@@ -1,12 +1,14 @@
 //! The push button: macOS heights 24pt (`Small`) and 30pt (`Regular`), the
-//! primary one on the accent colour. Wraps gpui-component's `Button` with
-//! its variant, radius and colours replaced by the system's; views never
-//! use gpui-component's `Button` directly.
+//! primary one on the accent colour; `Button::icon_only` is the square
+//! icon button of the toolbar (28pt, `Toolbar`) whose text is only its
+//! accessible name. Wraps gpui-component's `Button` with its variant, radius
+//! and colours replaced by the system's; views never use gpui-component's
+//! `Button` directly.
 
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div, px,
+    App, ClickEvent, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div, px,
 };
 use gpui_component::button::{ButtonCustomVariant, ButtonRounded, ButtonVariants};
 use gpui_component::{Disableable, Sizable, Size};
@@ -33,6 +35,8 @@ pub struct Button {
     kind: ButtonKind,
     size: ButtonSize,
     icon: Option<Icon>,
+    icon_only: bool,
+    active: Option<bool>,
     disabled: bool,
     on_click: Option<ClickHandler>,
 }
@@ -55,6 +59,8 @@ pub enum ButtonSize {
     /// 30pt high.
     #[default]
     Regular,
+    /// 28pt high: the toolbar's buttons (`Button::icon_only`).
+    Toolbar,
 }
 
 impl ButtonSize {
@@ -62,20 +68,21 @@ impl ButtonSize {
         match self {
             ButtonSize::Small => px(24.0),
             ButtonSize::Regular => px(30.0),
+            ButtonSize::Toolbar => px(28.0),
         }
     }
 
     fn radius(self) -> Pixels {
         match self {
             ButtonSize::Small => px(5.0),
-            ButtonSize::Regular => px(6.0),
+            ButtonSize::Regular | ButtonSize::Toolbar => px(6.0),
         }
     }
 
     fn horizontal_padding(self) -> Pixels {
         match self {
             ButtonSize::Small => px(8.0),
-            ButtonSize::Regular => px(12.0),
+            ButtonSize::Regular | ButtonSize::Toolbar => px(12.0),
         }
     }
 }
@@ -98,9 +105,33 @@ impl Button {
             kind: ButtonKind::default(),
             size: ButtonSize::default(),
             icon: None,
+            icon_only: false,
+            active: None,
             disabled: false,
             on_click: None,
         }
+    }
+
+    /// A square button that shows only `icon`, of the `Toolbar` size and
+    /// `Plain` kind: the toolbar's Back and Inspector buttons. `label` is not
+    /// drawn; it is the accessible name and the probe node's label.
+    pub fn icon_only(id: NodeId, icon: Icon, label: Text) -> Button {
+        Button {
+            icon: Some(icon),
+            icon_only: true,
+            kind: ButtonKind::Plain,
+            size: ButtonSize::Toolbar,
+            ..Button::new(id, label)
+        }
+    }
+
+    /// Makes the button a toggle that is `active` (the inspector toggle:
+    /// on while the inspector is open): the probe node is a `Toggle` with
+    /// `checked`, and the icon of an icon-only button takes the accent colour
+    /// while it is on.
+    pub fn active(mut self, active: bool) -> Button {
+        self.active = Some(active);
+        self
     }
 
     pub fn kind(mut self, kind: ButtonKind) -> Button {
@@ -128,6 +159,16 @@ impl Button {
         self
     }
 
+    /// The text colour of a plain button: `label`; an icon-only button is
+    /// `secondary_label`, or the accent while it is active.
+    fn plain_foreground(&self, palette: &Palette) -> Hsla {
+        match (self.icon_only, self.active) {
+            (false, _) => palette.label,
+            (true, Some(true)) => palette.accent,
+            (true, _) => palette.secondary_label,
+        }
+    }
+
     /// The colours of one kind: fill, text, hovered fill, pressed fill and
     /// whether a border is drawn.
     fn style(&self, palette: &Palette, cx: &App) -> ButtonCustomVariant {
@@ -148,7 +189,7 @@ impl Button {
                 )),
             ButtonKind::Plain => base
                 .color(palette.label.alpha(0.0))
-                .foreground(palette.label)
+                .foreground(self.plain_foreground(palette))
                 .hover(palette.label.alpha(PLAIN_HOVER_ALPHA))
                 .active(palette.label.alpha(PLAIN_ACTIVE_ALPHA)),
         }
@@ -165,7 +206,8 @@ impl RenderOnce for Button {
         } else {
             match self.kind {
                 ButtonKind::Primary => on_accent(),
-                ButtonKind::Secondary | ButtonKind::Plain => palette.label,
+                ButtonKind::Secondary => palette.label,
+                ButtonKind::Plain => self.plain_foreground(&palette),
             }
         };
         // The normal fill is set on the instance: gpui-component thins a
@@ -177,30 +219,41 @@ impl RenderOnce for Button {
             ButtonKind::Secondary => Some(palette.control_background),
             ButtonKind::Plain => None,
         };
-        let spec = Semantic::new(self.id.clone(), Role::Button)
-            .label(&self.text)
-            .state(State {
-                disabled: self.disabled,
-                ..State::default()
-            });
+        let spec = Semantic::new(
+            self.id.clone(),
+            if self.active.is_some() {
+                Role::Toggle
+            } else {
+                Role::Button
+            },
+        )
+        .label(&self.text)
+        .state(State {
+            disabled: self.disabled,
+            checked: self.active,
+            ..State::default()
+        });
         let gpui_size = match self.size {
             ButtonSize::Small => Size::Small,
-            ButtonSize::Regular => Size::Medium,
+            ButtonSize::Regular | ButtonSize::Toolbar => Size::Medium,
         };
-        let label = div()
-            .text_role(TextRole::Body, window, cx)
-            .text_color(text_color)
-            .whitespace_nowrap()
-            .child(self.text.shared());
         let mut button = gpui_component::button::Button::new(self.id.element_id())
             .custom(style)
             .with_size(gpui_size)
             .rounded(ButtonRounded::Size(self.size.radius()))
             .disabled(self.disabled)
             .accessibility_label(self.text.shared())
-            .h(self.size.height())
-            .px(self.size.horizontal_padding())
-            .child(label);
+            .h(self.size.height());
+        if self.icon_only {
+            button = button.w(self.size.height());
+        } else {
+            let label = div()
+                .text_role(TextRole::Body, window, cx)
+                .text_color(text_color)
+                .whitespace_nowrap()
+                .child(self.text.shared());
+            button = button.px(self.size.horizontal_padding()).child(label);
+        }
         if let (false, Some(fill)) = (self.disabled, fill) {
             button = button.bg(fill);
         }

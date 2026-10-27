@@ -60,7 +60,7 @@ const ROW_GAP: f32 = 8.0;
 const SELECTED_SECONDARY_OPACITY: f32 = 0.8;
 /// How much of the row's own padding and of its neighbour shows when the
 /// lists scroll to the selected row.
-const REVEAL_MARGIN: f32 = 12.0;
+const REVEAL_MARGIN: f32 = 18.0;
 /// How many skeleton rows a list that is slow to arrive shows.
 const SKELETON_ROWS: usize = 2;
 
@@ -920,6 +920,7 @@ impl WelcomeView {
         let path = entry.path.clone();
         Row::new(id)
             .selected(selected)
+            .accent()
             .on_click(move |_, cx| {
                 let _ = view.update(cx, |this, cx| {
                     this.click(OpenSource::Recent, path.clone(), cx);
@@ -978,6 +979,7 @@ impl WelcomeView {
         let path = folder.path.to_path_buf();
         Row::new(id)
             .selected(selected)
+            .accent()
             .on_click(move |_, cx| {
                 let _ = view.update(cx, |this, cx| {
                     this.click(OpenSource::Discovered, path.clone(), cx);

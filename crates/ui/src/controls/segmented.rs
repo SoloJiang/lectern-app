@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    AnimationExt, App, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
-    StatefulInteractiveElement, Styled, Window, div, px, relative,
+    AnimationExt, App, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RenderOnce, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 
 use crate::controls::require_ready;
@@ -31,10 +31,10 @@ pub struct Segmented {
 }
 
 /// The control's height, its padding around the slider and the radii.
-const HEIGHT: Pixels = px(22.0);
-const INSET: Pixels = px(1.0);
-const RADIUS: Pixels = px(6.0);
-const SLIDER_RADIUS: Pixels = px(5.0);
+const HEIGHT: Pixels = px(24.0);
+const INSET: Pixels = px(2.0);
+const RADIUS: Pixels = px(8.0);
+const SLIDER_RADIUS: Pixels = px(6.0);
 /// The alpha of the `label`-coloured track behind the slider.
 const TRACK_ALPHA: f32 = 0.08;
 
@@ -175,6 +175,7 @@ impl RenderOnce for Segmented {
                     .cursor_default()
                     .whitespace_nowrap()
                     .text_role(TextRole::Body, window, cx)
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(if index == selected {
                         palette.label
                     } else {

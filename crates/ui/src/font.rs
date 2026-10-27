@@ -24,21 +24,32 @@ pub const MONO_FALLBACK_FAMILY: &str = "Menlo";
 /// own fallback stack, which a family that failed to resolve also gives.
 const PROBE_FAMILY: &str = ".LecternNoSuchFamily";
 
-/// The text size roles (interaction spec「视觉」).
+/// The text size roles (interaction spec「视觉」), after the macOS HIG text
+/// styles: Large Title 26, Title 1 22, Title 2 17, Title 3 15, Headline 13
+/// semibold, Body 13, Callout 12, Subheadline 11 (`Caption`), Footnote 10.
+/// The roles smaller than `Body` and `Secondary` are in `secondary_label`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TextRole {
-    /// 40pt, the project home's large title.
+    /// 26pt bold: the project home's large title.
     LargeTitle,
-    /// 26pt.
-    Title,
-    /// 22pt.
-    Subtitle,
+    /// 22pt semibold (HIG Title 1).
+    Title1,
+    /// 17pt semibold (HIG Title 2).
+    Title2,
+    /// 15pt semibold (HIG Title 3).
+    Title3,
+    /// 13pt semibold: row titles, section headers, the toolbar title.
+    Headline,
     /// 13pt, body text.
     Body,
     /// 13pt, `secondary_label`.
     Secondary,
-    /// 11pt, `secondary_label`.
+    /// 12pt, `secondary_label`: the lines under a row title.
+    Callout,
+    /// 11pt, `secondary_label` (HIG Subheadline).
     Caption,
+    /// 10pt, `secondary_label`.
+    Footnote,
     /// SF Mono 12pt.
     Code,
 }
@@ -46,12 +57,14 @@ pub enum TextRole {
 impl TextRole {
     pub fn size(self) -> Pixels {
         match self {
-            TextRole::LargeTitle => px(40.0),
-            TextRole::Title => px(26.0),
-            TextRole::Subtitle => px(22.0),
-            TextRole::Body | TextRole::Secondary => px(13.0),
+            TextRole::LargeTitle => px(26.0),
+            TextRole::Title1 => px(22.0),
+            TextRole::Title2 => px(17.0),
+            TextRole::Title3 => px(15.0),
+            TextRole::Headline | TextRole::Body | TextRole::Secondary => px(13.0),
+            TextRole::Callout | TextRole::Code => px(12.0),
             TextRole::Caption => px(11.0),
-            TextRole::Code => px(12.0),
+            TextRole::Footnote => px(10.0),
         }
     }
 
@@ -59,16 +72,20 @@ impl TextRole {
     /// self-drawn lists use `MonoMetrics::line_height` instead.
     pub fn line_height(self) -> Pixels {
         match self {
-            TextRole::LargeTitle => px(48.0),
-            TextRole::Title => px(32.0),
-            TextRole::Subtitle => px(28.0),
-            TextRole::Body | TextRole::Secondary | TextRole::Code => px(16.0),
+            TextRole::LargeTitle => px(32.0),
+            TextRole::Title1 => px(26.0),
+            TextRole::Title2 => px(22.0),
+            TextRole::Title3 => px(20.0),
+            TextRole::Headline | TextRole::Body | TextRole::Secondary | TextRole::Code => px(16.0),
+            TextRole::Callout => px(15.0),
             TextRole::Caption => px(14.0),
+            TextRole::Footnote => px(13.0),
         }
     }
 
     /// The font: the system UI family, or the monospaced family for `Code`;
-    /// large titles bold, titles semibold, the rest regular.
+    /// the large title bold, the titles and the headline semibold, the rest
+    /// regular.
     pub fn font(self) -> Font {
         let mut font = font(self.family());
         font.weight = self.weight();
@@ -85,14 +102,18 @@ impl TextRole {
     fn weight(self) -> FontWeight {
         match self {
             TextRole::LargeTitle => FontWeight::BOLD,
-            TextRole::Title => FontWeight::SEMIBOLD,
+            TextRole::Title1 | TextRole::Title2 | TextRole::Title3 | TextRole::Headline => {
+                FontWeight::SEMIBOLD
+            }
             _ => FontWeight::NORMAL,
         }
     }
 
     fn color(self, palette: &Palette) -> Hsla {
         match self {
-            TextRole::Secondary | TextRole::Caption => palette.secondary_label,
+            TextRole::Secondary | TextRole::Callout | TextRole::Caption | TextRole::Footnote => {
+                palette.secondary_label
+            }
             _ => palette.label,
         }
     }

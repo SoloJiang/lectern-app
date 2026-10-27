@@ -25,7 +25,7 @@ use lectern_ui::motion::{self, LOADING_PROGRESS_AT, LOADING_SKELETON_AT, Transit
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
     AgentDot, GroupedList, LoadingPhase, Progress, ProgressShape, Row, Skeleton, Text, TextRole,
-    TextRoleExt, colors, loading_phase, on_accent, strings,
+    TextRoleExt, colors, loading_phase, strings,
 };
 
 use crate::actions::{
@@ -41,8 +41,6 @@ const PADDING: Pixels = px(24.0);
 const SECTION_GAP: Pixels = px(20.0);
 /// The gap between the lines of a card.
 const LINE_GAP: Pixels = px(2.0);
-/// How much of `on_accent` a selected card's secondary lines keep.
-const SELECTED_SECONDARY: f32 = 0.75;
 /// The placeholder's blocks.
 const BLOCK_WIDE: Pixels = px(180.0);
 const BLOCK_NARROW: Pixels = px(120.0);
@@ -317,13 +315,10 @@ impl HomeScreen {
         let signals = present::signals(strings, &card.signals);
 
         let secondary = move |window: &Window, cx: &gpui::App, text: String| {
-            let line = div().truncate().text_role(TextRole::Secondary, window, cx);
-            if selected {
-                line.text_color(on_accent().opacity(SELECTED_SECONDARY))
-            } else {
-                line
-            }
-            .child(text)
+            div()
+                .truncate()
+                .text_role(TextRole::Secondary, window, cx)
+                .child(text)
         };
         let mut lines = div()
             .flex()
@@ -555,7 +550,7 @@ impl Render for HomeScreen {
             column = column.child(semantic(
                 Semantic::new(nodes::empty(), Role::Text).label(&text),
                 div()
-                    .text_role(TextRole::Title, window, cx)
+                    .text_role(TextRole::Title1, window, cx)
                     .child(text.shared()),
             ));
         } else {
