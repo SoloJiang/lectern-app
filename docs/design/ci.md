@@ -15,7 +15,7 @@
 
 前三个任务是必需检查。`Judge (physical Mac)` 不在 PR 上运行，不是必需检查（「判定机器」）。步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`、`just bench`），本地和 CI 跑的是同一套命令。`just bench` 在 Linux 上是冒烟运行，在 macOS 上判定预算，之后上传 `target/lectern-bench/report.json`（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。
 
-两个 macOS 任务各用一个 `Swatinem/rust-cache` 的缓存键（`test`、`bench`）：缓存按任务和键区分，debug 与 release 的产物不互相挤占。基准原来是 macOS 任务的最后一步，任务的墙钟时间是测试与基准之和（#129 之后约 13 分钟，其中 setup、check、测试和 doctest 约 4 分钟）；拆开之后取两者中较长的一个。目标：典型 PR 的 macOS 墙钟时间 ≤ 15 分钟，基准任务 ≤ 12 分钟。
+两个 macOS 任务各用一个 `Swatinem/rust-cache` 的缓存键（`test`、`bench-<序号>`）：缓存按任务和键区分，debug 与 release 的产物不互相挤占。键完全命中时 `rust-cache` 不再保存，所以 `bench` 配方增加构建（如第 5 步加入的 `bench-probe` 的 `lectern`，它的依赖特性与其他构建不同）时要把序号加一，否则这个构建的依赖每次都重新编译（#277 之后 `lectern` 的测量构建每次约 5.5 分钟，`gix`、`gpui`、`tree-sitter` 等依赖都在重新编译）。改键之后第一次运行没有缓存，从头构建一次。基准原来是 macOS 任务的最后一步，任务的墙钟时间是测试与基准之和（#129 之后约 13 分钟，其中 setup、check、测试和 doctest 约 4 分钟）；拆开之后取两者中较长的一个。目标：典型 PR 的 macOS 墙钟时间 ≤ 15 分钟，基准任务 ≤ 12 分钟。
 
 `Benchmarks (macOS arm64)` 另用 `actions/cache` 保存和还原 `target/lectern-bench/fixtures`（跨运行保留的基准夹具，现在是 `code_intel` 的 10 万文件虚拟仓库，约 330 MB）。键是生成它的源码的哈希（`crates/code_intel/src`、`crates/cache/src`、`crates/bench/benches/fixtures` 和 `Cargo.lock`）；这个键只决定命中率。正确性靠夹具自己：还原的夹具在使用前对照当前的写入逻辑核对单元数和抽样单元，不符就重写（[ADR 0039](../adr/0039.md)，[bench 设计「夹具与 `test-support`」](bench.md#夹具与-test-support)）。源码哈希是另一层防护：`code_intel` 的源码一改就不命中，连核对看不出的、只影响样本之外文件的改动也会重写。键没变时还原约十几秒，代替约一分钟的写入。每个基准的耗时写进 `report.json`，最慢的 10 个是 check run 的一条 notice（[bench 设计「报告」](bench.md#报告)），超过目标时据此定位。
 

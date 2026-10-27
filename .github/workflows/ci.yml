@@ -91,7 +91,11 @@ jobs:
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - uses: Swatinem/rust-cache@v2
         with:
-          key: bench
+          # A full key match is never saved again. When the justfile's bench
+          # recipe adds a build (each has its own dependency features), bump
+          # this key, or that build recompiles its dependencies on every run.
+          # The first run after a bump starts with no cache.
+          key: bench-2
       # The benchmarks' kept fixtures (ADR 0039): this key decides how often
       # the restore hits. Each fixture checks its contents against the
       # current writer before use; the source hash is a second guard that
