@@ -6,7 +6,10 @@
 
 use raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
 
-use super::{MAX_NAME_LEN, WindowError, set_frame_autosave_name, valid_name};
+use super::{
+    MAX_NAME_LEN, WindowError, clamp_to_visible, set_frame_autosave_name,
+    set_frame_autosave_name_or_center, valid_name,
+};
 
 /// A window whose handle must not be asked for.
 struct Untouchable;
@@ -59,6 +62,48 @@ fn set_frame_autosave_name_checks_the_name_before_the_window() {
 }
 
 #[test]
+fn or_center_checks_the_name_before_the_window() {
+    assert_eq!(
+        set_frame_autosave_name_or_center(&Untouchable, "", (1180.0, 760.0)),
+        Err(WindowError::InvalidName)
+    );
+    assert_eq!(
+        set_frame_autosave_name_or_center(&Untouchable, "a b", (1180.0, 760.0)),
+        Err(WindowError::InvalidName)
+    );
+}
+
+#[test]
+fn clamp_to_visible_keeps_a_size_that_fits() {
+    assert_eq!(
+        clamp_to_visible((1180.0, 760.0), Some((1512.0, 920.0))),
+        (1180.0, 760.0)
+    );
+    assert_eq!(
+        clamp_to_visible((1180.0, 760.0), Some((1180.0, 760.0))),
+        (1180.0, 760.0)
+    );
+    // No screen: nothing to cut to.
+    assert_eq!(clamp_to_visible((1180.0, 760.0), None), (1180.0, 760.0));
+}
+
+#[test]
+fn clamp_to_visible_shrinks_each_side_that_does_not() {
+    assert_eq!(
+        clamp_to_visible((1180.0, 760.0), Some((1024.0, 900.0))),
+        (1024.0, 760.0)
+    );
+    assert_eq!(
+        clamp_to_visible((1180.0, 760.0), Some((1440.0, 700.0))),
+        (1180.0, 700.0)
+    );
+    assert_eq!(
+        clamp_to_visible((1180.0, 760.0), Some((800.0, 600.0))),
+        (800.0, 600.0)
+    );
+}
+
+#[test]
 fn window_error_kinds_are_distinct_static_names() {
     let kinds = [
         WindowError::InvalidName,
@@ -86,6 +131,16 @@ fn set_frame_autosave_name_does_nothing_elsewhere() {
     assert_eq!(set_frame_autosave_name(&NoHandle, "project"), Ok(()));
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn or_center_does_nothing_elsewhere() {
+    use super::FrameSource;
+    assert_eq!(
+        set_frame_autosave_name_or_center(&Untouchable, "project", (1180.0, 760.0)),
+        Ok(FrameSource::Restored)
+    );
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ptr::NonNull;
@@ -96,7 +151,9 @@ mod macos {
         XlibWindowHandle,
     };
 
-    use super::{NoHandle, WindowError, set_frame_autosave_name};
+    use super::{
+        NoHandle, WindowError, set_frame_autosave_name, set_frame_autosave_name_or_center,
+    };
 
     /// A handle of another windowing system.
     struct Foreign;
@@ -165,6 +222,43 @@ mod macos {
             ),
             "{line}"
         );
+        assert!(line.contains("\"lv\":\"warn\""), "{line}");
+        assert!(line.contains("\"tg\":\"platform\""), "{line}");
+        assert!(line.contains("\"kind\":\"not_main_thread\""), "{line}");
+        log.assert_absent(CANARY);
+    }
+
+    #[test]
+    fn or_center_without_a_handle_is_no_window() {
+        assert_eq!(
+            set_frame_autosave_name_or_center(&NoHandle, "project", (1180.0, 760.0)),
+            Err(WindowError::NoWindow)
+        );
+        assert_eq!(
+            set_frame_autosave_name_or_center(&Foreign, "project", (1180.0, 760.0)),
+            Err(WindowError::NoWindow)
+        );
+    }
+
+    #[test]
+    fn or_center_off_the_main_thread_is_an_error_and_logs_the_kind_only() {
+        const CANARY: &str = "canary9t3m7q2x4v";
+        assert!(off_the_main_thread(), "this test needs a test thread");
+        let log = testing::capture();
+        log.clear();
+
+        assert_eq!(
+            set_frame_autosave_name_or_center(&Dangling, CANARY, (1180.0, 760.0)),
+            Err(WindowError::NotMainThread)
+        );
+
+        let lines: Vec<String> = log
+            .lines()
+            .into_iter()
+            .filter(|line| line.contains("\"msg\":\"the window frame autosave name was not set"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        let line = &lines[0];
         assert!(line.contains("\"lv\":\"warn\""), "{line}");
         assert!(line.contains("\"tg\":\"platform\""), "{line}");
         assert!(line.contains("\"kind\":\"not_main_thread\""), "{line}");

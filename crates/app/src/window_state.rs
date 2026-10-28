@@ -52,6 +52,24 @@ pub fn autosave_name(desktop: bool, bench_probe: bool, name: &'static str) -> Op
     (desktop && !bench_probe).then_some(name)
 }
 
+/// The content size of the project window when nothing is saved under
+/// [`PROJECT`] yet, centred on the screen (docs/design/workspace.md
+/// 「对其他 crate 的要求」D).
+const PROJECT_SIZE: (f64, f64) = (1180.0, 760.0);
+
+/// Gives `window` the frame autosave name `name`. [`PROJECT`] used for the
+/// first time also sets the project size and centres the window
+/// (`platform::window::set_frame_autosave_name_or_center`). Main thread.
+/// `platform` logs a failure; the window keeps its frame.
+pub fn apply_name(window: &gpui::Window, name: &'static str) {
+    if name == PROJECT {
+        let _ =
+            lectern_platform::window::set_frame_autosave_name_or_center(window, name, PROJECT_SIZE);
+    } else {
+        let _ = lectern_platform::window::set_frame_autosave_name(window, name);
+    }
+}
+
 /// The frame autosave name for a state.
 pub fn frame_name(state: &WindowState) -> &'static str {
     if state.project.is_some() {
@@ -186,9 +204,7 @@ fn rename(
     };
     cx.update(|cx| {
         // A window that is gone has nothing to name.
-        let _ = window.update(cx, |_, window, _| {
-            let _ = lectern_platform::window::set_frame_autosave_name(&*window, name);
-        });
+        let _ = window.update(cx, |_, window, _| apply_name(&*window, name));
     });
 }
 
