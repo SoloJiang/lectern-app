@@ -49,6 +49,9 @@ pub const PANEL_RADIUS: Pixels = px(14.0);
 const SEPARATOR: Pixels = px(0.5);
 /// The inspector's padding around its segmented control.
 const INSPECTOR_PADDING: Pixels = px(14.0);
+/// The toolbar's leading inset on a screen without the sidebar, where the
+/// window controls sit in the toolbar (docs/design/workspace.md「区域与三层」).
+const WINDOW_CONTROLS_INSET: Pixels = px(88.0);
 /// The sidebar panel shown when no other replaces it.
 const PROJECT_SIDEBAR: &str = "project";
 const VIEW: &str = "workspace";
@@ -711,7 +714,12 @@ impl Workspace {
 
     // ----- rendering ---------------------------------------------------------
 
-    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_toolbar(
+        &self,
+        sidebar_shown: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let palette = *colors(window, cx);
         let registry = self.driver.registry();
         let nav = self.driver.nav();
@@ -744,6 +752,7 @@ impl Workspace {
             .h(TOOLBAR_HEIGHT)
             .w_full()
             .px_4()
+            .when(!sidebar_shown, |toolbar| toolbar.pl(WINDOW_CONTROLS_INSET))
             .gap_3()
             .border_b(SEPARATOR)
             .border_color(palette.separator)
@@ -921,7 +930,9 @@ impl Workspace {
             .h_full()
             .border_l(SEPARATOR)
             .border_color(palette.separator)
-            .bg(palette.window_background)
+            // The sidebar material: GPUI cannot blur behind an element
+            // (docs/design/ui.md「与设计的差异」).
+            .bg(palette.under_page_background)
             .child(
                 div()
                     .id("workspace-inspector-tabs")
@@ -1114,6 +1125,9 @@ impl Render for Workspace {
                                 .key_context(actions::SIDEBAR)
                                 .w(SIDEBAR_WIDTH)
                                 .h_full()
+                                // The top row, as tall as the toolbar, holds
+                                // the window controls.
+                                .pt(TOOLBAR_HEIGHT)
                                 .border_r(SEPARATOR)
                                 .border_color(palette.separator)
                                 .children(panel),
@@ -1127,10 +1141,17 @@ impl Render for Workspace {
                             .min_w_0()
                             .h_full()
                             .bg(palette.window_background)
-                            .child(self.render_toolbar(window, cx))
-                            .child(self.render_content(window, cx)),
-                    )
-                    .children(inspector),
+                            .child(self.render_toolbar(sidebar_shown, window, cx))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(self.render_content(window, cx))
+                                    .children(inspector),
+                            ),
+                    ),
             );
         } else {
             root = root.child(self.render_content(window, cx));
