@@ -405,6 +405,21 @@ fn build_shows_packages_by_scan_state() {
 }
 
 #[test]
+fn build_hides_outside_when_nothing_changed_there() {
+    let fx = ProjectFx::git("app");
+    let key = fx.key();
+    let empty = overview(&key, Vec::new(), OutsideCount::Files(0));
+    let built = compose(&fx.snapshot(), &[], Some(&empty), None, None);
+    assert_eq!(built.snapshot.main.outside, OutsideRow::Hidden);
+    let one = overview(&key, Vec::new(), OutsideCount::Files(1));
+    let built = compose(&fx.snapshot(), &[], Some(&one), None, None);
+    assert!(matches!(
+        built.snapshot.main.outside,
+        OutsideRow::Files { count: 1, .. }
+    ));
+}
+
+#[test]
 fn build_folder_project_hides_outside() {
     let fx = ProjectFx::folder("notes");
     let key = fx.key();
