@@ -149,6 +149,8 @@ fn recent(path: &str, folder: bool, sessions: u32, running: u32) -> RecentEntry 
         missing: false,
         sessions,
         running,
+        review: None,
+        to_review: None,
     }
 }
 
@@ -194,6 +196,47 @@ fn a_recent_row_reads_folder_sessions_running_and_the_parent_directory() {
     );
     // A project at the root has no parent directory to show.
     assert_eq!(recent_detail(&en, &recent("/", true, 0, 0), None), "Folder");
+}
+
+#[test]
+fn a_recent_row_shows_to_review_when_known() {
+    let en = Strings::of(Locale::En);
+    let home = Some(Path::new(HOME));
+    let with = |to_review: Option<u32>, sessions: u32, running: u32| {
+        let mut entry = recent("/Users/example/work/lectern", false, sessions, running);
+        entry.to_review = to_review;
+        entry
+    };
+    // A number replaces the session count, in the same place.
+    assert_eq!(
+        recent_detail(&en, &with(Some(3), 7, 1), home),
+        "3 to review · 1 running · ~/work"
+    );
+    // Zero is shown too.
+    assert_eq!(
+        recent_detail(&en, &with(Some(0), 7, 0), home),
+        "0 to review · ~/work"
+    );
+    // Without a mark the row keeps the session count.
+    assert_eq!(
+        recent_detail(&en, &with(None, 7, 0), home),
+        "7 sessions · ~/work"
+    );
+    assert_eq!(
+        recent_detail(&Strings::of(Locale::ZhCn), &with(Some(2), 7, 0), home),
+        "2 个待审 · ~/work"
+    );
+    // A folder keeps its "Folder" first.
+    let mut folder = recent("/Users/example/notes", true, 0, 0);
+    folder.to_review = Some(1);
+    assert_eq!(
+        recent_detail(&en, &folder, home),
+        "Folder · 1 to review · ~"
+    );
+    // A missing row says only that.
+    let mut gone = with(Some(4), 7, 0);
+    gone.missing = true;
+    assert_eq!(recent_detail(&en, &gone, home), "Folder no longer exists");
 }
 
 #[test]

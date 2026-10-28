@@ -1,6 +1,7 @@
 //! The canary test (docs/design/welcome.md「日志与诊断」): a project path and
-//! name, a session cwd, a session path and an error text carry the canary
-//! through the whole flow at trace level, and no record carries it.
+//! name, a session cwd, a session path, an error text and the session keys of
+//! a review mark carry the canary through the whole flow at trace level, and
+//! no record carries it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,8 +23,9 @@ fn canary_stays_out_of_welcome_logs() {
     let repo = format!("/repos/{CANARY}");
     let repo_key = git_key(&format!("{repo}/.git"));
     // A file with the canary in a path and a name.
+    // The entry carries a review mark whose session key has the canary.
     let file = format!(
-        r#"{{"version":1,"entries":[{{"path":"{repo}","key":{{"Git":{{"common_dir":"{repo}/.git"}}}},"name":"{CANARY}","last_opened":1}}]}}"#
+        r#"{{"version":1,"entries":[{{"path":"{repo}","key":{{"Git":{{"common_dir":"{repo}/.git"}}}},"name":"{CANARY}","last_opened":1,"review":{{"sessions":[{{"source":"session-claude-code","id":"marked-{CANARY}"}}],"at":1}}}}]}}"#
     );
     rig.seed(file.as_bytes());
     rig.start_screen();
@@ -40,6 +42,19 @@ fn canary_stays_out_of_welcome_logs() {
         .build(),
     ]);
     rig.start_discovery();
+    rig.start_review();
+    rig.settle();
+
+    // An overview with other canary session keys replaces the mark (written
+    // to the file, and counted against the session list).
+    rig.review.set(
+        &repo_key,
+        &[
+            (&format!("overview-{CANARY}"), true),
+            (&format!("done-{CANARY}"), false),
+        ],
+    );
+    rig.emit(rig.review.event(&repo_key));
     rig.settle();
 
     // The canary project opens, is removed, fails to open, and the write fails.
@@ -82,6 +97,7 @@ fn canary_stays_out_of_welcome_logs() {
     broken.start_screen();
     broken.settle();
 
+    rig.stop_review();
     rig.stop_discovery();
     drop(broken);
     drop(rig);
@@ -102,6 +118,7 @@ fn canary_stays_out_of_welcome_logs() {
         "project open failed",
         "language override not saved",
         "discovery unavailable",
+        "review marked",
     ] {
         assert!(has(msg), "{msg:?} is logged: {lines:#?}");
     }

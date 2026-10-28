@@ -14,11 +14,12 @@ use lectern_executor::{Executor, Priority};
 use lectern_kernel::{PluginHandle, ServiceRef, ServiceSet};
 use lectern_logging::{Value, debug, info, warn};
 use lectern_services::project::{OpenError, ProjectEvent, ProjectKey, Projects};
-use lectern_services::session::{SessionList, SessionSource, Timestamp};
+use lectern_services::review::{Review, ReviewEvent};
+use lectern_services::session::{SessionKey, SessionList, SessionSource, Timestamp};
 
 use crate::discover::{self, DiscoveredFolder};
 use crate::recent::store::{self, Unreadable};
-use crate::recent::{self, RecentEntry};
+use crate::recent::{self, RecentEntry, ReviewMark};
 
 /// What the view reads. Replaced as a whole, as a new `Arc`, on every change.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -634,6 +635,81 @@ impl WelcomeModel {
         }
     }
 
+    // The "welcome-review" plugin.
+
+    /// `ReviewEvent` for "welcome-review": an overview update goes to a task
+    /// that reads it; the other events are not ours.
+    pub(crate) fn review_event(
+        &self,
+        event: &ReviewEvent,
+        handle: &PluginHandle,
+        review: &ServiceRef<dyn Review>,
+    ) {
+        let ReviewEvent::Overview { project, .. } = event else {
+            return;
+        };
+        let project = project.clone();
+        let review = review.clone();
+        self.spawn(handle, move |model| model.mark_review(&project, &review));
+    }
+
+    /// Step 11: reads the overview of `project` and marks the sessions that
+    /// need review on the recent entries with that key. The file is written
+    /// only when the set of sessions changed; the marking time moves on
+    /// every time, in memory. No overview (nobody watches it any more) leaves
+    /// the marks as they are.
+    fn mark_review(&self, project: &ProjectKey, review: &ServiceRef<dyn Review>) {
+        let Some(overview) = review.get().and_then(|review| review.overview(project)) else {
+            return;
+        };
+        let mut sessions: Vec<SessionKey> = overview
+            .sessions
+            .iter()
+            .filter(|s| s.needs_review())
+            .map(|s| s.session.clone())
+            .collect();
+        drop(overview);
+        // A set: the overview's order (by activity) is not part of the mark.
+        sessions.sort();
+        let at = (self.clock)();
+        let mut entries = 0usize;
+        let mut changed = false;
+        let mut state = lock(&self.state);
+        for entry in state.entries.iter_mut().filter(|e| e.key == *project) {
+            entries += 1;
+            match &mut entry.review {
+                Some(mark) if mark.sessions == sessions => mark.at = at,
+                mark => {
+                    *mark = Some(ReviewMark {
+                        sessions: sessions.clone(),
+                        at,
+                    });
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            // The view does not read the marks, but the snapshot carries
+            // them: a new one only when the set changed, not for the time.
+            self.publish(state);
+        } else {
+            drop(state);
+        }
+        debug!(
+            "review marked";
+            entries = entries,
+            sessions = sessions.len(),
+            changed = changed
+        );
+        if entries == 0 {
+            return;
+        }
+        if changed {
+            self.schedule_write();
+        }
+        self.request_rebuild();
+    }
+
     // The "welcome-discovery" plugin.
 
     /// `started` of "welcome-discovery": the list is pending until the first
@@ -656,7 +732,8 @@ impl WelcomeModel {
     }
 
     /// "welcome-discovery" was deactivated: the list is unavailable and the
-    /// counts on the recent rows go back to 0.
+    /// counts on the recent rows go back to 0 (and the to-review numbers to
+    /// none).
     pub(crate) fn discovery_stopped(&self) {
         let mut state = lock(&self.state);
         state.discovery = None;
@@ -664,6 +741,7 @@ impl WelcomeModel {
         for entry in &mut state.entries {
             entry.sessions = 0;
             entry.running = 0;
+            entry.to_review = None;
         }
         let was_available = state.discovered != DiscoveredState::Unavailable;
         state.discovered = DiscoveredState::Unavailable;
@@ -699,7 +777,7 @@ impl WelcomeModel {
     fn rebuild_task(&self) {
         loop {
             let started = Instant::now();
-            let (side, recent_keys) = {
+            let (side, recent_keys, marks) = {
                 let mut state = lock(&self.state);
                 state.rebuild.dirty = false;
                 let Some(side) = state.discovery.clone() else {
@@ -707,7 +785,12 @@ impl WelcomeModel {
                     return;
                 };
                 let keys: Vec<ProjectKey> = state.entries.iter().map(|e| e.key.clone()).collect();
-                (side, keys)
+                let marks: Vec<(ProjectKey, ReviewMark)> = state
+                    .entries
+                    .iter()
+                    .filter_map(|e| Some((e.key.clone(), e.review.clone()?)))
+                    .collect();
+                (side, keys, marks)
             };
             let mut lists: Vec<Arc<SessionList>> = Vec::new();
             side.sources
@@ -717,7 +800,13 @@ impl WelcomeModel {
                 .get()
                 .map(|projects| projects.open_projects())
                 .unwrap_or_default();
-            let built = discover::build(&lists, &open, &recent_keys, Timestamp((self.clock)()));
+            let built = discover::build(
+                &lists,
+                &open,
+                &recent_keys,
+                &marks,
+                Timestamp((self.clock)()),
+            );
             drop(lists);
             #[cfg(test)]
             {
@@ -737,6 +826,7 @@ impl WelcomeModel {
                         built.counts.get(&entry.key).copied().unwrap_or((0, 0));
                     entry.sessions = sessions;
                     entry.running = running;
+                    entry.to_review = built.to_review.get(&entry.key).copied();
                 }
                 let folders = built.folders.len();
                 state.discovered = DiscoveredState::Ready(built.folders.into());

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use lectern_services::project::{ProjectKey, ProjectSnapshot};
+use lectern_services::session::SessionKey;
 
 pub(crate) mod store;
 
@@ -44,6 +45,28 @@ pub struct RecentEntry {
     pub sessions: u32,
     #[serde(skip)]
     pub running: u32,
+    /// The sessions that needed review in this project's latest overview
+    /// (docs/design/welcome.md「待审数」). A file from before this field reads
+    /// as `None` and `version` stays 1: an older build reading a newer file
+    /// ignores the field. Not written while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewMark>,
+    /// The number on the row: from `review` and the session list by
+    /// [`discover::build`](crate::discover::build); memory only. `None` when
+    /// `review` is `None` or discovery is not active (the row then shows the
+    /// session count).
+    #[serde(skip)]
+    pub to_review: Option<u32>,
+}
+
+/// The sessions of one project that needed review in its latest overview.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ReviewMark {
+    /// `SessionOverview::needs_review()` was true; at most 50 (the overview
+    /// has at most 50 sessions).
+    pub sessions: Vec<SessionKey>,
+    /// When it was marked, UTC milliseconds.
+    pub at: i64,
 }
 
 /// The `recent.json` content.
@@ -71,9 +94,18 @@ pub(crate) enum DecodeError {
 
 /// Puts `entry` first. An older entry with the same path goes away; the list
 /// keeps [`MAX_ENTRIES`], dropping the oldest. The entry's `missing` is
-/// false: it was just opened.
+/// false: it was just opened; its `review` is the old entry's when it has
+/// none and the project is the same.
 pub(crate) fn push_front(entries: &mut Vec<RecentEntry>, mut entry: RecentEntry) {
     entry.missing = false;
+    if let Some(old) = entries.iter().find(|e| e.path == entry.path)
+        && entry.review.is_none()
+        && old.key == entry.key
+    {
+        // Opening a project again keeps what its last overview marked, until
+        // the next overview replaces it.
+        entry.review = old.review.clone();
+    }
     entries.retain(|e| e.path != entry.path);
     entries.insert(0, entry);
     entries.truncate(MAX_ENTRIES);
@@ -149,5 +181,7 @@ pub(crate) fn entry_from_snapshot(snapshot: &ProjectSnapshot, now: i64) -> Recen
         missing: false,
         sessions: 0,
         running: 0,
+        review: None,
+        to_review: None,
     }
 }

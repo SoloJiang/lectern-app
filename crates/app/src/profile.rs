@@ -82,8 +82,8 @@ impl Profile {
     }
 
     /// Desktop: `project`, the two session sources, `review`, `usage`,
-    /// `workspace`, `welcome`, `welcome-discovery`, `project-home`,
-    /// `project-home-usage` and `review-view`
+    /// `workspace`, `welcome`, `welcome-discovery`, `welcome-review`,
+    /// `project-home`, `project-home-usage` and `review-view`
     /// (docs/design/app.md「插件与资源」). Test: none. With the number of
     /// plugins, for the log (`PluginSet` does not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
@@ -138,8 +138,9 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
         .with(id, review)
         .with(usage_id, usage)
         .with("workspace", WorkspacePlugin::new(r.workspace.clone()));
-    // `welcome` and `welcome-discovery` share one model; `plugins` builds it
-    // empty and does no IO (docs/design/welcome.md「对其他 crate 的要求」C).
+    // `welcome`, `welcome-discovery` and `welcome-review` share one model;
+    // `plugins` builds it empty and does no IO (docs/design/welcome.md「对其他
+    // crate 的要求」C, H).
     for (id, plugin) in lectern_welcome::plugins(WelcomeDeps {
         executor: r.executor.clone(),
         data_dir: r.app_data.join("welcome"),

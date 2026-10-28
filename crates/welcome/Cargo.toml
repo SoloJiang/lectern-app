@@ -9,8 +9,8 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
-# The "welcome" and "welcome-discovery" plugins (docs/design/welcome.md「依赖」,
-# ADR 0025).
+# The "welcome", "welcome-discovery" and "welcome-review" plugins
+# (docs/design/welcome.md「依赖」, ADR 0025).
 plugin = true
 
 [dependencies]

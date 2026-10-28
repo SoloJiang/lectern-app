@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lectern_services::project::{ProjectKey, Resolved};
-use lectern_services::session::{Agent, Place, SessionList, SessionSummary, Timestamp};
+use lectern_services::session::{Agent, Place, SessionKey, SessionList, SessionSummary, Timestamp};
+
+use crate::recent::ReviewMark;
 
 /// The most folders the list keeps.
 pub(crate) const MAX_FOLDERS: usize = 50;
@@ -46,6 +48,10 @@ pub struct Built {
     /// `(sessions, running)` of every recent project, by its key. A recent
     /// project without sessions is not in the map.
     pub counts: HashMap<ProjectKey, (u32, u32)>,
+    /// The to-review number of every project that has a mark, by its key
+    /// (docs/design/welcome.md「待审数」); a project without a mark is not in
+    /// the map.
+    pub to_review: HashMap<ProjectKey, u32>,
     /// The sessions looked at, before grouping.
     pub total: usize,
     /// Sessions skipped because their place is not known yet (`Pending`,
@@ -70,14 +76,26 @@ struct Group {
 /// - `Resolved` and `Located` sessions of a project in `recent_keys` give
 ///   that recent project's `counts`.
 /// - A sub-agent session counts as a session and never as running.
+/// - `marks` are the recent projects' review marks. A project's `to_review`
+///   is the marked sessions that are still in a list, plus its other
+///   sessions (sub-agents not counted) with `last_activity` after the mark's
+///   `at`. With two marks for one key the later one is used.
 pub(crate) fn build(
     lists: &[Arc<SessionList>],
     open_projects: &[ProjectKey],
     recent_keys: &[ProjectKey],
+    marks: &[(ProjectKey, ReviewMark)],
     now: Timestamp,
 ) -> Built {
     let open: HashSet<&ProjectKey> = open_projects.iter().collect();
     let recent: HashSet<&ProjectKey> = recent_keys.iter().collect();
+    let mut marked: HashMap<&ProjectKey, &ReviewMark> = HashMap::new();
+    for (key, mark) in marks {
+        let slot = marked.entry(key).or_insert(mark);
+        if mark.at > slot.at {
+            *slot = mark;
+        }
+    }
     let mut sessions: Vec<&SessionSummary> = lists.iter().flat_map(|l| l.sessions.iter()).collect();
     // Newest first across sources; stable, so the sources keep their order
     // among equal times.
@@ -87,6 +105,16 @@ pub(crate) fn build(
         total: sessions.len(),
         ..Built::default()
     };
+    if !marked.is_empty() {
+        let present: HashSet<&SessionKey> = sessions.iter().map(|s| &s.key).collect();
+        for (key, mark) in &marked {
+            let still_listed = mark.sessions.iter().filter(|k| present.contains(k)).count();
+            built.to_review.insert(
+                (*key).clone(),
+                u32::try_from(still_listed).unwrap_or(u32::MAX),
+            );
+        }
+    }
     let mut groups: HashMap<&ProjectKey, Group> = HashMap::new();
     for s in sessions {
         let running = s.parent.is_none() && is_running(s, now);
@@ -102,6 +130,13 @@ pub(crate) fn build(
             let counts = built.counts.entry(project.clone()).or_default();
             counts.0 += 1;
             counts.1 += u32::from(running);
+            if let Some(mark) = marked.get(project)
+                && s.parent.is_none()
+                && s.last_activity.0 > mark.at
+                && !mark.sessions.contains(&s.key)
+            {
+                *built.to_review.entry(project.clone()).or_default() += 1;
+            }
             continue;
         }
         let Some(resolved) = resolved else { continue };

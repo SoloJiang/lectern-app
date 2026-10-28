@@ -9,6 +9,7 @@ welcome-open-folder-hint = A repository or any folder
 welcome-open-folder-shortcut = ⌘O
 welcome-clone = Clone Repository…
 welcome-clone-hint = From GitHub or GitLab
+welcome-clone-soon = Coming Soon
 welcome-recent = Recent
 welcome-recent-empty = No recent projects
 welcome-recent-missing = Folder no longer exists
@@ -25,6 +26,7 @@ welcome-row-agent-sessions = { $count ->
     [one] { $count } { $agent } session
    *[other] { $count } { $agent } sessions
 }
+welcome-row-to-review = { $count } to review
 welcome-row-folder = Folder
 welcome-row-running = { $count } running
 welcome-language = Language

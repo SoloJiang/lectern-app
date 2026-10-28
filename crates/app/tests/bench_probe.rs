@@ -206,7 +206,7 @@ fn first_frame_plugins_and_quit() {
         _ => None,
     });
     // The desktop profile's plugins; the probe's own is not among them.
-    assert_eq!(plugins.len(), 11, "{plugins:?}");
+    assert_eq!(plugins.len(), 12, "{plugins:?}");
     assert!(plugins.iter().all(|plugin| plugin.id != "bench-probe"));
     assert!(plugins.iter().any(|plugin| plugin.id == "workspace"));
 

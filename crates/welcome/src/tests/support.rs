@@ -1,5 +1,5 @@
-//! Fakes and the rig: a `dyn Projects`, session sources and a `dyn
-//! Contributions` written for these tests, and the two plugins on two
+//! Fakes and the rig: a `dyn Projects`, session sources, a `dyn Review` and a
+//! `dyn Contributions` written for these tests, and the three plugins on
 //! `TestKernel`s sharing one model and one manual executor. Every path here
 //! is synthetic; nothing reads a real session directory.
 
@@ -14,6 +14,11 @@ use lectern_kernel::{ActivationToken, Event};
 use lectern_services::project::{
     ActiveTree, Location, OpenError, OpenRequest, PackageMatch, ProjectEvent, ProjectKey,
     ProjectSnapshot, Projects, ResolveError, Resolved, Scan, ScanError, WorktreeKey,
+};
+use lectern_services::review::{
+    BriefRules, BriefRulesRegistration, FileRows, OutsideCount, Overview, OverviewInterest,
+    Progress, Review, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey,
+    SessionOverview, TextKey,
 };
 use lectern_services::session::{
     Agent, Batch, Content, ContentRef, Cursor, Format, Parent, Place, ResumeCommand, SessionError,
@@ -314,6 +319,115 @@ pub(crate) fn located(key: &ProjectKey, rel: &str) -> Place {
     })
 }
 
+/// A `dyn Review` that answers `overview` from a table the test fills, and
+/// counts the calls to `watch_overview` (the screen must never make one).
+#[derive(Default)]
+pub(crate) struct FakeReview {
+    overviews: Mutex<HashMap<ProjectKey, Arc<Overview>>>,
+    pub(crate) watched: Mutex<Vec<ProjectKey>>,
+}
+
+impl FakeReview {
+    /// The overview of `project` from now on: `(session id, needs review)`,
+    /// all in the Claude Code source.
+    pub(crate) fn set(&self, project: &ProjectKey, sessions: &[(&str, bool)]) {
+        let sessions: Vec<SessionOverview> = sessions
+            .iter()
+            .map(|(id, needs_review)| SessionOverview {
+                session: session_key(id),
+                progress: Some(if *needs_review {
+                    Progress {
+                        total: 4,
+                        seen: 1,
+                        changed_since_seen: 0,
+                    }
+                } else {
+                    Progress {
+                        total: 4,
+                        seen: 4,
+                        changed_since_seen: 0,
+                    }
+                }),
+                drifted: None,
+                critical: 0,
+            })
+            .collect();
+        let mut table = self.overviews.lock().unwrap();
+        let generation = table.get(project).map_or(0, |o| o.generation) + 1;
+        table.insert(
+            project.clone(),
+            Arc::new(Overview {
+                project: project.clone(),
+                generation,
+                sessions: sessions.into(),
+                outside: OutsideCount::Files(0),
+                packages: None,
+            }),
+        );
+    }
+
+    /// Nobody watches the overview any more.
+    pub(crate) fn clear(&self, project: &ProjectKey) {
+        self.overviews.lock().unwrap().remove(project);
+    }
+
+    /// The event the review plugin sends after it replaced an overview.
+    pub(crate) fn event(&self, project: &ProjectKey) -> ReviewEvent {
+        ReviewEvent::Overview {
+            project: project.clone(),
+            generation: self
+                .overviews
+                .lock()
+                .unwrap()
+                .get(project)
+                .map_or(0, |o| o.generation),
+        }
+    }
+}
+
+impl Review for FakeReview {
+    fn open(&self, _: ReviewTarget) -> ReviewId {
+        unreachable!("the welcome screen never opens a review")
+    }
+    fn snapshot(&self, _: ReviewId) -> Option<Arc<ReviewSnapshot>> {
+        unreachable!("the welcome screen never reads a review")
+    }
+    fn command(&self, _: ReviewId, _: ReviewCommand) {
+        unreachable!("the welcome screen never commands a review")
+    }
+    fn rows(&self, _: ReviewId, _: &RowsKey) -> Option<Arc<FileRows>> {
+        unreachable!("the welcome screen never reads rows")
+    }
+    fn text(&self, _: ReviewId, _: &TextKey) -> Option<Arc<str>> {
+        unreachable!("the welcome screen never reads text")
+    }
+    fn close(&self, _: ReviewId) {
+        unreachable!("the welcome screen never closes a review")
+    }
+    fn overview(&self, project: &ProjectKey) -> Option<Arc<Overview>> {
+        self.overviews.lock().unwrap().get(project).cloned()
+    }
+    fn watch_overview(&self, project: &ProjectKey) -> OverviewInterest {
+        self.watched.lock().unwrap().push(project.clone());
+        OverviewInterest::new(|| {})
+    }
+    fn register_brief_rules(
+        &self,
+        _: Arc<dyn BriefRules>,
+        _: ActivationToken,
+    ) -> BriefRulesRegistration {
+        unreachable!("the welcome screen registers no brief rules")
+    }
+}
+
+/// The key of a synthetic session of the Claude Code source.
+pub(crate) fn session_key(id: &str) -> SessionKey {
+    SessionKey {
+        source: SourceId(Arc::from("session-claude-code")),
+        id: Arc::from(id),
+    }
+}
+
 /// A `dyn Contributions` that remembers what was registered (the payloads
 /// too, so a test can build the screen) and the commands it was sent.
 #[derive(Default)]
@@ -460,14 +574,15 @@ impl LanguagePrefs for FakePrefs {
     }
 }
 
-/// The two plugins on two test kernels, one manual executor, one clock and
-/// one data directory.
+/// The three plugins on test kernels, one manual executor, one clock and one
+/// data directory.
 pub(crate) struct Rig {
     pub(crate) model: Arc<WelcomeModel>,
     pub(crate) executor: Executor,
     pub(crate) projects: Arc<FakeProjects>,
     pub(crate) contributions: Arc<FakeContributions>,
     pub(crate) prefs: Arc<FakePrefs>,
+    pub(crate) review: Arc<FakeReview>,
     pub(crate) claude: Arc<FakeSource>,
     pub(crate) codex: Arc<FakeSource>,
     pub(crate) dir: tempfile::TempDir,
@@ -475,6 +590,8 @@ pub(crate) struct Rig {
     screen: TestKernel,
     discovery: Option<TestKernel>,
     discovery_plugin: Option<WelcomePlugin>,
+    review_kernel: Option<TestKernel>,
+    review_plugin: Option<WelcomePlugin>,
 }
 
 impl Rig {
@@ -499,7 +616,7 @@ impl Rig {
         let claude = FakeSource::new("session-claude-code", Agent::ClaudeCode);
         let codex = FakeSource::new("session-codex", Agent::Codex);
         let prefs = Arc::new(FakePrefs::default());
-        let [(_, screen), (_, discovery)] = from_model(
+        let [(_, screen), (_, discovery), (_, review_plugin)] = from_model(
             model.clone(),
             prefs.clone(),
             Some(PathBuf::from("/Users/example")),
@@ -514,6 +631,7 @@ impl Rig {
             projects,
             contributions,
             prefs,
+            review: Arc::new(FakeReview::default()),
             claude,
             codex,
             dir,
@@ -521,6 +639,8 @@ impl Rig {
             screen,
             discovery: None,
             discovery_plugin: Some(discovery),
+            review_kernel: None,
+            review_plugin: Some(review_plugin),
         }
     }
 
@@ -562,11 +682,29 @@ impl Rig {
         }
     }
 
+    /// Activates "welcome-review" with the fake `dyn Review`.
+    pub(crate) fn start_review(&mut self) {
+        let plugin = self.review_plugin.take().expect("started once");
+        let kernel = TestKernel::new(plugin).mock::<dyn Review>(self.review.clone());
+        kernel.activate().unwrap();
+        self.review_kernel = Some(kernel);
+    }
+
+    /// Deactivates "welcome-review".
+    pub(crate) fn stop_review(&mut self) {
+        if let Some(kernel) = self.review_kernel.take() {
+            kernel.deactivate();
+        }
+    }
+
     /// An event for the plugins that are listening.
     pub(crate) fn emit<E: Event + Clone>(&self, event: E) {
         self.screen.inner().unwrap().emitter().emit(event.clone());
         if let Some(discovery) = &self.discovery {
-            discovery.inner().unwrap().emitter().emit(event);
+            discovery.inner().unwrap().emitter().emit(event.clone());
+        }
+        if let Some(review) = &self.review_kernel {
+            review.inner().unwrap().emitter().emit(event);
         }
     }
 
@@ -591,6 +729,9 @@ impl Rig {
             self.screen.inner().unwrap().barrier();
             if let Some(discovery) = &self.discovery {
                 discovery.inner().unwrap().barrier();
+            }
+            if let Some(review) = &self.review_kernel {
+                review.inner().unwrap().barrier();
             }
             if self.executor.run_until_idle() == 0 {
                 return;

@@ -495,6 +495,16 @@ fn sessions_text(strings: &Strings, count: u32) -> String {
     .to_owned()
 }
 
+fn to_review_text(strings: &Strings, count: u32) -> String {
+    Text::fmt(
+        strings,
+        keys::welcome::ROW_TO_REVIEW,
+        &Args::new().num("count", count),
+    )
+    .as_str()
+    .to_owned()
+}
+
 fn running_text(strings: &Strings, count: u32) -> String {
     Text::fmt(
         strings,
@@ -546,8 +556,9 @@ pub(crate) fn subtitle(strings: &Strings, version: Option<&str>) -> Text {
 }
 
 /// The second line of a recent project: Folder (when it is not a git
-/// repository) · sessions · running · the directory it is in (`~` for the
-/// home directory); `missing` replaces all of it.
+/// repository) · to review (0 too; or, while the project has no mark, the
+/// sessions) · running · the directory it is in (`~` for the home directory);
+/// `missing` replaces all of it.
 pub(crate) fn recent_detail(strings: &Strings, entry: &RecentEntry, home: Option<&Path>) -> String {
     if entry.missing {
         return Text::key(strings, keys::welcome::RECENT_MISSING)
@@ -565,11 +576,20 @@ pub(crate) fn recent_detail(strings: &Strings, entry: &RecentEntry, home: Option
                 .to_owned(),
         );
     }
-    if entry.sessions > 0 {
-        parts.push(sessions_text(strings, entry.sessions));
-        if entry.running > 0 {
-            parts.push(running_text(strings, entry.running));
+    match entry.to_review {
+        Some(count) => {
+            parts.push(to_review_text(strings, count));
+            if entry.running > 0 {
+                parts.push(running_text(strings, entry.running));
+            }
         }
+        None if entry.sessions > 0 => {
+            parts.push(sessions_text(strings, entry.sessions));
+            if entry.running > 0 {
+                parts.push(running_text(strings, entry.running));
+            }
+        }
+        None => {}
     }
     if let Some(parent) = entry.path.parent() {
         parts.push(display_path(parent, home));
@@ -721,8 +741,8 @@ fn skeleton_shown(elapsed: Duration) -> bool {
 
 impl WelcomeView {
     /// The left column, centred: the app icon, the name and subtitle, the
-    /// Open Folder card with the notice under it, and the language choice
-    /// at the bottom.
+    /// Open Folder card, the disabled Clone card and the notice under them,
+    /// and the language choice at the bottom.
     fn left_column(
         &self,
         paint: &Paint<'_>,
@@ -748,6 +768,16 @@ impl WelcomeView {
                 let _ = view.update(cx, |this, _| this.open_folder());
             }
         });
+        // Not built yet: the card shows the design and does nothing. It has
+        // no `on_click` and is not in the keyboard selection.
+        let clone = ActionCard::new(
+            NodeId::new("welcome", "clone", None),
+            Icon::Clone,
+            Text::key(&paint.strings, keys::welcome::CLONE),
+            Text::key(&paint.strings, keys::welcome::CLONE_HINT),
+        )
+        .shortcut(Text::key(&paint.strings, keys::welcome::CLONE_SOON))
+        .disabled(true);
         let notice = paint.snapshot.notice.map(|notice| {
             let text = Text::key(&paint.strings, notice_key(notice));
             semantic(
@@ -798,6 +828,7 @@ impl WelcomeView {
                     .flex_col()
                     .gap(px(CARD_GAP))
                     .child(open_folder)
+                    .child(clone)
                     .children(notice),
             );
         div()

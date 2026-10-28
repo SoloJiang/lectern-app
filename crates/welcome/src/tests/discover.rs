@@ -9,6 +9,7 @@ use lectern_services::session::{Agent, Place, SessionList, SessionSummary, Times
 
 use super::support::*;
 use crate::discover::{Built, MAX_AGENTS, MAX_FOLDERS, build, root_of};
+use crate::recent::ReviewMark;
 
 fn list(sessions: Vec<SessionSummary>) -> Arc<SessionList> {
     Arc::new(SessionList {
@@ -21,7 +22,7 @@ fn list(sessions: Vec<SessionSummary>) -> Arc<SessionList> {
 fn run(sessions: Vec<SessionSummary>, open: &[&ProjectKey], recent: &[&ProjectKey]) -> Built {
     let open: Vec<_> = open.iter().map(|k| (*k).clone()).collect();
     let recent: Vec<_> = recent.iter().map(|k| (*k).clone()).collect();
-    build(&[list(sessions)], &open, &recent, Timestamp(NOW))
+    build(&[list(sessions)], &open, &recent, &[], Timestamp(NOW))
 }
 
 #[test]
@@ -264,7 +265,7 @@ fn sources_are_merged_newest_first() {
             .agent("session-codex", Agent::Codex)
             .build(),
     ]);
-    let built = build(&[from_claude, from_codex], &[], &[], Timestamp(NOW));
+    let built = build(&[from_claude, from_codex], &[], &[], &[], Timestamp(NOW));
     assert_eq!(&*built.folders[0].agents, [Agent::Codex, Agent::ClaudeCode]);
     assert_eq!(built.folders[0].newest_activity, Timestamp(NOW - MINUTE));
 }
@@ -296,4 +297,96 @@ fn recent_rows_get_counts_by_key_from_located_and_resolved() {
     assert_eq!(built.counts.get(&app), Some(&(3, 1)));
     assert_eq!(built.counts.get(&other), None);
     assert_eq!(built.folders.len(), 1, "the recent project is not a folder");
+}
+
+fn mark(ids: &[&str], at: i64) -> ReviewMark {
+    ReviewMark {
+        sessions: ids.iter().map(|id| session_key(id)).collect(),
+        at,
+    }
+}
+
+#[test]
+fn to_review_counts_marked_sessions_still_listed_and_later_activity() {
+    let app = git_key("/repos/app/.git");
+    let notes = folder_key("/notes");
+    let quiet = git_key("/repos/quiet/.git");
+    let at = NOW - 60 * MINUTE;
+    let sessions = vec![
+        // Marked and still listed: in the main tree and, resolved, in a worktree.
+        Sess::new("m1", "/repos/app", located(&app, ""))
+            .at(at - 30 * MINUTE)
+            .build(),
+        Sess::new("m2", "/repos/app-wt", resolved(&app, ""))
+            .at(at - 10 * MINUTE)
+            .build(),
+        // "m-gone" is marked and not in the list: not counted.
+        // Not marked, active after the mark: counted, once each.
+        Sess::new("n1", "/repos/app", located(&app, ""))
+            .at(at + 1)
+            .build(),
+        // Active exactly at the mark: not counted; before it: not counted.
+        Sess::new("n2", "/repos/app", located(&app, ""))
+            .at(at)
+            .build(),
+        Sess::new("n3", "/repos/app", located(&app, ""))
+            .at(at - MINUTE)
+            .build(),
+        // A sub-agent after the mark: not counted.
+        Sess::new("n1/agent", "/repos/app", located(&app, ""))
+            .at(at + MINUTE)
+            .child_of("n1")
+            .build(),
+        // A marked session counts once even when it was active after the mark.
+        Sess::new("m1b", "/repos/app", located(&app, ""))
+            .at(NOW)
+            .build(),
+        // Another project's sessions are its own.
+        Sess::new("k1", "/notes", located(&notes, ""))
+            .at(NOW)
+            .build(),
+        // A session that has not been placed yet is not counted as later
+        // activity (its project is unknown) but a marked one that is listed is.
+        Sess::new("p", "/x/p", Place::Pending).at(NOW).build(),
+    ];
+    let marks = vec![
+        (app.clone(), mark(&["m1", "m2", "m-gone", "m1b"], at)),
+        (quiet.clone(), mark(&[], at)),
+    ];
+    let list = list(sessions);
+    let recent = vec![app.clone(), notes.clone(), quiet.clone()];
+    let built = build(&[list], &[], &recent, &marks, Timestamp(NOW));
+    // m1, m2, m1b (marked, listed) + n1 (later) = 4.
+    assert_eq!(built.to_review.get(&app), Some(&4));
+    // A mark with no sessions and no activity is 0, not absent.
+    assert_eq!(built.to_review.get(&quiet), Some(&0));
+    // No mark: no number, and the session counts are still there.
+    assert_eq!(built.to_review.get(&notes), None);
+    assert_eq!(built.counts.get(&notes), Some(&(1, 0)));
+}
+
+#[test]
+fn to_review_takes_the_later_mark_of_a_key() {
+    let app = git_key("/repos/app/.git");
+    let sessions = vec![
+        Sess::new("a", "/repos/app", located(&app, ""))
+            .at(NOW - 5 * MINUTE)
+            .build(),
+        Sess::new("b", "/repos/app", located(&app, ""))
+            .at(NOW - 20 * MINUTE)
+            .build(),
+    ];
+    let marks = vec![
+        (app.clone(), mark(&[], NOW - 30 * MINUTE)),
+        (app.clone(), mark(&["b"], NOW - 10 * MINUTE)),
+    ];
+    let built = build(
+        &[list(sessions)],
+        &[],
+        std::slice::from_ref(&app),
+        &marks,
+        Timestamp(NOW),
+    );
+    // The later mark: "b" is marked, "a" is later activity.
+    assert_eq!(built.to_review.get(&app), Some(&2));
 }

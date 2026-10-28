@@ -5,6 +5,7 @@ expression: tree(cx)
 welcome.root Group recent=ready discovered=unavailable
   welcome.title Text [welcome-title] "Lectern"
   welcome.open-folder Button [welcome-open-folder] "Open Folder…"
+  welcome.clone Button [welcome-clone] "Clone Repository…" disabled
   welcome.language Button [welcome-language] "Language" value=system
   welcome.recent List
   welcome.recent.empty Text [welcome-recent-empty] "No recent projects"

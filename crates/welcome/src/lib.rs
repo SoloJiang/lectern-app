@@ -1,9 +1,9 @@
 //! The open-a-project screen: the recent projects and the folders found
 //! through agent sessions (docs/design/welcome.md).
 //!
-//! - [`plugins`]: the "welcome" and "welcome-discovery" plugins, which share
-//!   one [`WelcomeModel`]. "welcome" registers `Screen(WELCOME)` and the
-//!   screen's `KeyBindings`.
+//! - [`plugins`]: the "welcome", "welcome-discovery" and "welcome-review"
+//!   plugins, which share one [`WelcomeModel`]. "welcome" registers
+//!   `Screen(WELCOME)` and the screen's `KeyBindings`.
 //! - [`WelcomeModel`] and [`WelcomeSnapshot`]: what the view reads and
 //!   the commands it sends back (memory only).
 //! - `recent`: the list, and `recent.json` under the data directory (the
@@ -33,5 +33,5 @@ pub use model::{
     DiscoveredState, Notice, OpenFailure, OpenSource, Opening, RecentState, WakeGuard,
     WelcomeModel, WelcomeSnapshot,
 };
-pub use plugin::{DISCOVERY_ID, WELCOME_ID, WelcomeDeps, WelcomePlugin, plugins};
-pub use recent::RecentEntry;
+pub use plugin::{DISCOVERY_ID, REVIEW_ID, WELCOME_ID, WelcomeDeps, WelcomePlugin, plugins};
+pub use recent::{RecentEntry, ReviewMark};
