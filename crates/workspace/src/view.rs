@@ -1128,6 +1128,10 @@ impl Render for Workspace {
                                 // The top row, as tall as the toolbar, holds
                                 // the window controls.
                                 .pt(TOOLBAR_HEIGHT)
+                                // The sidebar material, opaque: the window's
+                                // `Blurred` background does not blur
+                                // (docs/design/ui.md「与设计的差异」).
+                                .bg(palette.under_page_background)
                                 .border_r(SEPARATOR)
                                 .border_color(palette.separator)
                                 .children(panel),

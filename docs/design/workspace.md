@@ -360,7 +360,7 @@ pub struct WindowState {
 
 | 区域 | 规格（[交互规范「窗口结构」](interaction.md#窗口结构)） | 层 | 内容来源 |
 |---|---|---|---|
-| Sidebar | 248pt，vibrancy，占满窗口高度，顶部一行（与工具栏同高）留给窗口控件；当前侧栏面板 | 常驻（项目侧栏）/ 按需（Files 等替换面板） | `SidebarPanel` 贡献；项目侧栏里的条目来自 `SidebarEntry` 贡献 |
+| Sidebar | 248pt，侧栏材质（不透明的 `under_page_background`，同检查器），占满窗口高度，顶部一行（与工具栏同高）留给窗口控件；当前侧栏面板 | 常驻（项目侧栏）/ 按需（Files 等替换面板） | `SidebarPanel` 贡献；项目侧栏里的条目来自 `SidebarEntry` 贡献 |
 | Toolbar | 52pt，半透明材质，下沿 0.5pt 分隔线；从侧栏右边起横跨内容区和检查器（没有侧栏时横跨整个窗口宽，窗口控件在它里面，左边让出 88pt 给窗口控件，检查器在它下面）；标题 + 副标题；左侧是图标按钮：返回（有 `back_button` 的屏幕）或侧栏开关（有侧栏的屏幕）；右侧至多 3 个控件，检查器开关（图标按钮）算其中一个 | 常驻 | 本 crate 画容器和三个图标按钮（返回、侧栏开关、检查器开关，都不带文字）；标题、副标题、其余右侧控件由当前屏幕经 `ui::contrib::Screen::toolbar` 提供（下节） |
 | Content | 居中 760pt 阅读栏（`reading_column`）或整个内容区 | 常驻 / 收起（阅读视图） | 栈顶 `Screen` |
 | Inspector | 300pt，侧栏材质（GPUI 的元素画不了模糊，用不透明的 `under_page_background`，[ui 设计「与设计的差异」](ui.md#与设计的差异)）；顶部撑满宽度的分段控件切换页 | 按需（⌥⌘I） | `InspectorTab` 贡献 |
@@ -469,7 +469,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 ## 界面
 
 - 屏幕与层：见「区域与三层」。本 crate 画的只有区域的容器、工具栏左右的图标按钮（返回、侧栏开关、检查器开关：`Button` 的图标形态加 `Icon::Back`、`Icon::Sidebar`、`Icon::Inspector`，不带文字，辅助名见键表）、检查器顶部撑满宽度的分段控件、浮条区域和一次性提示；其余都是贡献的视图。布局以设计画布为准（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，取舍见[交互规范「视觉」](interaction.md#视觉)）：侧栏占满窗口高度，工具栏在它右边横跨内容区和检查器；没有侧栏的屏幕（审阅）工具栏横跨整个窗口宽，窗口控件在工具栏里，检查器在工具栏下面。侧栏开关（画布上有）的命令和 Action 还没有设计，要由 workspace 的一个设计 PR 补上；在那之前工具栏不画这个按钮。
-- `ui` 的控件与动效原语（名字以 `ui` 设计为准，[#214](https://github.com/SoloJiang/lectern-app/issues/214)）：颜色经 `lectern_ui::colors(cx)`，文字经 `Text` 与 `TextRole`，分段控件 `Segmented`，按钮 `Button`；动效用 `motion::{PANEL_OPEN, PANEL_CLOSE, SEGMENT, HOVER_IN, HOVER_OUT}` 和可打断的 `Transition`（面板偏移、透明度），减弱动态效果由 `motion::reduced(cx)` 给出淡入淡出、时长减半的版本。侧栏、工具栏、检查器、面板、覆盖层、浮条的容器本身由本 crate 画（`ui` 只给数值和控件）：侧栏用窗口的 `Blurred` 材质（app 设计「界面」），不自定义材质。本 crate 不写任何颜色值、字体和动画参数（验收用 `rg` 检查）。
+- `ui` 的控件与动效原语（名字以 `ui` 设计为准，[#214](https://github.com/SoloJiang/lectern-app/issues/214)）：颜色经 `lectern_ui::colors(cx)`，文字经 `Text` 与 `TextRole`，分段控件 `Segmented`，按钮 `Button`；动效用 `motion::{PANEL_OPEN, PANEL_CLOSE, SEGMENT, HOVER_IN, HOVER_OUT}` 和可打断的 `Transition`（面板偏移、透明度），减弱动态效果由 `motion::reduced(cx)` 给出淡入淡出、时长减半的版本。侧栏、工具栏、检查器、面板、覆盖层、浮条的容器本身由本 crate 画（`ui` 只给数值和控件）：侧栏和检查器用侧栏材质，即不透明的 `under_page_background`（[ui 设计「与设计的差异」](ui.md#与设计的差异)：窗口的 `Blurred` 背景在真实窗口里没有模糊，不画底色的侧栏是透明的），不自定义材质。本 crate 不写任何颜色值、字体和动画参数（验收用 `rg` 检查）。
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/workspace.ftl`）：
 
   | 键 | en | zh-CN | 用途 |
