@@ -33,7 +33,7 @@
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
 | `gpui`、`gpui-component` | 元素、窗口外观、文字系统、动画元素；gpui-component 的 `Button`、`Icon` 作为底层（`Skeleton`、`ProgressCircle` 自带不可关的动画，不用，见「与设计的差异」第 3 步） | 已锁定（[ADR 0016](../adr/0016.md)） |
-| `gpui-kit-assets`（`=0.7.3`，gpui-component 的依赖） | `icon_assets!` 宏生成 `IconAssets`：只嵌入 10 个图标 | 已在 Cargo.lock，与 gpui-component 同版本、一起升级；直接依赖只为用它的宏 |
+| `gpui-kit-assets`（`=0.7.3`，gpui-component 的依赖） | `icon_assets!` 宏生成 `IconAssets`：只嵌入 `Icon` 的 16 个图标（第一批 10 个，第二批 6 个） | 已在 Cargo.lock，与 gpui-component 同版本、一起升级；直接依赖只为用它的宏 |
 | `lectern-i18n` | `Strings`、`Key`、`FmtKey`、`Args`、`Locale`：`Text` 的构造 | 界面字符串不硬编码（[ADR 0013](../adr/0013.md)） |
 | `lectern-platform` | `appearance::{system_colors, reduce_motion, watch}`（前置条件 A） | macOS 专属能力只在 `platform`（架构规则 6）；视图层可以依赖基础设施层 |
 | `lectern-services` | `workspace::Payload`：`contrib` 类型的 `into_payload`；`WorkspaceCommand`（`SidebarItem::on_select`） | kernel 层，任何层都可以依赖 |
@@ -417,9 +417,9 @@ impl Button {
 }
 
 /// 第一批屏幕用到的图标，来自 gpui-component 自带的 Lucide 集合（见「未决问题」1）。只列需要的，不暴露整个 `IconName`。
-pub enum Icon { Folder, Clone, ChevronRight, ChevronDown, Check, Close, Search, Inspector, Back, Forward }
+pub enum Icon { Folder, Clone, ChevronRight, ChevronDown, Check, Close, Search, Inspector, Back, Forward /* 第二批的 6 个见「第二批控件」 */ }
 
-/// 这 10 个图标的 SVG 资源来源（gpui-kit-assets 的 `icon_assets!` 宏生成，只嵌入这 10 个文件）。
+/// `Icon` 全部图标的 SVG 资源来源（gpui-kit-assets 的 `icon_assets!` 宏生成，只嵌入这些文件；第二批之后是 16 个）。
 /// `app` 在 `Application::with_assets` 里注册它；GPUI 只认这一处注册的来源。
 #[derive(Clone, Copy, Default)]
 pub struct IconAssets;
@@ -565,7 +565,9 @@ impl PopUpButton {
     pub fn value(self, value: SharedString) -> PopUpButton;
 }
 
-/// 右键菜单：在指针处弹出系统菜单。行（`Row`、`SidebarRow`）经 `context_menu` 挂上；视图不直接调用。
+/// 在 `position`（窗口坐标）弹出系统菜单：行的右键（`Row`、`SidebarRow` 的 `context_menu`）和从按钮弹出的菜单（pull-down，如 `usage_view` 的「合并到…」）都用它。
+/// 选中的项经 `Window::dispatch_action` 从窗口当前的焦点派发，所以屏幕的 `on_action` 要在焦点路径上（屏幕的根元素持有焦点，[workspace 设计](workspace.md)的做法）。
+/// 要带参数的选择（「合并到」哪个项目）用带字段的 `Action`。
 pub fn show_menu(items: Vec<MenuItem>, position: Point<Pixels>, window: &mut Window, cx: &mut App);
 
 /// 侧栏样式的平铺行：没有卡片、没有分隔线，圆角 8pt、左右内缩由父元素给。内容由调用方给（文字层级由行内元素给出）。
@@ -580,10 +582,13 @@ impl SidebarRow {
     pub fn compact(self) -> SidebarRow;
     pub fn trailing(self, text: Text) -> SidebarRow;
     pub fn on_click(self, f: impl Fn(&mut Window, &mut App) + 'static) -> SidebarRow;
-    pub fn context_menu(self, items: Vec<MenuItem>) -> SidebarRow;
+    /// 右键：先调用 `select`（调用方把选择移到这一行，与点击的选中效果相同、但不触发 `on_click` 的其他行为，如打开），
+    /// 再在指针处 `show_menu(items)`。菜单项的 `Action` 不带行的标识，作用于选中的行，所以 `select` 必须在弹出之前完成。
+    pub fn context_menu(self, items: Vec<MenuItem>, select: impl Fn(&mut Window, &mut App) + 'static) -> SidebarRow;
     pub fn child(self, child: impl IntoElement) -> SidebarRow;
 }
-impl Row { pub fn context_menu(self, items: Vec<MenuItem>) -> Row; }
+impl Row { /// 同 `SidebarRow::context_menu`。
+    pub fn context_menu(self, items: Vec<MenuItem>, select: impl Fn(&mut Window, &mut App) + 'static) -> Row; }
 
 impl Segmented {
     /// 撑满父元素的宽度，各项等分（检查器的 Files / Conversation）。轨道 `fill_strong`，滑块 `control_background`。
@@ -611,9 +616,9 @@ pub struct Switch { /* id, on, knob: f32, on_change */ }
 ```
 
 - 为什么自己做：gpui-component 的 `Button`、`Select`、`PopupMenu`、`ContextMenu` 都是自己画的菜单，样式与 macOS 不一致，也会被窗口边界裁掉。`PopUpButton` 和 `show_menu` 用 gpui-component 的 `native_menu::NativeMenu`，菜单由系统画（`NSMenu`），与菜单栏同一条 `Action` 路径；macOS 之外它退回 gpui-component 自己画的菜单，Lectern 只发 macOS。`ActionCard`、`SidebarRow`、`Capsule`、`Disclosure`、`Switch` 在 gpui-component 里没有对应的形态，或圆角、颜色与画布不同。
-- 菜单项不是探针节点：系统菜单不在 GPUI 的元素树里。探针按名字触发菜单项的 `Action`（如 `welcome::SelectLanguage`），读弹出按钮的 `attrs.value` 确认结果。
+- 菜单项不是探针节点：系统菜单不在 GPUI 的元素树里，`semantic` 的 `Menu`、`MenuItem` 角色留给以后自己画的菜单。探针按名字触发菜单项的 `Action`（如 `welcome::SelectLanguage`），读弹出按钮的 `attrs.value` 确认结果。
 - 「侧栏材质」（Welcome 的右栏、检查器）：画布用半透明加背景模糊。GPUI 的元素画不了模糊，所以不透明的面板用 `under_page_background`；工作区的侧栏仍然不画底色，透出窗口的模糊。
-- `contrib::SidebarItem` 加 `count: Option<u32>`：行尾的数量（Worktrees 的 11、Merge Requests 的 2），`workspace` 交给 `SidebarRow::trailing`；`None` 不画。
+- 侧栏行尾的数量（Worktrees 的 11、Merge Requests 的 2）不在这一批：`SidebarRow::trailing` 能画它，但数量是会变的项目数据，而 `SidebarItem` 是登记时应用一次的载荷，谁提供数量、数量变化时谁触发重画要由 [workspace 设计](workspace.md)决定。在那之前不画数量（[project_home 设计](project_home.md)「对其他 crate 的要求」C）。
 
 ### 贡献载荷（`contrib`）
 
@@ -626,7 +631,7 @@ pub mod contrib {
     pub struct ToolbarItems { pub title: Text, pub subtitle: Option<Text>, pub controls: Vec<AnyElement> /* ≤ 3 */ }
     pub struct SidebarPanel { pub build: ViewFactory<()> }
     /// 侧栏的一个条目（`services::workspace::SidebarEntry` 的载荷）。图标用本 crate 的 `Icon`（见「未决问题」1），不是 SF Symbols 的名字。
-    pub struct SidebarItem { pub label: Key, pub icon: Option<Icon>, pub count: Option<u32>, pub on_select: WorkspaceCommand }
+    pub struct SidebarItem { pub label: Key, pub icon: Option<Icon>, pub on_select: WorkspaceCommand }
     pub struct InspectorTab { pub label: Key, pub build: ViewFactory<()> }
     pub struct Panel { pub build: ViewFactory<()> }
     pub struct Overlay { pub build: ViewFactory<()> }
@@ -915,7 +920,7 @@ pub mod semantic {
 
 **第 5 步：第二批控件（`Refs #283`）。**
 
-- `Palette::fill`、`fill_strong`，6 个新图标，`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`，`contrib::SidebarItem::count`。`Switch` 随 #21 的调用方实现。
+- `Palette::fill`、`fill_strong`，6 个新图标，`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`。`Switch` 随 #21 的调用方实现。
 - `palette_builtin_*` 检查两个新颜色在两个外观下都比底色深一档（浅色）或浅一档（深色）；`icon_assets_hold_every_icon` 覆盖 16 个图标；`ActionCard`、`PopUpButton`、`SidebarRow`（默认、`accent`、`compact` 加 `trailing`）、`Segmented::fill` 的语义节点快照；`disclosure_rotates_with_its_value`（0、0.5、1 三个值的角度）；`popup_items_dispatch_their_action`（菜单项的 `Action` 经 `dispatch_action` 到达，用 `TestAppContext`，不弹出系统菜单）。
 - 同一节里的 `rg` 检查仍没有结果。
 
