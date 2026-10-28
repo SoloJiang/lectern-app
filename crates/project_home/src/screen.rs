@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use gpui::{
-    AnyElement, Bounds, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Pixels, Render, ScrollHandle, StatefulInteractiveElement, Styled, Task, Window,
-    canvas, div, px,
+    AnyElement, Bounds, Context, FocusHandle, Focusable, HighlightStyle, InteractiveElement,
+    IntoElement, ParentElement, Pixels, Render, ScrollHandle, StatefulInteractiveElement, Styled,
+    StyledText, Task, Window, canvas, div, px, svg,
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_logging::debug;
@@ -24,8 +24,9 @@ use lectern_services::session::SessionKey;
 use lectern_ui::motion::{self, LOADING_PROGRESS_AT, LOADING_SKELETON_AT, Transition};
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
-    AgentDot, GroupedList, LoadingPhase, Progress, ProgressShape, Row, Skeleton, Text, TextRole,
-    TextRoleExt, colors, loading_phase, strings,
+    AgentDot, Button, ButtonKind, ButtonSize, GroupedList, Icon, LoadingPhase, Progress,
+    ProgressShape, Row, Skeleton, SystemColor, Text, TextRole, TextRoleExt, colors, loading_phase,
+    strings,
 };
 
 use crate::actions::{
@@ -34,13 +35,27 @@ use crate::actions::{
 use crate::home::Home;
 use crate::nodes;
 use crate::present::{self, flag};
-use crate::snapshot::{Card, HomeSnapshot, OutsideRow};
+use crate::snapshot::{Card, HomeSnapshot, OutsideRow, SessionStatus};
 
-/// The main area's padding and the gap between its sections.
-const PADDING: Pixels = px(24.0);
-const SECTION_GAP: Pixels = px(20.0);
+/// The main area's padding and the gap between its sections, and between the
+/// large title and the sentence under it (the design canvas's Overview).
+const PADDING_X: Pixels = px(32.0);
+const PADDING_TOP: Pixels = px(36.0);
+const PADDING_BOTTOM: Pixels = px(48.0);
+const SECTION_GAP: Pixels = px(28.0);
+const TITLE_GAP: Pixels = px(4.0);
 /// The gap between the lines of a card.
-const LINE_GAP: Pixels = px(2.0);
+const LINE_GAP: Pixels = px(3.0);
+/// The gap between the parts of a card row: `Row`'s own, so that the text
+/// starts where the separators do.
+const CARD_GAP: Pixels = px(14.0);
+/// The gap inside the group at a card's end (ring, figures, chevron).
+const END_GAP: Pixels = px(8.0);
+/// The slot of the agent dot: 10pt wide, so that the text begins 40pt from
+/// the card's edge (16 + 10 + 14), where `separator_inset` starts the lines.
+const DOT_SLOT: Pixels = px(10.0);
+const SEPARATOR_INSET: Pixels = px(40.0);
+const CHEVRON_SIZE: Pixels = px(14.0);
 /// The placeholder's blocks.
 const BLOCK_WIDE: Pixels = px(180.0);
 const BLOCK_NARROW: Pixels = px(120.0);
@@ -81,7 +96,7 @@ pub struct HomeScreen {
     pick: Option<Pick>,
     /// Scroll the picked item into view on the next frame.
     reveal: bool,
-    /// The progress ring of each card, kept across snapshots so that a
+    /// The progress ring of each Needs Review card, kept across snapshots so that a
     /// ring goes from its old value to the new one.
     rings: HashMap<SessionKey, Transition>,
     waiting: Option<Waiting>,
@@ -141,12 +156,8 @@ impl HomeScreen {
         let now = Instant::now();
         let mut rings = HashMap::new();
         if let Some(snapshot) = &self.snapshot {
-            for card in snapshot
-                .main
-                .needs_review
-                .iter()
-                .chain(snapshot.main.done.iter())
-            {
+            // Only the Needs Review cards have a ring; a Recently Done row has none.
+            for card in snapshot.main.needs_review.iter() {
                 let Some(progress) = card.progress else {
                     continue;
                 };
@@ -292,6 +303,8 @@ impl HomeScreen {
 
     // ----------------------------------------------------------- rendering
 
+    /// A Needs Review card: the agent's dot, the title with the lines under
+    /// it, and the progress at the end.
     fn card_row(
         &mut self,
         card: &Card,
@@ -304,6 +317,7 @@ impl HomeScreen {
         let pick = Pick::Session(key.clone());
         let selected = self.pick.as_ref() == Some(&pick);
         let node = card.session.node.clone();
+        let palette = *colors(window, cx);
         let fraction = card.progress.and_then(|_| {
             self.rings
                 .get_mut(&key)
@@ -311,108 +325,232 @@ impl HomeScreen {
         });
 
         let title = present::title(strings, &card.session);
-        let activity = present::activity(strings, &card.session, now);
+        let meta = present::meta(strings, card, now);
         let signals = present::signals(strings, &card.signals);
 
-        let secondary = move |window: &Window, cx: &gpui::App, text: String| {
-            div()
-                .truncate()
-                .text_role(TextRole::Secondary, window, cx)
-                .child(text)
-        };
+        let mut text = StyledText::new(meta.text);
+        if let Some((range, status)) = meta.status {
+            // Running and waiting are the system green; ended stays grey.
+            if status != SessionStatus::Ended {
+                text = text.with_highlights([(
+                    range,
+                    HighlightStyle {
+                        color: Some(palette.system(SystemColor::Green)),
+                        ..HighlightStyle::default()
+                    },
+                )]);
+            }
+        }
         let mut lines = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .gap(LINE_GAP)
-            .child(div().truncate().child(title.shared()))
-            .child(secondary(window, cx, activity));
+            .child(
+                div()
+                    .truncate()
+                    .text_role(TextRole::Headline, window, cx)
+                    .child(title.shared()),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_role(TextRole::Callout, window, cx)
+                    .child(text),
+            );
         if let Some(signals) = signals {
-            lines = lines.child(secondary(window, cx, signals));
+            lines = lines.child(
+                div()
+                    .truncate()
+                    .text_role(TextRole::Callout, window, cx)
+                    .child(signals),
+            );
         }
 
-        let mut facts = Semantic::new(node.child("facts"), Role::Group)
-            .label(&title)
-            .attr("agent", agent_attr(&card.session.agent))
-            .attr("critical", card.signals.critical.to_string())
-            .attr("changed", card.signals.changed_since_seen.to_string())
-            .attr("drifted", flag(card.signals.drifted));
-        if let Some(progress) = card.progress {
-            facts = facts
-                .attr("seen", progress.seen.to_string())
-                .attr("total", progress.total.to_string());
-        }
-        let mut content = div().flex().flex_1().min_w_0().items_center().gap(px(10.0));
-        if let Some(agent) = present::dot_agent(&card.session.agent) {
-            content = content.child(AgentDot::new(agent));
-        }
-        content = content.child(lines);
-        if let Some(fraction) = fraction {
-            content = content.child(Progress::new(
-                node.child("progress"),
-                ProgressShape::Ring,
-                fraction,
+        let mut content = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(CARD_GAP)
+            .child(dot_slot(&card.session.agent))
+            .child(lines);
+        if let (Some(progress), Some(fraction)) = (card.progress, fraction) {
+            let name = Text::fmt(
+                strings,
+                keys::project_home::PROGRESS,
+                &Args::new()
+                    .num("seen", progress.seen as f64)
+                    .num("total", progress.total as f64),
+            );
+            let short = strings.format(
+                keys::project_home::PROGRESS_SHORT,
+                &Args::new()
+                    .num("seen", progress.seen as f64)
+                    .num("total", progress.total as f64),
+            );
+            content = content.child(semantic(
+                Semantic::new(node.child("seen"), Role::Text).label(&name),
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(END_GAP)
+                    .child(Progress::new(
+                        node.child("progress"),
+                        ProgressShape::Ring,
+                        fraction,
+                    ))
+                    .child(div().text_role(TextRole::Callout, window, cx).child(short))
+                    .child(
+                        svg()
+                            .path(Icon::ChevronRight.path())
+                            .size(CHEVRON_SIZE)
+                            .flex_shrink_0()
+                            .text_color(palette.tertiary_label),
+                    ),
             ));
         }
 
         let this = cx.entity().downgrade();
-        Row::new(node)
+        Row::new(node.clone())
             .selected(selected)
             .on_click(move |_, cx| {
                 let key = key.clone();
                 this.update(cx, |this, cx| this.open_session(key, cx)).ok();
             })
-            .child(semantic(facts, content.relative().child(self.probe(pick))))
+            .child(semantic(
+                card_facts(&node, card, &title),
+                content.relative().child(self.probe(pick)),
+            ))
     }
 
-    /// The Outside Any Session row's content.
+    /// A Recently Done row: the title, and on the right how long ago the
+    /// session moved (the result, "Committed", needs git and merge request
+    /// data that does not exist yet).
+    fn done_row(
+        &mut self,
+        card: &Card,
+        strings: &Strings,
+        now: lectern_services::session::Timestamp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Row {
+        let key = card.session.key.clone();
+        let pick = Pick::Session(key.clone());
+        let selected = self.pick.as_ref() == Some(&pick);
+        let node = card.session.node.clone();
+        let title = present::title(strings, &card.session);
+        let when = present::relative(strings, &card.session, now);
+        let content = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(END_GAP)
+            .relative()
+            .child(div().flex_1().min_w_0().truncate().child(title.shared()))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_role(TextRole::Callout, window, cx)
+                    .child(when),
+            )
+            .child(self.probe(pick));
+        let this = cx.entity().downgrade();
+        Row::new(node.clone())
+            .selected(selected)
+            .on_click(move |_, cx| {
+                let key = key.clone();
+                this.update(cx, |this, cx| this.open_session(key, cx)).ok();
+            })
+            .child(semantic(card_facts(&node, card, &title), content))
+    }
+
+    /// The Outside Any Session card: how many files changed on the branch and
+    /// the first paths on the left, the Review button on the right.
     fn outside_row(
         &mut self,
-        outside: OutsideRow,
+        snapshot: &HomeSnapshot,
         strings: &Strings,
         phase: LoadingPhase,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Row {
         let node = nodes::outside();
         let pick = Pick::Outside;
         let selected = self.pick.as_ref() == Some(&pick);
         let facts = Semantic::new(node.child("facts"), Role::Group);
-        let (facts, text) = match outside {
-            OutsideRow::Files(n) => {
+        let branch = snapshot.branch.as_deref().unwrap_or("HEAD");
+        let mut names = None;
+        let (facts, text) = match &snapshot.main.outside {
+            OutsideRow::Files {
+                count,
+                names: paths,
+            } => {
                 let text = Text::fmt(
                     strings,
                     keys::project_home::OUTSIDE_FILES,
-                    &Args::new().num("count", n),
+                    &Args::new().num("count", *count).str("branch", branch),
                 );
-                (facts.label(&text).attr("files", n.to_string()), Some(text))
+                names = present::outside_names(*count, paths);
+                (
+                    facts.label(&text).attr("files", count.to_string()),
+                    Some(text),
+                )
             }
             OutsideRow::Capped(n) => {
                 let text = Text::fmt(
                     strings,
                     keys::project_home::OUTSIDE_CAPPED,
-                    &Args::new().num("count", n),
+                    &Args::new().num("count", *n),
                 );
                 (facts.label(&text).attr("capped", n.to_string()), Some(text))
             }
             OutsideRow::Pending | OutsideRow::Hidden => (facts.attr("pending", flag(true)), None),
         };
-        let content = div().flex().flex_1().min_w_0().items_center().relative();
-        let content = match text {
-            Some(text) => content.child(div().truncate().child(text.shared())),
+        let mut lines = div().flex().flex_col().flex_1().min_w_0().gap(LINE_GAP);
+        lines = match text {
+            Some(text) => lines.child(div().truncate().child(text.shared())),
             // The number is not known yet: a block once the wait is noticed.
             None if phase != LoadingPhase::Nothing => {
-                content.child(Skeleton::new(NUMBER_WIDTH, BLOCK_HEIGHT))
+                lines.child(Skeleton::new(NUMBER_WIDTH, BLOCK_HEIGHT))
             }
-            None => content,
+            None => lines,
         };
+        if let Some(names) = names {
+            lines = lines.child(
+                div()
+                    .truncate()
+                    .text_role(TextRole::Code, window, cx)
+                    .text_color(colors(window, cx).secondary_label)
+                    .child(names),
+            );
+        }
         let this = cx.entity().downgrade();
+        let button = Button::new(
+            node.child("review"),
+            Text::key(strings, keys::project_home::OUTSIDE_REVIEW),
+        )
+        .kind(ButtonKind::Secondary)
+        .size(ButtonSize::Toolbar);
+        let content = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(CARD_GAP)
+            .relative()
+            .child(lines)
+            .child(div().flex_shrink_0().child(button))
+            .child(self.probe(pick));
         Row::new(node)
             .selected(selected)
             .on_click(move |_, cx| {
                 this.update(cx, |this, cx| this.open_outside(cx)).ok();
             })
-            .child(semantic(facts, content.child(self.probe(pick))))
+            .child(semantic(facts, content))
     }
 
     /// Records where the item's row is painted, for scrolling it into view.
@@ -449,6 +587,39 @@ impl HomeScreen {
             .header(Text::key(strings, keys::project_home::NEEDS_REVIEW))
             .row(Row::new(nodes::area("loading").child("row")).child(semantic(facts, blocks)))
     }
+}
+
+/// The slot an agent's dot sits in; empty for an agent without one (its name
+/// leads the first line anyway), so that the text of every card starts at
+/// the same place.
+fn dot_slot(agent: &lectern_services::session::Agent) -> gpui::Div {
+    let slot = div()
+        .w(DOT_SLOT)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center();
+    match present::dot_agent(agent) {
+        Some(agent) => slot.child(AgentDot::new(agent)),
+        None => slot,
+    }
+}
+
+/// What the probe reads off a card, on the node of its content (`Row` has
+/// no attributes of its own).
+fn card_facts(node: &lectern_ui::semantic::NodeId, card: &Card, title: &Text) -> Semantic {
+    let mut facts = Semantic::new(node.child("facts"), Role::Group)
+        .label(title)
+        .attr("agent", agent_attr(&card.session.agent))
+        .attr("critical", card.signals.critical.to_string())
+        .attr("changed", card.signals.changed_since_seen.to_string())
+        .attr("drifted", flag(card.signals.drifted));
+    if let Some(progress) = card.progress {
+        facts = facts
+            .attr("seen", progress.seen.to_string())
+            .attr("total", progress.total.to_string());
+    }
+    facts
 }
 
 /// Nothing is focused, or the focus is on the workspace's root view (its key
@@ -537,14 +708,15 @@ impl Render for HomeScreen {
         let empty = snapshot.sidebar.session_rows == 0
             && main.needs_review.is_empty()
             && main.done.is_empty();
-        let _ = colors(window, cx);
+        let palette = *colors(window, cx);
 
         let mut column = div()
             .flex()
             .flex_col()
             .gap(SECTION_GAP)
-            .px(PADDING)
-            .py(PADDING);
+            .px(PADDING_X)
+            .pt(PADDING_TOP)
+            .pb(PADDING_BOTTOM);
         if empty {
             let text = Text::key(&strings, keys::project_home::EMPTY);
             column = column.child(semantic(
@@ -560,7 +732,7 @@ impl Render for HomeScreen {
                 keys::project_home::TITLE,
                 &Args::new().num("count", count as f64),
             );
-            column = column.child(semantic(
+            let mut heading = div().flex().flex_col().gap(TITLE_GAP).child(semantic(
                 Semantic::new(nodes::title(), Role::Text)
                     .label(&title)
                     .attr("count", count.to_string())
@@ -569,10 +741,28 @@ impl Render for HomeScreen {
                     .text_role(TextRole::LargeTitle, window, cx)
                     .child(title.shared()),
             ));
+            if let Some(lede) = present::lede(&strings, main) {
+                let outside = match &main.outside {
+                    OutsideRow::Files { count, .. } => *count,
+                    _ => 0,
+                };
+                heading = heading.child(semantic(
+                    Semantic::new(nodes::lede(), Role::Text)
+                        .label(&Text::verbatim(lede.clone()))
+                        .attr("running", main.running.to_string())
+                        .attr("outside", outside.to_string()),
+                    div()
+                        .text_role(TextRole::Title3, window, cx)
+                        .text_color(palette.secondary_label)
+                        .child(lede),
+                ));
+            }
+            column = column.child(heading);
 
             if !main.needs_review.is_empty() {
                 let mut group = GroupedList::new(nodes::needs_review())
-                    .header(Text::key(&strings, keys::project_home::NEEDS_REVIEW));
+                    .header(Text::key(&strings, keys::project_home::NEEDS_REVIEW))
+                    .separator_inset(SEPARATOR_INSET);
                 for card in main.needs_review.iter() {
                     group = group.row(self.card_row(card, &strings, now, window, cx));
                 }
@@ -590,7 +780,7 @@ impl Render for HomeScreen {
             }
 
             if main.outside != OutsideRow::Hidden {
-                let row = self.outside_row(main.outside, &strings, phase, cx);
+                let row = self.outside_row(&snapshot, &strings, phase, window, cx);
                 column = column.child(
                     GroupedList::new(nodes::outside().child("group"))
                         .header(Text::key(&strings, keys::project_home::OUTSIDE))
@@ -602,7 +792,7 @@ impl Render for HomeScreen {
                 let mut group = GroupedList::new(nodes::done())
                     .header(Text::key(&strings, keys::project_home::DONE));
                 for card in main.done.iter() {
-                    group = group.row(self.card_row(card, &strings, now, window, cx));
+                    group = group.row(self.done_row(card, &strings, now, window, cx));
                 }
                 column = column.child(group);
             }

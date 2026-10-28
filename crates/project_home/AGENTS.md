@@ -16,9 +16,9 @@
 | `home.rs` | `Home`：插件状态、合成任务、视图的唤醒通道（`attach_view`）、经 `Contributions` 的 `dispatch` / `sidebar_entries` / 里程碑 |
 | `plugin.rs`、`usage_slot.rs` | 两个插件与共用的 `UsageSlot` |
 | `contribute.rs` | `Screen`、`SidebarPanel`、`SidebarEntry("overview")`、`KeyBindings` 的载荷与登记 |
-| `screen.rs` | `HomeScreen`：大标题与三个 `GroupedList`、选中项、进度环的 `Transition`、等待概览的占位、滚动到可见 |
-| `sidebar.rs` | `HomeSidebar`：一个 `uniform_list` 装 `Project` 条目、快照的行和 `Views` 条目，底部固定 `Bottom` 条目（Usage 行） |
-| `actions.rs`、`nodes.rs`、`present.rs` | Action 与键绑定（谓词 `Content > project-home`）；探针 ID；行里的文字（相对时间、信号） |
+| `screen.rs` | `HomeScreen`：大标题与说明、三个 `GroupedList`（Needs Review 的卡片、Outside 卡片、Recently Done 的行）、选中项、Needs Review 进度环的 `Transition`、等待概览的占位、滚动到可见 |
+| `sidebar.rs` | `HomeSidebar`：一个 `uniform_list` 装 `Project` 条目、快照的行（会话混排只列最近 3 个，其余折成「N more」，折叠是视图的状态）、`Views` 小标题和条目，行是 `ui::SidebarRow::compact()`；底部固定 `Bottom` 条目（Usage 卡片） |
+| `actions.rs`、`nodes.rs`、`present.rs` | Action 与键绑定（谓词 `Content > project-home`）；探针 ID；行里的文字（卡片第一行、信号、大标题下的说明、工具栏副标题、额度行） |
 
 ## 视图的规则
 
@@ -52,5 +52,5 @@ just test -p lectern-project-home
 - 假服务在 `src/testing.rs`（`FakeProjects`、`FakeSessions`、`FakeReview`、`FakeUsage`、`FakeContributions`），不依赖 `review`、`usage` 等插件 crate 的 `test-support`；本 crate 不得调用的方法（`read`、`turns`、`load`、`resolve` 等）一律 `unreachable!`。
 - `src/tests/stage.rs`：视图的 GPUI 台架。`rig(cx)` 做 `init_fixed`、`allow_parking`（kernel 线程会唤醒视图的前台任务）并建 `Rig`；`standard(&rig)` 是有六个会话的夹具；`window(cx, &rig)` 用插件登记的 `Screen` / `SidebarPanel` 工厂建两个视图（侧栏在 248pt 的 `Sidebar` 区，主区在 `Content` 区的 760pt 栏里），绑定登记的键绑定（谓词必须能被 GPUI 解析）；`tree(vcx, …)` 在 `ui::semantic::Recorder` 下画一帧，输出紧凑的语义树文本（没有 `bounds` 和 `declared_at`）；`click(vcx, id)` 点节点的中心。
 - `src/tests/views.rs`：`#[gpui::test]` 的行为测试（按键、点击、跟随服务、占位、滚动、里程碑）。`src/tests/tree.rs`：三份语义树的 insta 快照（`src/tests/snapshots/`，更新用 `INSTA_UPDATE=always just test -p lectern-project-home`，之后用 `git diff` 逐个看）。`src/tests/present.rs`：行里的文字（文字不在语义树里）。记录器的开关是进程级的，要用 nextest（`just test` 就是）。
-- 可交互元素带稳定 ID（`视图.区域.条目[业务键]`）；语义树里 `Row` 自己的节点只有 `selected`，卡片的事实（agent、进度、信号）在行内容的 `….facts` 节点上。
+- 可交互元素带稳定 ID（`视图.区域.条目[业务键]`）；语义树里 `Row` 和 `SidebarRow` 自己的节点只有 `selected`，行的事实（agent、进度、信号、运行中、标签）在行内容的 `….facts` 节点上。
 - 视图只读领域层提供的快照。测试里直接构造快照，不使用真实的 git、会话扫描或文件 IO。

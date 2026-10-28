@@ -48,45 +48,74 @@ fn push_review(target: ReviewTarget) -> WorkspaceCommand {
 }
 
 #[gpui::test]
-fn sidebar_lists_sessions_under_worktrees(cx: &mut TestAppContext) {
+fn sidebar_lists_recent_sessions_and_folds_the_rest(cx: &mut TestAppContext) {
     let rig = rig(cx);
     let _world = standard(&rig);
     let (_host, vcx) = window(cx, &rig);
     let tree = tree(vcx, sidebar_part);
+    // The newest three of all the worktrees (s3 is in the other one), then
+    // "3 more"; no heading for a worktree.
     in_order(
         &tree,
         &[
             "project-home.sidebar.overview",
             "project-home.sidebar.sessions ",
-            "worktree.item[/fixture/app/.git] Text label=\"main\"",
             "sessions.item[s1]",
             "sessions.item[s2]",
-            "sessions.item[s4]",
-            "sessions.item[s6]",
-            "sessions.item[s5]",
-            "worktree.item[/fixture/app/.git/worktrees/feature] Text label=\"feature/search\"",
             "sessions.item[s3]",
+            "project-home.sidebar.sessions.more.facts Button label=[project-home-sessions-more] hidden=3 expanded=false",
             "project-home.sidebar.packages ",
             "packages.item[api]",
-            "packages.item[web] ListItem changed=3 depth=0",
-            "packages.item[web/ui] ListItem changed=0 depth=1",
+            "packages.item[web].facts Group label=[project-home-changed-today] changed=3 depth=0",
+            "packages.item[web/ui].facts Group changed=0 depth=1",
         ],
     );
+    assert!(!tree.contains("worktree"), "no worktree headings: {tree}");
     assert!(
-        tree.contains("sessions.item[s1] ListItem label=\"Fix the login redirect\" agent=claude-code running=true"),
+        !tree.contains("sessions.item[s4]") && !tree.contains("sessions.item[s5]"),
+        "folded away: {tree}"
+    );
+    assert!(tree.contains("project-home.sidebar Group sessions=6 shown=3"));
+    assert!(
+        tree.contains("sessions.item[s1].facts Group label=\"Fix the login redirect\" agent=claude-code running=true"),
         "{tree}"
     );
     assert!(
-        tree.contains(
-            "sessions.item[s5] ListItem label=[project-home-untitled-session] agent=other"
-        ),
-        "a session without a title is called Untitled: {tree}"
+        tree.contains("sessions.item[s1].running Badge label=[project-home-running]"),
+        "a running session wears the green dot: {tree}"
     );
     assert!(
-        tree.contains(
-            "project-home.sidebar.overview ListItem label=[project-home-overview] selected"
-        ),
+        !tree.contains("sessions.item[s2].running"),
+        "and a quiet one does not: {tree}"
+    );
+    assert!(
+        tree.contains("project-home.sidebar.overview ListItem selected")
+            && tree.contains("overview.facts Text label=[project-home-overview]"),
         "the Overview entry is selected on the home screen"
+    );
+
+    // The row unfolds the rest (14 days: s4, s6, s5 by recency) and folds it again.
+    click(vcx, "project-home.sidebar.sessions.more");
+    let open = super::stage::tree(vcx, sidebar_part);
+    in_order(
+        &open,
+        &[
+            "sessions.item[s3]",
+            "sessions.item[s4]",
+            "sessions.item[s6]",
+            "sessions.item[s5].facts Group label=[project-home-untitled-session] agent=other",
+            "project-home.sidebar.sessions.more.facts Button label=[project-home-sessions-less] hidden=3 expanded=true",
+            "project-home.sidebar.packages ",
+        ],
+    );
+    assert!(open.contains("project-home.sidebar Group sessions=6 shown=6"));
+    click(vcx, "project-home.sidebar.sessions.more");
+    let folded = super::stage::tree(vcx, sidebar_part);
+    assert!(!folded.contains("sessions.item[s4]"), "{folded}");
+    assert!(folded.contains("label=[project-home-sessions-more] hidden=3 expanded=false"));
+    assert!(
+        rig.contributions.commands().is_empty(),
+        "folding opens nothing"
     );
 }
 
@@ -116,12 +145,12 @@ fn sidebar_builds_only_visible_rows(cx: &mut TestAppContext) {
     let (host, vcx) = window(cx, &rig);
     let (sidebar, _) = views(&host, vcx);
     let height = vcx.update(|window, _| window.viewport_size().height);
-    let screenful = (height / px(24.0)).ceil() as usize;
+    let screenful = (height / px(28.0)).ceil() as usize;
     let built = sidebar.read_with(vcx, |sidebar, _| sidebar.built_rows());
     let tree = tree(vcx, sidebar_part);
     assert!(
-        tree.contains("rows=3004"),
-        "overview + 2 headings + worktree + 1000 sessions + heading + 2000 packages: {}",
+        tree.contains("rows=2007"),
+        "overview + heading + 3 sessions + \"997 more\" + heading + 2000 packages: {}",
         tree.lines().nth(1).unwrap_or_default()
     );
     assert!(built > 0, "something is drawn");
@@ -129,6 +158,17 @@ fn sidebar_builds_only_visible_rows(cx: &mut TestAppContext) {
         built <= screenful * 2,
         "{built} rows built for a {screenful}-row window"
     );
+    // Unfolded, the 1000 sessions are rows of the list, and a frame still
+    // builds only the visible ones.
+    click(vcx, "project-home.sidebar.sessions.more");
+    let open = super::stage::tree(vcx, sidebar_part);
+    assert!(
+        open.contains("rows=3004"),
+        "{}",
+        open.lines().nth(1).unwrap_or_default()
+    );
+    let unfolded = sidebar.read_with(vcx, |sidebar, _| sidebar.built_rows());
+    assert!(unfolded > 0 && unfolded <= screenful * 2, "{unfolded} rows");
     // Scrolling builds other rows, not more of them.
     vcx.simulate_event(gpui::ScrollWheelEvent {
         position: point(px(100.0), px(100.0)),
@@ -276,6 +316,59 @@ fn outside_opens_the_outside_review(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_review_button_of_the_outside_card_opens_it_once(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    let (_host, vcx) = window(cx, &rig);
+    click(vcx, "project-home.outside.review");
+    assert_eq!(
+        rig.contributions.commands(),
+        [push_review(ReviewTarget::Outside {
+            project: world.key.clone(),
+            worktree: world.main.clone(),
+        })],
+        "one click on the button is one command, not one for the button and one for the card"
+    );
+}
+
+#[gpui::test]
+fn the_lede_leaves_out_what_is_zero(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    let (_host, vcx) = window(cx, &rig);
+    let tree = tree(vcx, main_part);
+    assert!(
+        tree.contains("project-home.lede Text label=\"1 agent is running. 4 files changed outside any session.\" running=1 outside=4"),
+        "{tree}"
+    );
+
+    // Nothing runs any more and nothing changed outside: no second line.
+    rig.sessions.set(Vec::new());
+    rig.review.set_overview(Some(overview(
+        &world.key,
+        Vec::new(),
+        OutsideCount::Files(0),
+    )));
+    rig.sessions_changed();
+    rig.overview_changed(&world.key);
+    rig.run();
+    frame(vcx);
+    let quiet = super::stage::tree(vcx, main_part);
+    assert!(!quiet.contains("project-home.lede"), "{quiet}");
+    // A count that is not known is not said either.
+    rig.review.set_overview(Some(overview(
+        &world.key,
+        Vec::new(),
+        OutsideCount::Capped(5000),
+    )));
+    rig.overview_changed(&world.key);
+    rig.run();
+    frame(vcx);
+    let capped = super::stage::tree(vcx, main_part);
+    assert!(!capped.contains("project-home.lede"), "{capped}");
+}
+
+#[gpui::test]
 fn clicking_a_card_and_a_sidebar_session_pushes_review(cx: &mut TestAppContext) {
     let rig = rig(cx);
     let world = standard(&rig);
@@ -339,8 +432,9 @@ fn views_entries_dispatch_their_command(cx: &mut TestAppContext) {
         &tree,
         &[
             "packages.item[web/ui]",
-            "views.item[worktrees] ListItem label=[workspace-back]",
-            "views.item[files] ListItem label=[workspace-inspector-toggle]",
+            "project-home.sidebar.views Text label=[project-home-views]",
+            "views.item[worktrees].facts Text label=[workspace-back]",
+            "views.item[files].facts Text label=[workspace-inspector-toggle]",
         ],
     );
     click(vcx, "project-home.sidebar.views.item[files]");
@@ -420,7 +514,11 @@ fn the_overview_entry_follows_the_current_screen(cx: &mut TestAppContext) {
     });
     frame(vcx);
     let tree = tree(vcx, sidebar_part);
-    assert!(!tree.contains("sidebar.overview ListItem label=[project-home-overview] selected"));
+    assert!(
+        tree.contains("sidebar.overview ListItem\n")
+            && !tree.contains("sidebar.overview ListItem selected"),
+        "{tree}"
+    );
     rig.workspace_event(WorkspaceEvent::ScreenChanged {
         window: lectern_services::workspace::WindowId(0),
         from: Some(route(screens::USAGE)),
@@ -428,7 +526,7 @@ fn the_overview_entry_follows_the_current_screen(cx: &mut TestAppContext) {
     });
     frame(vcx);
     let tree = super::stage::tree(vcx, sidebar_part);
-    assert!(tree.contains("sidebar.overview ListItem label=[project-home-overview] selected"));
+    assert!(tree.contains("sidebar.overview ListItem selected"));
 }
 
 #[gpui::test]
@@ -528,29 +626,36 @@ fn progress_ring_transitions_between_snapshots(cx: &mut TestAppContext) {
         "a new ring starts at its value"
     );
 
-    // 2 of 5 become 5 of 5.
-    rig.review.set_overview(Some(overview(
-        &world.key,
-        vec![
-            entry(&world.running, progress(5, 5, 0), Some(true), 1),
-            entry(&world.codex, progress(0, 3, 0), Some(false), 0),
-        ],
-        OutsideCount::Files(4),
-    )));
+    // 2 of 5 become 4 of 5.
+    let reviewing = |seen: u32, codex: bool| {
+        let mut entries = vec![entry(&world.running, progress(seen, 5, 0), Some(true), 1)];
+        if codex {
+            entries.push(entry(&world.codex, progress(0, 3, 0), Some(false), 0));
+        }
+        overview(&world.key, entries, OutsideCount::Files(4))
+    };
+    rig.review.set_overview(Some(reviewing(4, true)));
     rig.overview_changed(&world.key);
     rig.run();
     vcx.run_until_parked();
     let (value, target) = ring(vcx).expect("the card is still there");
-    assert_eq!(target, 1.0);
+    assert_eq!(target, 0.8);
     assert!(
-        (0.4..1.0).contains(&value),
-        "the ring goes on from 0.4 to 1.0, not from 0 or at once: {value}"
+        (0.4..0.8).contains(&value),
+        "the ring goes on from 0.4 to 0.8, not from 0 or at once: {value}"
     );
-    // The card moved to Recently Done; the ring is the same session's.
+
+    // 5 of 5: the card moves to Recently Done, whose rows have no ring.
+    rig.review.set_overview(Some(reviewing(5, true)));
+    rig.overview_changed(&world.key);
+    rig.run();
+    vcx.run_until_parked();
     frame(vcx);
     let tree = tree(vcx, main_part);
     assert!(tree.contains("done.item[s1]"), "{tree}");
-    // Cards that left the snapshot lose their rings.
+    assert!(!tree.contains("done.item[s1].progress"), "{tree}");
+    assert_eq!(ring(vcx), None, "a row of Recently Done keeps no ring");
+    // Cards that left the snapshot lose their rings too.
     assert_eq!(
         screen.read_with(vcx, |screen, _| screen.ring(&world.changed)),
         None
@@ -757,8 +862,8 @@ fn packages_follow_the_scan_state(cx: &mut TestAppContext) {
     );
     assert!(!pending.contains("packages.item"));
     assert!(
-        pending.contains("rows=6"),
-        "overview, Sessions, worktree, session, Packages, block: {pending}"
+        pending.contains("rows=5"),
+        "overview, Sessions, session, Packages, block: {pending}"
     );
 
     rig.projects.set(
@@ -771,7 +876,7 @@ fn packages_follow_the_scan_state(cx: &mut TestAppContext) {
     frame(vcx);
     let ready = super::stage::tree(vcx, sidebar_part);
     assert!(
-        ready.contains("packages.item[a] ListItem changed=0 depth=0"),
+        ready.contains("packages.item[a].facts Group changed=0 depth=0"),
         "{ready}"
     );
 
@@ -809,7 +914,14 @@ fn a_folder_project_has_no_worktrees_and_no_outside_row(cx: &mut TestAppContext)
     let (_host, vcx) = window(cx, &rig);
     let sidebar = tree(vcx, sidebar_part);
     assert!(sidebar.contains("sessions.item[s1]"));
-    assert!(!sidebar.contains("worktree.item"), "{sidebar}");
+    assert!(!sidebar.contains("worktree"), "{sidebar}");
+    let screen: lectern_ui::contrib::Screen = rig.contributions.payload("project-home").unwrap();
+    let toolbar = vcx.update(|_, cx| (screen.toolbar)(cx));
+    assert_eq!(toolbar.title.as_str(), "notes");
+    assert!(
+        toolbar.subtitle.is_none(),
+        "a folder has neither a branch nor worktrees"
+    );
     let main = super::stage::tree(vcx, main_part);
     assert!(main.contains("needs-review.item[s1]"), "{main}");
     assert!(!main.contains("project-home.outside"), "{main}");
@@ -847,8 +959,8 @@ fn other_worktrees_and_a_capped_overview(cx: &mut TestAppContext) {
     let (_host, vcx) = window(cx, &rig);
     let sidebar = tree(vcx, sidebar_part);
     assert!(
-        sidebar.contains("worktree.item[other] Text label=[project-home-other-worktrees]"),
-        "{sidebar}"
+        sidebar.contains("sessions.item[s1]") && !sidebar.contains("worktree"),
+        "a session of a worktree that is gone is a row like the others: {sidebar}"
     );
     let main = super::stage::tree(vcx, main_part);
     assert!(
@@ -858,7 +970,7 @@ fn other_worktrees_and_a_capped_overview(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_toolbar_shows_the_name_and_the_count(cx: &mut TestAppContext) {
+fn the_toolbar_shows_the_name_the_branch_and_the_worktrees(cx: &mut TestAppContext) {
     let rig = rig(cx);
     let world = standard(&rig);
     let (_host, vcx) = window(cx, &rig);
@@ -872,7 +984,11 @@ fn the_toolbar_shows_the_name_and_the_count(cx: &mut TestAppContext) {
     );
     let subtitle = items.subtitle.expect("a subtitle");
     assert_eq!(subtitle.message_id(), Some("project-home-subtitle"));
-    assert_eq!(subtitle.as_str(), "4 to review");
+    assert_eq!(
+        subtitle.as_str().replace(['\u{2068}', '\u{2069}'], ""),
+        "main · 2 worktrees",
+        "the branch and the number of worktrees"
+    );
     assert!(items.controls.is_empty());
 
     rig.projects.remove(&world.key);

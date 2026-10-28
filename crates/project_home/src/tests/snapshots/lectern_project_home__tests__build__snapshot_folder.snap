@@ -2,7 +2,7 @@
 source: crates/project_home/src/tests/build.rs
 expression: render(snapshot)
 ---
-project "notes" branch=- settled=true
+project "notes" branch=- worktrees=0 settled=true
 sources project=1 sessions=["a@3"] overview=Some(7) usage=None
 sidebar groups=1 session_rows=2 packages=0 counts=false
   group folder
@@ -12,6 +12,6 @@ rows
   sessions-header
   session 0.0
   session 0.1
-main overview_ready=true needs_review=0 done=0
+main running=0 overview_ready=true needs_review=0 done=0
   outside hidden
 usage none

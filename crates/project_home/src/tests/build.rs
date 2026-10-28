@@ -10,7 +10,9 @@ use lectern_services::session::{Agent, SessionList, SessionSummary, SourceId, Ti
 use lectern_services::usage::UsageState;
 
 use crate::snapshot::render::render;
-use crate::snapshot::{Built, GroupKind, Inputs, OutsideRow, SidebarRow, UsageInputs, build};
+use crate::snapshot::{
+    Built, GroupKind, Inputs, OutsideRow, SessionStatus, SidebarRow, UsageInputs, build,
+};
 use crate::testing::{
     DAY, MINUTE, NOW, ProjectFx, branch, entry, folder_key, list, overview, package, progress,
     project_usage, sess, unavailable, usage_limits, wt_key,
@@ -117,6 +119,24 @@ fn build_groups_sessions_by_worktree() {
     );
     assert_eq!(sidebar.session_rows, 5);
     assert_eq!(built.snapshot.branch.as_deref(), Some("main"));
+    assert_eq!(
+        built.snapshot.worktree_count, 3,
+        "main, feat and the prunable one: the length of the worktree list"
+    );
+    // The sidebar mixes the groups: all the sessions, newest first.
+    let mixed: Vec<&str> = sidebar
+        .rows
+        .iter()
+        .filter_map(|row| match *row {
+            SidebarRow::Session { group, index } => Some(
+                &*sidebar.groups[group as usize].sessions[index as usize]
+                    .key
+                    .id,
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(mixed, ["s4", "s8", "s1", "s2", "s3"]);
     insta::assert_snapshot!("snapshot_groups", render(&built.snapshot));
 }
 
@@ -178,7 +198,14 @@ fn build_splits_needs_review_and_done() {
     assert_eq!(main.needs_review[1].signals.critical, 2);
     assert!(main.needs_review[0].progress.is_none());
     assert!(main.overview_ready);
-    assert_eq!(main.outside, OutsideRow::Files(3));
+    assert_eq!(
+        main.outside,
+        OutsideRow::Files {
+            count: 3,
+            names: Arc::from(Vec::new()),
+        },
+        "review has the count only: no names yet"
+    );
     assert_eq!(built.snapshot.sources.overview, Some(7));
     insta::assert_snapshot!("snapshot_review", render(&built.snapshot));
 }
@@ -392,13 +419,14 @@ fn build_folder_project_hides_outside() {
     assert!(snapshot.branch.is_none());
     assert_eq!(snapshot.sidebar.groups.len(), 1);
     assert_eq!(snapshot.sidebar.groups[0].kind, GroupKind::Folder);
+    assert_eq!(snapshot.worktree_count, 0, "a folder has no worktrees");
     assert!(
-        !snapshot
-            .sidebar
-            .rows
+        snapshot
+            .main
+            .needs_review
             .iter()
-            .any(|r| matches!(r, SidebarRow::WorktreeHeader(_))),
-        "a folder has no worktree heading"
+            .all(|c| c.branch.is_none()),
+        "and so no branch to put on a card"
     );
     insta::assert_snapshot!("snapshot_folder", render(snapshot));
 }
@@ -428,6 +456,11 @@ fn build_with_usage() {
     assert_eq!(
         (tightest.agent.clone(), tightest.used_percent),
         (Agent::Codex, 34)
+    );
+    assert_eq!(
+        tightest.window_minutes,
+        Some(300),
+        "the length of the window the limit is of"
     );
     assert_eq!(built.snapshot.sources.usage, Some(9));
     insta::assert_snapshot!("snapshot_usage", render(&built.snapshot));
@@ -489,23 +522,23 @@ fn build_flattens_sidebar_rows() {
         "the root and 2000 sub-projects"
     );
     assert_eq!(sidebar.session_rows, 300);
-    // header, 2 groups with a heading each, 300 sessions, header, 2001 packages.
-    assert_eq!(sidebar.rows.len(), 1 + 2 + 300 + 1 + 2001);
+    // header, 300 sessions, header, 2001 packages.
+    assert_eq!(sidebar.rows.len(), 1 + 300 + 1 + 2001);
     assert_eq!(sidebar.rows[0], SidebarRow::SessionsHeader);
-    assert_eq!(sidebar.rows[1], SidebarRow::WorktreeHeader(0));
+    // The newest session (s0000) is in `feat` (the second group), the next in `main`.
+    assert_eq!(sidebar.rows[1], SidebarRow::Session { group: 1, index: 0 });
     assert_eq!(sidebar.rows[2], SidebarRow::Session { group: 0, index: 0 });
     let first_package = sidebar
         .rows
         .iter()
         .position(|r| *r == SidebarRow::PackagesHeader)
         .unwrap();
-    assert_eq!(first_package, 1 + 2 + 300);
+    assert_eq!(first_package, 1 + 300);
     assert_eq!(sidebar.rows[first_package + 1], SidebarRow::Package(0));
     assert_eq!(sidebar.rows.last(), Some(&SidebarRow::Package(2000)));
     // Every index points at a row that exists.
     for row in sidebar.rows.iter() {
         match *row {
-            SidebarRow::WorktreeHeader(g) => assert!((g as usize) < sidebar.groups.len()),
             SidebarRow::Session { group, index } => {
                 assert!((index as usize) < sidebar.groups[group as usize].sessions.len());
             }
@@ -607,4 +640,126 @@ fn build_has_no_key_clash_between_sources() {
         None,
     );
     assert_eq!(built.snapshot.sidebar.session_rows, 2);
+}
+
+#[test]
+fn build_puts_the_branch_and_the_status_on_the_cards() {
+    let fx = ProjectFx::git("app")
+        .linked("feat", branch("feat/x"))
+        .prunable("old", branch("old"));
+    let key = fx.key();
+    let sessions = vec![
+        sess("a", "in-main", &key, Some(&fx.wt("main")))
+            .open_turn()
+            .ago(MINUTE)
+            .build(),
+        sess("a", "in-feat", &key, Some(&fx.wt("feat")))
+            .ago(2 * MINUTE)
+            .build(),
+        sess("a", "in-old", &key, Some(&fx.wt("old")))
+            .ago(3 * MINUTE)
+            .build(),
+        sess("a", "stale", &key, Some(&fx.wt("main")))
+            .open_turn()
+            .ago(DAY)
+            .build(),
+        // Not in the sidebar's window any more, but the overview has it.
+        sess("a", "ancient", &key, Some(&fx.wt("feat")))
+            .ago(20 * DAY)
+            .build(),
+    ];
+    let ov = overview(
+        &key,
+        sessions
+            .iter()
+            .map(|s| entry(&s.key, progress(1, 4, 0), None, 0))
+            .collect(),
+        OutsideCount::Files(0),
+    );
+    let built = compose(&fx.snapshot(), &[("a", sessions)], Some(&ov), None, None);
+    let cards: Vec<(String, Option<String>, Option<SessionStatus>)> = built
+        .snapshot
+        .main
+        .needs_review
+        .iter()
+        .map(|c| {
+            (
+                c.session.key.id.to_string(),
+                c.branch.as_deref().map(str::to_owned),
+                c.status,
+            )
+        })
+        .collect();
+    assert_eq!(
+        cards,
+        [
+            (
+                "in-main".to_owned(),
+                Some("main".to_owned()),
+                Some(SessionStatus::Running)
+            ),
+            ("in-feat".to_owned(), Some("feat/x".to_owned()), None),
+            ("in-old".to_owned(), None, None),
+            ("stale".to_owned(), Some("main".to_owned()), None),
+            ("ancient".to_owned(), Some("feat/x".to_owned()), None),
+        ],
+        "the branch of the worktree a session is placed in (none for a prunable one); only a running session has a status"
+    );
+}
+
+#[test]
+fn build_counts_the_running_sessions_of_the_project() {
+    let fx = ProjectFx::git("app").linked("feat", branch("feat"));
+    let key = fx.key();
+    let parent = sess("a", "p", &key, Some(&fx.wt("main"))).key();
+    let sessions = vec![
+        sess("a", "p", &key, Some(&fx.wt("main")))
+            .open_turn()
+            .ago(MINUTE)
+            .build(),
+        // Another worktree counts too.
+        sess("a", "q", &key, Some(&fx.wt("feat")))
+            .open_turn()
+            .ago(2 * MINUTE)
+            .build(),
+        // A sub-agent is an agent that runs, though it has no row.
+        sess("a", "sub", &key, Some(&fx.wt("main")))
+            .child_of(&parent)
+            .open_turn()
+            .ago(MINUTE)
+            .build(),
+        sess("a", "idle", &key, Some(&fx.wt("main")))
+            .ago(MINUTE)
+            .build(),
+        sess("a", "silent", &key, Some(&fx.wt("main")))
+            .open_turn()
+            .ago(DAY)
+            .build(),
+        // Another project's.
+        sess("a", "other", &folder_key("elsewhere"), None)
+            .open_turn()
+            .ago(MINUTE)
+            .build(),
+    ];
+    let built = compose(&fx.snapshot(), &[("a", sessions)], None, None, None);
+    assert_eq!(built.snapshot.main.running, 3);
+    assert_eq!(built.snapshot.sidebar.session_rows, 4);
+    let none = compose(&fx.snapshot(), &[], None, None, None);
+    assert_eq!(none.snapshot.main.running, 0);
+}
+
+#[test]
+fn build_gives_the_limit_window_when_it_is_known() {
+    let fx = ProjectFx::git("app");
+    let mut limits = (*usage_limits(vec![(Agent::Codex, 50.0)], Some(0))).clone();
+    let mut windows = limits.windows.to_vec();
+    windows[0].window_minutes = None;
+    limits.windows = windows.into();
+    let inputs = UsageInputs {
+        snapshot: None,
+        limits: Arc::new(limits),
+    };
+    let built = compose(&fx.snapshot(), &[], None, None, Some(&inputs));
+    let tightest = built.snapshot.usage.unwrap().tightest.unwrap();
+    assert_eq!(tightest.window_minutes, None);
 }

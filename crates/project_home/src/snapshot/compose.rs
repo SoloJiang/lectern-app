@@ -19,8 +19,8 @@ use crate::nodes;
 use lectern_ui::semantic::NodeId;
 
 use super::{
-    Card, GroupKind, HomeSnapshot, MainModel, OutsideRow, PackageRow, SessionRow, SidebarModel,
-    SidebarRow, Signals, SourceGenerations, TightestLimit, UsageModel, WorktreeGroup,
+    Card, GroupKind, HomeSnapshot, MainModel, OutsideRow, PackageRow, SessionRow, SessionStatus,
+    SidebarModel, SidebarRow, Signals, SourceGenerations, TightestLimit, UsageModel, WorktreeGroup,
 };
 
 /// The sidebar lists the sessions of the last 14 days, the same window the
@@ -81,7 +81,14 @@ pub fn build(inputs: &Inputs<'_>) -> Built {
             .map(|w| short_head(&w.head))
     };
 
-    let groups = groups(inputs, folder, active_worktree.as_ref());
+    // A prunable worktree is listed by `project` but is not a place to show:
+    // its sessions go to `Other`.
+    let listed: Vec<&Worktree> = if folder {
+        Vec::new()
+    } else {
+        project.worktrees.iter().filter(|w| !w.prunable).collect()
+    };
+    let groups = groups(inputs, &listed, folder, active_worktree.as_ref());
     let session_rows = count(groups.iter().map(|g| g.sessions.len()).sum());
 
     let capped = matches!(
@@ -99,17 +106,28 @@ pub fn build(inputs: &Inputs<'_>) -> Built {
     if groups.is_empty() {
         rows.push(SidebarRow::SessionsEmpty);
     }
-    for (g, group) in groups.iter().enumerate() {
-        if !matches!(group.kind, GroupKind::Folder) {
-            rows.push(SidebarRow::WorktreeHeader(count(g)));
-        }
-        for i in 0..group.sessions.len() {
-            rows.push(SidebarRow::Session {
-                group: count(g),
-                index: count(i),
-            });
-        }
-    }
+    // The sessions of all the worktrees, newest first (the groups only tell
+    // the cards their branch).
+    let mut mixed: Vec<(usize, usize, &SessionRow)> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, group)| {
+            group
+                .sessions
+                .iter()
+                .enumerate()
+                .map(move |(i, s)| (g, i, s))
+        })
+        .collect();
+    mixed.sort_by(|a, b| {
+        b.2.last_activity
+            .cmp(&a.2.last_activity)
+            .then_with(|| a.2.key.cmp(&b.2.key))
+    });
+    rows.extend(mixed.into_iter().map(|(g, i, _)| SidebarRow::Session {
+        group: count(g),
+        index: count(i),
+    }));
     match package_state {
         Some(Scan::Pending) => {
             rows.push(SidebarRow::PackagesHeader);
@@ -122,7 +140,7 @@ pub fn build(inputs: &Inputs<'_>) -> Built {
         _ => {}
     }
 
-    let (main, missing) = main_model(inputs, folder);
+    let (main, missing) = main_model(inputs, &listed, folder);
     let mut seen = HashSet::new();
     let pending: Vec<SessionKey> = groups
         .iter()
@@ -154,6 +172,11 @@ pub fn build(inputs: &Inputs<'_>) -> Built {
         now: inputs.now,
         branch,
         active_worktree,
+        worktree_count: if folder {
+            0
+        } else {
+            count(project.worktrees.len())
+        },
         files_settled: active.is_some_and(|tree| !matches!(tree.files, Scan::Pending)),
         sidebar: SidebarModel {
             groups: groups.into(),
@@ -185,6 +208,21 @@ fn short_head(head: &Head) -> Arc<str> {
     }
 }
 
+/// `open_turn` and moved in the last 10 minutes.
+fn is_running(summary: &SessionSummary, now: Timestamp) -> bool {
+    summary.open_turn && now.0.saturating_sub(summary.last_activity.0) <= RUNNING_MS
+}
+
+/// The index in `listed` of the worktree the session is placed in.
+fn worktree_of(summary: &SessionSummary, listed: &[&Worktree]) -> Option<usize> {
+    let worktree = match &summary.place {
+        Place::Located(location) => location.worktree.as_ref(),
+        Place::Resolved(resolved) => resolved.worktree.as_ref(),
+        _ => None,
+    };
+    worktree.and_then(|key| listed.iter().position(|w| w.key == *key))
+}
+
 fn row(summary: &SessionSummary, now: Timestamp, node: NodeId) -> SessionRow {
     SessionRow {
         key: summary.key.clone(),
@@ -192,22 +230,20 @@ fn row(summary: &SessionSummary, now: Timestamp, node: NodeId) -> SessionRow {
         title: summary.title.clone(),
         last_activity: summary.last_activity,
         node,
-        running: summary.open_turn && now.0.saturating_sub(summary.last_activity.0) <= RUNNING_MS,
+        running: is_running(summary, now),
         tail_pending: summary.tail_pending,
     }
 }
 
 /// The sidebar's session groups: the sessions of the project that are not
 /// sub-agents' and moved in the last 14 days, by worktree.
-fn groups(inputs: &Inputs<'_>, folder: bool, active: Option<&WorktreeKey>) -> Vec<WorktreeGroup> {
+fn groups(
+    inputs: &Inputs<'_>,
+    listed: &[&Worktree],
+    folder: bool,
+    active: Option<&WorktreeKey>,
+) -> Vec<WorktreeGroup> {
     let project = inputs.project;
-    // A prunable worktree is listed by `project` but is not a place to show:
-    // its sessions go to `Other`.
-    let listed: Vec<&Worktree> = if folder {
-        Vec::new()
-    } else {
-        project.worktrees.iter().filter(|w| !w.prunable).collect()
-    };
     let mut buckets: Vec<Vec<&SessionSummary>> = vec![Vec::new(); listed.len()];
     let mut loose: Vec<&SessionSummary> = Vec::new();
     for (_, list) in inputs.sessions {
@@ -217,12 +253,7 @@ fn groups(inputs: &Inputs<'_>, folder: bool, active: Option<&WorktreeKey>) -> Ve
             {
                 continue;
             }
-            let worktree = match &summary.place {
-                Place::Located(location) => location.worktree.as_ref(),
-                Place::Resolved(resolved) => resolved.worktree.as_ref(),
-                _ => None,
-            };
-            match worktree.and_then(|key| listed.iter().position(|w| w.key == *key)) {
+            match worktree_of(summary, listed) {
                 Some(i) => buckets[i].push(summary),
                 None => loose.push(summary),
             }
@@ -306,7 +337,11 @@ fn depth(list: &[Package], i: usize) -> u8 {
 }
 
 /// The main area, and the overview sessions the session lists do not know.
-fn main_model(inputs: &Inputs<'_>, folder: bool) -> (MainModel, Vec<SessionKey>) {
+fn main_model(
+    inputs: &Inputs<'_>,
+    listed: &[&Worktree],
+    folder: bool,
+) -> (MainModel, Vec<SessionKey>) {
     let index: HashMap<&SessionKey, &SessionSummary> = inputs
         .sessions
         .iter()
@@ -322,11 +357,13 @@ fn main_model(inputs: &Inputs<'_>, folder: bool) -> (MainModel, Vec<SessionKey>)
             continue;
         };
         match entry.progress {
-            None => needs_review.push(card(summary, entry, inputs.now, true)),
+            None => needs_review.push(card(summary, entry, inputs.now, listed, true)),
             Some(p) if p.seen < p.total || p.changed_since_seen > 0 => {
-                needs_review.push(card(summary, entry, inputs.now, true));
+                needs_review.push(card(summary, entry, inputs.now, listed, true));
             }
-            Some(p) if p.total > 0 => done.push(card(summary, entry, inputs.now, false)),
+            Some(p) if p.total > 0 => {
+                done.push(card(summary, entry, inputs.now, listed, false));
+            }
             // No files at all: nothing to review and nothing done.
             Some(_) => {}
         }
@@ -336,11 +373,21 @@ fn main_model(inputs: &Inputs<'_>, folder: bool) -> (MainModel, Vec<SessionKey>)
     } else {
         match inputs.overview.map(|o| o.outside) {
             None | Some(OutsideCount::Pending) => OutsideRow::Pending,
-            Some(OutsideCount::Files(n)) => OutsideRow::Files(n),
+            Some(OutsideCount::Files(count)) => OutsideRow::Files {
+                count,
+                names: Arc::from(Vec::new()),
+            },
             Some(OutsideCount::Capped(n)) => OutsideRow::Capped(n),
         }
     };
+    let running = inputs
+        .sessions
+        .iter()
+        .flat_map(|(_, list)| list.in_project(&inputs.project.key))
+        .filter(|summary| is_running(summary, inputs.now))
+        .count();
     let main = MainModel {
+        running: count(running),
         overview_ready: inputs.overview.is_some(),
         needs_review: needs_review.into(),
         outside,
@@ -353,6 +400,7 @@ fn card(
     summary: &SessionSummary,
     entry: &SessionOverview,
     now: Timestamp,
+    listed: &[&Worktree],
     needs_review: bool,
 ) -> Card {
     let node = if needs_review {
@@ -360,8 +408,11 @@ fn card(
     } else {
         nodes::done_card(&summary.key.id)
     };
+    let session = row(summary, now, node);
     Card {
-        session: row(summary, now, node),
+        branch: worktree_of(summary, listed).map(|i| short_head(&listed[i].head)),
+        status: session.running.then_some(SessionStatus::Running),
+        session,
         progress: entry.progress,
         signals: Signals {
             drifted: entry.drifted == Some(true),
@@ -394,6 +445,7 @@ fn usage_model(usage: &UsageInputs) -> UsageModel {
         .map(|window| TightestLimit {
             agent: window.agent.clone(),
             used_percent: window.used_percent.round().clamp(0.0, 100.0) as u8,
+            window_minutes: window.window_minutes,
             resets_at: window.resets_at,
         });
     UsageModel {

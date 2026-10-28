@@ -2,9 +2,10 @@
 source: crates/project_home/src/tests/tree.rs
 expression: "tree(vcx, | _ | true)"
 ---
-project-home.sidebar Group worktrees=0 sessions=0
+project-home.sidebar Group sessions=0 shown=0
   project-home.sidebar.list List rows=3 visible=3
-    project-home.sidebar.overview ListItem label=[project-home-overview] selected
+    project-home.sidebar.overview ListItem selected
+      project-home.sidebar.overview.facts Text label=[project-home-overview]
     project-home.sidebar.sessions Text label=[project-home-sessions]
     project-home.sidebar.sessions.empty Text label=[project-home-sessions-empty]
 project-home.empty Text label=[project-home-empty]

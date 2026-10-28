@@ -1,6 +1,6 @@
 # project_home 设计
 
-状态：实现中。前置条件 B（`project-home.ftl`，[#237](https://github.com/SoloJiang/lectern-app/pull/237)）与「验收」第 1 步（不开窗口的部分：`snapshot::build`、两个插件、`UsageSlot`，[#241](https://github.com/SoloJiang/lectern-app/pull/241)）、第 2 步（视图与贡献登记：`HomeScreen`、`HomeSidebar`、Action 与快捷键、语义节点）已实现（[#248](https://github.com/SoloJiang/lectern-app/pull/248)）；`app` 的装配（前置条件 D 的装配部分，[#247](https://github.com/SoloJiang/lectern-app/pull/247)）已实现，见「实际验证」「与设计的差异」；第 3 步（`app` 装配、里程碑的基准与 `Overview.packages` 的接入）尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，已实现的部分要随之修改，见「与设计的差异」。
+状态：实现中。前置条件 B（`project-home.ftl`，[#237](https://github.com/SoloJiang/lectern-app/pull/237)）与「验收」第 1 步（不开窗口的部分：`snapshot::build`、两个插件、`UsageSlot`，[#241](https://github.com/SoloJiang/lectern-app/pull/241)）、第 2 步（视图与贡献登记：`HomeScreen`、`HomeSidebar`、Action 与快捷键、语义节点）已实现（[#248](https://github.com/SoloJiang/lectern-app/pull/248)）；`app` 的装配（前置条件 D 的装配部分，[#247](https://github.com/SoloJiang/lectern-app/pull/247)）已实现，见「实际验证」「与设计的差异」；第 3 步（`app` 装配、里程碑的基准与 `Overview.packages` 的接入）尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，主区、侧栏、工具栏副标题和快照的数据结构已跟着改（`Refs #283`），见「实际验证」「与设计的差异」；搜索框、New session、`Waiting` / `Ended` 状态、Outside 卡片的文件名、侧栏的数量和 Recently Done 的结果还没有数据来源，没有画。
 
 对应 issue [#30](https://github.com/SoloJiang/lectern-app/issues/30)。`project_home` 是打开项目后首先看到的屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 02 画板，[ADR 0012](../adr/0012.md)）：项目侧栏（Overview、最近的 Sessions、带今天改动数的 Packages、其他 crate 贡献的 Worktrees / Files / MR 入口、底部的 Usage 卡片）和主区（Needs Review 的会话卡片、Outside Any Session、Recently Done）。它只显示领域层算好的快照（`project`、`agents`、`review`、`usage`），自己不做归位、比较和统计；它由 [workspace 设计](workspace.md)的根视图承载，作为 `Screen(PROJECT_HOME)` 和 `SidebarPanel("project")` 贡献进去。
 
@@ -198,7 +198,6 @@ pub struct SessionRow {
     /// 最后一轮没有结束、但几天没有动静的会话是中断的会话，不是运行中。
     pub running: bool,
     pub tail_pending: bool,
-    pub node: NodeId,
 }
 
 pub struct PackageRow {
@@ -512,9 +511,9 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 
 第 1 步的测试（`snapshot::build`、插件、金丝雀）不依赖 GPUI，Linux 和 macOS 上都跑；第 2 步加 `gpui` 与 `lectern-ui` 后只在 macOS 上编译和测试：`just test -p lectern-project-home`。会话、项目、概览、用量、贡献都用 `services` trait 的假实现，放在本 crate 的 `testing` 模块（`FakeSessions`、`FakeProjects`、`FakeReview`、`FakeUsage`、`FakeContributions`）：直接构造 `SessionList`、`ProjectSnapshot`、`Overview`、`UsageSnapshot` / `Limits` 交出去，记下收到的 `complete`、`watch_overview`、`watch`、`dispatch`，不解析脚本；`read` / `turns` / `load` / `resolve` 一律 `unreachable!`（本 crate 不得调用它们）。不用真实的 git、会话扫描和文件 IO，也不依赖 `review` 等插件 crate 的 `test-support`。
 
-- `snapshot::build`（`#[test]`，不开窗口）：`build_groups_sessions_by_worktree`（主 worktree 在前、`Resolved` 与 `Located` 都归位、prunable 的进 `Other`、子 agent 不成行、14 天之外的不出现）；`build_splits_needs_review_and_done`（`progress` None / 部分 / 全部 / `changed_since_seen` 四种）；`build_drops_overview_sessions_missing_from_list`；`build_marks_running_within_ten_minutes`；`build_counts_packages_today`（有 `Overview.packages` 与没有、`Capped`）；`build_folder_project_hides_outside`；`build_without_usage`；`build_flattens_sidebar_rows`（`rows` 的顺序与下标，2000 个子项目时长度正确；不含贡献条目）；每个用例的 `HomeSnapshot` 渲染成文本做 insta 快照（`snapshot_*`）；`project_home/build_1000` 的夹具也在这里构造。
+- `snapshot::build`（`#[test]`，不开窗口）：`build_groups_sessions_by_worktree`（主 worktree 在前、`Resolved` 与 `Located` 都归位、prunable 的进 `Other`、子 agent 不成行、14 天之外的不出现）；`build_splits_needs_review_and_done`（`progress` None / 部分 / 全部 / `changed_since_seen` 四种）；`build_drops_overview_sessions_missing_from_list`；`build_marks_running_within_ten_minutes`；`build_counts_packages_today`（有 `Overview.packages` 与没有、`Capped`）；`build_folder_project_hides_outside`；`build_without_usage`；`build_flattens_sidebar_rows`（`rows` 的顺序与下标，所有 worktree 的会话按时间混排，2000 个子项目时长度正确；不含贡献条目）；`build_puts_the_branch_and_the_status_on_the_cards`、`build_counts_the_running_sessions_of_the_project`、`build_gives_the_limit_window_when_it_is_known`（#283 的快照字段）；每个用例的 `HomeSnapshot` 渲染成文本做 insta 快照（`snapshot_*`）；`project_home/build_1000` 的夹具也在这里构造。
 - 插件（`#[test]`，`TestKernel`）：`activate_registers_contributions_only`（登记了 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings`，没有任务）；`opened_takes_the_overview_interest_and_closed_drops_it`；`events_coalesce_into_one_build`（跑着的时候来 5 个事件，结束后只再跑一轮）；`complete_is_requested_once_per_pending_session`；`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`usage_activating_after_opened_takes_the_watch`（`Opened` 先到、usage 插件后 `started`：`started` 返回时 `FakeUsage` 还没有收到 `watch`，token 变为 `Live`、对账任务跑过之后收到一次，快照重建一次并带 `UsageModel`）、`opened_after_usage_takes_the_watch`（相反的顺序，结果相同）；`started_handles_an_already_open_project`；`changed_for_an_unknown_project_counts_as_opened`。
-- `#[gpui::test]`（`TestAppContext`，`init_fixed`）：`sidebar_lists_recent_sessions_and_folds_the_rest`；`sidebar_builds_only_visible_rows`（2000 个子项目、1000 个会话时一帧里建出的行数不超过可见行数加一屏）；`home_shows_cards_outside_and_done`；`arrow_keys_move_across_groups`（↓ 从最后一张卡片到 Outside 再到 Done，↑ 反向，到头不回绕）；`enter_pushes_the_review_route`（`FakeContributions` 收到 `Push(REVIEW, Session(key))`）；`outside_opens_the_outside_review`；`clicking_a_sidebar_session_pushes_review`；`views_entries_dispatch_their_command`；`late_entries_appear_without_a_new_snapshot`（`FakeContributions` 在快照建好之后加一个 `Project` 区和一个 `Views` 区的条目并发 `ContributionsChanged`，下一帧两行都出现）；`usage_row_shows_tokens_and_the_tightest_limit`；`new_sidebar_view_reads_the_current_snapshot`（面板视图 drop 再建，不等事件就有内容）；`progress_ring_transitions_between_snapshots`（`Transition` 从旧值出发）；`milestone_is_reported_on_the_first_settled_frame`（`files` 为 `Pending` 的快照不报告，`Ready` 的那一帧报告一次，之后不再报告）；`skeleton_appears_after_100ms_only`；`closed_project_clears_the_views`。
+- `#[gpui::test]`（`TestAppContext`，`init_fixed`）：`sidebar_lists_recent_sessions_and_folds_the_rest`；`sidebar_builds_only_visible_rows`（2000 个子项目、1000 个会话时一帧里建出的行数不超过可见行数加一屏）；`home_shows_cards_outside_and_done`；`arrow_keys_move_across_groups`（↓ 从最后一张卡片到 Outside 再到 Done，↑ 反向，到头不回绕）；`enter_pushes_the_review_route`（`FakeContributions` 收到 `Push(REVIEW, Session(key))`）；`outside_opens_the_outside_review`；`the_review_button_of_the_outside_card_opens_it_once`；`the_lede_leaves_out_what_is_zero`；`clicking_a_sidebar_session_pushes_review`；`views_entries_dispatch_their_command`；`late_entries_appear_without_a_new_snapshot`（`FakeContributions` 在快照建好之后加一个 `Project` 区和一个 `Views` 区的条目并发 `ContributionsChanged`，下一帧两行都出现）；`usage_row_shows_tokens_and_the_tightest_limit`；`new_sidebar_view_reads_the_current_snapshot`（面板视图 drop 再建，不等事件就有内容）；`progress_ring_transitions_between_snapshots`（`Transition` 从旧值出发）；`milestone_is_reported_on_the_first_settled_frame`（`files` 为 `Pending` 的快照不报告，`Ready` 的那一帧报告一次，之后不再报告）；`skeleton_appears_after_100ms_only`；`closed_project_clears_the_views`。
 - 语义树：`home_tree_with_cards`、`home_tree_empty`、`sidebar_tree_with_views_and_usage` 的 insta 快照（UI 探针完成后接入；之前用 `ui::semantic::Recorder` 的记录去掉 `bounds` 和 `declared_at`）。
 - 日志：`canary_stays_out_of_home_logs`。
 - fixtures：没有外部格式；测试数据是源码里构造的快照。
@@ -621,6 +620,20 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - 没有验证：真实的 `workspace` 根视图承载这两个视图（台架自己放 `Sidebar` / `Content` 上下文，`Content > project-home` 在真实窗口里是否命中，要等 `app` 装配后手动试）；真实屏幕上的观感（悬停淡入、选中行里次要文字的对比度、进度环在选中行的底色上、`svg` 图标是否画出、骨架块）；`app` 的装配、`every_profile_graph_validates`、`app/home_frames`、`project_home/build_1000`、`project_home/resident_bytes` 基准（第 3 步）；`Overview.packages` 的接入（第 3 步，侧栏的计数列由 `build` 测试和 `packages` 夹具覆盖，视图用 `Overview.packages` 为 Some 的夹具验证了显示）。
 - 文档补回（本提交）：#248 合并后，晚合并的 #247 与 #251 带着旧版的本文档和 `AGENTS.md` 覆盖了第 2 步的状态行、「实际验证」「与设计的差异」和模块表，代码没有受影响。本提交把 #248 的这几处补回，并保留 #247 的装配记录；在 `9991a3d` 上重跑：`just test -p lectern-project-home` 60 个测试通过，`just check`、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过，第 2 步的各条 `rg` 与 `python3 scripts/check_architecture.py`（32 个 crate）通过。
 
+### 为 #283 实现「界面」
+
+主区、侧栏和工具栏副标题按「界面」重画，快照的数据结构按「为 #283 修订「界面」」改（`Refs #283`），在 macOS（arm64，Rust 1.97.0）上运行，屏幕锁着，没有启动应用，全部是 headless 的测试：
+
+- `just fmt`、`just check`、`just deny`、`just doctest`、`cargo metadata --format-version 1 --locked --all-features` 通过。
+- `just test -p lectern-project-home -p lectern-workspace -p lectern-i18n -p lectern-app`：257 个测试通过（本 crate 69 个，原 60 个加 9 个；`lectern-workspace` 76、`lectern-i18n` 57、`lectern-app` 55）。
+  - `src/tests/build.rs`（18 个）：`build_groups_sessions_by_worktree` 加了 `worktree_count`（主、feat、prunable 共 3）和混排顺序（`s4 s8 s1 s2 s3`：跨三个组按 `last_activity`）；`build_flattens_sidebar_rows` 改为 `1 + 300 + 1 + 2001` 行，第一个会话行属于第二个组（最新的会话在 feat 里）；`build_folder_project_hides_outside` 检查 `worktree_count` 为 0、卡片没有分支；`build_with_usage` 检查 `window_minutes`。新增：`build_puts_the_branch_and_the_status_on_the_cards`（主 worktree、linked、prunable、14 天之外的会话各自的分支，只有运行中的会话有 `Running`）、`build_counts_the_running_sessions_of_the_project`（两个 worktree 和子 agent 都计，闲置的、几天没动静的、别的项目的不计）、`build_gives_the_limit_window_when_it_is_known`（没有窗口长度时为 None）。
+  - 六份 `snapshot_*` insta 快照逐份看过，改动只有：每份的 `project` 行多 `worktrees=`、`main` 行多 `running=`；`snapshot_groups` 和 `snapshot_review` 的 `rows` 去掉 `worktree-header`、会话行混排；`snapshot_review` 的卡片行多 `branch=` 和 `status=`、Outside 行多 `names=[]`；`snapshot_usage` 的 `tightest` 多一项 `window_minutes`（`Some(300)`）。
+  - `src/tests/present.rs`（7 个）：相对时间不再被 Running 替换；卡片第一行（`Codex · feat-print-queue · 34 min ago · running`，en 与 zh-CN，无分支、无状态、`Waiting`、`Ended`、第三方 agent）；大标题下的说明（两句、单数、某一句为 0、`Pending` / `Hidden` / `Capped`）；Outside 卡片的路径（3 个、更多时加 `…`、没有路径）；额度行（5-hour、7-day、不是整小时的向上取整、没有窗口长度）。字符串参数两端的方向隔离符在断言里去掉。
+  - `src/tests/views.rs`（`#[gpui::test]`）：`sidebar_lists_sessions_under_worktrees` 改名为 `sidebar_lists_recent_sessions_and_folds_the_rest`（最新 3 个混排、没有 worktree 小标题、运行中的会话有绿点节点、点「3 more」展开成「Show less」再折回、折叠不发命令）；`sidebar_builds_only_visible_rows` 的行数改为 2007（折叠）和 3004（展开），一帧建出的行数两种情况下都不超过一屏的两倍；`the_toolbar_shows_the_name_the_branch_and_the_worktrees`（「main · 2 worktrees」，文件夹项目没有副标题）；`progress_ring_transitions_between_snapshots` 改为 2/5 → 4/5 时环从 0.4 出发，5/5 后卡片移到 Recently Done 且环丢掉；其余按新节点（`….facts`、`….more`、`views` 小标题）改了断言。新增 `the_review_button_of_the_outside_card_opens_it_once`（点按钮只发一条 `Push(REVIEW, Outside)`）、`the_lede_leaves_out_what_is_zero`。
+  - 三份语义树快照逐份看过：侧栏树少了 worktree 小标题，会话行变成 `ListItem` 加 `….facts`（运行中的会话多一个 `….running`），「更多」行、`views` 小标题是新节点，`sidebar` 的属性是 `sessions`、`shown`；主区树多 `project-home.lede`，进度环外多一层 `….seen`，Recently Done 的行没有 `….progress`，Outside 多 `project-home.outside.review` 按钮。
+- 验收的 `rg`（第 2 步的三条加第 1 步的三条）都没有结果；`rg 'NodeId::new\("project-home"'` 有结果。
+- 没有验证：真实窗口里的观感（行高、间距、绿点、状态词的颜色、橙色额度条、进度环加「2/6」和 ›、Large Title 与说明的层级、分隔线与文字起点对齐）；中文标题与长标题的截断；Outside 卡片的文件名行（`OutsideRow::Files::names` 现在总是空，只有 `present::outside_names` 的单元测试）；`project_home/build_1000`、`project_home/resident_bytes` 基准（`bench` 里还没有这两个基准，预算表里是 `Planned`，随第 3 步）。`snapshot::build` 多了一次对会话行的排序（至多 1000 个）和一次对 `in_project` 的计数，没有测量。
+
 ## 与设计的差异
 
 ### 第 1 步
@@ -645,13 +658,13 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - **选中项按身份保存**：`HomeScreen` 存 `Pick::Session(SessionKey)` 或 `Pick::Outside`，不是 `Selection { list, index }`：新快照把卡片重新排序（或一张卡片从 Needs Review 移到 Recently Done）时，选中项跟着会话走；会话消失时清空。↑ ↓ 的顺序不变。
 - **快照里的 `now` 与 `node`**：`HomeSnapshot::now`（合成时刻）是新增的，相对时间从它往回数，使一帧只取决于快照（「已知限制」第一条因此是设计上的结果，而不是视图的疏忽）。`WorktreeGroup`、`SessionRow`、`PackageRow` 加了 `node: NodeId`（第 1 步的差异里说好第 2 步加回）；`SessionRow::node` 是这一行所在位置的节点（卡片用卡片的，侧栏用侧栏的），所以没有 `Card::node`。`NodeId` 里的业务键来自会话 ID、路径、子项目目录，换行或 `].` 会让 `NodeId` 在调试构建里 panic，先过 `nodes::safe`。
 - **语义节点与设计表的差异**：
-  - worktree 小标题是 `project-home.sidebar.sessions.worktree.item[<key>]`：`NodeId` 只有 `item(key)` 一种方括号写法，不能写 `worktree[<key>]`；没有 worktree 的组用键 `other` / `folder`。
+  - worktree 小标题是 `project-home.sidebar.sessions.worktree.item[<key>]`：`NodeId` 只有 `item(key)` 一种方括号写法，不能写 `worktree[<key>]`；没有 worktree 的组用键 `other` / `folder`。（#283 之后侧栏不再按 worktree 分组，这个节点已去掉，见「为 #283 实现「界面」」。）
   - 卡片的事实（`agent`、`seen`、`total`、`drifted`、`critical`、`changed`）在行内容的 `….facts`（`Group`）节点上，Outside 的 `files` / `capped` / `pending` 在 `project-home.outside.facts` 上：`ui::Row` 不带 `attrs`，`GroupedList::row` 只收 `Row`，没法给行本身声明。`Row` 自己的 `ListItem` 节点只有 `selected`。`….facts` 的 `Label` 是标题（原样）或 Outside 的消息键。
   - `project-home.needs-review` 是 `GroupedList` 的容器，没有 `ready` 属性（`GroupedList` 不收 `attrs`）：`ready` 放在 `project-home.title` 上；Outside 的容器是 `project-home.outside.group`，`project-home.outside` 是它的行。
   - 新增：`project-home.sidebar.sessions.empty`、`project-home.sidebar.project.item[…]` / `project-home.sidebar.bottom.item[…]`（其他 crate 登记在这两区的条目）、`project-home.loading`（概览没有结果时 Needs Review 位置上的占位，属性 `phase`）。
   - `project-home.sidebar.list` 的 `visible` 是上一帧建出的行数：行是布局之后在 `uniform_list` 里建的，这一帧声明节点时还不知道。
-- **侧栏的行不是 `ui::Row`**：`Row` 是 36pt、带分隔线、选中是强调色，侧栏要 24pt 的等高行，所以侧栏行是自己的 `div` + `semantic_interactive`，悬停的 6% 淡入淡出用与 `Row` 相同的做法（`window.use_keyed_state` 里的 `Transition`，`HOVER_IN` / `HOVER_OUT`）。Overview 条目选中时用 `unemphasized_selected_content_background`（macOS 侧栏的灰色选中，文字保持 `label`）；侧栏的会话行不会处于选中态（审阅屏幕隐藏侧栏，侧栏也没有键盘焦点）。图标用 `gpui::svg()` 画 `Icon::path()`（`ui` 没有图标元素）。
-- **`ui` 的一处改动**：`lectern_ui::on_accent` 公开（原来是 `pub(crate)`）。主区卡片放在 `Row` 里，选中时 `Row` 把文字设成 `on_accent`，但卡片里次要文字用 `TextRole::Secondary`（灰色）会盖掉它，在强调色上看不清；选中的卡片次要行因此改用 `on_accent` 的 75%。改动是 `ui` 的两处可见性加一行 `pub use`。
+- **侧栏的行不是 `ui::Row`**：`Row` 是带分隔线的卡片行，侧栏要等高、没有分隔线的行。第 2 步时 `ui` 还没有侧栏行，所以侧栏行是自己的 24pt `div` + `semantic_interactive`，悬停的淡入淡出自己做；#283 的第二批控件之后改用 `ui::SidebarRow::compact()`（28pt，见「为 #283 实现「界面」」），只有 Usage 卡片还留着这段悬停的代码（`clickable`）。侧栏的会话行不会处于选中态（审阅屏幕隐藏侧栏，侧栏也没有键盘焦点）。图标用 `gpui::svg()` 画 `Icon::path()`（`ui` 没有图标元素）。
+- **`ui` 的一处改动**：`lectern_ui::on_accent` 公开（原来是 `pub(crate)`）。主区卡片放在 `Row` 里，选中时 `Row` 把文字设成 `on_accent`，但卡片里次要文字用 `TextRole::Secondary`（灰色）会盖掉它，在强调色上看不清；选中的卡片次要行因此改用 `on_accent` 的 75%。改动是 `ui` 的两处可见性加一行 `pub use`。（控件对齐画布之后选中默认是安静的灰底，这一支已去掉；本 crate 不再用 `on_accent`。）
 - **等待概览**：`LoadingPhase::Progress` 要显示「不确定进度」，`ui` 没有这个控件（`Progress` 只有 `Bar` / `Ring` 两种确定的）。第 2 步在 `Progress` 阶段继续显示骨架，节点的 `phase=progress` 记下阶段，不确定进度等 `ui` 有了控件再换（待办，写在 PR 里）。起点用 `background_executor().now()`（测试里可以 `advance_clock`），两个阈值各一个一次性定时器，概览到达时丢掉；没有周期性的定时器。
 - **里程碑**：在 `HomeScreen::render` 里经 `Home::frame_drawn` 报告（`workspace` 自己在下一帧回调里记下时刻）；`request` 是 `Opened` 的 `OpenRequest` 序号，`started` 时项目已经打开的情形没有序号，记 0。
 - **键**：↓ 没有选中项时选第一项、↑ 没有选中项时选最后一项（macOS 列表的习惯，设计没有写）；`Open` 没有选中项时选第一项（设计）。谓词 `Content > project-home` 靠的是屏幕根视图是焦点路径上最深的上下文（`workspace` 设计第 2 步的差异里写过 `>` 的这个要求）。屏幕在工厂里建完就取得焦点；审阅屏幕弹出之后，被它压在下面的主页没有焦点（`workspace` 把焦点收回自己的根视图），所以主页在 `render` 里「焦点在根视图上（或没有焦点）而不在自己里面」时取回焦点，焦点在检查器、面板、覆盖层或侧栏上时不动（用 `Window::context_stack` 的最内层上下文判断）。这是 `workspace` 测试里 `Blank` 视图的做法的收窄版；更好的做法是 `workspace` 在弹出屏幕之后把焦点交给新的栈顶屏幕，等 `app` 装配后手动试过再定（PR 里写明）。
@@ -674,5 +687,33 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - **阅读栏**：仍然是 760pt（画布的 Overview 画板写 820pt，与 Flows 画板矛盾，取 Flows 与交互规范）。
 - **圆点**：仍然是 8pt（画布的卡片画了 10pt）。
 - **快照的数据结构也变了**（第 1 步已实现的 `snapshot::build` 要跟着改）：`HomeSnapshot` 加 `worktree_count`；`Card` 加 `branch`、`status`（新的 `SessionStatus`）；`MainModel` 加 `running`；`OutsideRow::Files(u32)` 改成 `Files { count, names }`；`TightestLimit` 加 `window_minutes`；`SidebarRow` 去掉 `WorktreeHeader`，会话行不再按组排，按 `last_activity` 混排。
-- **键**：删 `project-home-current-worktree`、`project-home-other-worktrees`；改 `project-home-subtitle`、`project-home-outside-files`、`project-home-limit`；加 `project-home-sessions-more` 等（见键表）。.ftl 文件由实现 PR 改。
+- **键**：删 `project-home-current-worktree`、`project-home-other-worktrees`；改 `project-home-subtitle`、`project-home-outside-files`、`project-home-limit`；加 `project-home-sessions-more` 等（见键表）。.ftl 文件由实现 PR 改（已改，见下一节）。
 
+
+### 为 #283 实现「界面」
+
+实现 PR（`Refs #283`）照「为 #283 修订「界面」」做；下面是与「界面」「数据结构」不同的地方，和写文档时没有想到的情形。
+
+- **没有画的**（数据或归属还不存在，按「界面」的写法）：工具栏的搜索框和 New session 按钮、`Waiting` / `Ended` 状态词、Outside 卡片的文件名、侧栏 `Views` 条目行尾的数量、Recently Done 行右边的结果（显示相对时间）。`Card::status` 只会是 `None` 或 `Running`；`OutsideRow::Files::names` 总是空，卡片没有第二行。`project-home-status-waiting`、`-ended`、`project-home-done-*` 键已登记，没有调用方。
+- **额度条是自己画的**：`ui::Progress::Bar` 的填充固定是强调色，不收颜色；「界面」要的是警示橙色。条在 `sidebar.rs` 里用 `palette.fill_strong` 的轨道加 `SystemColor::Orange` 的填充画（颜色都来自调色板），探针节点仍是 `project-home.sidebar.usage.limit`（`Progress`，`fraction`），用 `semantic()` 声明。`ui` 的 `Progress` 收颜色之后改回控件。
+- **小标题和 Usage 标签用 `FontWeight::SEMIBOLD`**：「界面」要 Subheadline（11pt）半粗和 Callout 半粗，而 `TextRole` 里没有这两个半粗的档（`Caption`、`Callout` 都是常规字重）。视图在 `Caption` / `Callout` 上叠 `.font_weight(FontWeight::SEMIBOLD)`，没有字体名、字号或颜色字面量。`ui` 加这两个档之后去掉。
+- **圆点的槽是 10pt**：圆点画 8pt，但放在 10pt 宽的槽里，加卡片行自带的 14pt 间距，文字从卡片边缘 40pt 开始，与 `GroupedList::separator_inset(40)` 的分隔线对齐（16 + 10 + 14）。没有圆点的第三方 agent 的卡片留一个空槽，文字仍然对齐。
+- **侧栏的行节点**：`ui::SidebarRow` 只声明带 `selected` 的 `ListItem`，没有标签和 `attrs`，所以行的事实放在内容里的 `….facts` 节点上（与卡片相同）：
+  - 会话行：`project-home.sidebar.sessions.item[<id>]`（`ListItem`）里是 `….facts`（`Group`，标题作 `Label`，`agent`、`running`、`pending`）；运行中的会话行尾的绿点是 `….running`（`Badge`，`Label` 是 `project-home-running`）。
+  - 「更多」行：`project-home.sidebar.sessions.more`（`ListItem`）里是 `….more.facts`，`Role::Button`、`Label` 是 `project-home-sessions-more` 或 `-less`，`hidden`、`expanded`。表里写的是 `sessions.more` 自己为 `Button`。
+  - Packages 行：`….facts`（`Group`，`changed`、`depth`；今天的改动数大于 0 时 `Label` 是 `project-home-changed-today`）。
+  - `Project` / `Views` / `Bottom` 区的条目：`….facts`（`Text`，`Label` 是标签键）。
+  - 新增 `project-home.sidebar.views`（`Text`，`Views` 区的小标题）。`project-home.sidebar` 的属性是 `sessions`、`shown`（折叠时列出的个数，展开后等于 `sessions`），没有 `worktrees`。
+- **卡片和 Recently Done 的节点**：进度环外多一层 `project-home.needs-review.item[<id>].seen`（`Text`，`Label` 是 `project-home-progress`，即「已看 2/6」，作进度环加数字的无障碍名称）。Recently Done 的行是普通行，没有进度环：只有 `….facts`，没有表里「同 Needs Review」的 `….progress`；`HomeScreen::rings` 因此只保留 Needs Review 的卡片，一张卡片移到 Recently Done 时环丢掉。新增 `project-home.lede`（`Text`，`Label` 是整句，`running`、`outside`）。
+- **`MainModel::running` 的口径**：数 `in_project(key)` 里 `running` 为 true 的全部会话，包括子 agent 会话（它们没有行，但也是在运行的 agent）和其他 worktree 的；不看 14 天的窗口（运行中本来就在 10 分钟之内）。大标题下的那句因此可能比侧栏的绿点多。
+- **`Card::branch` 按会话的归位算**，不按它在 `groups` 里的位置：概览里 14 天之外的会话不在 `groups` 里，也有分支。prunable 的 worktree、文件夹项目、没有归位的会话为 None。
+- **Outside 卡片没有分支时写 `HEAD`**：git 项目没有活动 worktree 时 `HomeSnapshot::branch` 为 None，而 `project-home-outside-files` 要 `$branch`；这时用 `HEAD`（与 `short_head` 对读不出的 HEAD 的写法相同）。
+- **审阅按钮没有自己的点击处理**：按钮在卡片的行里，点击冒泡到行的处理（`Push(REVIEW, Outside)`）；两处都接会各发一次命令。`the_review_button_of_the_outside_card_opens_it_once` 检查。
+- **状态词的颜色**：第一行是一段文字，状态词那一段用 `StyledText` 的高亮改成 `SystemColor::Green`（`Running`、`Waiting`），`Ended` 保持次要色。
+- **侧栏图标**：Overview 条目的图标是 `Icon::Overview`（原来为 None）；所有条目和 Packages 行的图标用 `palette.accent`。
+- **`WorktreeGroup::node` 留着**：数据结构里仍有这个字段，侧栏不再画 worktree 小标题，视图不用它；`nodes::sidebar_worktree` 的键仍是 worktree 目录。
+- **折叠数 3 是视图的常量**（`sidebar::FOLDED`）：`HomeSidebar::expanded` 是视图的状态，不进快照；`uniform_list` 的长度随它变（`Plan` 用算术把列表的下标对到 `SidebarModel::rows` 的下标，不分配）。
+- **键**：`project-home-signal-critical` 仍是单一形式（`{ $count } critical`）：键表写的 `[one]` 与 `*[other]` 相同，`i18n` 的校验不收这种写法（前置条件 B 的记录）。`project-home-limit` 的 `$window` 是 `project-home-window-hours` 或 `-days` 的结果（整天的窗口用天，其余的向上取整成小时，没有长度时用 `project-home-limit-no-window`）。
+- **`present`**：`activity` 去掉，换成 `relative`（相对时间，运行中也显示）和 `meta`（第一行加状态词的位置）；新增 `lede`、`subtitle`、`outside_names`、`limit`。
+- **`OutsideRow` 不再是 `Copy`**（`names` 是 `Arc<[RelPath]>`）：`HomeScreen` 里按引用传。
+- **Usage 卡片的悬停**：背景从 `fill` 淡入到 `fill_strong`（`HOVER_IN` / `HOVER_OUT`，两者是同一个颜色的不同不透明度，按悬停强度插值，只有一层背景），与 [ui 设计「第二批控件」](ui.md#第二批控件283)里 `ActionCard` 的悬停相同；没有直接用 `ActionCard`，因为它的形态（左边图标、标题加说明、右边快捷键提示）与这张卡片（标签加数字、额度条、额度行）不同。淡入淡出的 `Transition` 是视图里的 `clickable`。

@@ -2,23 +2,31 @@
 source: crates/project_home/src/tests/tree.rs
 expression: "tree(vcx, sidebar_part)"
 ---
-project-home.sidebar Group worktrees=2 sessions=6
-  project-home.sidebar.list List rows=16 visible=16
-    project-home.sidebar.overview ListItem label=[project-home-overview] selected
+project-home.sidebar Group sessions=6 shown=3
+  project-home.sidebar.list List rows=13 visible=13
+    project-home.sidebar.overview ListItem selected
+      project-home.sidebar.overview.facts Text label=[project-home-overview]
     project-home.sidebar.sessions Text label=[project-home-sessions]
-    project-home.sidebar.sessions.worktree.item[/fixture/app/.git] Text label="main" branch=main active=true
-    project-home.sidebar.sessions.item[s1] ListItem label="Fix the login redirect" agent=claude-code running=true pending=false
-    project-home.sidebar.sessions.item[s2] ListItem label="Add the search index" agent=codex running=false pending=false
-    project-home.sidebar.sessions.item[s4] ListItem label="Rename the config keys" agent=claude-code running=false pending=false
-    project-home.sidebar.sessions.item[s6] ListItem label="Tidy the error messages" agent=claude-code running=false pending=false
-    project-home.sidebar.sessions.item[s5] ListItem label=[project-home-untitled-session] agent=other running=false pending=false
-    project-home.sidebar.sessions.worktree.item[/fixture/app/.git/worktrees/feature] Text label="feature/search" branch=feature/search active=false
-    project-home.sidebar.sessions.item[s3] ListItem label="Try a new layout" agent=claude-code running=false pending=false
+    project-home.sidebar.sessions.item[s1] ListItem
+      project-home.sidebar.sessions.item[s1].facts Group label="Fix the login redirect" agent=claude-code running=true pending=false
+        project-home.sidebar.sessions.item[s1].running Badge label=[project-home-running]
+    project-home.sidebar.sessions.item[s2] ListItem
+      project-home.sidebar.sessions.item[s2].facts Group label="Add the search index" agent=codex running=false pending=false
+    project-home.sidebar.sessions.item[s3] ListItem
+      project-home.sidebar.sessions.item[s3].facts Group label="Try a new layout" agent=claude-code running=false pending=false
+    project-home.sidebar.sessions.more ListItem
+      project-home.sidebar.sessions.more.facts Button label=[project-home-sessions-more] hidden=3 expanded=false
     project-home.sidebar.packages Text label=[project-home-packages] counts=true
-    project-home.sidebar.packages.item[api] ListItem changed=0 depth=0
-    project-home.sidebar.packages.item[web] ListItem changed=3 depth=0
-    project-home.sidebar.packages.item[web/ui] ListItem changed=0 depth=1
-    project-home.sidebar.views.item[worktrees] ListItem label=[workspace-back]
-    project-home.sidebar.views.item[files] ListItem label=[workspace-inspector-toggle]
+    project-home.sidebar.packages.item[api] ListItem
+      project-home.sidebar.packages.item[api].facts Group changed=0 depth=0
+    project-home.sidebar.packages.item[web] ListItem
+      project-home.sidebar.packages.item[web].facts Group label=[project-home-changed-today] changed=3 depth=0
+    project-home.sidebar.packages.item[web/ui] ListItem
+      project-home.sidebar.packages.item[web/ui].facts Group changed=0 depth=1
+    project-home.sidebar.views Text label=[project-home-views]
+    project-home.sidebar.views.item[worktrees] ListItem
+      project-home.sidebar.views.item[worktrees].facts Text label=[workspace-back]
+    project-home.sidebar.views.item[files] ListItem
+      project-home.sidebar.views.item[files].facts Text label=[workspace-inspector-toggle]
   project-home.sidebar.usage ListItem tokens=12345 percent=61
     project-home.sidebar.usage.limit Progress fraction=0.610

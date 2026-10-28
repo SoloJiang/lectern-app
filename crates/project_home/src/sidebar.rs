@@ -1,8 +1,10 @@
 //! `HomeSidebar`: the project sidebar panel (docs/design/project_home.md「界面」).
 //! The scrolling area is one `uniform_list` over the `Project` entries, the
-//! snapshot's rows (Sessions, Packages) and the `Views` entries, all 24pt, so
-//! a frame builds only the visible rows however many sessions and
-//! sub-projects there are. The `Bottom` entries (Usage) sit below it.
+//! snapshot's rows (Sessions, Packages), the heading of the `Views` section and
+//! its entries, all 28pt (the sidebar row of `ui`), so a frame builds only the
+//! visible rows however many sessions and sub-projects there are. The
+//! Sessions list shows the newest three and folds the rest into "N more"
+//! (the view's state). The `Bottom` entries (the Usage card) sit below it.
 //!
 //! Like [`HomeScreen`](crate::screen::HomeScreen) the view only reads the
 //! snapshot and the contributed entries and sends commands. The sidebar has
@@ -17,9 +19,9 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use gpui::{
-    AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
-    Render, SharedString, StatefulInteractiveElement, Styled, Task, UniformListScrollHandle,
-    Window, div, px, svg, uniform_list,
+    AnyElement, App, Context, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Task,
+    UniformListScrollHandle, Window, div, px, relative, svg, uniform_list,
 };
 use lectern_i18n::{Args, Strings, count_compact, keys};
 use lectern_logging::debug;
@@ -27,32 +29,49 @@ use lectern_services::session::{SessionKey, Timestamp};
 use lectern_services::workspace::{SidebarEntry, SidebarSection};
 use lectern_ui::contrib::SidebarItem;
 use lectern_ui::motion::{HOVER_IN, HOVER_OUT, Transition};
-use lectern_ui::semantic::{NodeId, Role, Semantic, State, semantic, semantic_interactive};
+use lectern_ui::semantic::{NodeId, Role, Semantic, semantic, semantic_interactive};
 use lectern_ui::{
-    AgentDot, Palette, Progress, ProgressShape, Skeleton, Text, TextRole, TextRoleExt, colors,
-    strings,
+    AgentDot, Icon, Palette, SidebarRow as Row, Skeleton, SystemColor, Text, TextRole, TextRoleExt,
+    colors, strings,
 };
 
 use crate::actions::CONTEXT;
 use crate::home::Home;
 use crate::nodes;
 use crate::present::{self, flag};
-use crate::snapshot::{
-    GroupKind, HomeSnapshot, PackageRow, SessionRow, SidebarRow, UsageModel, WorktreeGroup,
-};
+use crate::snapshot::{HomeSnapshot, PackageRow, SessionRow, SidebarRow, UsageModel};
 
-/// A row of the scrolling area, and the inset of its content.
-const ROW_HEIGHT: Pixels = px(24.0);
-const INSET: Pixels = px(12.0);
-const GAP: Pixels = px(8.0);
+/// A row of the scrolling area (the canvas's 28pt) and the inset of the rows
+/// from the panel's edge; a heading's text starts `HEADING_INSET` further in,
+/// where the text of a row does (the row's own 8pt padding).
+const ROW_HEIGHT: Pixels = px(28.0);
+const SIDE: Pixels = px(10.0);
+const HEADING_INSET: Pixels = px(8.0);
+/// The gap under a heading's text; its height is a row's, so the text sits
+/// low in it and the section above is set off.
+const HEADING_BOTTOM: Pixels = px(4.0);
 /// What a nested sub-project adds to the inset per level.
 const INDENT: Pixels = px(12.0);
-const ICON_SIZE: Pixels = px(14.0);
-const SEPARATOR: Pixels = px(0.5);
+const ICON_SIZE: Pixels = px(16.0);
+/// The gap inside a row's content, as `SidebarRow::compact`'s.
+const GAP: Pixels = px(8.0);
+/// The width the agent dot and the gap after it take: the "N more" row and
+/// the third-party agent's name start after it.
+const DOT_INDENT: Pixels = px(16.0);
+/// The green dot at the end of a running session's row.
+const RUNNING_DOT: Pixels = px(6.0);
 const BLOCK_WIDTH: Pixels = px(96.0);
 const BLOCK_HEIGHT: Pixels = px(10.0);
-/// The alpha of the `label`-coloured hover wash at full strength, as in `Row`.
-const HOVER_ALPHA: f32 = 0.06;
+/// The Usage card: its margin, padding, radius and the gap between its lines.
+const CARD_MARGIN_TOP: Pixels = px(8.0);
+const CARD_MARGIN_BOTTOM: Pixels = px(12.0);
+const CARD_PADDING: Pixels = px(10.0);
+const CARD_RADIUS: Pixels = px(8.0);
+const CARD_GAP: Pixels = px(6.0);
+const BAR_HEIGHT: Pixels = px(4.0);
+
+/// How many of the newest sessions the list shows before "N more".
+pub(crate) const FOLDED: usize = 3;
 
 /// The id of the entry this crate registers and draws as the selectable
 /// Overview row, and the Usage entry it draws with the figures.
@@ -125,6 +144,9 @@ pub struct HomeSidebar {
     /// The window shows the project home: the Overview entry is selected.
     on_home: bool,
     scroll: UniformListScrollHandle,
+    /// The Sessions list shows all the sessions of the last 14 days, not
+    /// only the newest `FOLDED`. The view's state, not the snapshot's.
+    expanded: bool,
     rounds: HashMap<SessionKey, Round>,
     /// How many rows the last frame built (the probe's `visible`, and tests).
     built: Rc<Cell<usize>>,
@@ -150,6 +172,7 @@ impl HomeSidebar {
             entries: Entries::empty(),
             on_home: home.on_home_screen(),
             scroll: UniformListScrollHandle::new(),
+            expanded: false,
             rounds: HashMap::new(),
             built: Rc::new(Cell::new(0)),
             home,
@@ -219,11 +242,21 @@ impl HomeSidebar {
         self.rounds = rounds;
     }
 
-    fn snapshot_rows(&self) -> Arc<[SidebarRow]> {
-        match &self.snapshot {
-            Some(snapshot) => snapshot.sidebar.rows.clone(),
-            None => Arc::from(Vec::new()),
-        }
+    fn plan(&self) -> Plan {
+        let (rows, sessions) = match &self.snapshot {
+            Some(snapshot) => (
+                snapshot.sidebar.rows.clone(),
+                snapshot.sidebar.session_rows as usize,
+            ),
+            None => (Arc::from(Vec::new()), 0),
+        };
+        Plan::new(
+            self.entries.project.len(),
+            rows,
+            sessions,
+            self.expanded,
+            self.entries.views.len(),
+        )
     }
 
     // ------------------------------------------------------------- rows
@@ -239,22 +272,23 @@ impl HomeSidebar {
         self.built.set(range.len());
         let palette = *colors(window, cx);
         let strings = strings(cx);
-        let rows = self.snapshot_rows();
-        let (first, second) = (
-            self.entries.project.len(),
-            self.entries.project.len() + rows.len(),
-        );
+        let plan = self.plan();
         range
-            .map(|index| {
-                if index < first {
-                    let entry = self.entries.project[index].clone();
+            .map(|index| match plan.at(index) {
+                Line::Project(i) => {
+                    let entry = self.entries.project[i].clone();
                     let selected = entry.id == OVERVIEW_ENTRY && self.on_home;
-                    self.entry_row("project", &entry, selected, &strings, &palette, window, cx)
-                } else if index < second {
-                    self.snapshot_row(rows[index - first], &strings, &palette, window, cx)
-                } else {
-                    let entry = self.entries.views[index - second].clone();
-                    self.entry_row("views", &entry, false, &strings, &palette, window, cx)
+                    self.entry_row("project", &entry, selected, &strings, window, cx)
+                }
+                Line::Snapshot(row) => self.snapshot_row(row, &strings, &palette, window, cx),
+                Line::More => self.more_row(&plan, &strings, cx),
+                Line::ViewsHeading => {
+                    let text = Text::key(&strings, keys::project_home::VIEWS);
+                    heading(nodes::sidebar_views(), text, None, &palette, window, cx)
+                }
+                Line::View(i) => {
+                    let entry = self.entries.views[i].clone();
+                    self.entry_row("views", &entry, false, &strings, window, cx)
                 }
             })
             .collect()
@@ -275,21 +309,22 @@ impl HomeSidebar {
         match row {
             SidebarRow::SessionsHeader => {
                 let text = Text::key(strings, keys::project_home::SESSIONS);
-                self.heading(nodes::sidebar_sessions(), text, None, window, cx)
-            }
-            SidebarRow::WorktreeHeader(group) => {
-                self.worktree_header(&sidebar.groups[group as usize], strings, window, cx)
+                heading(nodes::sidebar_sessions(), text, None, palette, window, cx)
             }
             SidebarRow::Session { group, index } => {
                 let row = &sidebar.groups[group as usize].sessions[index as usize];
-                self.session_row(row, snapshot.now, strings, palette, window, cx)
+                self.session_row(row, strings, palette, window, cx)
             }
             SidebarRow::SessionsEmpty => {
                 let text = Text::key(strings, keys::project_home::SESSIONS_EMPTY);
                 semantic(
                     Semantic::new(nodes::sidebar_sessions().child("empty"), Role::Text)
                         .label(&text),
-                    self.line(window, cx)
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(ROW_HEIGHT)
+                        .pl(SIDE + HEADING_INSET)
                         .text_role(TextRole::Secondary, window, cx)
                         .child(text.shared()),
                 )
@@ -297,128 +332,52 @@ impl HomeSidebar {
             }
             SidebarRow::PackagesHeader => {
                 let text = Text::key(strings, keys::project_home::PACKAGES);
-                self.heading(
+                heading(
                     nodes::sidebar_packages(),
                     text,
                     Some(("counts", flag(sidebar.package_counts))),
+                    palette,
                     window,
                     cx,
                 )
             }
             SidebarRow::Package(index) => {
                 let row = &sidebar.packages[index as usize];
-                self.package_row(row, sidebar.package_counts, strings, palette, window, cx)
+                self.package_row(row, sidebar.package_counts, strings, palette)
             }
-            SidebarRow::PackagesSkeleton => self
-                .line(window, cx)
+            SidebarRow::PackagesSkeleton => div()
+                .flex()
+                .items_center()
+                .h(ROW_HEIGHT)
+                .pl(SIDE + HEADING_INSET)
                 .child(Skeleton::new(BLOCK_WIDTH, BLOCK_HEIGHT))
                 .into_any_element(),
         }
     }
 
-    /// The base of a row of the scrolling area: 24pt, the inset, centred.
-    fn line(&self, window: &Window, cx: &App) -> gpui::Div {
-        div()
-            .flex()
-            .items_center()
-            .gap(GAP)
-            .w_full()
-            .h(ROW_HEIGHT)
-            .flex_shrink_0()
-            .px(INSET)
-            .text_role(TextRole::Body, window, cx)
-    }
-
-    /// A section title: Sessions, Packages.
-    fn heading(
-        &self,
-        node: NodeId,
-        text: Text,
-        attr: Option<(&'static str, &'static str)>,
-        window: &Window,
-        cx: &App,
-    ) -> AnyElement {
-        let mut spec = Semantic::new(node, Role::Text).label(&text);
-        if let Some((key, value)) = attr {
-            spec = spec.attr(key, value);
-        }
-        semantic(
-            spec,
-            self.line(window, cx)
-                .text_role(TextRole::Caption, window, cx)
-                .child(text.shared()),
-        )
-        .into_any_element()
-    }
-
-    /// A worktree's small heading: its branch (or "other worktrees"), and
-    /// `current` for the active one.
-    fn worktree_header(
-        &self,
-        group: &WorktreeGroup,
-        strings: &Strings,
-        window: &Window,
-        cx: &App,
-    ) -> AnyElement {
-        let (label, branch, active) = match &group.kind {
-            GroupKind::Worktree { branch, is_active } => (
-                Text::verbatim(branch.clone()),
-                branch.to_string(),
-                *is_active,
-            ),
-            GroupKind::Other => (
-                Text::key(strings, keys::project_home::OTHER_WORKTREES),
-                String::new(),
-                false,
-            ),
-            GroupKind::Folder => return div().into_any_element(),
-        };
-        let mut line = self
-            .line(window, cx)
-            .text_role(TextRole::Secondary, window, cx)
-            .child(div().truncate().child(label.shared()));
-        if active {
-            let current = Text::key(strings, keys::project_home::CURRENT_WORKTREE);
-            line = line.child(
-                div()
-                    .flex_shrink_0()
-                    .text_role(TextRole::Caption, window, cx)
-                    .child(current.shared()),
-            );
-        }
-        semantic(
-            Semantic::new(group.node.clone(), Role::Text)
-                .label(&label)
-                .attr("branch", branch)
-                .attr("active", flag(active)),
-            line,
-        )
-        .into_any_element()
-    }
-
+    /// A session: the agent's dot, the title, and a green dot at the end
+    /// while it runs. Clicking opens its review.
     fn session_row(
         &self,
         row: &SessionRow,
-        now: Timestamp,
         strings: &Strings,
         palette: &Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = present::title(strings, row);
-        let spec = Semantic::new(row.node.clone(), Role::ListItem)
+        let facts = Semantic::new(row.node.child("facts"), Role::Group)
             .label(&title)
-            .state(State::default())
             .attr("agent", agent_attr(&row.agent))
             .attr("running", flag(row.running))
             .attr("pending", flag(row.tail_pending));
-        let home = self.home.clone();
-        let key = row.key.clone();
-        let mut line = clickable(self.line(window, cx), &row.node, palette, window, cx).on_click(
-            move |_, _, _| {
-                home.dispatch(present::review_session(key.clone()), "session");
-            },
-        );
+        let mut content = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(GAP)
+            .text_role(TextRole::Body, window, cx);
         if let Some(agent) = present::dot_agent(&row.agent) {
             let mut dot = AgentDot::new(agent);
             let round = self.rounds.get(&row.key).map_or(0, |round| round.count);
@@ -428,37 +387,114 @@ impl HomeSidebar {
                     round,
                 ));
             }
-            line = line.child(dot);
-        }
-        let activity = present::activity(strings, row, now);
-        let line = line
-            .child(div().flex_1().min_w_0().truncate().child(title.shared()))
-            .child(
+            content = content.child(dot);
+        } else {
+            // A third party's agent has no dot: its name leads the title.
+            content = content.child(
                 div()
                     .flex_shrink_0()
-                    .text_role(TextRole::Secondary, window, cx)
-                    .child(activity),
+                    .text_color(palette.secondary_label)
+                    .child(present::agent_name(strings, &row.agent)),
             );
-        semantic_interactive(spec, line).into_any_element()
+        }
+        content = content.child(div().flex_1().min_w_0().truncate().child(title.shared()));
+        if row.running {
+            let name = Text::key(strings, keys::project_home::RUNNING);
+            content = content.child(semantic(
+                Semantic::new(row.node.child("running"), Role::Badge).label(&name),
+                div()
+                    .flex_shrink_0()
+                    .size(RUNNING_DOT)
+                    .rounded_full()
+                    .bg(palette.system(SystemColor::Green)),
+            ));
+        }
+        let home = self.home.clone();
+        let key = row.key.clone();
+        inset(
+            Row::new(row.node.clone())
+                .compact()
+                .on_click(move |_, _| {
+                    home.dispatch(present::review_session(key.clone()), "session");
+                })
+                .child(semantic(facts, content)),
+        )
+        .into_any_element()
     }
 
+    /// The row under the newest sessions that says how many are folded away
+    /// (or offers to fold them again when all are shown): unfolds and folds
+    /// the list.
+    fn more_row(&self, plan: &Plan, strings: &Strings, cx: &mut Context<Self>) -> AnyElement {
+        let hidden = plan.sessions - FOLDED.min(plan.sessions);
+        let text = if self.expanded {
+            Text::key(strings, keys::project_home::SESSIONS_LESS)
+        } else {
+            Text::fmt(
+                strings,
+                keys::project_home::SESSIONS_MORE,
+                &Args::new().num("count", hidden as f64),
+            )
+        };
+        let node = nodes::sidebar_more();
+        let facts = Semantic::new(node.child("facts"), Role::Button)
+            .label(&text)
+            .attr("hidden", hidden.to_string())
+            .attr("expanded", flag(self.expanded));
+        let this = cx.entity().downgrade();
+        inset(
+            Row::new(node)
+                .compact()
+                .on_click(move |_, cx| {
+                    this.update(cx, |this, cx| {
+                        this.expanded = !this.expanded;
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .child(semantic(
+                    facts,
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .pl(DOT_INDENT)
+                        .child(text.shared()),
+                )),
+        )
+        .into_any_element()
+    }
+
+    /// A sub-project: the folder icon, the name, and today's change count at
+    /// the end. Not clickable yet (「本 issue 之外」).
     fn package_row(
         &self,
         row: &PackageRow,
         counts: bool,
         strings: &Strings,
         palette: &Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let spec = Semantic::new(row.node.clone(), Role::ListItem)
+        let mut facts = Semantic::new(row.node.child("facts"), Role::Group)
             .attr("changed", row.changed_today.to_string())
             .attr("depth", row.depth.to_string());
-        // Packages are not clickable yet (「本 issue 之外」), so no hover wash.
-        let _ = palette;
-        let mut line = self
-            .line(window, cx)
-            .pl(INSET + INDENT * f32::from(row.depth))
+        let mut line = Row::new(row.node.clone()).compact();
+        if counts && row.changed_today > 0 {
+            // The figure alone is drawn; its meaning is the accessible name.
+            let name = Text::fmt(
+                strings,
+                keys::project_home::CHANGED_TODAY,
+                &Args::new().num("count", row.changed_today),
+            );
+            facts = facts.label(&name);
+            line = line.trailing(Text::verbatim(row.changed_today.to_string()));
+        }
+        let content = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(GAP)
+            .child(icon(Icon::Folder, palette))
             .child(
                 div()
                     .flex_1()
@@ -466,37 +502,32 @@ impl HomeSidebar {
                     .truncate()
                     .child(row.name.to_string()),
             );
-        if counts && row.changed_today > 0 {
-            let text = Text::fmt(
-                strings,
-                keys::project_home::CHANGED_TODAY,
-                &Args::new().num("count", row.changed_today),
-            );
-            line = line.child(
-                div()
-                    .flex_shrink_0()
-                    .text_role(TextRole::Secondary, window, cx)
-                    .child(text.shared()),
-            );
-        }
-        semantic(spec, line).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .flex_shrink_0()
+            .px(SIDE)
+            .pl(SIDE + INDENT * f32::from(row.depth))
+            .child(line.child(semantic(facts, content)))
+            .into_any_element()
     }
 
     /// A contributed entry: icon, label; the Overview entry is selected on the
-    /// home screen; the Usage entry is drawn with the figures.
-    #[allow(clippy::too_many_arguments, reason = "one call site per section")]
+    /// home screen; the Usage entry is drawn as the card with the figures.
     fn entry_row(
         &self,
         section: &'static str,
         entry: &Entry,
         selected: bool,
         strings: &Strings,
-        palette: &Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let palette = *colors(window, cx);
+        let palette = &palette;
         if section == "bottom" && entry.id == USAGE_ENTRY {
-            return self.usage_row(entry, strings, palette, window, cx);
+            return self.usage_card(strings, palette, window, cx);
         }
         let node = if entry.id == OVERVIEW_ENTRY {
             nodes::sidebar_overview()
@@ -504,36 +535,29 @@ impl HomeSidebar {
             nodes::sidebar_entry(section, &entry.id)
         };
         let label = Text::key(strings, entry.item.label);
-        let spec = Semantic::new(node.clone(), Role::ListItem)
-            .label(&label)
-            .state(State {
-                selected,
-                ..State::default()
-            });
+        let facts = Semantic::new(node.child("facts"), Role::Text).label(&label);
+        let mut content = div().flex().flex_1().min_w_0().items_center().gap(GAP);
+        if let Some(item) = entry.item.icon {
+            content = content.child(icon(item, palette));
+        }
+        content = content.child(div().flex_1().min_w_0().truncate().child(label.shared()));
         let home = self.home.clone();
         let command = entry.item.on_select.clone();
-        let mut line = clickable(self.line(window, cx), &node, palette, window, cx)
-            .on_click(move |_, _, _| home.dispatch(command.clone(), "entry"));
-        if selected {
-            line = line.bg(palette.unemphasized_selected_content_background);
-        }
-        if let Some(icon) = entry.item.icon {
-            line = line.child(
-                svg()
-                    .path(icon.path())
-                    .size(ICON_SIZE)
-                    .flex_shrink_0()
-                    .text_color(palette.secondary_label),
-            );
-        }
-        let line = line.child(div().flex_1().min_w_0().truncate().child(label.shared()));
-        semantic_interactive(spec, line).into_any_element()
+        inset(
+            Row::new(node)
+                .compact()
+                .selected(selected)
+                .on_click(move |_, _| home.dispatch(command.clone(), "entry"))
+                .child(semantic(facts, content)),
+        )
+        .into_any_element()
     }
 
-    /// The Usage entry: the 7-day tokens, and the tightest limit's bar.
-    fn usage_row(
+    /// The Usage entry as a card: the label and the 7-day tokens, the tightest
+    /// limit's bar, and the line naming that limit. The whole card is the
+    /// entry's button.
+    fn usage_card(
         &self,
-        entry: &Entry,
         strings: &Strings,
         palette: &Palette,
         window: &mut Window,
@@ -543,11 +567,14 @@ impl HomeSidebar {
             .snapshot
             .as_deref()
             .and_then(|snapshot| snapshot.usage.as_ref());
-        let first: AnyElement = match model {
-            None => div()
-                .truncate()
-                .child(Text::key(strings, entry.item.label).shared())
-                .into_any_element(),
+        let label = Text::key(strings, keys::project_home::USAGE);
+        let mut head = div().flex().items_center().gap(CARD_GAP).child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label.shared()),
+        );
+        match model {
+            None => {}
             Some(UsageModel {
                 tokens_7d: Some(tokens),
                 ..
@@ -558,10 +585,23 @@ impl HomeSidebar {
                     keys::project_home::USAGE_7D,
                     &Args::new().str("tokens", &compact),
                 );
-                div().truncate().child(text.shared()).into_any_element()
+                head = head.child(
+                    div()
+                        .ml_auto()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(palette.secondary_label)
+                        .child(text.shared()),
+                );
             }
-            Some(_) => Skeleton::new(BLOCK_WIDTH, BLOCK_HEIGHT).into_any_element(),
-        };
+            Some(_) => {
+                head = head.child(
+                    div()
+                        .ml_auto()
+                        .child(Skeleton::new(BLOCK_WIDTH, BLOCK_HEIGHT)),
+                );
+            }
+        }
         let node = nodes::sidebar_usage();
         let mut spec = Semantic::new(node.clone(), Role::ListItem).attr(
             "tokens",
@@ -572,87 +612,226 @@ impl HomeSidebar {
         let mut content = div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(CARD_GAP)
             .w_full()
-            .px(INSET)
-            .py(GAP)
-            .text_role(TextRole::Body, window, cx)
-            .child(first);
+            .p(CARD_PADDING)
+            .rounded(CARD_RADIUS)
+            .text_role(TextRole::Callout, window, cx);
+        content = content.child(head);
         if let Some(limit) = model.and_then(|model| model.tightest.as_ref()) {
             spec = spec.attr("percent", limit.used_percent.to_string());
-            let agent = present::agent_name(strings, &limit.agent);
-            let text = Text::fmt(
-                strings,
-                keys::project_home::LIMIT,
-                &Args::new()
-                    .str("agent", &agent)
-                    .num("percent", limit.used_percent),
-            );
-            content = content.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(GAP)
-                    .child(div().w(px(56.0)).flex_shrink_0().child(Progress::new(
-                        node.child("limit"),
-                        ProgressShape::Bar,
-                        f32::from(limit.used_percent) / 100.0,
-                    )))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_role(TextRole::Secondary, window, cx)
-                            .child(text.shared()),
-                    ),
-            );
+            let fraction = f32::from(limit.used_percent) / 100.0;
+            // `ui::Progress::Bar` paints the accent; the limit's bar is the
+            // system orange (project_home.md「界面」), so it is drawn here.
+            let bar = div()
+                .w_full()
+                .h(BAR_HEIGHT)
+                .rounded_full()
+                .bg(palette.fill_strong)
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(fraction))
+                        .rounded_full()
+                        .bg(palette.system(SystemColor::Orange)),
+                );
+            content = content
+                .child(semantic(
+                    Semantic::new(node.child("limit"), Role::Progress)
+                        .attr("fraction", format!("{fraction:.3}")),
+                    bar,
+                ))
+                .child(
+                    div()
+                        .truncate()
+                        .text_color(palette.secondary_label)
+                        .child(present::limit(strings, limit)),
+                );
         }
         let project = self
             .snapshot
             .as_deref()
             .map(|snapshot| snapshot.project.clone());
         let home = self.home.clone();
-        let content = clickable(content, &node, palette, window, cx).on_click(move |_, _, _| {
+        let card = clickable(
+            content,
+            &node,
+            palette.fill,
+            palette.fill_strong,
+            window,
+            cx,
+        )
+        .on_click(move |_, _, _| {
             if let Some(project) = project.clone() {
                 home.dispatch(present::usage_screen(project), "entry");
             }
         });
-        semantic_interactive(spec, content).into_any_element()
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .px(SIDE)
+            .mt(CARD_MARGIN_TOP)
+            .mb(CARD_MARGIN_BOTTOM)
+            .child(semantic_interactive(spec, card))
+            .into_any_element()
     }
 
     /// The `Bottom` entries, below the scrolling area.
-    fn bottom(
-        &self,
-        strings: &Strings,
-        palette: &Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn bottom(&self, strings: &Strings, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rows: Vec<AnyElement> = self
             .entries
             .bottom
             .iter()
-            .map(|entry| self.entry_row("bottom", entry, false, strings, palette, window, cx))
+            .map(|entry| self.entry_row("bottom", entry, false, strings, window, cx))
             .collect();
         div()
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .border_t(SEPARATOR)
-            .border_color(palette.separator)
             .children(rows)
             .into_any_element()
     }
 }
 
-/// A row that answers the pointer: the 6% `label` wash that fades in and out
-/// with `HOVER_IN` / `HOVER_OUT`, as `Row` does. The fade's state lives in
-/// GPUI's keyed element state under the row's id.
+/// Which line of the scrolling area an index is: the contributed entries and
+/// the snapshot's rows, with the Sessions folded, and the heading of the
+/// `Views` section when it has entries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Line {
+    Project(usize),
+    Snapshot(SidebarRow),
+    More,
+    ViewsHeading,
+    View(usize),
+}
+
+/// The arithmetic behind the folded list, with no allocation: the snapshot's
+/// rows are the Sessions heading, `sessions` session rows (or the one
+/// `SessionsEmpty` row), then the Packages, so the sessions are the rows
+/// `1..=sessions` and the first `shown` of them stay.
+struct Plan {
+    project: usize,
+    rows: Arc<[SidebarRow]>,
+    sessions: usize,
+    shown: usize,
+    more: bool,
+    views: usize,
+}
+
+impl Plan {
+    fn new(
+        project: usize,
+        rows: Arc<[SidebarRow]>,
+        sessions: usize,
+        expanded: bool,
+        views: usize,
+    ) -> Plan {
+        Plan {
+            project,
+            rows,
+            sessions,
+            shown: if expanded {
+                sessions
+            } else {
+                sessions.min(FOLDED)
+            },
+            more: sessions > FOLDED,
+            views,
+        }
+    }
+
+    /// The lines that come from the snapshot.
+    fn snapshot_len(&self) -> usize {
+        self.rows.len() - self.sessions + self.shown + usize::from(self.more)
+    }
+
+    fn len(&self) -> usize {
+        self.project + self.snapshot_len() + if self.views > 0 { 1 + self.views } else { 0 }
+    }
+
+    fn at(&self, index: usize) -> Line {
+        if index < self.project {
+            return Line::Project(index);
+        }
+        let at = index - self.project;
+        if at >= self.snapshot_len() {
+            return match at - self.snapshot_len() {
+                0 => Line::ViewsHeading,
+                view => Line::View(view - 1),
+            };
+        }
+        if at <= self.shown {
+            Line::Snapshot(self.rows[at])
+        } else if self.more && at == self.shown + 1 {
+            Line::More
+        } else {
+            Line::Snapshot(self.rows[at - self.shown - usize::from(self.more) + self.sessions])
+        }
+    }
+}
+
+/// The inset of a row from the panel's edge.
+fn inset(row: impl IntoElement) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .flex_shrink_0()
+        .px(SIDE)
+        .child(row)
+}
+
+/// A section title: Sessions, Packages, Project. A row high, the text low in
+/// it, semibold and quiet.
+fn heading(
+    node: NodeId,
+    text: Text,
+    attr: Option<(&'static str, &'static str)>,
+    palette: &Palette,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let mut spec = Semantic::new(node, Role::Text).label(&text);
+    if let Some((key, value)) = attr {
+        spec = spec.attr(key, value);
+    }
+    semantic(
+        spec,
+        div()
+            .flex()
+            .items_end()
+            .w_full()
+            .h(ROW_HEIGHT)
+            .flex_shrink_0()
+            .pl(SIDE + HEADING_INSET)
+            .pb(HEADING_BOTTOM)
+            .text_role(TextRole::Caption, window, cx)
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(palette.secondary_label)
+            .child(text.shared()),
+    )
+    .into_any_element()
+}
+
+/// An icon in the accent colour, as the entries and the sub-projects wear it.
+fn icon(icon: Icon, palette: &Palette) -> AnyElement {
+    svg()
+        .path(icon.path())
+        .size(ICON_SIZE)
+        .flex_shrink_0()
+        .text_color(palette.accent)
+        .into_any_element()
+}
+
+/// The Usage card answers the pointer: its background goes from `rest` to
+/// `raised` (the same colour at a higher opacity, so one background and no dip
+/// in between) with `HOVER_IN` / `HOVER_OUT`, as `ActionCard` does. The
+/// fade's state lives in GPUI's keyed element state under the card's id.
 fn clickable(
     row: gpui::Div,
     node: &NodeId,
-    palette: &Palette,
+    rest: Hsla,
+    raised: Hsla,
     window: &mut Window,
     cx: &mut App,
 ) -> gpui::Stateful<gpui::Div> {
@@ -663,19 +842,22 @@ fn clickable(
         |_, _| Transition::new(0.0),
     );
     let strength = hover.update(cx, |hover, _| hover.tick(Instant::now(), window));
-    let mut row = row.id(id).cursor_default();
-    if strength > 0.0 {
-        row = row.bg(palette.label.alpha(HOVER_ALPHA * strength));
-    }
-    row.on_hover(move |hovered, window, cx| {
-        let (target, motion) = if *hovered {
-            (1.0, HOVER_IN)
-        } else {
-            (0.0, HOVER_OUT)
-        };
-        hover.update(cx, |hover, cx| hover.go(target, motion, Instant::now(), cx));
-        window.refresh();
-    })
+    let background = Hsla {
+        a: rest.a + (raised.a - rest.a) * strength,
+        ..rest
+    };
+    row.id(id)
+        .cursor_default()
+        .bg(background)
+        .on_hover(move |hovered, window, cx| {
+            let (target, motion) = if *hovered {
+                (1.0, HOVER_IN)
+            } else {
+                (0.0, HOVER_OUT)
+            };
+            hover.update(cx, |hover, cx| hover.go(target, motion, Instant::now(), cx));
+            window.refresh();
+        })
 }
 
 fn agent_attr(agent: &lectern_services::session::Agent) -> &'static str {
@@ -694,17 +876,10 @@ impl Drop for HomeSidebar {
 
 impl Render for HomeSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = *colors(window, cx);
         let strings = strings(cx);
-        let total =
-            self.entries.project.len() + self.snapshot_rows().len() + self.entries.views.len();
-        let (worktrees, sessions) = match &self.snapshot {
-            Some(snapshot) => (
-                snapshot.sidebar.groups.len(),
-                snapshot.sidebar.session_rows as usize,
-            ),
-            None => (0, 0),
-        };
+        let plan = self.plan();
+        let total = plan.len();
+        let (sessions, shown) = (plan.sessions, plan.shown);
         let list = uniform_list(
             "project-home-sidebar-list",
             total,
@@ -720,11 +895,11 @@ impl Render for HomeSidebar {
                 .attr("visible", self.built.get().to_string()),
             list,
         );
-        let bottom = self.bottom(&strings, &palette, window, cx);
+        let bottom = self.bottom(&strings, window, cx);
         semantic(
             Semantic::new(nodes::sidebar(), Role::Group)
-                .attr("worktrees", worktrees.to_string())
-                .attr("sessions", sessions.to_string()),
+                .attr("sessions", sessions.to_string())
+                .attr("shown", shown.to_string()),
             div()
                 .id("project-home-sidebar")
                 .key_context(CONTEXT)

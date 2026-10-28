@@ -39,6 +39,9 @@ pub struct HomeSnapshot {
     /// for a folder project.
     pub branch: Option<Arc<str>>,
     pub active_worktree: Option<WorktreeKey>,
+    /// The length of `ProjectSnapshot::worktrees`: the toolbar subtitle's
+    /// "N worktrees"; 0 for a folder project.
+    pub worktree_count: u32,
     /// `ProjectSnapshot::active.files` is no longer `Pending`: the condition
     /// of the milestone (「性能」).
     pub files_settled: bool,
@@ -72,7 +75,11 @@ pub struct SidebarModel {
     /// given or the overview is `Capped`; then only the names show.
     pub package_counts: bool,
     /// The rows of the sidebar's scrolling area that come from the snapshot,
-    /// flat, in display order. The contributed entries are not here.
+    /// flat, in display order: the Sessions heading, then all the session
+    /// rows (or the one `SessionsEmpty` row), then the Packages. The
+    /// sessions of all the worktrees are mixed, newest first; folding them
+    /// into "N more" is the view's state, not the snapshot's. The
+    /// contributed entries are not here.
     pub rows: Arc<[SidebarRow]>,
 }
 
@@ -81,7 +88,6 @@ pub struct SidebarModel {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SidebarRow {
     SessionsHeader,
-    WorktreeHeader(u32),
     Session {
         group: u32,
         index: u32,
@@ -141,6 +147,10 @@ pub struct PackageRow {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MainModel {
+    /// The sessions of the project that are running (`running` of the rows
+    /// of `SessionList::in_project`, in any worktree): the large title's
+    /// second sentence.
+    pub running: u32,
     /// `Review::overview` has a first result; before that the main area shows
     /// skeletons (`loading_phase`).
     pub overview_ready: bool,
@@ -153,9 +163,28 @@ pub struct MainModel {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Card {
     pub session: SessionRow,
+    /// The short branch name of the worktree the session is placed in; None
+    /// for a folder project and for a session in no listed worktree. The
+    /// first line of the card shows it.
+    pub branch: Option<Arc<str>>,
+    /// The status word at the end of the first line. Only `Running` (from
+    /// `session.running`) until `agents` tells how a session ended
+    /// (project_home.md「对其他 crate 的要求」F); None shows no word.
+    pub status: Option<SessionStatus>,
     /// `SessionOverview::progress`; None draws no ring.
     pub progress: Option<Progress>,
     pub signals: Signals,
+}
+
+/// How a session stands, the status word of a card's first line. Only
+/// `Running` has a source today.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionStatus {
+    Running,
+    /// Waiting for the user (not produced yet).
+    Waiting,
+    /// The session ended (not produced yet).
+    Ended,
 }
 
 /// The sources of the second grey line.
@@ -168,12 +197,18 @@ pub struct Signals {
     pub changed_since_seen: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OutsideRow {
     /// A folder project has no base: no row.
     Hidden,
     Pending,
-    Files(u32),
+    /// `names` are the first 3 changed paths (the card's second line);
+    /// `OutsideCount` only has the count (project_home.md「对其他 crate 的
+    /// 要求」F), so they are empty until `review` gives paths.
+    Files {
+        count: u32,
+        names: Arc<[RelPath]>,
+    },
     /// `OutsideCount::Capped(n)`: all changed paths, not told apart.
     Capped(u32),
 }
@@ -192,5 +227,8 @@ pub struct TightestLimit {
     pub agent: Agent,
     /// `used_percent` rounded into 0..=100.
     pub used_percent: u8,
+    /// The length of the limit window ("5-hour"); None when the source did
+    /// not say.
+    pub window_minutes: Option<u32>,
     pub resets_at: Option<Timestamp>,
 }
