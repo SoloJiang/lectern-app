@@ -568,7 +568,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 ## 界面
 
-- 窗口：没有打开项目时的独立窗口，820 × 520 pt，居中（[交互规范「窗口结构」](interaction.md#窗口结构)的 Welcome 宽度）。标题栏透明，窗口背景用 `WindowBackgroundAppearance::Blurred`（系统的毛玻璃材质，自动适配浅色和深色模式，不需要自定义颜色），根视图不画任何内容，这就是 ADR 0017 的中性骨架。`ui` 提供骨架控件以后，由 Welcome 和 Overview 的视图替换这个根视图。
+- 窗口：没有打开项目时的独立窗口，820 × 520 pt，居中（[交互规范「窗口结构」](interaction.md#窗口结构)的 Welcome 宽度）。标题栏透明，窗口控件（红绿灯）放在 `point(20, 19)`，在 52pt 的工具栏里竖直居中（[workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求) G，[#283](https://github.com/SoloJiang/lectern-app/issues/283)）；窗口背景用 `WindowBackgroundAppearance::Blurred`（系统的毛玻璃材质，自动适配浅色和深色模式，不需要自定义颜色），根视图不画任何内容，这就是 ADR 0017 的中性骨架。`ui` 提供骨架控件以后，由 Welcome 和 Overview 的视图替换这个根视图。
 - 关闭窗口不退出应用（产品负责人 2026-10-23 决定，见「未决问题」）。点 Dock 图标而且没有窗口时，重新打开骨架窗口（`Application::on_reopen`，在 `run` 之前登记）；`workspace` 装好之后，新窗口按当前状态取 frame autosave 名，`WorkspaceHost::attach` 把根视图换成 `Workspace`（「workspace 的装配」）。
 - 应用菜单，Fluent 键在 `crates/i18n/locales/{en,zh-CN}/app.ftl`（前置条件 A）：
 

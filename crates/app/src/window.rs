@@ -3,7 +3,7 @@
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render,
     Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, size,
+    actions, div, point, prelude::*, px, size,
 };
 use lectern_i18n::{Strings, keys};
 use lectern_review_view::actions as review;
@@ -76,7 +76,9 @@ pub fn open_named(cx: &mut App, frame: &'static str) -> Option<AnyWindowHandle> 
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: None,
+            // Centred in the 52pt toolbar: (52 - 14) / 2 for 14pt buttons
+            // (docs/design/workspace.md「对其他 crate 的要求」G).
+            traffic_light_position: Some(point(px(20.0), px(19.0))),
         }),
         window_background: WindowBackgroundAppearance::Blurred,
         ..Default::default()
