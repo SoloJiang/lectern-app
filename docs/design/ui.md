@@ -627,7 +627,7 @@ pub struct Switch { /* id, on, knob: f32, on_change */ }
 
 - 为什么自己做：gpui-component 的 `Button`、`Select`、`PopupMenu`、`ContextMenu` 都是自己画的菜单，样式与 macOS 不一致，也会被窗口边界裁掉。`PopUpButton` 和 `show_menu` 用 gpui-component 的 `native_menu::NativeMenu`，菜单由系统画（`NSMenu`），与菜单栏同一条 `Action` 路径；macOS 之外它退回 gpui-component 自己画的菜单，Lectern 只发 macOS。`ActionCard`、`SidebarRow`、`Capsule`、`Disclosure`、`Switch` 在 gpui-component 里没有对应的形态，或圆角、颜色与画布不同。
 - 菜单项不是探针节点：系统菜单不在 GPUI 的元素树里，`semantic` 的 `Menu`、`MenuItem` 角色留给以后自己画的菜单。探针按名字触发菜单项的 `Action`（如 `welcome::SelectLanguage`），读弹出按钮的 `attrs.value` 确认结果。
-- 「侧栏材质」（Welcome 的右栏、检查器）：画布用半透明加背景模糊。GPUI 的元素画不了模糊，所以不透明的面板用 `under_page_background`；工作区的侧栏仍然不画底色，透出窗口的模糊。
+- 「侧栏材质」（Welcome 的右栏、工作区的侧栏、检查器）：画布用半透明加背景模糊。GPUI 的元素画不了模糊，所以这些面板都用不透明的 `under_page_background`。工作区的侧栏原来不画底色，想透出窗口的 `Blurred` 背景；在真实窗口里（2026-10-28，macOS 27）窗口背景没有模糊，侧栏完全透明，能看清后面其他应用的文字，所以改成同样不透明。
 - 侧栏行尾的数量（Worktrees 的 11、Merge Requests 的 2）不在这一批：`SidebarRow::trailing` 能画它，但数量是会变的项目数据，而 `SidebarItem` 是登记时应用一次的载荷，谁提供数量、数量变化时谁触发重画要由 [workspace 设计](workspace.md)决定。在那之前不画数量（[project_home 设计](project_home.md)「对其他 crate 的要求」C）。
 
 ### 贡献载荷（`contrib`）
