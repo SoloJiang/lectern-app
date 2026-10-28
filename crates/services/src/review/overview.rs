@@ -38,6 +38,17 @@ pub struct SessionOverview {
     pub critical: u32,
 }
 
+impl SessionOverview {
+    /// 项目主页的 Needs Review 与 Welcome 的待审数共用的判断：进度还没算出、
+    /// 有没看过的文件，或看过之后又改了（docs/design/review.md「接口」）。
+    pub fn needs_review(&self) -> bool {
+        match self.progress {
+            None => true,
+            Some(p) => p.seen < p.total || p.changed_since_seen > 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum OutsideCount {
     Pending,

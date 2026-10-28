@@ -851,3 +851,25 @@ fn overview_and_brief_requests_round_trip() {
         assert_eq!(round_trip(&item), item);
     }
 }
+
+#[test]
+fn needs_review_is_unknown_unseen_or_changed_since_seen() {
+    let with = |progress| SessionOverview {
+        session: session("a"),
+        progress,
+        drifted: None,
+        critical: 0,
+    };
+    let p = |total, seen, changed_since_seen| {
+        Some(Progress {
+            total,
+            seen,
+            changed_since_seen,
+        })
+    };
+    assert!(with(None).needs_review());
+    assert!(with(p(3, 2, 0)).needs_review());
+    assert!(with(p(3, 3, 1)).needs_review());
+    assert!(!with(p(3, 3, 0)).needs_review());
+    assert!(!with(p(0, 0, 0)).needs_review());
+}
