@@ -46,6 +46,10 @@ pub const TOOLBAR_HEIGHT: Pixels = px(52.0);
 pub const INSPECTOR_WIDTH: Pixels = px(300.0);
 pub const READING_COLUMN_WIDTH: Pixels = px(760.0);
 pub const PANEL_RADIUS: Pixels = px(14.0);
+/// The context panel floats over the inspector, set in from the toolbar and
+/// the window's right and bottom edges (docs/design/workspace.md「界面」).
+pub const PANEL_WIDTH: Pixels = px(420.0);
+pub const PANEL_INSET: Pixels = px(8.0);
 const SEPARATOR: Pixels = px(0.5);
 /// The inspector's padding around its segmented control.
 const INSPECTOR_PADDING: Pixels = px(14.0);
@@ -956,8 +960,17 @@ impl Workspace {
         let (id, view) = self.panel.as_ref()?;
         let palette = *colors(window, cx);
         let value = self.panel_slide.tick(Instant::now(), window);
+        let project = self.driver.nav().nav().project().is_some();
+        let sidebar_shown = project
+            && self
+                .driver
+                .nav()
+                .layout(&registry_env(self.driver.registry()))
+                .sidebar
+                == Visibility::Shown;
+        let width = panel_width(window.viewport_size().width, sidebar_shown);
         let (offset, opacity) = match PANEL_OPEN.effective(cx) {
-            Effective::Move(_) => ((1.0 - value) * INSPECTOR_WIDTH, 1.0),
+            Effective::Move(_) => ((1.0 - value) * (width + PANEL_INSET), 1.0),
             Effective::Fade(_) => (px(0.0), value),
         };
         let _ = id;
@@ -967,10 +980,10 @@ impl Workspace {
                 .key_context(actions::PANEL)
                 .occlude()
                 .absolute()
-                .top(TOOLBAR_HEIGHT)
-                .bottom_0()
-                .right_0()
-                .w(INSPECTOR_WIDTH)
+                .top(TOOLBAR_HEIGHT + PANEL_INSET)
+                .bottom(PANEL_INSET)
+                .right(PANEL_INSET)
+                .w(width)
                 .left_auto()
                 .ml_auto()
                 .rounded(PANEL_RADIUS)
@@ -1165,6 +1178,17 @@ impl Render for Workspace {
             .children(self.render_notice(window, cx))
             .into_any_element()
     }
+}
+
+/// The panel's width: `PANEL_WIDTH`, or the content area less the two
+/// insets when the window is too narrow for it.
+pub(crate) fn panel_width(window: Pixels, sidebar_shown: bool) -> Pixels {
+    let content = if sidebar_shown {
+        window - SIDEBAR_WIDTH
+    } else {
+        window
+    };
+    (content - PANEL_INSET * 2.0).max(px(0.0)).min(PANEL_WIDTH)
 }
 
 /// The state machine's view of the registry, for `layout`.

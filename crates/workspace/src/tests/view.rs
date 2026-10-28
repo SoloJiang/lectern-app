@@ -852,3 +852,15 @@ fn ask_leave_answers_through_the_guards(cx: &mut TestAppContext) {
     assert_eq!(*answers.lock().unwrap(), vec![true, false]);
     assert_eq!(refusing.asked(), vec![LeaveScope::App]);
 }
+
+#[test]
+fn the_panel_is_420pt_and_narrows_with_the_window() {
+    use crate::view::{PANEL_INSET, PANEL_WIDTH, SIDEBAR_WIDTH, panel_width};
+    use gpui::px;
+    assert_eq!(panel_width(px(1180.0), true), PANEL_WIDTH);
+    assert_eq!(panel_width(px(820.0), false), PANEL_WIDTH);
+    // Too narrow: the content area less the two insets.
+    let narrow = SIDEBAR_WIDTH + px(300.0);
+    assert_eq!(panel_width(narrow, true), px(300.0) - PANEL_INSET * 2.0);
+    assert_eq!(panel_width(px(10.0), false), px(0.0));
+}
