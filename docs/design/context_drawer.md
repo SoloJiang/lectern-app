@@ -19,7 +19,7 @@
 - 不做：
   - 符号抽取、索引、跳转与引用的查询、候选排序：`code_intel`。本 crate 只发 `Query`、读 `QueryResults`。
   - 完整文件阅读、编辑、离开守卫：`file_reader`（经 `dyn Reader`）。
-  - 面板的容器、位置（贴右侧、占检查器的 300pt）、圆角阴影、滑入滑出动画、Esc 的分层关闭：`workspace`（[workspace 设计「未决问题」](workspace.md#未决问题)的产品决定）。
+  - 面板的容器、位置（420pt 宽，离工具栏下沿与窗口右边、底边各 8pt，浮在检查器上方）、圆角阴影、滑入滑出动画、Esc 的分层关闭：`workspace`（[workspace 设计「未决问题」](workspace.md#未决问题)3 的产品决定）。
   - 审阅对象的打开与关闭、归因、改动集：`review`。本 crate 不调用 `Review::open` / `close` / `command`，只用调用方给的 `ReviewId` 读 `snapshot`。
   - 语义判断（原型里的「types match」「still passes a string」）：语义导航 [#26](https://github.com/SoloJiang/lectern-app/issues/26) 与 Analyze [#66](https://github.com/SoloJiang/lectern-app/issues/66)。
   - ⌘K 的符号搜索：[#102](https://github.com/SoloJiang/lectern-app/issues/102)。
@@ -451,12 +451,12 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 
 ## 界面
 
-- 层：按需呼出层（[ADR 0012](../adr/0012.md)、[交互规范「三层结构」](interaction.md#三层结构)）。`workspace` 把面板贴右侧放在检查器的位置，宽 300pt（`INSPECTOR_WIDTH`），滑入用 `PANEL_OPEN`、滑出用 `PANEL_CLOSE`，阅读栏不动、不加遮罩；本 crate 只画面板里的内容，不写尺寸和动画（[workspace 设计「未决问题」](workspace.md#未决问题)第 3 条的决定）。
+- 层：按需呼出层（[ADR 0012](../adr/0012.md)、[交互规范「三层结构」](interaction.md#三层结构)）。`workspace` 把面板浮在检查器上方，宽 420pt（`PANEL_WIDTH`），离工具栏下沿与窗口右边、底边各 8pt，滑入用 `PANEL_OPEN`、滑出用 `PANEL_CLOSE`，阅读栏不动、不加遮罩；本 crate 只画面板里的内容，不写尺寸和动画（[workspace 设计「未决问题」](workspace.md#未决问题)第 3 条的决定）。
 - 布局（自上而下）：
   - 标题行：主题的名字（`TextRole::Body`，原文），右侧关闭按钮（`Icon::Close`，发 `dispatch(ClosePanel)`）。下一行次要文字：种类 · 文件名:行号（行号从 1 起显示）；依赖里的定义显示种类 · 包名 版本（`DepOrigin`）。主题来自 `Preselect` 时再加一行 `context-by-name`。
   - 分段控件 `Segmented`：Definition / Callers N / Tests N / History。数字在对应查询有结果之后才显示。
   - 摘要行（Callers 页，有审阅时）：`context-summary-*`，`secondary_label`。
-  - 列表：`GroupedList` 与 `Row` 的样式，`uniform_list` 承载。每行两段：主文字是文件名:行号（`TextRole::Body`），次要文字是目录（`secondary_label`，从开头省略，保留靠近文件名的部分）和「位于 定义名」；状态在行的右侧，一行次要文字，`NotUpdated` 前加一个 `Palette::system(SystemColor::Orange)` 的 6pt 圆点（状态用圆点或一行次要文字，不用彩色标签块：[交互规范「视觉」](interaction.md#视觉)）。300pt 宽度下路径不完整显示，完整路径在探针节点和悬停提示里。
+  - 列表：`GroupedList` 与 `Row` 的样式，`uniform_list` 承载。每行两段：主文字是文件名:行号（`TextRole::Body`），次要文字是目录（`secondary_label`，从开头省略，保留靠近文件名的部分）和「位于 定义名」；状态在行的右侧，一行次要文字，`NotUpdated` 前加一个 `Palette::system(SystemColor::Orange)` 的 6pt 圆点（状态用圆点或一行次要文字，不用彩色标签块：[交互规范「视觉」](interaction.md#视觉)）。420pt 宽度下长路径仍可能不完整显示，完整路径在探针节点和悬停提示里。
   - Callers 页末尾：同名引用组（默认折叠，`Expander` 展开），标题 `context-same-name`；主题来自 Diff 的旧一侧时默认展开，标题 `context-same-name-current`。
   - Tests 页两组：`context-tests-calls`、`context-tests-files`。History 页一组 `context-history-review`。
   - 底部：打开按钮（`Button`，`context-open`），没有 `Reader` 或没有选中行时不可用。
@@ -686,7 +686,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 没有需要产品决定的问题。下面五条已于 2026-10-25 决定，人确认按默认选项：
 
 1. **审阅里 Space 作用在一行上时，查哪个符号。** 已决定：选 (a)，这一行所在的定义（名字在这一行上的优先，否则是包含这一行的最内层定义），需要 `code_intel` 加 `Enclosing`（要求 B）。审阅关心「改了哪个函数、谁调用它」，在函数体里任何一行按 Space 都得到这个函数；调用处的符号用点击（`Position`）查看。不选：(b) 这一行上第一个标识符；(c) Space 只在点过符号之后可用。
-2. **调用方的行显示什么。** 已决定：选 (a)，文件名:行号、目录和「位于 定义名」，不需要新数据。面板宽 300pt。不选：(b) 再加一行裁剪的代码（需要 `code_intel` 的 `Reference` 带这一行的文字；另开 issue）。
+2. **调用方的行显示什么。** 已决定：选 (a)，文件名:行号、目录和「位于 定义名」，不需要新数据。面板宽 420pt（2026-10-29 起，见 workspace 设计「未决问题」3）。不选：(b) 再加一行裁剪的代码（需要 `code_intel` 的 `Reference` 带这一行的文字；另开 issue）。
 3. **History 是否包含提交历史。** 已决定：选 (a)，只有本次审阅里改过这个文件的轮次。审阅时最相关的是本会话的轮次。不选：(b) 再加这个文件最近的提交（需要 `git` 的按路径 log 和一个领域层的提供者，要求 L）。
 4. **审阅的 worktree 不是当前 worktree 时。** 已决定：选 (a)，面板提示并给出切换按钮，切换后自动查询。`code_intel` 只用当前 worktree 的映射回答，并行 agent 的审阅常常在别的 worktree 里；切换 worktree 有离开守卫，不在用户没有要求时发生。不选：(b) Space 时自动切换当前 worktree；(c) `code_intel` 支持在其他 worktree 里查询。
 5. **面板是否取得键盘焦点。** 已决定：选 (a)，打开时取得焦点，↑↓ ↵ 作用在列表上，Esc 关闭后焦点回到原处（要求 C）。键盘可以完成全部操作，与「Esc 回到原处」一致。不选：(b) 不取焦点。

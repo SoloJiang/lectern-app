@@ -552,6 +552,9 @@ impl ActionCard {
     pub fn new(id: NodeId, icon: Icon, title: Text, detail: Text) -> ActionCard;
     pub fn shortcut(self, hint: Text) -> ActionCard;
     pub fn on_click(self, f: impl Fn(&mut Window, &mut App) + 'static) -> ActionCard;
+    /// 禁用（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的画布决定，Welcome 的 Clone 卡片）：底色仍是 `fill`，没有悬停变化；
+    /// 图标和标题用 `secondary_label`，说明和快捷键提示用 `tertiary_label`；不调 `on_click`；探针节点带 `disabled`。
+    pub fn disabled(self, disabled: bool) -> ActionCard;
 }
 
 /// 菜单的一项：选中时把 `action` 派发到窗口（`Window::dispatch_action`，与菜单栏和快捷键同一条路）。
@@ -778,7 +781,7 @@ pub mod semantic {
 
 - 用到的控件与动效原语见「接口」；本 crate 自己不定义任何颜色值、字体名和时长之外的东西：颜色来自 `platform` 或内置表，时长来自交互规范的表。
 - Fluent 键：没有。本 crate 不显示自己的文字；`Text` 只是容器。
-- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Toggle`（`checked`），`Progress` → `Role::Progress`（`attrs` 里 `fraction`），`Segmented` → `Role::TabBar` 与每项 `Role::Tab`（`selected`），`Button` 调了 `.active(bool)` 的 → `Role::Toggle`（`checked`），`GroupedList` → `Role::List`，`Row` → `Role::ListItem`（`selected`），`AgentDot` → `Role::Badge`（`attrs` 里 `agent`），`Expander` → `Role::Group`（`expanded`），`Hint` → `Role::Text`，第二批：`ActionCard` 与 `PopUpButton` → `Role::Button`（`PopUpButton` 的 `attrs` 里 `value`），`SidebarRow` → `Role::ListItem`（`selected`）），`Label` 来自它们的 `Text`，`disabled` 来自 `Button::disabled`；ID 由视图给。
+- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Toggle`（`checked`），`Progress` → `Role::Progress`（`attrs` 里 `fraction`），`Segmented` → `Role::TabBar` 与每项 `Role::Tab`（`selected`），`Button` 调了 `.active(bool)` 的 → `Role::Toggle`（`checked`），`GroupedList` → `Role::List`，`Row` → `Role::ListItem`（`selected`），`AgentDot` → `Role::Badge`（`attrs` 里 `agent`），`Expander` → `Role::Group`（`expanded`），`Hint` → `Role::Text`，第二批：`ActionCard` 与 `PopUpButton` → `Role::Button`（`PopUpButton` 的 `attrs` 里 `value`），`SidebarRow` → `Role::ListItem`（`selected`）），`Label` 来自它们的 `Text`，`disabled` 来自 `Button::disabled` 和 `ActionCard::disabled`；ID 由视图给。
 - Action 与快捷键：没有。控件只回调，Action 在视图里定义（技术调研：探针只经 Action 操作）。
 
 ## 状态与异常

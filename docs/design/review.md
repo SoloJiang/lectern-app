@@ -716,6 +716,12 @@ pub struct SessionOverview {
     pub critical: u32,
 }
 
+impl SessionOverview {
+    /// 项目主页的 Needs Review 与 Welcome 的待审数共用的判断：`progress` 为 None、`seen < total` 或 `changed_since_seen > 0`
+    /// （[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的画布决定，[welcome 设计「待审数」](welcome.md#待审数)）。
+    pub fn needs_review(&self) -> bool;
+}
+
 pub enum OutsideCount {
     Pending,
     Files(u32),
