@@ -35,35 +35,40 @@ struct Reports<'a> {
     gated: bool,
 }
 
+/// Writes `report-<target>.json` into `dir` with `(id, status)` results.
+fn write_report(dir: &Path, gated: bool, target: Target, results: &[(&str, &str)], extra: Json) {
+    let mut json = json!({
+        "version": 1,
+        "target": target.name(),
+        "mode": "measure",
+        "gated": gated,
+        "host": { "model": null, "chip": null, "os_version": null, "cpus": 8 },
+        "commit": null,
+        "results": results.iter().map(|(id, status)| json!({
+            "id": id,
+            "status": status,
+            "budget": "",
+            "source": SOURCE,
+            "measured": "",
+            "attempts": [],
+            "noisy": false,
+        })).collect::<Vec<_>>(),
+        "errors": [],
+    });
+    if let (Json::Object(json), Json::Object(extra)) = (&mut json, extra) {
+        json.extend(extra);
+    }
+    std::fs::write(
+        dir.join(format!("report-{}.json", target.name())),
+        serde_json::to_string(&json).unwrap(),
+    )
+    .unwrap();
+}
+
 impl Reports<'_> {
     /// Writes `report-<target>.json` with `(id, status)` results.
     fn write(&self, target: Target, results: &[(&str, &str)], extra: Json) {
-        let mut json = json!({
-            "version": 1,
-            "target": target.name(),
-            "mode": "measure",
-            "gated": self.gated,
-            "host": { "model": null, "chip": null, "os_version": null, "cpus": 8 },
-            "commit": null,
-            "results": results.iter().map(|(id, status)| json!({
-                "id": id,
-                "status": status,
-                "budget": "",
-                "source": SOURCE,
-                "measured": "",
-                "attempts": [],
-                "noisy": false,
-            })).collect::<Vec<_>>(),
-            "errors": [],
-        });
-        if let (Json::Object(json), Json::Object(extra)) = (&mut json, extra) {
-            json.extend(extra);
-        }
-        std::fs::write(
-            self.dir.join(format!("report-{}.json", target.name())),
-            serde_json::to_string(&json).unwrap(),
-        )
-        .unwrap();
+        write_report(self.dir, self.gated, target, results, extra);
     }
 
     /// The three benchmark targets' reports with every entry, the plugin
@@ -96,7 +101,18 @@ impl Reports<'_> {
 }
 
 fn run(dir: &Path, require_package: bool) -> Merged {
-    merge(dir, TABLE, require_package, Some("abc".into()))
+    merge(
+        &[dir.to_path_buf()],
+        TABLE,
+        require_package,
+        Some("abc".into()),
+    )
+}
+
+/// Merges several directories.
+fn run_dirs(dirs: &[&Path]) -> Merged {
+    let dirs: Vec<_> = dirs.iter().map(|d| d.to_path_buf()).collect();
+    merge(&dirs, TABLE, false, Some("abc".into()))
 }
 
 fn statuses(merged: &Merged) -> Vec<(String, String)> {
@@ -598,4 +614,315 @@ fn report_merge_judging_run_needs_a_judging_machine_entry() {
         let merged = run(dir.path(), false);
         assert_eq!(merged.exit, 0, "{status}: {}", merged.text);
     }
+}
+
+/// The three directories of a sharded run over [`TABLE`]: shard `a` owns
+/// `t/a`, shard `b` owns `t/later` and `m/a`, shard `p` owns every
+/// `process` budget. Each report lists every budget of its target, the
+/// other shards' as `sharded`.
+struct Shards {
+    a: tempfile::TempDir,
+    b: tempfile::TempDir,
+    p: tempfile::TempDir,
+}
+
+impl Shards {
+    fn new() -> Shards {
+        let shards = Shards {
+            a: tempfile::tempdir().unwrap(),
+            b: tempfile::tempdir().unwrap(),
+            p: tempfile::tempdir().unwrap(),
+        };
+        let shard = |name: &str, bench: &str, seconds: f64| json!({ "shard": name, "benches": [{ "id": bench, "seconds": seconds, "attempts": 1 }] });
+        let a = shards.a.path();
+        write_report(
+            a,
+            true,
+            Target::Time,
+            &[("t/a", "ok"), ("t/later", "sharded")],
+            shard("a", "t/a", 3.0),
+        );
+        write_report(
+            a,
+            true,
+            Target::Memory,
+            &[("m/a", "sharded")],
+            shard("a", "m/x", 1.0),
+        );
+        let b = shards.b.path();
+        write_report(
+            b,
+            true,
+            Target::Time,
+            &[("t/a", "sharded"), ("t/later", "planned")],
+            shard("b", "t/b", 5.0),
+        );
+        write_report(
+            b,
+            true,
+            Target::Memory,
+            &[("m/a", "planned")],
+            shard("b", "m/y", 1.0),
+        );
+        write_report(
+            shards.p.path(),
+            true,
+            Target::Process,
+            &[
+                ("p/a", "ok"),
+                ("plugin/special/activate", "ok"),
+                ("plugin/terminal/activate", "ok"),
+                ("lsp/*/resident", "skipped"),
+            ],
+            json!({
+                "shard": "p",
+                "plugins": ["terminal", "special"],
+                "language_servers": [],
+                "host": { "model": "Mac14,2", "chip": null, "os_version": null, "cpus": 3 },
+                "benches": [{ "id": "p/a", "seconds": 4.0, "attempts": 1 }],
+            }),
+        );
+        shards
+    }
+
+    fn merge(&self) -> Merged {
+        run_dirs(&[self.a.path(), self.b.path(), self.p.path()])
+    }
+}
+
+#[test]
+fn report_merge_shards_list_every_budget_once() {
+    let shards = Shards::new();
+    let merged = shards.merge();
+    assert_eq!(merged.exit, 0, "{}", merged.text);
+    assert_eq!(merged.report["errors"], json!([]));
+    let ids: Vec<(String, String)> = statuses(&merged);
+    assert_eq!(
+        ids,
+        [
+            ("t/a", "ok"),
+            ("t/later", "planned"),
+            ("m/a", "planned"),
+            ("p/a", "ok"),
+            ("plugin/terminal/activate", "ok"),
+            ("plugin/special/activate", "ok"),
+            ("lsp/*/resident", "skipped"),
+            ("pkg/size", "skipped"),
+        ]
+        .map(|(id, status)| (id.to_owned(), status.to_owned()))
+    );
+}
+
+#[test]
+fn report_merge_shards_name_each_shard_and_its_benchmarks() {
+    let shards = Shards::new();
+    let merged = shards.merge();
+    // The host is the first report's, the shards list each one's own.
+    assert_eq!(merged.report["host"]["cpus"], 8);
+    let listed: Vec<(&str, i64)> = merged.report["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap(),
+                s["host"]["cpus"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(listed, [("a", 8), ("b", 8), ("p", 3)]);
+    // Slowest first, each with its target and shard.
+    let benches: Vec<(&str, &str, &str)> = merged.report["benches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["id"].as_str().unwrap(),
+                b["target"].as_str().unwrap(),
+                b["shard"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        benches,
+        [
+            ("t/b", "time", "b"),
+            ("p/a", "process", "p"),
+            ("t/a", "time", "a"),
+            ("m/x", "memory", "a"),
+            ("m/y", "memory", "b"),
+        ]
+    );
+    assert!(
+        merged.text.contains("t/b (time, b): 5.0 s"),
+        "{}",
+        merged.text
+    );
+}
+
+#[test]
+fn report_merge_shards_a_plain_run_has_no_shard_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let reports = Reports {
+        dir: dir.path(),
+        gated: true,
+    };
+    reports.complete();
+    reports.write(
+        Target::Time,
+        &[("t/a", "ok"), ("t/later", "planned")],
+        json!({ "benches": [{ "id": "t/a", "seconds": 1.0, "attempts": 1 }] }),
+    );
+    let merged = run(dir.path(), false);
+    assert_eq!(merged.exit, 0, "{}", merged.text);
+    assert!(merged.report.get("shards").is_none());
+    assert!(merged.report["benches"][0].get("shard").is_none());
+}
+
+#[test]
+fn report_merge_shards_all_sharded_is_an_error() {
+    let shards = Shards::new();
+    // Shard `a` also says `t/a` is another shard's.
+    write_report(
+        shards.a.path(),
+        true,
+        Target::Time,
+        &[("t/a", "sharded"), ("t/later", "sharded")],
+        json!({ "shard": "a" }),
+    );
+    let merged = shards.merge();
+    assert_eq!(merged.exit, 2);
+    assert!(
+        merged.report["errors"].as_array().unwrap().iter().any(|e| e
+            .as_str()
+            .unwrap()
+            .starts_with("t/a 在全部报告里都是 sharded")),
+        "{:?}",
+        merged.report["errors"]
+    );
+    assert!(statuses(&merged).contains(&("t/a".into(), "error".into())));
+}
+
+#[test]
+fn report_merge_shards_two_shards_ran_the_same_budget() {
+    let shards = Shards::new();
+    write_report(
+        shards.b.path(),
+        true,
+        Target::Time,
+        &[("t/a", "ok"), ("t/later", "planned")],
+        json!({ "shard": "b" }),
+    );
+    let merged = shards.merge();
+    assert_eq!(merged.exit, 2);
+    let errors = merged.report["errors"].to_string();
+    assert!(errors.contains("t/a 出现了多次"), "{errors}");
+}
+
+#[test]
+fn report_merge_shards_every_target_needs_a_report() {
+    for gone in [Target::Time, Target::Memory] {
+        let shards = Shards::new();
+        for dir in [shards.a.path(), shards.b.path()] {
+            std::fs::remove_file(dir.join(format!("report-{}.json", gone.name()))).unwrap();
+        }
+        let merged = shards.merge();
+        assert_eq!(merged.exit, 2, "{}", gone.name());
+        assert!(
+            merged
+                .text
+                .contains(&format!("缺少 report-{}.json", gone.name())),
+            "{}",
+            merged.text
+        );
+    }
+    // One report of the target is enough to have it: a shard that did not
+    // run is found by the budgets it owns.
+    let shards = Shards::new();
+    let merged = run_dirs(&[shards.a.path(), shards.p.path()]);
+    assert_eq!(merged.exit, 2);
+    let errors = merged.report["errors"].to_string();
+    assert!(!errors.contains("缺少 report-"), "{errors}");
+    assert!(
+        errors.contains("t/later 在全部报告里都是 sharded"),
+        "{errors}"
+    );
+    assert!(errors.contains("缺少分片 rest 的报告"), "{errors}");
+}
+
+#[test]
+fn report_merge_shards_the_plugin_list_comes_from_the_process_shard() {
+    let shards = Shards::new();
+    // Another shard's report with lists of its own is not the source.
+    write_report(
+        shards.a.path(),
+        true,
+        Target::Memory,
+        &[("m/a", "sharded")],
+        json!({ "shard": "a", "plugins": ["other"], "language_servers": ["lspx"] }),
+    );
+    let merged = shards.merge();
+    assert_eq!(merged.exit, 0, "{}", merged.text);
+    let ids: Vec<String> = statuses(&merged).into_iter().map(|(id, _)| id).collect();
+    assert!(ids.contains(&"plugin/terminal/activate".to_owned()));
+    assert!(!ids.contains(&"plugin/other/activate".to_owned()));
+    assert!(ids.contains(&"lsp/*/resident".to_owned()));
+}
+
+#[test]
+fn report_merge_shards_a_process_report_that_did_not_run_gives_no_lists() {
+    let shards = Shards::new();
+    write_report(
+        shards.p.path(),
+        true,
+        Target::Process,
+        &[
+            ("p/a", "sharded"),
+            ("plugin/special/activate", "sharded"),
+            ("plugin/*/activate", "sharded"),
+            ("lsp/*/resident", "sharded"),
+        ],
+        json!({ "shard": "p", "plugins": ["terminal"], "language_servers": [] }),
+    );
+    let merged = shards.merge();
+    // Every process budget is `sharded` everywhere: none was run.
+    assert_eq!(merged.exit, 2);
+    assert!(
+        !statuses(&merged)
+            .iter()
+            .any(|(id, _)| id == "plugin/terminal/activate")
+    );
+}
+
+#[test]
+fn report_merge_shards_reports_must_agree_on_mode_and_gating() {
+    let shards = Shards::new();
+    write_report(
+        shards.b.path(),
+        false,
+        Target::Memory,
+        &[("m/a", "planned")],
+        json!({ "shard": "b" }),
+    );
+    let merged = shards.merge();
+    assert_eq!(merged.exit, 2);
+    let errors = merged.report["errors"].to_string();
+    assert!(errors.contains("report-memory.json"), "{errors}");
+    // With several directories the message says which one.
+    assert!(
+        errors.contains(&shards.b.path().display().to_string()),
+        "{errors}"
+    );
+}
+
+#[test]
+fn report_merge_shards_subcommand_names_the_targets() {
+    use crate::merge::target_names;
+    assert_eq!(target_names("code-intel").unwrap(), ["time", "memory"]);
+    assert_eq!(target_names("process").unwrap(), ["process"]);
+    assert_eq!(target_names("git").unwrap(), ["time", "memory"]);
+    assert_eq!(target_names("rest").unwrap(), ["time", "memory"]);
+    let error = target_names("nope").unwrap_err();
+    assert!(error.contains("code-intel, process, git, rest"), "{error}");
 }

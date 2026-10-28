@@ -1,6 +1,6 @@
 # CI 与约束检查
 
-状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。macOS 的基准拆成单独的任务（[ADR 0036](../adr/0036.md)），见「任务」「实际验证」。打印 lint 与架构规则检查第 8 条由 [#195](https://github.com/SoloJiang/lectern-app/pull/195) 加入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 10 项，验证见 [logging 设计「实际验证」](logging.md#实际验证)）。判定任务 `Judge (physical Mac)` 和它的自托管 runner 由 [ADR 0052](../adr/0052.md) 加入，见「判定机器」；runner 还没有注册，任务现在跳过。
+状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。macOS 的基准拆成单独的任务（[ADR 0036](../adr/0036.md)），再按分片并行运行、由一个任务合并判定（[ADR 0053](../adr/0053.md)，[#279](https://github.com/SoloJiang/lectern-app/issues/279)），见「任务」「实际验证」。打印 lint 与架构规则检查第 8 条由 [#195](https://github.com/SoloJiang/lectern-app/pull/195) 加入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 10 项，验证见 [logging 设计「实际验证」](logging.md#实际验证)）。判定任务 `Judge (physical Mac)` 和它的自托管 runner 由 [ADR 0052](../adr/0052.md) 加入，见「判定机器」；runner 还没有注册，任务现在跳过。
 
 对应 issue [#4](https://github.com/SoloJiang/lectern-app/issues/4)。规则以脚本执行，违反时构建立即失败（[技术调研](tech-research.md)「约束检查」）。
 
@@ -11,7 +11,7 @@
 | `Checks (Linux, GPUI-free crates)` | `ubuntu-latest` | 格式、架构规则、cargo-deny、不依赖 GPUI 的 crate 的 clippy 与测试、基准的冒烟运行 | 不编译 GPUI，约 2 分钟出结果；agent 改领域逻辑时先看这个任务 |
 | `Build and test (macOS arm64)` | `macos-15`（Apple Silicon） | 整个工作区的 clippy、测试、doctest、构建 `lectern` | GPUI 与视图层只能在 macOS 编译 |
 | `Benchmarks shard (<分片>)` | `macos-15`（Apple Silicon），每个分片一个 | `just bench --shard <分片>`：只运行这个分片的预算，上传它的 `report-<target>.json`；不判定 | 与上一个任务并行；基准用 release 构建，与测试的 debug 构建不共用产物（[ADR 0036](../adr/0036.md)）；分片并行运行（[ADR 0053](../adr/0053.md)） |
-| `Benchmarks (macOS arm64)` | `ubuntu-latest` | 全部分片结束后（分片失败时也运行）下载它们的报告，`lectern-bench-report merge` 合并并判定性能预算，上传 `report.json`；测量的时间止于首帧的条目只记录 | 判定和注释集中在一个检查上，检查名不变；合并只读 JSON，不需要 macOS（[ADR 0053](../adr/0053.md)） |
+| `Benchmarks (macOS arm64)` | `ubuntu-latest` | 全部分片结束后（分片失败时也运行，运行被取消时不运行）下载它们的报告，`lectern-bench-report merge` 合并并判定性能预算，上传 `report.json`；测量的时间止于首帧的条目只记录 | 判定和注释集中在一个检查上，检查名不变；合并只读 JSON，不需要 macOS（[ADR 0053](../adr/0053.md)） |
 | `Judge (physical Mac)` | `[self-hosted, macOS, ARM64, lectern-judge]`（自托管的实体 M 系列 Mac） | `LECTERN_BENCH_JUDGE=1 just bench baseline/ app/cold_start`：判定 `app/cold_start`，记录 `app/cold_start_purged` 和 `baseline/*`，上传 `report.json` | 托管 runner 不给 `presentedTime`（[ADR 0052](../adr/0052.md)）；只在 push 到 `main` 和手动触发时运行，不自动运行 PR 的代码，并且要仓库变量 `LECTERN_JUDGE_RUNNER` 为 `true`，见「判定机器」 |
 
 `Checks (Linux, GPUI-free crates)`、`Build and test (macOS arm64)`、`Benchmarks (macOS arm64)` 是必需检查，分片任务不是：分片的结果由合并任务判定。`Judge (physical Mac)` 不在 PR 上运行，不是必需检查（「判定机器」）。步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`、`just bench`），本地和 CI 跑的是同一套命令。`just bench` 在 Linux 上是冒烟运行，在 macOS 上判定预算，之后上传 `target/lectern-bench/report.json`（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。
