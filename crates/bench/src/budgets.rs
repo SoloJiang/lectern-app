@@ -763,9 +763,10 @@ pub static BUDGETS: &[Budget] = &[
     // `refresh(Full)` does the same. Active again: macOS CI measured about
     // 3.7 s (base tree 1.84 s, stat 1.15 s, walk 645 ms); the cache-tree
     // skips the base tree and the stat pass runs on a few threads (ADR 0038).
+    // 3 s, not 2 s, while hosted runners vary (ADR 0054, #286).
     share(
         "git/changes_clean_100k",
-        &[median(Limit::TimeBelow(ms(2000)))],
+        &[median(Limit::TimeBelow(ms(3000)))],
         GIT,
         ACTIVE,
         Time,
@@ -1194,10 +1195,11 @@ pub static BUDGETS: &[Budget] = &[
     // ---- fs_watch (docs/design/fs_watch.md「性能」) ----
     // Single-thread extraction, about 1 MiB of each first-release language as
     // 8 KiB files (repository-shaped), by the core languages' one-walk
-    // extractors (ADR 0031).
+    // extractors (ADR 0031). 3 MB/s, not 4, while hosted runners vary
+    // (ADR 0054, #286).
     share(
         "code_intel/extract_throughput",
-        &[median(Limit::ThroughputAtLeast(4 * MB))],
+        &[median(Limit::ThroughputAtLeast(3 * MB))],
         CODE_INTEL,
         ACTIVE,
         Time,
