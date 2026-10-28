@@ -825,7 +825,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `kernel/service_get`、`kernel/service_for_each/{1,4,16}`、`kernel/service_current/{1,4,16}`、`kernel/emit`、`kernel/emit_nested` | 只记录 | [kernel](kernel.md#性能) | 第 1 步 |
 | `i18n/frame_strings` | 只记录（en 资源里每条消息各取一次、带变量的用样例参数格式化） | [i18n](i18n.md#性能) | 第 1 步 |
 | `log/disabled_call`、`log/filtered_call`、`log/enabled_call` | 中位数 ≤ 2 ns / ≤ 5 ns / ≤ 1 µs（调用线程上：低于全局级别的调用；全局级别放行、按 target 拒绝的调用；写出的 info 记录，4 个字段，每个样本是写盘线程清空缓冲后的 256 次调用） | [logging](logging.md#性能) | `logging` 第 1 步 |
-| `log/contended_call` | 10 000 次里超过 5 µs 的不超过 100 次，即 p99 ≤ 5 µs（`min(4, 可用核数 − 1)` 个线程同时写，至少 1 个，个数和调用线程慢路径的计数（遇到缓冲锁被占着、自旋后仍阻塞、唤醒写盘线程的次数）写在报告的备注里；线程只建一次、先各写一条不计时的记录，每轮在写盘线程清空缓冲后同时开始；每次调用单独计时，每轮约 400 条小于缓冲，不丢记录） | [logging](logging.md#性能) | `logging` 第 1 步 |
+| `log/contended_call` | 10 000 次里超过 5 µs 的不超过 300 次，即 p97 ≤ 5 µs（[ADR 0055](../adr/0055.md) 从 100 次放宽；`min(4, 可用核数 − 1)` 个线程同时写，至少 1 个，个数和调用线程慢路径的计数（遇到缓冲锁被占着、自旋后仍阻塞、唤醒写盘线程的次数）写在报告的备注里；线程只建一次、先各写一条不计时的记录，每轮在写盘线程清空缓冲后同时开始；每次调用单独计时，每轮约 400 条小于缓冲，不丢记录） | [logging](logging.md#性能) | `logging` 第 1 步 |
 | `log/third_party_limited`、`log/install_early` | 中位数 ≤ 30 ns / ≤ 20 µs（被限流的第三方记录；`install_early` 的全部工作，经 `testing::install_early_again`） | [logging](logging.md#性能) | `logging` 第 1 步 |
 | `log/idle_memory`、`log/idle_memory/verbose` | ≤ 512 KiB / 只记录（写出 1 万条记录、静止 5 s 后日志器的活跃字节，默认配置 / 详细日志开启；`Memory`） | [logging](logging.md#性能) | `logging` 第 1 步 |
 
