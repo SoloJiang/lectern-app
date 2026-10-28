@@ -1956,13 +1956,14 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // Four threads writing at once, each call timed on its own: exactly
-    // 10 000 calls in measure mode, so「at most 100 above 5 µs」is the p99
-    // ≤ 5 µs of the design. No record dropped.
+    // 10 000 calls in measure mode, so「at most 300 above 5 µs」is p97
+    // ≤ 5 µs (ADR 0055 relaxed it from 100 while hosted runners vary). No
+    // record dropped.
     share(
         "log/contended_call",
         &[Check {
             stat: Stat::CountAbove(us(5)),
-            limit: Limit::CountAtMost(100),
+            limit: Limit::CountAtMost(300),
         }],
         LOGGING,
         ACTIVE,

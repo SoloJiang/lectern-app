@@ -385,7 +385,7 @@ level     := off | error | warn | info | debug | trace
 | 低于全局级别的调用 | ≤ 2 ns | `log/disabled_call` |
 | 全局级别放行、按 target 拒绝 | ≤ 5 ns | `log/filtered_call` |
 | 写出的调用（info，4 个字段），调用线程上 | p50 ≤ 1 µs，不分配内存 | `log/enabled_call` |
-| 4 个线程同时写（核数不够时为可用核数减 1，至少 1 个，给写盘线程留一个核），调用线程上 | p99 ≤ 5 µs，不丢记录（总量小于缓冲） | `log/contended_call` |
+| 4 个线程同时写（核数不够时为可用核数减 1，至少 1 个，给写盘线程留一个核），调用线程上 | p97 ≤ 5 µs（10 000 次里超过 5 µs 的不超过 300 次，[ADR 0055](../adr/0055.md) 从 p99 放宽），不丢记录（总量小于缓冲） | `log/contended_call` |
 | 被限流的第三方记录，调用线程上 | ≤ 30 ns，不编码 | `log/third_party_limited` |
 | `install_early` | ≤ 20 µs | `log/install_early` |
 | 进入并离开 `within`（executor 每次 poll） | ≤ 3 ns，不复制 `Ctx` | 暂无基准，见「实际验证」 |
