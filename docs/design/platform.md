@@ -1139,7 +1139,7 @@ pub mod window {
     /// 与 `set_frame_autosave_name` 相同，另外处理这个名字第一次使用的情况：先 `setFrameUsingName:`，
     /// 返回 NO（这个名字下没有保存的 frame）时，把内容尺寸设为 `default_size`（pt，宽、高；
     /// 超过屏幕可见区域的一边缩到可见区域）并居中，再 `setFrameAutosaveName:`。
-    /// 检查顺序、错误和记录与 `set_frame_autosave_name` 相同；出错时窗口的 frame 不变。
+    /// 检查顺序、错误和记录与 `set_frame_autosave_name` 相同；检查不通过时窗口的 frame 不变，`NameInUse` 时窗口已经居中、只是没有设上名字。
     /// 只在主线程调用；其他平台只检查名字，返回 `Ok(FrameSource::Restored)`，不改窗口。
     pub fn set_frame_autosave_name_or_center(
         window: &impl raw_window_handle::HasWindowHandle,
@@ -1154,7 +1154,7 @@ pub mod window {
 - 名字的检查是纯函数（`valid_name`），在所有平台上编译和运行：非空、不超过 64 字节、只含 ASCII 字母、数字、`-`、`_`。名字是 user defaults 的键（`NSWindow Frame <名字>`），这个范围让它在任何平台上都是一个普通的键；`app` 用的只有 `welcome` 和 `project`。
 - 检查的顺序让每个错误都不依赖前一个：名字不经句柄就拒绝；句柄在任何线程上都能取（GPUI 只锁一把互斥锁）；主线程检查（`pthread_main_np`）放在碰 AppKit 之前，所以不在主线程时不读视图指针、不碰窗口。
 - macOS 的实现手写在 `window.rs` 里，不引入绑定 crate（与 `system`、`fs_events` 相同）：`sel_registerName`、`objc_msgSend`（libobjc，声明时不带签名，每次调用转成那个方法的签名；`BOOL` 在两个 Apple 架构上都是一个字节，按 `!= 0` 判断）和 CoreFoundation 的 `CFStringCreateWithBytes`、`CFRelease`。步骤：`[view window]`，为 nil 时 `NoWindow`；名字按 UTF-8 建 CFString（免费桥接为 `NSString`）；`[window setFrameAutosaveName:]`，窗口复制字符串，调用后立即 `CFRelease`；返回 NO 为 `NameInUse`。从 `[view window]` 得到的窗口按 Get 规则不释放。
-- `set_frame_autosave_name_or_center` 的步骤（[workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求)的 D：「项目」窗口第一次使用时 1180 × 760 pt 居中）：检查与 `set_frame_autosave_name` 相同，之后 `[window setFrameUsingName:]`。它返回 YES 表示读到并套用了这个名字下保存的 frame，结果为 `Restored`；不靠比较设名前后的 `frame` 来判断（workspace 设计「与设计的差异」第 3 步原来的设想），保存的 frame 恰好等于当前 frame 时比较会判错。返回 NO 时：`[[window screen] visibleFrame]`（窗口不在任何屏幕上时用 `[NSScreen mainScreen]`，两者都为 nil 时不缩）把 `default_size` 每一边限制在可见区域以内，`[window setContentSize:]`、`[window center]`，结果为 `Centered`。最后 `[window setFrameAutosaveName:]`，与 `set_frame_autosave_name` 相同。设名放在最后，所以 AppKit 在设名时无论是否立即保存当前 frame，保存下来的都是居中后的 frame，不是原来的 Welcome 尺寸。`NSSize`、`NSRect` 是 `f64` 的结构体，两个 Apple 架构上的 `objc_msgSend` 都经寄存器传递和返回它们：arm64 上直接用 `objc_msgSend`；x86_64 上 32 字节的 `NSRect` 返回值要经 `objc_msgSend_stret`，实现按 `target_arch` 分开写。
+- `set_frame_autosave_name_or_center` 的步骤（[workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求)的 D：「项目」窗口第一次使用时 1180 × 760 pt 居中）：检查与 `set_frame_autosave_name` 相同，之后 `[window setFrameUsingName:]`。它返回 YES 表示读到并套用了这个名字下保存的 frame，结果为 `Restored`；不靠比较设名前后的 `frame` 来判断（workspace 设计「与设计的差异」第 3 步原来的设想），保存的 frame 恰好等于当前 frame 时比较会判错。返回 NO 时：`[[window screen] visibleFrame]`（窗口不在任何屏幕上时用 `[NSScreen mainScreen]`，两者都为 nil 时不缩）把 `default_size` 每一边限制在可见区域以内，`[window setContentSize:]`、`[window center]`，结果为 `Centered`。最后 `[window setFrameAutosaveName:]`，与 `set_frame_autosave_name` 相同。设名放在最后，所以 AppKit 在设名时无论是否立即保存当前 frame，保存下来的都是居中后的 frame，不是原来的 Welcome 尺寸。`NSSize`、`NSRect` 是 `f64` 的结构体：arm64 上参数和返回值都经寄存器，直接用 `objc_msgSend`；x86_64 上 16 字节的 `NSSize` 参数也用 `objc_msgSend`，x86_64 上 32 字节的 `NSRect` 返回值要经 `objc_msgSend_stret`，实现按 `target_arch` 分开写。
 - 首帧之前做的事不变（ADR 0017）：`app` 在 Dock 重开、带 `"project"` 名开窗口时在首帧之前调用它，`setFrameUsingName:` 与 `setFrameAutosaveName:` 读的是同一份内存里的 user defaults；其余调用在打开项目时，在首帧之后。
 - 其他平台：名字检查之后直接返回 `Ok(())`（`set_frame_autosave_name_or_center` 为 `Ok(FrameSource::Restored)`），不碰句柄，不记录。`app` 只在 macOS 上运行，这个分支只为 Linux CI 编译。
 - 不新增依赖 crate：`raw-window-handle` 0.6 已在 Cargo.lock（「依赖」），`pthread_main_np` 来自已有的 `libc`。
