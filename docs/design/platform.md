@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；drawable 没有 `presentedTime` 时首帧取显示回调运行的时刻、结果注明来源（`PresentedAt`、`TimeSource`，[ADR 0052](../adr/0052.md)）已实现；`frame::record` 及其类型（B2，见「逐帧记录」）已实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现；没有保存过 frame 时设默认尺寸并居中的 `window::set_frame_autosave_name_or_center`（同一节）已设计，尚未实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；drawable 没有 `presentedTime` 时首帧取显示回调运行的时刻、结果注明来源（`PresentedAt`、`TimeSource`，[ADR 0052](../adr/0052.md)）已实现；`frame::record` 及其类型（B2，见「逐帧记录」）已实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -1126,6 +1126,26 @@ pub mod window {
     /// 检查按这个顺序：名字（`InvalidName`）、句柄（`NoWindow`）、线程（`NotMainThread`）、
     /// AppKit（视图没有窗口为 `NoWindow`，返回 NO 为 `NameInUse`）。macOS 上每个错误都以 warn 记一条、只带种类（「日志与诊断」），调用方不再记。
     pub fn set_frame_autosave_name(window: &impl raw_window_handle::HasWindowHandle, name: &str) -> Result<(), WindowError>;
+
+    /// `set_frame_autosave_name_or_center` 用的是哪个 frame。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum FrameSource {
+        /// 这个名字下保存过 frame，已经套用。
+        Restored,
+        /// 没有保存过：窗口改为默认的内容尺寸，在所在屏幕上居中。
+        Centered,
+    }
+
+    /// 与 `set_frame_autosave_name` 相同，另外处理这个名字第一次使用的情况：先 `setFrameUsingName:`，
+    /// 返回 NO（这个名字下没有保存的 frame）时，把内容尺寸设为 `default_size`（pt，宽、高；
+    /// 超过屏幕可见区域的一边缩到可见区域）并居中，再 `setFrameAutosaveName:`。
+    /// 检查顺序、错误和记录与 `set_frame_autosave_name` 相同；检查不通过时窗口的 frame 不变，`NameInUse` 时窗口已经居中、只是没有设上名字。
+    /// 只在主线程调用；其他平台只检查名字，返回 `Ok(FrameSource::Restored)`，不改窗口。
+    pub fn set_frame_autosave_name_or_center(
+        window: &impl raw_window_handle::HasWindowHandle,
+        name: &str,
+        default_size: (f64, f64),
+    ) -> Result<FrameSource, WindowError>;
 }
 ```
 
@@ -1134,13 +1154,15 @@ pub mod window {
 - 名字的检查是纯函数（`valid_name`），在所有平台上编译和运行：非空、不超过 64 字节、只含 ASCII 字母、数字、`-`、`_`。名字是 user defaults 的键（`NSWindow Frame <名字>`），这个范围让它在任何平台上都是一个普通的键；`app` 用的只有 `welcome` 和 `project`。
 - 检查的顺序让每个错误都不依赖前一个：名字不经句柄就拒绝；句柄在任何线程上都能取（GPUI 只锁一把互斥锁）；主线程检查（`pthread_main_np`）放在碰 AppKit 之前，所以不在主线程时不读视图指针、不碰窗口。
 - macOS 的实现手写在 `window.rs` 里，不引入绑定 crate（与 `system`、`fs_events` 相同）：`sel_registerName`、`objc_msgSend`（libobjc，声明时不带签名，每次调用转成那个方法的签名；`BOOL` 在两个 Apple 架构上都是一个字节，按 `!= 0` 判断）和 CoreFoundation 的 `CFStringCreateWithBytes`、`CFRelease`。步骤：`[view window]`，为 nil 时 `NoWindow`；名字按 UTF-8 建 CFString（免费桥接为 `NSString`）；`[window setFrameAutosaveName:]`，窗口复制字符串，调用后立即 `CFRelease`；返回 NO 为 `NameInUse`。从 `[view window]` 得到的窗口按 Get 规则不释放。
-- 其他平台：名字检查之后直接返回 `Ok(())`，不碰句柄，不记录。`app` 只在 macOS 上运行，这个分支只为 Linux CI 编译。
+- `set_frame_autosave_name_or_center` 的步骤（[workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求)的 D：「项目」窗口第一次使用时 1180 × 760 pt 居中）：检查与 `set_frame_autosave_name` 相同，之后 `[window setFrameUsingName:]`。它返回 YES 表示读到并套用了这个名字下保存的 frame，结果为 `Restored`；不靠比较设名前后的 `frame` 来判断（workspace 设计「与设计的差异」第 3 步原来的设想），保存的 frame 恰好等于当前 frame 时比较会判错。返回 NO 时：`[[window screen] visibleFrame]`（窗口不在任何屏幕上时用 `[NSScreen mainScreen]`，两者都为 nil 时不缩）把 `default_size` 每一边限制在可见区域以内，`[window setContentSize:]`、`[window center]`，结果为 `Centered`。最后 `[window setFrameAutosaveName:]`，与 `set_frame_autosave_name` 相同。设名放在最后，所以 AppKit 在设名时无论是否立即保存当前 frame，保存下来的都是居中后的 frame，不是原来的 Welcome 尺寸。`NSSize`、`NSRect` 是 `f64` 的结构体：arm64 上参数和返回值都经寄存器，直接用 `objc_msgSend`；x86_64 上 16 字节的 `NSSize` 参数也用 `objc_msgSend`，x86_64 上 32 字节的 `NSRect` 返回值要经 `objc_msgSend_stret`，实现按 `target_arch` 分开写。
+- 首帧之前做的事不变（ADR 0017）：`app` 在 Dock 重开、带 `"project"` 名开窗口时在首帧之前调用它，`setFrameUsingName:` 与 `setFrameAutosaveName:` 读的是同一份内存里的 user defaults；其余调用在打开项目时，在首帧之后。
+- 其他平台：名字检查之后直接返回 `Ok(())`（`set_frame_autosave_name_or_center` 为 `Ok(FrameSource::Restored)`），不碰句柄，不记录。`app` 只在 macOS 上运行，这个分支只为 Linux CI 编译。
 - 不新增依赖 crate：`raw-window-handle` 0.6 已在 Cargo.lock（「依赖」），`pthread_main_np` 来自已有的 `libc`。
 
 ### 已知限制
 
 - 同名窗口：`setFrameAutosaveName:` 返回 NO 表示没有设上名字（AppKit 把它留给名字已被另一个窗口使用的情况）。本机实测（macOS 27.0.1）两个未显示过的 `NSWindow` 设同一个名字时都返回 YES，第二个窗口也拿到这个名字；`NameInUse` 只在 AppKit 确实返回 NO 时出现，本 crate 不自己查重。`app` 只有一个窗口，`welcome` 与 `project` 不会同时在两个窗口上，不受影响。
-- 第一次用 `"project"`、还没有保存过 frame 时 AppKit 不改 frame；`app` 先把窗口设为 1180 × 760 pt 居中（workspace 设计的 D），本 crate 不做。
+- 第一次用 `"project"`、还没有保存过 frame 时 `setFrameAutosaveName:` 不改 frame；`app` 为此调用 `set_frame_autosave_name_or_center`（workspace 设计的 D）。可见区域比 1180 × 760 pt 小的屏幕上，窗口缩到可见区域（`setContentSize:` 设的是内容尺寸，标题栏透明、与内容重叠，所以内容尺寸就是窗口尺寸）；不按屏幕比例另选尺寸。
 - 本函数不读 `frameAutosaveName`、不调 `saveFrameUsingName:`；保存的时机（移动、缩放、关闭）由 AppKit 决定。
 
 ### 测试
@@ -1149,8 +1171,9 @@ pub mod window {
 
 - 所有平台：`frame_autosave_name_accepts_plain_names`（`welcome`、`project`、单字符、含 `-` 与 `_`、64 字节）；`frame_autosave_name_rejects_anything_else`（空、空格、`/`、`.`、`:`、NUL、换行、非 ASCII、65 字节）；`set_frame_autosave_name_checks_the_name_before_the_window`（句柄被查询即 panic 的窗口，名字无效时为 `InvalidName`）；`window_error_kinds_are_distinct_static_names`。
 - 只在 macOS 上：`set_frame_autosave_name_without_a_handle_is_no_window`（`window_handle` 返回 `NotSupported`，与 GPUI 测试平台相同）；`set_frame_autosave_name_with_a_foreign_handle_is_no_window`（Xlib 句柄）；`set_frame_autosave_name_off_the_main_thread_is_an_error_and_logs_the_kind_only`（悬空的 AppKit 句柄，不在主线程时不读它；记录见「日志与诊断」的金丝雀测试）；`every_failure_is_logged_with_its_kind`（两次失败两条记录，名字不出现在记录里）。
-- 其他平台：`set_frame_autosave_name_does_nothing_elsewhere`（句柄被查询即 panic 的窗口也返回 `Ok(())`）。
-- 真实窗口的检查是 `crates/platform/examples/frame_autosave.rs`，手工运行 `cargo run -p lectern-platform --example frame_autosave`（需要窗口服务器会话，CI 不运行；`cargo clippy --all-targets` 编译它）：在主线程上建两个不显示的 `NSWindow`，给第一个设名后 `frameAutosaveName` 读回相同的名字；第二个设同一个名字时结果是 `Ok` 或 `NameInUse`（「已知限制」）；换名成功；从另一个线程调用为 `NotMainThread` 且名字不变。全部断言成立时退出码为 0。
+- 只在 macOS 上，`set_frame_autosave_name_or_center`：`or_center_checks_the_name_before_the_window`、`or_center_without_a_handle_is_no_window`、`or_center_off_the_main_thread_is_an_error_and_logs_the_kind_only`（与上面三个相同的夹具，结果相同、记录相同）；`clamp_to_visible_keeps_a_size_that_fits`、`clamp_to_visible_shrinks_each_side_that_does_not`（限制尺寸的纯函数，所有平台）。
+- 其他平台：`set_frame_autosave_name_does_nothing_elsewhere`（句柄被查询即 panic 的窗口也返回 `Ok(())`）；`or_center_does_nothing_elsewhere`（同样的窗口返回 `Ok(FrameSource::Restored)`）。
+- 真实窗口的检查是 `crates/platform/examples/frame_autosave.rs`，手工运行 `cargo run -p lectern-platform --example frame_autosave`（需要窗口服务器会话，CI 不运行；`cargo clippy --all-targets` 编译它）：在主线程上建两个不显示的 `NSWindow`，给第一个设名后 `frameAutosaveName` 读回相同的名字；第二个设同一个名字时结果是 `Ok` 或 `NameInUse`（「已知限制」）；换名成功；从另一个线程调用为 `NotMainThread` 且名字不变。再建一个窗口，用每次运行都不同的名字（带进程号与时间）调 `set_frame_autosave_name_or_center`：结果为 `Centered`，内容尺寸等于给定尺寸（或可见区域），窗口的中心在屏幕可见区域的中心附近（`center` 把窗口放在略高于正中的位置，横向误差 1 pt 以内）；把窗口移开后对另一个窗口用同一个名字再调，结果为 `Restored`，frame 等于移开后的 frame。示例退出前删掉这个名字下保存的 frame（`removeFrameUsingName:`），不在偏好设置里留下键。全部断言成立时退出码为 0。
 
 ## 系统外观
 
@@ -1669,6 +1692,13 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
 - `git diff origin/main -- Cargo.lock` 只在 `lectern-platform` 的依赖里多了 `raw-window-handle`，没有新的外部 crate；`rg -n 'setFrameAutosaveName|objc_msgSend|pthread_main_np' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
 - `cargo run -p lectern-platform --example frame_autosave` 在 macOS 上退出码为 0。
 - 本文的状态行、「实际验证」写明已实现。
+
+`set_frame_autosave_name_or_center`（「项目」窗口第一次使用时 1180 × 760 pt 居中，workspace 的前置条件 D）一个实现 PR，写 `Refs #215`，同一个 PR 里 `app` 改为调用它（[app 设计「已知限制」](app.md#已知限制)的对应一条随之删除）：
+
+- `just test -p lectern-platform`、`just test -p lectern-app` 在 macOS CI 上通过，其中有「测试」里的 `or_center_*`、`clamp_to_visible_*`；Linux CI 上有 `or_center_does_nothing_elsewhere` 和 `clamp_to_visible_*`。
+- `git diff origin/main -- Cargo.lock` 为空；`rg -n 'setFrameUsingName|setContentSize|objc_msgSend' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
+- `cargo run -p lectern-platform --example frame_autosave` 在 macOS 上退出码为 0（会建不显示的窗口，在用户的 Mac 上运行前先征得同意）。
+- 真实窗口：临时 HOME 下第一次打开项目，窗口变为 1180 × 760 pt、在屏幕上居中；移动窗口后回到 Welcome 再打开项目，窗口回到移动后的位置。用户同意后在本机检查，否则写进「实际验证」的未验证项。
 
 系统外观（ui 设计的前置条件 A）一个实现 PR，写 `Refs #214`，在 ui 第 1 步之前合并：
 

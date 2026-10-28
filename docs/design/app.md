@@ -659,7 +659,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 - 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。屏幕锁定的图形会话（`CGSessionCopyCurrentDictionary` 的 `CGSSessionScreenIsLocked` 为 1）同样：首帧画出，之后不再有帧请求，屏障不放开；启动测试在锁屏期间全部 30 s 后判为失败（`ui` 接入时实测；接入前一天的本机调试构建同样如此），解锁后再跑。
 - 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。系统发起的退出也不问离开守卫。
 - `window.json` 去抖 500 ms：最后一次变化之后 500 ms 内退出，这次变化不会写出，下次启动回到上一次写出的状态（多半是上一个项目）。系统发起的退出同样。
-- 第一次使用 `"project"`、还没有保存过 frame 时，设计要求先把窗口设为 1180 × 760 pt 居中（workspace 设计「对其他 crate 的要求」D）。GPUI 的窗口没有移动接口，`resize` 只改内容尺寸并保持左上角，在 Welcome 居中的窗口上放大到 1180 × 760 会越出屏幕；居中要调 AppKit，属于 `platform`（架构规则 6）。所以现在窗口沿用 Welcome 的大小，用户拖一次，AppKit 就保存在 `"project"` 下。`platform` 补上居中并设尺寸的接口后，`app` 在改名为 `"project"` 之前调用（「与设计的差异」）。
+- 第一次使用 `"project"`、还没有保存过 frame 时，设计要求先把窗口设为 1180 × 760 pt 居中（workspace 设计「对其他 crate 的要求」D）。GPUI 的窗口没有移动接口，`resize` 只改内容尺寸并保持左上角，在 Welcome 居中的窗口上放大到 1180 × 760 会越出屏幕；居中要调 AppKit，属于 `platform`（架构规则 6）。所以现在窗口沿用 Welcome 的大小，用户拖一次，AppKit 就保存在 `"project"` 下。已设计 `platform::window::set_frame_autosave_name_or_center`（[platform 设计「窗口 frame 的 autosave」](platform.md#窗口-frame-的-autosave)）：`app` 设 `"project"` 时（`window_state` 的改名，以及 Dock 重开时 `window::reopen` 经 `open_named` 开的窗口）改为调用它，`default_size` 为 `(1180.0, 760.0)`；`open_named` 按名字选：`"project"` 用它，`"welcome"` 仍用 `set_frame_autosave_name`。这一条随那个实现 PR 删除（「与设计的差异」）。
 - 屏障比首帧的实际显示最多晚约 2 个刷新周期：精确的显示时刻只在测量构建里有（ADR 0048，「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
 - `project_home` 的视图合并之前，装配了的 `project-home` 在项目打开（或从 `window.json` 恢复）时会取概览与用量的关注、在后台合成快照，没有视图读它们。没有项目打开时它什么也不做。随 project_home 第 2 步消失。
 
