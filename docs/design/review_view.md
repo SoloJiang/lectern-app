@@ -622,7 +622,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **D. `bench`**：预算表加 `review_view/items_5000`、`review_view/scroll_5000`；`app/open_diff` 的夹具与场景按「性能」。
 - **E. `code_intel`**（随 review 设计的前置条件 F，不阻塞）：两条 `BriefRules` 规则的 `rule` 名与 `args` 的参数名定下后，本 crate 的静态表加两行、`review.ftl` 加两个键。
 - **F. `ui`**（#214 的设计加两个字段，随它的第 1 步或之后一个小 PR）：`Palette` 加 `diff_added_inline_background`、`diff_removed_inline_background`：词级差异的底色，`system(Green)` / `system(Red)` 按浅色 28%、深色 36% 的透明度叠在 `control_background` 上（比 `diff_*_background` 深一档），内置表与系统色两条路径都给出，`palette_builtin_*` 里一并检查对比度。本 crate 第 2 步之前合并。已实现：[#238](https://github.com/SoloJiang/lectern-app/pull/238)。
-- **G. `app`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：应用菜单加一个 View 菜单，放统一 / 双栏（`review::ToggleDiffMode`）和刷新（`review::Refresh`）两项，没有审阅屏幕时置灰；菜单项的文字用 `review-mode-*`、`review-refresh`。
+- **G. `app`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：应用菜单加一个 View 菜单，放统一 / 双栏（`review::ToggleDiffMode`）和刷新（`review::Refresh`）两项，没有审阅屏幕时置灰。实现在 `app` 的 View 菜单 PR（分支 `impl/app-view-menu`，与本屏幕的重画一起合并）：菜单项的文字用 `app` 自己的键（`app-menu-toggle-diff-mode`、`app-menu-refresh`，[app 设计「界面」](app.md#界面)的菜单表），刷新另有 ⌘R；菜单只设置一次，统一 / 双栏不显示勾选状态。
 - **H. `review`**（同上，不阻塞）：`ReviewSnapshot` 带涉及的子项目数（标题区「in 2 packages」）、每个无法对齐的改动块的编辑时间（Drifted 提示）。没有时标题区只写文件数，Drifted 提示用 `review-drift-note-untimed`。
 - **I. `ui`**（为 #283 新增）：撑满宽度的分段控件（检查器页签）、胶囊形的浮条容器、开关（#21 之后）、轮次折叠行 / 文件折叠行用的展开箭头；名字和接口见 [ui 设计「第二批控件」](ui.md#第二批控件283)：`Segmented::fill`、`Capsule` 加 `Button::pill`、`Switch`、`Disclosure`。
 
