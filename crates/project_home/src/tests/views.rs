@@ -745,7 +745,8 @@ fn skeleton_appears_after_100ms_only(cx: &mut TestAppContext) {
     frame(vcx);
     let tree3 = tree(vcx, main_part);
     assert!(!tree3.contains("loading"), "{tree3}");
-    assert!(tree3.contains("outside.facts Group label=[project-home-outside-files] files=0"));
+    // Nothing changed outside the sessions: no Outside card.
+    assert!(!tree3.contains("project-home.outside"), "{tree3}");
 }
 
 #[gpui::test]

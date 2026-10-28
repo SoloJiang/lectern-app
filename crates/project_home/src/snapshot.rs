@@ -199,7 +199,8 @@ pub struct Signals {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OutsideRow {
-    /// A folder project has no base: no row.
+    /// A folder project has no base, or nothing changed outside the
+    /// sessions: no row.
     Hidden,
     Pending,
     /// `names` are the first 3 changed paths (the card's second line);

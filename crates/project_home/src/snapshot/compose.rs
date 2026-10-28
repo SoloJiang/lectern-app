@@ -373,6 +373,8 @@ fn main_model(
     } else {
         match inputs.overview.map(|o| o.outside) {
             None | Some(OutsideCount::Pending) => OutsideRow::Pending,
+            // Nothing changed outside the sessions: nothing to review.
+            Some(OutsideCount::Files(0)) => OutsideRow::Hidden,
             Some(OutsideCount::Files(count)) => OutsideRow::Files {
                 count,
                 names: Arc::from(Vec::new()),
