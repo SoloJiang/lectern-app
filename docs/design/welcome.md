@@ -279,7 +279,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 ## 界面
 
-- 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)画板 01，常驻层；没有侧栏、工具栏、检查器、浮条（`ScreenLayout { sidebar: Hidden, back_button: false, reading_column: false, inspector: false, floating_bar: false }`）。窗口 820 × 520 pt（[app 设计「界面」](app.md#界面)）。布局以设计画布的 Welcome 画板为准（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）：窗口分左右两栏，宽度按 360 : 320 的比例伸缩。左栏的内容水平居中，从上到下：应用图标（圆角方块，深色底，画布里是一个讲台图形；图标资源见「对其他 crate 的要求」E，没有资源时不画这一块）、应用名（Large Title 层级，粗体）、一行次要文字的版本说明、两张操作卡片（Open Folder…、Clone Repository…，宽度撑满、最宽 300pt；Clone 卡片见「未决问题」2）、最下面一行语言选择（`welcome-language` 的小标签加一个弹出菜单）。右栏铺在侧栏材质上（不是页面底色），左边一条 0.5pt 分隔线，里面是两组平铺的行：没有卡片、没有行间分隔线，每组上面一行小标题（Subheadline 层级，半粗，次要色）；右栏整体可滚动。
+- 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)画板 01，常驻层；没有侧栏、工具栏、检查器、浮条（`ScreenLayout { sidebar: Hidden, back_button: false, reading_column: false, inspector: false, floating_bar: false }`）。窗口 820 × 520 pt（[app 设计「界面」](app.md#界面)）。布局以设计画布的 Welcome 画板为准（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）：窗口分左右两栏，宽度按 360 : 320 的比例伸缩。左栏的内容水平居中，从上到下：应用图标（圆角方块，深色底，画布里是一个讲台图形；图标资源见「对其他 crate 的要求」E，没有资源时不画这一块）、应用名（Large Title 层级，粗体）、一行次要文字的版本说明、两张操作卡片（Open Folder…、Clone Repository…，宽度撑满、最宽 300pt；Clone 卡片见「未决问题」2）、最下面一行语言选择（`welcome-language` 的小标签加一个弹出菜单）。右栏铺在侧栏材质上（不是页面底色；不透明，`under_page_background`，见 [ui 设计「第二批控件」](ui.md#第二批控件283)），左边一条 0.5pt 分隔线，里面是两组平铺的行：没有卡片、没有行间分隔线，每组上面一行小标题（Subheadline 层级，半粗，次要色）；右栏整体可滚动。
 - `ui` 的控件与动效原语（名字以 `ui` 设计「控件」为准，PR [#218](https://github.com/SoloJiang/lectern-app/pull/218)）：`Text`（全部文字）、操作卡片（Open Folder、Clone：填充 `fill` 色、圆角 10pt、左边 20pt 的强调色图标 `Icon::Folder` / `Icon::Clone`、中间标题加一行次要说明、右边快捷键提示；`ui` 设计里还没有，见「对其他 crate 的要求」D）、弹出菜单（语言；同上）、侧栏列表的行（右栏的行：圆角 8pt，两侧内缩；悬停是淡填充，选中是强调色填充；`ui` 的 `Row` 现在是分组列表里的行，平铺样式见 D）、`AgentDot`（发现项的 agent 圆点）、`Skeleton`（加载态）；颜色经 `colors(cx)`，文字层级经 `TextRole`（见[交互规范「视觉」](interaction.md#视觉)的文字样式）。本 crate 不写任何颜色值、字体名和动画时长（验收用 `rg` 检查）。
 - 每一行的内容：
   - 最近项目：第一行 `name`（Headline 层级，半粗）；第二行次要文字（Callout 层级），各项用 ` · ` 连接，按这个顺序，不成立的项省略：`welcome-row-folder`（`key` 是文件夹而不是 git 仓库时）、`welcome-row-sessions`（`sessions > 0`）、`welcome-row-running`（`running > 0`）、所在目录（`path` 去掉最后一段，即项目的上一级；主目录写成 `~`，`Text::verbatim`，如 `~/work`）；`missing` 时第二行换成 `welcome-recent-missing`。画布在计数的位置画的是「3 to review」；待审数是「未决问题」1，没有决定之前这个位置显示会话数。会话数和运行中数来自与发现列表同一次 `discover::build`（按 `key` 匹配，见「发现的文件夹」）；`welcome-discovery` 没有激活时为 0，不显示。行上没有移除按钮：移除用 ⌫ 和行的右键菜单（`welcome-recent-remove`，菜单需要 `ui` 提供，见 D；在那之前只有 ⌫）。
@@ -323,8 +323,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   | `welcome.root` | `Group` | `recent`（`loading` / `ready`）、`discovered`（`unavailable` / `pending` / `ready`）、`opening`（`true` 时才有） |
   | `welcome.title` | `Text` | `Label::key = welcome-title` |
   | `welcome.open-folder` | `Button` | `Label::key = welcome-open-folder`（操作卡片） |
-  | `welcome.language` | `Button` | `Label::key = welcome-language`；`attrs`：`value`（当前选择：`system` / `en` / `zh-CN`）。弹出菜单的控件 |
-  | `welcome.language.item[system]`、`[en]`、`[zh-CN]` | `MenuItem` | `State::selected`；`Label::key` 是对应的 `common-language-*`；菜单关闭时不出现 |
+  | `welcome.language` | `Button` | `Label::key = welcome-language`；`attrs`：`value`（当前选择：`system` / `en` / `zh-CN`）。`ui::PopUpButton`；菜单是系统菜单，菜单项不是探针节点，探针经 `welcome::SelectLanguage` 切换、读 `value` 确认 |
   | `welcome.notice` | `Text` | `Label::key` 是 `welcome-open-failed-*` 或 `welcome-language-not-saved`；没有提示时不出现 |
   | `welcome.recent` | `List` | — |
   | `welcome.recent.empty` | `Text` | `Label::key = welcome-recent-empty`；列表非空时不出现 |
@@ -425,7 +424,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
   在 [platform 设计](platform.md)「系统首选语言」一节下补上这三个函数。与 [i18n 设计「数据流与线程」](i18n.md#数据流与线程)的差异：那里写 `language_override() -> Option<Locale>`；`platform` 在基础设施层、不依赖 `i18n`，所以返回 BCP 47 标签，调用方用 `Locale::negotiate([tag])` 转换。前置条件 B 的 PR 同时把 i18n 设计里的那一行改成了标签。
 - **C. `app`**（已实现，见 [app 设计「welcome 的装配」](app.md#welcome-的装配)）：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
-- **D. `ui`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：现在的 `ui` 没有下面几项，右栏和左栏按画布重画之前要有：操作卡片；弹出菜单；右键菜单（只用于「从最近的项目移除」，没有它时只有 ⌫）；侧栏列表的行（平铺、圆角 8pt、选中用强调色填充，文字层级由行内的元素给出）。名字和接口由 `ui` 设计定，`ui` 设计另有一个 PR 在补。探针角色：弹出菜单按 `Button` 加打开后的 `Menu` / `MenuItem` 写，以 `ui` 的实现为准。
+- **D. `ui`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：现在的 `ui` 没有下面几项，右栏和左栏按画布重画之前要有：操作卡片；弹出菜单；右键菜单（只用于「从最近的项目移除」，没有它时只有 ⌫）；侧栏列表的行（平铺、圆角 8pt、选中用强调色填充，文字层级由行内的元素给出）。名字和接口见 [ui 设计「第二批控件」](ui.md#第二批控件283)：`ActionCard`、`PopUpButton`、`Row` / `SidebarRow` 的 `context_menu`、`SidebarRow`（`accent()`）。
 - **E. `app`**：应用图标的资源（左栏顶部）和应用版本（主.次，传给 `WelcomeDeps`）。现在 bundle 里没有图标，`WelcomeDeps` 也没有版本字段；没有时视图不画图标、副标题不带版本，其余布局不变。
 
 ## 未决问题

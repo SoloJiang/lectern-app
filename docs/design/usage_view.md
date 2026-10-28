@@ -381,10 +381,10 @@ kernel 线程：usage-view 的 started ─▶ own_with ─▶ executor [Backgrou
   3. 每日 token（标题 `usage-daily`）：柱状图，高 120pt，每天一根柱、按系列从下往上堆叠，柱间 2pt；左上角是 `count_compact(max)`，下方只标第一天和今天（`usage-day`）。悬停一根柱时，图上方的一行次要文字换成那一天的明细（`usage-day-detail` 加每个系列的 `usage-day-agent`），不弹浮层；离开时恢复为窗口合计。柱和色块是 `div`，颜色来自 `Palette`。
   4. 合计：`usage-total`（`count_compact`），下面一行四类 token 与 `usage-cache-hit`。
   5. 当前项目（`Current` / `Drilled`）：分支组（标题 `usage-branches`，`mr_mode` 时 `usage-mrs`；普通文件夹没有这一组），每行：名字、右侧 token 与占比、次要文字（worktree、审阅部分、无法归属部分；MR 行是编号与状态）；`Unassigned` 行的名字是 `usage-unassigned-branches`（`mr_mode` 时 `usage-unassigned-mrs`），排在最后。按模型组（`usage-models`）：`AgentDot`（Claude Code、Codex；其他 agent 不画圆点）、模型 id、token 与占比。
-  6. 所有项目（`All`）：项目组（`usage-projects`），每行：项目名、右侧 token 与占比；次要文字是状态（`usage-path-missing`、临时项目的原因、`usage-confirmed-new`、`usage-pending`）；行尾按钮按 `RowAction`：「合并到…」（弹出 `Menu`，列出候选，「对其他 crate 的要求」C），「是同一个项目」（`candidate` 有值时直接确认，没有时弹出同样的候选菜单）与「是新项目」，「撤销」。右键这一行弹出同样内容的菜单。「其他」行在最后（`usage-other`，次要文字 `usage-other-detail`），不可点。点其他项目行进入 `Drilled`。已合并组（`usage-merged`，没有时不画）：每行项目名、`usage-merged-into` 与「撤销」。
+  6. 所有项目（`All`）：项目组（`usage-projects`），每行：项目名、右侧 token 与占比；次要文字是状态（`usage-path-missing`、临时项目的原因、`usage-confirmed-new`、`usage-pending`）；行尾按钮按 `RowAction`：「合并到…」（弹出菜单，列出候选，「对其他 crate 的要求」C），「是同一个项目」（`candidate` 有值时直接确认，没有时弹出同样的候选菜单）与「是新项目」，「撤销」。右键这一行弹出同样内容的菜单。「其他」行在最后（`usage-other`，次要文字 `usage-other-detail`），不可点。点其他项目行进入 `Drilled`。已合并组（`usage-merged`，没有时不画）：每行项目名、`usage-merged-into` 与「撤销」。
   7. 页脚：`Inherited` 时一行次要文字 `usage-inherited`。
 - 确认：「合并」与「是同一个项目」先弹系统确认框（`Window::prompt`，`PromptLevel::Info`，文字 `usage-merge-confirm` / `usage-same-confirm` 与对应的 `-detail`，按钮 `usage-merge` / `usage-same-project` 与 `common-cancel`），选第一个按钮才发命令。「是新项目」和「撤销」可以撤回，不弹确认。
-- 用到的 `ui` 控件与原语：`Segmented`（`SEGMENT`）、`GroupedList`、`Row`（悬停 `HOVER_IN` / `HOVER_OUT`）、`Button`、`AgentDot`、`Progress`、`Skeleton`、`loading_phase`、`Menu`；文字只用 `TextRole`。不在视图里定义颜色、字体和动画参数；柱状图的尺寸（120pt、2pt）是布局常量，不是动画。
+- 用到的 `ui` 控件与原语：`Segmented`（`SEGMENT`）、`GroupedList`、`Row`（悬停 `HOVER_IN` / `HOVER_OUT`）、`Button`、`AgentDot`、`Progress`、`Skeleton`、`loading_phase`、`show_menu` 与 `Row::context_menu`；文字只用 `TextRole`。不在视图里定义颜色、字体和动画参数；柱状图的尺寸（120pt、2pt）是布局常量，不是动画。
 
 Fluent 键在 `crates/i18n/locales/{en,zh-CN}/usage.ftl`（文件名取屏幕名 `screens::USAGE`，与 review_view 用 `review.ftl` 相同；键 `usage-*`，生成 `keys::usage::*`，前置条件 E）。项目名、分支名、MR 标题、模型 id 原样显示，作为 `Args::str` 或 `Text::verbatim`：
 
@@ -506,7 +506,6 @@ UI 探针的语义节点（`ui::semantic::NodeId::new("usage", 区域, 业务键
 | `usage.projects.row[<id>].merge` / `.same` / `.new` / `.undo` | `Button` | 按 `RowAction` 出现 |
 | `usage.projects.other` | `ListItem` | `attrs`：`tokens`、`percent` |
 | `usage.projects.more` | `Button` | 行数超过 100 时 |
-| `usage.menu`、`usage.menu.item[<项目 ID 的十六进制>]` | `Menu`、`MenuItem` | 打开时出现 |
 | `usage.merged`、`usage.merged.row[<id>]`、`usage.merged.row[<id>].undo` | `List`、`ListItem`、`Button` | 没有已合并的项目时不出现 |
 | `usage.unavailable`、`usage.loading` | `Text` | |
 
@@ -516,7 +515,7 @@ Action 与快捷键（探针可按名字触发）：
 |---|---|---|---|
 | `usage::Back` | Esc、⌘[ | `Content > usage` | `Drilled` 时回到「所有项目」；否则 `cx.propagate()`，交给 `workspace`（Esc → `Pop`，⌘[ → `PopToBase`，[workspace 设计「界面」](workspace.md#界面)） |
 
-菜单打开时 Esc 先关闭菜单（菜单自己处理）。
+菜单打开时 Esc 先关闭菜单（系统菜单自己处理）。
 
 ## 状态与异常
 
@@ -632,7 +631,7 @@ Action 与快捷键（探针可按名字触发）：
   7. 设置文件的位置、`statusLine` 的格式和空输出时 Claude Code 的表现按 Claude Code 的公开文档核对，写进 platform 设计（本文没有核对，见「已知限制」）。
 - **C. `ui`**：
   1. `Progress` 加颜色：`pub enum ProgressTone { Accent, Warning, Critical }`、`impl Progress { pub fn tone(self, tone: ProgressTone) -> Progress; }`。`Warning` 用系统橙、`Critical` 用系统红，来自 `Palette`；探针的 `attrs` 加 `tone`。
-  2. 菜单控件 `Menu`：从按钮弹出（pull-down）和右键弹出共用同一个菜单内容；项是文字、可选的禁用状态和选中回调，可以有一个标题项；Esc 与点外面关闭；外观按 macOS 的菜单（系统色、系统字体）；探针角色 `Menu`、`MenuItem`。可以包装 gpui-component 的 `PopupMenu` / `ContextMenu`，视图不直接用它们。具体签名由 ui 设计决定。
+  2. 菜单：[ui 设计「第二批控件」](ui.md#第二批控件283)的 `show_menu` 与 `Row::context_menu`（系统菜单）。按钮弹出（pull-down）和右键弹出共用同一组 `MenuItem`；选中经带项目 ID 的 `Action` 派发（如 `usage::MergeInto { project, into }`，在本文的 Action 表里随实现补上），没有选中回调；菜单项不是探针节点，探针按名字触发这个 `Action`；标题项用一个禁用的项。
 - **D. `workspace`**：让插件在窗口里显示一次性提示（`ui::Hint`，文字是调用方的 Fluent 键）。例如 `Contributions::show_hint(payload: Payload /* ui::contrib 的提示载荷 */, token: Option<ActivationToken>)`，任何线程调用，排到主线程显示，与 `workspace-command-failed` 用同一个位置；具体形状由 workspace 设计决定。本 crate 用它满足 ADR 0014 的「首次生效时提示一次」（「未决问题」1）。其余用到的接口都已存在：`ContributionKind::Screen`、`SidebarEntry { section: Bottom }`、`KeyBindings`、`screens::USAGE`、`Target::{None, Project}`、`WorkspaceCommand::Push`。
 - **E. `i18n`**：新增 `locales/en/usage.ftl`、`locales/zh-CN/usage.ftl`，内容是「界面」的键表。
 - **F. `app`**：`Profile::Desktop` 加两行：`lectern_usage_view::plugins(UsageViewDeps { executor, data_dir: app_data.join("usage_view"), claude_settings, statusline_sample: app_data.join("usage/statusline/claude-code.json") })` 的两个插件，在 `workspace`、`usage` 之后逐个放进 `PluginSet::with`。`claude_settings`：`CLAUDE_CONFIG_DIR` 有值时取逗号分隔的第一项，否则 `home/.claude`，加 `settings.json`；不检查目录是否存在（这是 IO，由 `platform::claude_statusline::status` 在后台判断）。启动测试的临时 `HOME` 已去掉 `CLAUDE_CONFIG_DIR`（app 设计「测试」），所以测试不会碰真实的设置文件。
@@ -666,7 +665,7 @@ Action 与快捷键（探针可按名字触发）：
 
 - A. `services` 与 `usage`：`rg -n 'pub confirmed: Option<AliasId>|pub merged: Arc<\[ProjectInfo\]>|pub fn level' crates/services/src/usage` 各有一处；`limit_level_thresholds` 与新字段的 JSON 往返通过（第 1 步之前）；`confirmed`、`merged` 的取值随 usage 第 3 步实现（第 2 步之前）。
 - B. `platform`：`claude_statusline` 的三个函数；platform 设计加对应一节；它的测试在临时目录里覆盖「对其他 crate 的要求」B 的七条约束（第 3 步之前）。
-- C. `ui`：`Progress::tone`（第 1 步之前）、`Menu`（第 2 步之前）；各自的语义树快照通过。
+- C. `ui`：`Progress::tone`（第 1 步之前）、`show_menu` 与 `Row::context_menu`（第 2 步之前，[ui 设计「第二批控件」](ui.md#第二批控件283)）；各自的语义树快照通过。
 - D. `workspace`：一次性提示的接口（第 3 步之前）。
 - E. `i18n`：`usage.ftl` 两种语言（第 1 步之前）。
 - F. `app`：装配两个插件（第 1 步之后；第 3 步之前 `claude_settings` 可以先传，statusline 任务在第 3 步才有）。
