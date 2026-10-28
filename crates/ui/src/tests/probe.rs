@@ -16,8 +16,9 @@ use crate::semantic::{
     semantic_interactive,
 };
 use crate::{
-    Agent, AgentDot, Appearance, Button, ButtonKind, CircleCheck, Expander, GroupedList, Hint,
-    Icon, Progress, ProgressShape, Row, Segmented, Text, init_fixed, strings,
+    ActionCard, Agent, AgentDot, Appearance, Button, ButtonKind, CircleCheck, Expander,
+    GroupedList, Hint, Icon, MenuItem, PopUpButton, Progress, ProgressShape, Row, Segmented,
+    SidebarRow, Text, init_fixed, strings,
 };
 
 /// A root view that renders whatever the test hands it.
@@ -620,4 +621,162 @@ fn semantic_snapshot_hint(cx: &mut TestAppContext) {
                 .into_any_element()
         }),
     );
+}
+
+gpui::actions!(lectern_ui_probe_tests, [PickLanguage]);
+
+#[gpui::test]
+fn semantic_snapshot_action_card(cx: &mut TestAppContext) {
+    check(
+        "action_card",
+        snapshot_of(cx, |_, cx| {
+            let strings = strings(cx);
+            div()
+                .w(px(320.0))
+                .child(
+                    ActionCard::new(
+                        root().child("open"),
+                        Icon::Folder,
+                        Text::key(&strings, keys::common::OK),
+                        verbatim("Review a project"),
+                    )
+                    .shortcut(verbatim("Cmd O"))
+                    .on_click(|_, _| {}),
+                )
+                .into_any_element()
+        }),
+    );
+}
+
+#[gpui::test]
+fn semantic_snapshot_popup_button(cx: &mut TestAppContext) {
+    check(
+        "popup_button",
+        snapshot_of(cx, |_, cx| {
+            let strings = strings(cx);
+            let items = vec![
+                MenuItem {
+                    text: verbatim("English"),
+                    action: Box::new(PickLanguage),
+                    checked: true,
+                },
+                MenuItem {
+                    text: verbatim("Chinese"),
+                    action: Box::new(PickLanguage),
+                    checked: false,
+                },
+            ];
+            div()
+                .child(
+                    PopUpButton::new(
+                        root().child("language"),
+                        Text::key(&strings, keys::common::OK),
+                        verbatim("English"),
+                        items,
+                    )
+                    .value("en".into()),
+                )
+                .into_any_element()
+        }),
+    );
+}
+
+#[gpui::test]
+fn semantic_snapshot_sidebar_row(cx: &mut TestAppContext) {
+    check(
+        "sidebar_row",
+        snapshot_of(cx, |_, _| {
+            div()
+                .w(px(240.0))
+                // Default.
+                .child(
+                    SidebarRow::new(root().child("recent").item("a"))
+                        .child(verbatim("lectern").shared())
+                        .child(verbatim("~/workspace").shared()),
+                )
+                // Selected on the accent.
+                .child(
+                    SidebarRow::new(root().child("recent").item("b"))
+                        .selected(true)
+                        .accent()
+                        .child(verbatim("other").shared()),
+                )
+                // Compact with a count.
+                .child(
+                    SidebarRow::new(root().child("sidebar").item("worktrees"))
+                        .compact()
+                        .trailing(verbatim("11"))
+                        .child(verbatim("Worktrees").shared()),
+                )
+                .into_any_element()
+        }),
+    );
+}
+
+#[gpui::test]
+fn semantic_snapshot_segmented_fill(cx: &mut TestAppContext) {
+    check(
+        "segmented_fill",
+        snapshot_of(cx, |_, _| {
+            div()
+                .w(px(240.0))
+                .child(
+                    Segmented::new(
+                        root().child("segments"),
+                        vec![
+                            (root().child("files"), verbatim("Files")),
+                            (root().child("conversation"), verbatim("Conversation")),
+                        ],
+                        0,
+                    )
+                    .fill(),
+                )
+                .into_any_element()
+        }),
+    );
+}
+
+/// The pop-up button is 24pt high; the filled segmented control takes the
+/// parent's width; the compact sidebar row is 28pt high.
+#[gpui::test]
+fn second_batch_sizes_follow_the_design(cx: &mut TestAppContext) {
+    let records = record_scene(cx, |_, _| {
+        div()
+            .w(px(240.0))
+            .child(PopUpButton::new(
+                root().child("language"),
+                verbatim("Language"),
+                verbatim("English"),
+                Vec::new(),
+            ))
+            .child(
+                SidebarRow::new(root().child("compact"))
+                    .compact()
+                    .child(verbatim("x").shared()),
+            )
+            .child(
+                Segmented::new(
+                    root().child("segments"),
+                    vec![
+                        (root().child("a"), verbatim("A")),
+                        (root().child("b"), verbatim("B")),
+                    ],
+                    0,
+                )
+                .fill(),
+            )
+            .into_any_element()
+    });
+    let bounds_of = |id: &str| {
+        records
+            .iter()
+            .find(|r| r.semantic.id.as_str() == id)
+            .map(|r| r.bounds)
+            .expect("recorded")
+    };
+    assert_eq!(bounds_of("snap.root.language").size.height, px(24.0));
+    assert_eq!(bounds_of("snap.root.compact").size.height, px(28.0));
+    assert_eq!(bounds_of("snap.root.segments").size.width, px(240.0));
+    assert_eq!(bounds_of("snap.root.a").size.width, px(118.0));
+    assert_eq!(bounds_of("snap.root.b").size.width, px(118.0));
 }

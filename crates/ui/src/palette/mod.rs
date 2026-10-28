@@ -125,6 +125,13 @@ pub struct Palette {
     /// (docs/design/review_view.md「对其他 crate 的要求」F).
     pub diff_added_inline_background: Hsla,
     pub diff_removed_inline_background: Hsla,
+    /// Derived: `label`'s RGB at a fixed opacity (light 4 % / 8 %, dark
+    /// 5 % / 10 %; docs/design/ui.md「第二批控件」). Translucent, so they
+    /// darken (light) or lighten (dark) whatever they lie on: `fill` the
+    /// action card, `fill_strong` the pop-up button, the segmented track and
+    /// the hovered action card.
+    pub fill: Hsla,
+    pub fill_strong: Hsla,
     /// The one custom colour (ADR 0015): agent identification.
     pub agent_claude: Hsla,
     pub agent_codex: Hsla,
@@ -137,6 +144,10 @@ const DIFF_OPACITY: [f32; 2] = [0.12, 0.18];
 /// The opacity of the word-level (inline) diff backgrounds: light 28 %,
 /// dark 36 %, one notch deeper than `DIFF_OPACITY`.
 const DIFF_INLINE_OPACITY: [f32; 2] = [0.28, 0.36];
+
+/// The opacity of `fill` and `fill_strong`: light 4 % / 8 %, dark 5 % / 10 %.
+const FILL_OPACITY: [f32; 2] = [0.04, 0.05];
+const FILL_STRONG_OPACITY: [f32; 2] = [0.08, 0.10];
 
 impl Palette {
     pub fn system(&self, color: SystemColor) -> Hsla {
@@ -151,11 +162,12 @@ impl Palette {
             *slot = builtin::convert(*color);
         }
         let control_background = builtin::convert(colors.control_background);
+        let label = builtin::convert(colors.label);
         let opacity = DIFF_OPACITY[appearance.index()];
         let inline_opacity = DIFF_INLINE_OPACITY[appearance.index()];
         Palette {
             appearance,
-            label: builtin::convert(colors.label),
+            label,
             secondary_label: builtin::convert(colors.secondary_label),
             tertiary_label: builtin::convert(colors.tertiary_label),
             separator: builtin::convert(colors.separator),
@@ -188,6 +200,8 @@ impl Palette {
                 system[SystemColor::Red as usize],
                 inline_opacity,
             ),
+            fill: label.alpha(FILL_OPACITY[appearance.index()]),
+            fill_strong: label.alpha(FILL_STRONG_OPACITY[appearance.index()]),
             agent_claude: builtin::agent_claude(appearance),
             agent_codex: builtin::agent_codex(appearance),
         }

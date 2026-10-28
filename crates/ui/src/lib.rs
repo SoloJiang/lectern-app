@@ -15,7 +15,10 @@
 //! `IconAssets`, `AgentDot`, `CircleCheck`, `Progress`, `Segmented`,
 //! `GroupedList`, `Row`, `loading_phase`, `Skeleton`, `Expander`, `Hint`)
 //! and the `semantic` node types they declare. Step 4 adds the probe's
-//! recording to `semantic`.
+//! recording to `semantic`. Step 5: the second batch of controls (`ActionCard`,
+//! `PopUpButton`, `show_menu`, `SidebarRow`, `Capsule`, `Disclosure`,
+//! `Segmented::fill`, `Button::pill`, `Row::context_menu`), `Palette::fill`
+//! and `fill_strong`, and six more icons.
 
 mod code;
 pub mod contrib;
@@ -37,15 +40,16 @@ mod tests;
 
 pub use code::{CodeStyle, code_style, code_styles};
 pub use controls::{
-    Agent, AgentDot, Button, ButtonKind, ButtonSize, CircleCheck, Expander, GroupedList, Hint,
-    HintFrame, LoadingPhase, Progress, ProgressShape, Row, Segmented, Skeleton, loading_phase,
+    ActionCard, Agent, AgentDot, AppIcon, Button, ButtonKind, ButtonSize, Capsule, CircleCheck,
+    Disclosure, Expander, GroupedList, Hint, HintFrame, LoadingPhase, MenuItem, PopUpButton,
+    Progress, ProgressShape, Row, Segmented, SidebarRow, Skeleton, loading_phase, show_menu,
 };
 pub use font::{
     MONO_FALLBACK_FAMILY, MONO_FAMILY, MonoMetrics, TextRole, TextRoleExt, UI_FAMILY, mono_metrics,
 };
 pub use icon::Icon;
-/// The SVG source of the ten icons of `Icon`, and only those; every other
-/// path answers `Ok(None)`. `app` passes it to `Application::with_assets`
+/// The SVG source of the sixteen icons of `Icon` and of the app icon, and
+/// only those; every other path answers `Ok(None)`. `app` passes it to `Application::with_assets`
 /// before `run`, the one place GPUI takes an asset source; without it every
 /// icon paints blank.
 pub use icon::IconAssets;

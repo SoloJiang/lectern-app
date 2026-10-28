@@ -27,6 +27,7 @@ pub struct Segmented {
     items: Vec<(NodeId, Text)>,
     selected: usize,
     slider: Option<f32>,
+    fill: bool,
     on_select: Option<SelectHandler>,
 }
 
@@ -35,8 +36,6 @@ const HEIGHT: Pixels = px(24.0);
 const INSET: Pixels = px(2.0);
 const RADIUS: Pixels = px(8.0);
 const SLIDER_RADIUS: Pixels = px(6.0);
-/// The alpha of the `label`-coloured track behind the slider.
-const TRACK_ALPHA: f32 = 0.08;
 
 impl Segmented {
     /// `selected` is clamped to the last item; an empty `items` draws
@@ -48,8 +47,17 @@ impl Segmented {
             items,
             selected,
             slider: None,
+            fill: false,
             on_select: None,
         }
+    }
+
+    /// Fills the parent's width, the items sharing it equally (the
+    /// inspector's Files / Conversation). The track is `fill_strong` and
+    /// the slider `control_background`.
+    pub fn fill(mut self) -> Segmented {
+        self.fill = true;
+        self
     }
 
     /// The slider's position, a fraction between `0` and `items.len() - 1`,
@@ -187,20 +195,23 @@ impl RenderOnce for Segmented {
                 }
                 semantic::declare(item_spec, item)
             });
-        let control = div()
+        let mut control = div()
             .id(self.id.element_id())
             .h(HEIGHT)
             .p(INSET)
             .rounded(RADIUS)
-            .bg(palette.label.alpha(TRACK_ALPHA))
-            .child(
-                div()
-                    .relative()
-                    .size_full()
-                    .flex()
-                    .child(slider)
-                    .children(items),
-            );
+            .bg(palette.fill_strong);
+        if self.fill {
+            control = control.w_full();
+        }
+        let control = control.child(
+            div()
+                .relative()
+                .size_full()
+                .flex()
+                .child(slider)
+                .children(items),
+        );
         semantic::declare(spec, control.into_any_element())
     }
 }

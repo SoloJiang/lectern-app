@@ -1,0 +1,27 @@
+---
+source: crates/ui/src/tests/probe.rs
+---
+[
+    Node {
+        id: "snap.root.open",
+        role: Button,
+        label: Some(
+            Label {
+                key: Some(
+                    "common-ok",
+                ),
+                text: "OK",
+            },
+        ),
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+]
