@@ -761,7 +761,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **检查器**：居中的文字页签 → 撑满宽度的分段控件；页签「Progress」→「Files」；标题「n/m reviewed」→「已看 n/m」加百分比和细进度条；选中行从强调色 → 淡灰填充；行尾加 `Turn N`。
 - **浮条**：进度条 + 「n/m reviewed」+ 意见数 + 置灰的 Send + 强调色的 Looks good → 胶囊：意见数 + Looks Good（次要）+ Send to {agent}（强调色）；进度只在检查器里。
 - **Analyze 按钮**：「Analyze」→「Analyze with {agent}」，放在简报标题行的右端。
-- **阅读栏宽度**仍是 760pt，**简报条目的标记**仍是圆点，**上下文面板**仍是 300pt（产品决定），这三处画布内部有矛盾或与已记录的决定冲突，取舍见[交互规范「视觉」](interaction.md#视觉)。
+- **阅读栏宽度**仍是 760pt，**简报条目的标记**仍是圆点，**上下文面板**当时仍是 300pt（2026-10-23 的产品决定；2026-10-29 改为按画布的 420pt、内缩 8pt，见 [workspace 设计「未决问题」](workspace.md#未决问题)3），这几处画布内部有矛盾或与已记录的决定冲突，取舍见[交互规范「视觉」](interaction.md#视觉)。
 - **键**：`review-step-counts` 拆成 `review-added`、`review-removed`；`review-comments`、`review-progress-title`、`review-looks-good`、`review-open-file`、`review-progress` 改值或改用途；加 `review-send-to`、`review-mark-reviewed`、`review-files-reviewed` 等（见键表）。.ftl 文件由实现 PR 改。
 - **探针**：去掉 `review.mode*` 和 `review.bar.progress`，加 `review.header`、`review.toolbar.*`。
 
