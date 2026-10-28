@@ -578,6 +578,11 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
   | 隐藏其他 | `app-menu-hide-others` | Hide Others | 隐藏其他 | ⌥⌘H | `cx.hide_other_apps()` |
   | 全部显示 | `app-menu-show-all` | Show All | 全部显示 | — | `cx.unhide_other_apps()` |
   | 退出 | `app-menu-quit` | Quit { -app-name } | 退出 { -app-name } | ⌘Q | `Quit` |
+  | View 菜单（标题） | `app-menu-view` | View | 显示 | — | — |
+  | 统一 / 双栏 | `app-menu-toggle-diff-mode` | Unified / Side by Side | 统一 / 双栏 | — | `review::ToggleDiffMode` |
+  | 刷新 | `app-menu-refresh` | Refresh | 刷新 | ⌘R | `review::Refresh` |
+
+  View 菜单放审阅屏幕在画布里没有控件的两个命令（[review_view 设计「对其他 crate 的要求」](review_view.md#对其他-crate-的要求) G，[#283](https://github.com/SoloJiang/lectern-app/issues/283)）。只有审阅屏幕处理这两个 `Action`，所以焦点不在审阅屏幕上时 macOS 把它们置灰、⌘R 也不起作用；菜单在启动时设置一次，统一 / 双栏不显示勾选状态。
 
   菜单的文字在启动时按第 4 步选出的语言生成。设置里切换语言后重建菜单，随语言设置的实现（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)）一起做。
 - UI 探针的语义节点：本 issue 的根视图没有可交互元素，不登记节点。

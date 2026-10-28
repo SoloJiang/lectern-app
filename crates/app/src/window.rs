@@ -6,6 +6,7 @@ use gpui::{
     actions, div, prelude::*, px, size,
 };
 use lectern_i18n::{Strings, keys};
+use lectern_review_view::actions as review;
 
 use crate::profile::Profile;
 use crate::quit::Quit;
@@ -133,12 +134,26 @@ pub fn set_menus(cx: &mut App, strings: Strings) {
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-q", Quit, None),
+        // The review screen's handler is the only one, so the key does
+        // nothing elsewhere (docs/design/review_view.md「对其他 crate 的要求」G).
+        KeyBinding::new("cmd-r", review::Refresh, None),
     ]);
-    cx.set_menus([Menu::new("Lectern").items([
-        MenuItem::action(strings.get(keys::app::MENU_HIDE), Hide),
-        MenuItem::action(strings.get(keys::app::MENU_HIDE_OTHERS), HideOthers),
-        MenuItem::action(strings.get(keys::app::MENU_SHOW_ALL), ShowAll),
-        MenuItem::separator(),
-        MenuItem::action(strings.get(keys::app::MENU_QUIT), Quit),
-    ])]);
+    cx.set_menus([
+        Menu::new("Lectern").items([
+            MenuItem::action(strings.get(keys::app::MENU_HIDE), Hide),
+            MenuItem::action(strings.get(keys::app::MENU_HIDE_OTHERS), HideOthers),
+            MenuItem::action(strings.get(keys::app::MENU_SHOW_ALL), ShowAll),
+            MenuItem::separator(),
+            MenuItem::action(strings.get(keys::app::MENU_QUIT), Quit),
+        ]),
+        // The review screen's two commands that have no control on screen; macOS
+        // greys an item out while no view on the focus path handles its action.
+        Menu::new(strings.get(keys::app::MENU_VIEW)).items([
+            MenuItem::action(
+                strings.get(keys::app::MENU_TOGGLE_DIFF_MODE),
+                review::ToggleDiffMode,
+            ),
+            MenuItem::action(strings.get(keys::app::MENU_REFRESH), review::Refresh),
+        ]),
+    ]);
 }
