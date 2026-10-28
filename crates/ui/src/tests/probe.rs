@@ -643,6 +643,17 @@ fn semantic_snapshot_action_card(cx: &mut TestAppContext) {
                     .shortcut(verbatim("Cmd O"))
                     .on_click(|_, _| {}),
                 )
+                .child(
+                    ActionCard::new(
+                        root().child("clone"),
+                        Icon::Clone,
+                        Text::key(&strings, keys::common::OK),
+                        verbatim("From a forge"),
+                    )
+                    .shortcut(verbatim("Soon"))
+                    .disabled(true)
+                    .on_click(|_, _| panic!("a disabled card does not click")),
+                )
                 .into_any_element()
         }),
     );
