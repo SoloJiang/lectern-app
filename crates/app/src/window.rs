@@ -11,7 +11,7 @@ use lectern_review_view::actions as review;
 use crate::profile::Profile;
 use crate::quit::Quit;
 use crate::startup::{self, Started, Startup};
-use crate::window_state::{WELCOME, autosave_name};
+use crate::window_state::{WELCOME, apply_name, autosave_name};
 
 actions!(lectern, [Hide, HideOthers, ShowAll]);
 
@@ -92,7 +92,7 @@ pub fn open_named(cx: &mut App, frame: &'static str) -> Option<AnyWindowHandle> 
             // The one preference read before the first frame: AppKit's
             // in-memory user defaults, no file of ours (ADR 0017). `platform`
             // logs a failure; the window keeps the frame it was opened with.
-            let _ = lectern_platform::window::set_frame_autosave_name(&*window, name);
+            apply_name(&*window, name);
         }
         cx.new(|_| Skeleton {
             armed: false,

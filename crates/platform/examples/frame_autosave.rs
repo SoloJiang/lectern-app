@@ -1,4 +1,5 @@
-//! The real-window check of `window::set_frame_autosave_name`
+//! The real-window check of `window::set_frame_autosave_name` and
+//! `window::set_frame_autosave_name_or_center`
 //! (docs/design/platform.md「窗口 frame 的 autosave」「测试」). AppKit windows
 //! live on the main thread and Rust's test harness never runs a test there,
 //! so the check is an example whose `main` is the main thread. It needs a
@@ -10,7 +11,8 @@
 //!
 //! It exits 0 when every assertion holds and panics otherwise. The windows
 //! are never shown. AppKit keeps the frames it saves under this process's
-//! defaults domain, named after the example binary.
+//! defaults domain, named after the example binary; the frame the centring
+//! check saves is removed before the example exits.
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -26,7 +28,9 @@ mod real {
     use std::mem;
     use std::ptr::NonNull;
 
-    use lectern_platform::window::{WindowError, set_frame_autosave_name};
+    use lectern_platform::window::{
+        FrameSource, WindowError, set_frame_autosave_name, set_frame_autosave_name_or_center,
+    };
     use raw_window_handle::{
         AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
     };
@@ -45,6 +49,14 @@ mod real {
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
+        fn CFStringCreateWithBytes(
+            alloc: *const c_void,
+            bytes: *const u8,
+            len: isize,
+            encoding: u32,
+            is_external: u8,
+        ) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
         fn CFStringGetCString(
             string: *const c_void,
             buffer: *mut c_char,
@@ -77,6 +89,62 @@ mod real {
                 mem::transmute(objc_msgSend as unsafe extern "C" fn());
             send(receiver, selector)
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_msgSend_stret();
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    }
+
+    /// `[receiver selector]` for a selector without arguments that returns
+    /// an `NSRect`.
+    ///
+    /// # Safety
+    ///
+    /// As `send0`, for a method that returns an `NSRect`.
+    unsafe fn rect(receiver: Id, selector: Sel) -> Rect {
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: the caller's contract; four `f64` come back in d0–d3.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel) -> Rect =
+                mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            send(receiver, selector)
+        }
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: the caller's contract; 32 bytes come back through memory.
+        unsafe {
+            let mut out = Rect::default();
+            let send: unsafe extern "C" fn(*mut Rect, Id, Sel) =
+                mem::transmute(objc_msgSend_stret as unsafe extern "C" fn());
+            send(&mut out, receiver, selector);
+            out
+        }
+    }
+
+    /// A CFString (toll-free an `NSString`) the caller releases.
+    fn cf_string(text: &str) -> *const c_void {
+        // SAFETY: `text` is UTF-8 of `len` bytes; the default allocator.
+        let string = unsafe {
+            CFStringCreateWithBytes(
+                std::ptr::null(),
+                text.as_ptr(),
+                text.len() as isize,
+                UTF8,
+                0,
+            )
+        };
+        assert!(!string.is_null(), "CFStringCreateWithBytes");
+        string
     }
 
     /// `[[NSWindow alloc] init]` on the main thread.
@@ -170,5 +238,98 @@ mod real {
         .unwrap();
         assert_eq!(off, Err(WindowError::NotMainThread));
         assert_eq!(autosave_name(first), renamed);
+
+        center_then_restore();
+    }
+
+    /// A name with no saved frame: the window gets the size and is centred;
+    /// a window named the same later gets the frame saved after a move.
+    fn center_then_restore() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("lectern-center-{}-{nanos}", std::process::id());
+        let size = (640.0, 400.0);
+
+        let window = new_window();
+        assert_eq!(
+            set_frame_autosave_name_or_center(&View::of(window), &name, size),
+            Ok(FrameSource::Centered)
+        );
+        assert_eq!(autosave_name(window), name);
+        // SAFETY: `window` is live; `contentView`, `frame`, `screen` and
+        // `visibleFrame` take nothing.
+        let (content, frame, visible) = unsafe {
+            let content = rect(send0(window, sel(c"contentView")), sel(c"frame"));
+            let frame = rect(window, sel(c"frame"));
+            let screen = send0(window, sel(c"screen"));
+            let screen = if screen.is_null() {
+                send0(objc_getClass(c"NSScreen".as_ptr()), sel(c"mainScreen"))
+            } else {
+                screen
+            };
+            assert!(!screen.is_null(), "no screen");
+            (content, frame, rect(screen, sel(c"visibleFrame")))
+        };
+        assert_eq!(
+            (content.width, content.height),
+            (size.0.min(visible.width), size.1.min(visible.height)),
+            "content size"
+        );
+        // `center` puts the window in the middle horizontally and somewhat
+        // above the middle vertically.
+        let mid_x = frame.x + frame.width / 2.0;
+        let screen_mid_x = visible.x + visible.width / 2.0;
+        assert!(
+            (mid_x - screen_mid_x).abs() <= 1.0,
+            "{frame:?} on {visible:?}"
+        );
+        assert!(frame.y >= visible.y && frame.y + frame.height <= visible.y + visible.height + 1.0);
+
+        // Move it and save, as AppKit does after a move of a shown window.
+        let moved = Rect {
+            x: visible.x + 10.0,
+            y: visible.y + 10.0,
+            ..frame
+        };
+        let string = cf_string(&name);
+        // SAFETY: `window` is live; `setFrameOrigin:` takes an `NSPoint` (two
+        // `f64`), `saveFrameUsingName:` an `NSString`; both return void.
+        unsafe {
+            let origin: unsafe extern "C" fn(Id, Sel, f64, f64) =
+                mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            origin(window, sel(c"setFrameOrigin:"), moved.x, moved.y);
+            let save: unsafe extern "C" fn(Id, Sel, *const c_void) =
+                mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            save(window, sel(c"saveFrameUsingName:"), string);
+        }
+
+        // Another window, the same name: the saved frame comes back. AppKit
+        // may refuse the name itself while the first window holds it
+        // (「已知限制」); the frame is applied before the name is set.
+        let again = new_window();
+        match set_frame_autosave_name_or_center(&View::of(again), &name, size) {
+            Ok(FrameSource::Restored) | Err(WindowError::NameInUse) => {}
+            other => panic!("the second window: {other:?}"),
+        }
+        // SAFETY: `again` is live.
+        let restored = unsafe { rect(again, sel(c"frame")) };
+        assert_eq!(restored, moved);
+
+        // Leave no key behind in the example's defaults.
+        // SAFETY: `removeFrameUsingName:` is a class method of `NSWindow`
+        // that takes an `NSString` and returns void; `string` is released
+        // once.
+        unsafe {
+            let remove: unsafe extern "C" fn(Id, Sel, *const c_void) =
+                mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            remove(
+                objc_getClass(c"NSWindow".as_ptr()),
+                sel(c"removeFrameUsingName:"),
+                string,
+            );
+            CFRelease(string);
+        }
     }
 }
