@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）尚未实现。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -106,6 +106,9 @@ pub struct Palette {
     // 派生：同样的两个来源再深一档，供行内的词级差异叠在上面（`review_view` 前置条件 F）
     pub diff_added_inline_background: Hsla,
     pub diff_removed_inline_background: Hsla,
+    // 派生：`label` 的 RGB 加固定的不透明度（「第二批控件」）
+    pub fill: Hsla,
+    pub fill_strong: Hsla,
     // 唯一的自定义颜色（ADR 0015）：agent 标识
     pub agent_claude: Hsla,
     pub agent_codex: Hsla,
@@ -524,6 +527,94 @@ impl Hint {
 
 面板的滑入（`PANEL_OPEN` / `PANEL_CLOSE`）没有控件：`workspace` 的面板容器持有一个 `Transition`（0 = 收起，1 = 展开），把 `(1 - value) × 面板宽度` 用作 `translate_x`；减弱动态效果时 `Effective::Fade`，偏移为 0、透明度取 value。
 
+#### 第二批控件（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）
+
+三个屏幕按设计画布重画要用到的控件（[welcome 设计](welcome.md)「对其他 crate 的要求」D、[project_home 设计](project_home.md)「对其他 crate 的要求」C、[review_view 设计](review_view.md)「对其他 crate 的要求」I）。数值取画布（`Welcome` / `Main` / `Review` 画板），颜色仍是系统语义色或由它们派生（ADR 0015）。工具栏的搜索框不在这一批：`project_home` 在搜索有归属之前不画它。
+
+```rust
+impl Palette {
+    // 派生（与 diff 底色同一做法）：`label` 的 RGB 加固定的不透明度。画布的 `--fill` / `--fill2`。
+    // fill：浅色 4%、深色 5%（操作卡片的底）；fill_strong：浅色 8%、深色 10%（弹出按钮、次要按钮、悬停的操作卡片、分段控件的轨道）。
+    pub fill: Hsla,
+    pub fill_strong: Hsla,
+}
+
+/// 新增 6 个，共 16 个，仍来自 Lucide：Overview → `layout-grid`，Worktrees → `git-branch`，Files → `file`，
+/// MergeRequest → `git-pull-request`，Plus → `plus`，Sidebar → `panel-left`。`IconAssets` 只嵌入这 16 个文件。
+pub enum Icon { /* 原有 10 个 */ Overview, Worktrees, Files, MergeRequest, Plus, Sidebar }
+
+/// 操作卡片（Welcome 的 Open Folder…）：`fill` 底、圆角 10pt、内边距上下 10pt 左右 12pt、间距 12pt；
+/// 左边 20pt 的图标用 `accent`，中间标题（`Headline`）加一行说明（`Callout`、次要色），右边快捷键提示（`Callout`、次要色）。
+/// 悬停时底色 `fill` → `fill_strong`（`HOVER_IN` / `HOVER_OUT`）。宽度撑满父元素，最宽由调用方限定。探针节点是 `Button`，`Label` 是标题。
+pub struct ActionCard { /* id, icon, title, detail, shortcut: Option<Text>, on_click */ }
+impl ActionCard {
+    pub fn new(id: NodeId, icon: Icon, title: Text, detail: Text) -> ActionCard;
+    pub fn shortcut(self, hint: Text) -> ActionCard;
+    pub fn on_click(self, f: impl Fn(&mut Window, &mut App) + 'static) -> ActionCard;
+}
+
+/// 菜单的一项：选中时把 `action` 派发到窗口（`Window::dispatch_action`，与菜单栏和快捷键同一条路）。
+pub struct MenuItem { pub text: Text, pub action: Box<dyn Action>, pub checked: bool }
+
+/// 弹出按钮（Welcome 的语言选择）：高 24pt、`fill_strong` 底、圆角 6pt、左右 6pt，文字 `Callout`，右边一个 `ChevronDown`。
+/// 点击时在按钮下沿弹出系统菜单，`checked` 的项带勾。探针节点是 `Button`，`Label` 由调用方给（`label`），`attrs.value` 由调用方给（`value`）。
+pub struct PopUpButton { /* id, label, current: Text, value, items: Vec<MenuItem> */ }
+impl PopUpButton {
+    /// `current` 是按钮上显示的文字（当前选项）。
+    pub fn new(id: NodeId, label: Text, current: Text, items: Vec<MenuItem>) -> PopUpButton;
+    pub fn value(self, value: SharedString) -> PopUpButton;
+}
+
+/// 右键菜单：在指针处弹出系统菜单。行（`Row`、`SidebarRow`）经 `context_menu` 挂上；视图不直接调用。
+pub fn show_menu(items: Vec<MenuItem>, position: Point<Pixels>, window: &mut Window, cx: &mut App);
+
+/// 侧栏样式的平铺行：没有卡片、没有分隔线，圆角 8pt、左右内缩由父元素给。内容由调用方给（文字层级由行内元素给出）。
+/// 默认（Welcome 的右栏）：内边距上下 8pt 左右 10pt、子元素间距 2pt；悬停 `fill`；选中 `accent()` 时用 `selected_content_background` 与 `on_accent`，
+/// 第二行文字由调用方用 `on_accent` 的 85% 不透明度；不带 `accent()` 时选中是 `fill_strong`。
+/// `compact()`（工作区侧栏）：高 28pt、左右 8pt、子元素间距 8pt、圆角 6pt；`trailing`（行尾的数量，次要色）。探针节点同 `Row`：`ListItem` 加 `State::selected`。
+pub struct SidebarRow { /* id, selected, accent, compact, trailing: Option<Text>, on_click, menu: Vec<MenuItem>, children */ }
+impl SidebarRow {
+    pub fn new(id: NodeId) -> SidebarRow;
+    pub fn selected(self, selected: bool) -> SidebarRow;
+    pub fn accent(self) -> SidebarRow;
+    pub fn compact(self) -> SidebarRow;
+    pub fn trailing(self, text: Text) -> SidebarRow;
+    pub fn on_click(self, f: impl Fn(&mut Window, &mut App) + 'static) -> SidebarRow;
+    pub fn context_menu(self, items: Vec<MenuItem>) -> SidebarRow;
+    pub fn child(self, child: impl IntoElement) -> SidebarRow;
+}
+impl Row { pub fn context_menu(self, items: Vec<MenuItem>) -> Row; }
+
+impl Segmented {
+    /// 撑满父元素的宽度，各项等分（检查器的 Files / Conversation）。轨道 `fill_strong`，滑块 `control_background`。
+    pub fn fill(self) -> Segmented;
+}
+
+impl Button {
+    /// 胶囊形：圆角为高度的一半，左右 14pt（浮条里的 Looks Good 与 Send）。`Secondary` 的底是 `fill_strong`、无边框；`Primary` 是 `accent`。
+    pub fn pill(self) -> Button;
+}
+
+/// 浮条容器（审阅的 Looks Good / Send）：圆角 22pt，内边距上下 8pt、左 16pt、右 8pt，子元素间距 12pt，
+/// `control_background` 底、0.5pt `separator` 外圈加阴影；画布的背景模糊 GPUI 画不了，所以不透明。不声明节点，内容自己声明。
+pub struct Capsule { /* children */ }
+impl Capsule { pub fn new() -> Capsule; pub fn child(self, child: impl IntoElement) -> Capsule; }
+
+/// 展开箭头（轮次折叠行、文件折叠行）：`ChevronRight`，`expanded` 为 0 时朝右、1 时朝下，中间按比例旋转。
+/// 值是调用方状态里的 `Transition`（`EXPAND_HEIGHT` 的曲线），减弱动态效果时直接到位。装饰元素，不声明节点（行自己声明展开状态）。
+pub struct Disclosure { /* expanded: f32 */ }
+impl Disclosure { pub fn new(expanded: f32) -> Disclosure; }
+
+/// 开关（审阅工具栏的 Hide formatting，#21 之后才有调用方，实现随它）：32 × 18pt，旋钮 14pt；开时 `accent`、关时 `fill_strong`。
+/// 旋钮的位置是调用方的 `Transition`（`SEGMENT`）。探针节点是带 `checked` 的 `Toggle`。
+pub struct Switch { /* id, on, knob: f32, on_change */ }
+```
+
+- 为什么自己做：gpui-component 的 `Button`、`Select`、`PopupMenu`、`ContextMenu` 都是自己画的菜单，样式与 macOS 不一致，也会被窗口边界裁掉。`PopUpButton` 和 `show_menu` 用 gpui-component 的 `native_menu::NativeMenu`，菜单由系统画（`NSMenu`），与菜单栏同一条 `Action` 路径；macOS 之外它退回 gpui-component 自己画的菜单，Lectern 只发 macOS。`ActionCard`、`SidebarRow`、`Capsule`、`Disclosure`、`Switch` 在 gpui-component 里没有对应的形态，或圆角、颜色与画布不同。
+- 菜单项不是探针节点：系统菜单不在 GPUI 的元素树里。探针按名字触发菜单项的 `Action`（如 `welcome::SelectLanguage`），读弹出按钮的 `attrs.value` 确认结果。
+- 「侧栏材质」（Welcome 的右栏、检查器）：画布用半透明加背景模糊。GPUI 的元素画不了模糊，所以不透明的面板用 `under_page_background`；工作区的侧栏仍然不画底色，透出窗口的模糊。
+- `contrib::SidebarItem` 加 `count: Option<u32>`：行尾的数量（Worktrees 的 11、Merge Requests 的 2），`workspace` 交给 `SidebarRow::trailing`；`None` 不画。
+
 ### 贡献载荷（`contrib`）
 
 `workspace` 的注册表（`services::workspace`）在 kernel 层，装不下 GPUI 的类型和 Fluent 键，所以每种贡献的具体载荷放在本 crate 的 `contrib` 模块，`workspace` 从 `Payload` 里 `downcast` 回来。字段、调用线程和生命周期以 [workspace 设计](workspace.md)「`ui::contrib` 的载荷类型」为准，本文只列名字和本 crate 决定的两点：
@@ -535,7 +626,7 @@ pub mod contrib {
     pub struct ToolbarItems { pub title: Text, pub subtitle: Option<Text>, pub controls: Vec<AnyElement> /* ≤ 3 */ }
     pub struct SidebarPanel { pub build: ViewFactory<()> }
     /// 侧栏的一个条目（`services::workspace::SidebarEntry` 的载荷）。图标用本 crate 的 `Icon`（见「未决问题」1），不是 SF Symbols 的名字。
-    pub struct SidebarItem { pub label: Key, pub icon: Option<Icon>, pub on_select: WorkspaceCommand }
+    pub struct SidebarItem { pub label: Key, pub icon: Option<Icon>, pub count: Option<u32>, pub on_select: WorkspaceCommand }
     pub struct InspectorTab { pub label: Key, pub build: ViewFactory<()> }
     pub struct Panel { pub build: ViewFactory<()> }
     pub struct Overlay { pub build: ViewFactory<()> }
@@ -792,7 +883,7 @@ pub mod semantic {
 
 ## 验收
 
-分四步，每步一个 PR；前置条件 A 在 `platform` 单独一个 PR；第 1 步的 `contrib` 还要 `services` 的 `workspace` 模块（[workspace 设计](workspace.md)「对其他 crate 的要求」A，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）先合并。每步都要在 macOS 上 `just check`、`just test -p lectern-ui`、`just doctest`、`just deny` 通过，并且 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 没有结果。
+分五步（第 5 步是 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 的第二批控件），每步一个 PR；前置条件 A 在 `platform` 单独一个 PR；第 1 步的 `contrib` 还要 `services` 的 `workspace` 模块（[workspace 设计](workspace.md)「对其他 crate 的要求」A，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）先合并。每步都要在 macOS 上 `just check`、`just test -p lectern-ui`、`just doctest`、`just deny` 通过，并且 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 没有结果。
 
 **前置条件 A（`platform`，`Refs #214`）**：`platform::appearance` 的三个函数与 `Watch`；[platform 设计](platform.md)增加「系统外观」一节。`just test -p lectern-platform` 里 `appearance_*` 通过：两个外观各读到一份 `SystemColors`、`label` 的明度在浅色下低于 0.5、深色下高于 0.5；`reduce_motion` 返回 Some；`watch` 在 drop 后不再回调（测试里经 `NSNotificationCenter` 手动投递一次通知）。
 
@@ -821,6 +912,12 @@ pub mod semantic {
 - `semantic` 模块：`NodeId`、`Role`、`Label`、`State`、`Semantic`、`Record`、`semantic(...)`、`Recorder`、无障碍属性的映射；控件的角色、`Label` 与状态。
 - `node_id_*`、`semantic_records_bounds_and_parents`、控件的语义节点快照通过；`just bench ui/` 的 `ui/semantic_disarmed` 在预算内。
 - `rg 'Recorder::begin' crates --glob '!crates/ui_probe/**' --glob '!**/tests*' --glob '!**/benches/**'` 没有结果（只有探针和测试打开记录器）。
+
+**第 5 步：第二批控件（`Refs #283`）。**
+
+- `Palette::fill`、`fill_strong`，6 个新图标，`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`，`contrib::SidebarItem::count`。`Switch` 随 #21 的调用方实现。
+- `palette_builtin_*` 检查两个新颜色在两个外观下都比底色深一档（浅色）或浅一档（深色）；`icon_assets_hold_every_icon` 覆盖 16 个图标；`ActionCard`、`PopUpButton`、`SidebarRow`（默认、`accent`、`compact` 加 `trailing`）、`Segmented::fill` 的语义节点快照；`disclosure_rotates_with_its_value`（0、0.5、1 三个值的角度）；`popup_items_dispatch_their_action`（菜单项的 `Action` 经 `dispatch_action` 到达，用 `TestAppContext`，不弹出系统菜单）。
+- 同一节里的 `rg` 检查仍没有结果。
 
 **视图 crate 接入后的持续检查**（写进各视图设计的验收，这里列出口径）：`rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|\.font_family\(|gpui_component::Button' crates/{workspace,welcome,project_home,review_view,file_reader}/src` 没有结果。
 
