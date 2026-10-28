@@ -10,16 +10,16 @@
 //! `GroupedList` is a compact list row (30pt, radius 6, the inspector's).
 
 use std::rc::Rc;
-use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, App, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
+    RenderOnce, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use crate::controls::hover::Hover;
+use crate::controls::menu::{ContextMenu, MenuItem};
 use crate::controls::require_ready;
 use crate::font::{TextRole, TextRoleExt};
-use crate::motion::{HOVER_IN, HOVER_OUT, Transition};
 use crate::palette::{colors, on_accent};
 use crate::semantic::{self, NodeId, Role, Semantic, State};
 use crate::text::Text;
@@ -41,6 +41,7 @@ pub struct Row {
     accent: bool,
     in_card: bool,
     on_click: Option<ClickHandler>,
+    menu: Option<ContextMenu>,
     children: Vec<AnyElement>,
 }
 
@@ -166,6 +167,7 @@ impl Row {
             accent: false,
             in_card: false,
             on_click: None,
+            menu: None,
             children: Vec::new(),
         }
     }
@@ -186,6 +188,20 @@ impl Row {
 
     pub fn on_click(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Row {
         self.on_click = Some(Rc::new(f));
+        self
+    }
+
+    /// The right-click menu: `select` first (the caller moves the selection
+    /// to this row, as a click would, without the click's other effects such
+    /// as opening it), then the system menu of `items` at the pointer
+    /// (`show_menu`). The items' actions carry no row identity and act on
+    /// the selection, so `select` must be done before the menu opens.
+    pub fn context_menu(
+        mut self,
+        items: Vec<MenuItem>,
+        select: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Row {
+        self.menu = Some(ContextMenu::new(items, select));
         self
     }
 
@@ -210,11 +226,7 @@ impl RenderOnce for Row {
             selected: self.selected,
             ..State::default()
         });
-        // The hover transition lives in GPUI's keyed element state, so it
-        // survives the re-renders of this value-like element.
-        let hover = window.use_keyed_state(self.id.part("hover"), cx, |_, _| Transition::new(0.0));
-        let now = Instant::now();
-        let strength = hover.update(cx, |hover, _| hover.tick(now, window));
+        let hover = Hover::track(&self.id, window, cx);
         let mut row = div()
             .id(self.id.element_id())
             .flex()
@@ -236,20 +248,15 @@ impl RenderOnce for Row {
             } else {
                 row.bg(palette.unemphasized_selected_content_background)
             };
-        } else if strength > 0.0 {
-            row = row.bg(palette.label.alpha(HOVER_ALPHA * strength));
+        } else if hover.strength > 0.0 {
+            row = row.bg(palette.label.alpha(HOVER_ALPHA * hover.strength));
         }
-        row = row.on_hover(move |hovered, window, cx| {
-            let (target, motion) = if *hovered {
-                (1.0, HOVER_IN)
-            } else {
-                (0.0, HOVER_OUT)
-            };
-            hover.update(cx, |hover, cx| hover.go(target, motion, Instant::now(), cx));
-            window.refresh();
-        });
+        row = row.on_hover(hover.listener());
         if let Some(on_click) = self.on_click {
             row = row.on_click(move |_, window, cx| on_click(window, cx));
+        }
+        if let Some(menu) = &self.menu {
+            row = row.on_mouse_down(MouseButton::Right, menu.on_right_down());
         }
         semantic::declare(spec, row.children(self.children))
     }

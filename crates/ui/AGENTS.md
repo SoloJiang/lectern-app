@@ -3,7 +3,7 @@
 系统色 token、动画原语和通用控件，封装 gpui-component。视图里的颜色、字体、动画都从这里取（[ADR 0015](../../docs/adr/0015.md)）。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：[docs/design/ui.md](../../docs/design/ui.md)（已接受）。实现按它的「验收」分四步，都已实现：第 1 步（初始化、颜色、文本、字体与代码配色、`contrib`）、第 2 步（动效原语 `motion`）、第 3 步（控件、`IconAssets`、`semantic` 的节点类型）和第 4 步（探针的记录器 `Recorder` 与包装元素 `semantic(...)`、无障碍映射、控件的语义节点快照）。前置条件 A 在 `platform`（已实现）；`app` 的接入（`with_assets(IconAssets)`、`init`、`attach`、`ready`）在 `app` 的 PR。
+- 设计文档：[docs/design/ui.md](../../docs/design/ui.md)（已接受）。实现按它的「验收」分五步：第 1 步（初始化、颜色、文本、字体与代码配色、`contrib`）、第 2 步（动效原语 `motion`）、第 3 步（控件、`IconAssets`、`semantic` 的节点类型）和第 4 步（探针的记录器 `Recorder` 与包装元素 `semantic(...)`、无障碍映射、控件的语义节点快照）。前置条件 A 在 `platform`（已实现）；`app` 的接入（`with_assets(IconAssets)`、`init`、`attach`、`ready`）在 `app` 的 PR。
 - issue：[#214](https://github.com/SoloJiang/lectern-app/issues/214)；探针节点与 [#6](https://github.com/SoloJiang/lectern-app/issues/6) 对齐
 - ADR：[0013](../../docs/adr/0013.md)、[0015](../../docs/adr/0015.md)、[0016](../../docs/adr/0016.md)、[0017](../../docs/adr/0017.md)、[0046](../../docs/adr/0046.md)
 
@@ -13,6 +13,7 @@
 - 颜色值只出现在 `src/palette/builtin.rs`（内置表、agent 标识色、强调色上的文字色）。其他文件不写 `hsla(`、`rgb(`、`rgba(` 和十六进制颜色，验收用 `rg` 检查（设计文档「验收」）。
 - 首帧之前只有 `init`：读减弱动态效果、登记 `platform` 的通知、用内置表建 `Palette`；系统色在 `ready`（首帧之后）才读（[platform 设计「系统外观」](../../docs/design/platform.md#系统外观)）。不做 IO、不建线程。
 - 动画时长与曲线见[交互规范「动效」](../../docs/design/interaction.md#动效)，在 `motion.rs` 里定义一次，视图不自定义；本 crate 其他文件也不写 `Duration::from_millis`（验收用 `rg` 检查）。控件用到的加载阈值与提示时长（`LOADING_SKELETON_AT`、`LOADING_PROGRESS_AT`、`HINT_DURATION`）也在 `motion.rs`。
+- 弹出的菜单是系统菜单（gpui-component 的 `native_menu::NativeMenu`），不用它自己画的 `PopupMenu` / `ContextMenu`；菜单项不是探针节点，选中项经 `Window::dispatch_action` 派发。
 - 控件只接受 `Text`，每个 render 先 `require_ready`（`ready` 之前 panic，是 `app` 的装配错误）；颜色从 `Palette` 取，悬停 / 按下只做明度偏移或 `label` 的淡色，不写新颜色值。不包装 gpui-component 的 `Skeleton`、`Progress`、`ProgressCircle`（自带关不掉的动画），自绘；只包装它的 `Button`、`Icon`。
 - 跨帧的控件状态（`Row` 的悬停过渡）放在 GPUI 的 keyed element state（`window.use_keyed_state`），不放在视图里，也不建 Entity。
 - 减弱动态效果由 `motion::reduced` 和 `Motion::effective` 处理（位移改为淡入淡出、时长减半）；不设置 GPUI 自己的 `App::reduce_motion` 标志，它会让 `with_animation` 直接画终态。
@@ -31,8 +32,8 @@
 | `font.rs` | 字体家族常量、`TextRole`、`TextRoleExt`、`MonoMetrics`、`mono_metrics` |
 | `code.rs` | `CodeStyle`、`code_style`、`code_styles` |
 | `contrib.rs` | `workspace` 贡献的载荷类型与 `into_payload` |
-| `icon.rs` | `Icon` 枚举、Lucide 文件名的对应、`IconAssets`（`icon_assets!` 只嵌入这 10 个 SVG） |
-| `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
+| `icon.rs` | `Icon` 枚举、Lucide 文件名的对应、`IconAssets`（`icon_assets!` 只嵌入这 16 个 SVG） |
+| `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`，第二批的 `ActionCard`、`menu.rs`（`MenuItem`、`show_menu`、`PopUpButton`、行的右键菜单）、`SidebarRow`、`Capsule`、`Disclosure`，以及共用的悬停过渡 `hover.rs`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
 | `semantic.rs` | `NodeId`、`Role`、`Label`、`State`、`Semantic`、`Record`、`Recorder`、包装元素 `semantic(...)` / `semantic_interactive(...)`（`SemanticElement`）、无障碍属性的映射，以及控件声明节点的接缝 `declare` |
 | `state.rs` | 唯一的 GPUI 全局 `UiState` |
 | `testing.rs` | `test-support` feature：`simulate_appearance_change`、`simulate_platform_change`、`mono_resolutions` |

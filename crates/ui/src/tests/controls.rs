@@ -1,17 +1,19 @@
-//! Step 3 (docs/design/ui.md「测试」): `loading_phase_*`, `hint_*`,
+//! Steps 3 and 5 (docs/design/ui.md「测试」): `loading_phase_*`, `hint_*`,
 //! `icon_assets_hold_every_icon`, `circle_check_toggles_from_key_and_click`,
 //! `segmented_slider_continues_from_current_position`, a render of every
-//! control after `ready` and the panic before it.
+//! control after `ready` and the panic before it; of step 5
+//! `disclosure_rotates_with_its_value`, `popup_items_dispatch_their_action`,
+//! `context_menu_selects_the_row_first`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
     AssetSource, Context, ElementId, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, Modifiers, ParentElement, Render, Styled, TestAppContext, VisualTestContext,
-    WeakEntity, Window, actions, div, point, px,
+    KeyBinding, Modifiers, MouseButton, ParentElement, Render, Styled, TestAppContext,
+    VisualTestContext, WeakEntity, Window, actions, div, point, px,
 };
 use lectern_i18n::{Locale, Strings, keys};
 
@@ -19,9 +21,10 @@ use crate::motion::{HINT_DURATION, HOVER_OUT, Transition};
 use crate::semantic::NodeId;
 use crate::tests::motion::{at, in_render};
 use crate::{
-    Agent, AgentDot, Appearance, Button, ButtonKind, ButtonSize, CircleCheck, Expander,
-    GroupedList, Hint, Icon, IconAssets, LoadingPhase, Progress, ProgressShape, Row, Segmented,
-    Skeleton, Text, init, init_fixed, loading_phase, strings,
+    ActionCard, Agent, AgentDot, Appearance, Button, ButtonKind, ButtonSize, Capsule, CircleCheck,
+    Disclosure, Expander, GroupedList, Hint, Icon, IconAssets, LoadingPhase, MenuItem, PopUpButton,
+    Progress, ProgressShape, Row, Segmented, SidebarRow, Skeleton, Text, init, init_fixed,
+    loading_phase, strings,
 };
 
 fn fixed(cx: &mut TestAppContext, reduced_motion: bool) {
@@ -139,6 +142,7 @@ fn icon_assets_hold_every_icon() {
             &svg[..svg.len().min(16)]
         );
     }
+    assert_eq!(Icon::ALL.len(), 16);
     assert_eq!(
         IconAssets.list("icons/").expect("lists").len(),
         Icon::ALL.len()
@@ -148,7 +152,7 @@ fn icon_assets_hold_every_icon() {
             .load("icons/activity.svg")
             .expect("answers")
             .is_none(),
-        "only the ten icons are embedded"
+        "only the sixteen icons are embedded"
     );
 }
 
@@ -383,6 +387,74 @@ impl Render for Gallery {
                     ),
             )
             .child(Skeleton::new(px(120.0), px(12.0)))
+            .child(
+                ActionCard::new(
+                    root.child("open"),
+                    Icon::Folder,
+                    verbatim("Open Folder"),
+                    verbatim("Review a project"),
+                )
+                .shortcut(verbatim("Cmd O"))
+                .on_click(|_, _| {}),
+            )
+            .child(PopUpButton::new(
+                root.child("language"),
+                verbatim("Language"),
+                verbatim("English"),
+                vec![
+                    MenuItem {
+                        text: verbatim("English"),
+                        action: Box::new(PickLanguage),
+                        checked: true,
+                    },
+                    MenuItem {
+                        text: verbatim("Chinese"),
+                        action: Box::new(PickLanguage),
+                        checked: false,
+                    },
+                ],
+            ))
+            .child(
+                SidebarRow::new(root.child("worktrees"))
+                    .compact()
+                    .trailing(verbatim("11"))
+                    .on_click(|_, _| {})
+                    .context_menu(Vec::new(), |_, _| {})
+                    .child(gpui_component::Icon::new(Icon::Worktrees))
+                    .child(verbatim("Worktrees").shared()),
+            )
+            .child(
+                SidebarRow::new(root.child("recent"))
+                    .selected(true)
+                    .accent()
+                    .child(verbatim("lectern").shared())
+                    .child(verbatim("~/workspace").shared()),
+            )
+            .child(
+                Segmented::new(
+                    root.child("fill"),
+                    vec![
+                        (root.child("fill-a"), verbatim("Files")),
+                        (root.child("fill-b"), verbatim("Conversation")),
+                    ],
+                    0,
+                )
+                .fill(),
+            )
+            .child(
+                Capsule::new()
+                    .child(
+                        Button::new(root.child("looks-good"), verbatim("Looks Good"))
+                            .pill()
+                            .on_click(|_, _| {}),
+                    )
+                    .child(
+                        Button::new(root.child("send"), verbatim("Send"))
+                            .kind(ButtonKind::Primary)
+                            .pill(),
+                    ),
+            )
+            .child(Disclosure::new(0.5))
             .child(Expander::new(
                 root.child("comment"),
                 px(self.height.tick(now, window)),
@@ -392,6 +464,8 @@ impl Render for Gallery {
             .child(self.hint.clone())
     }
 }
+
+actions!(lectern_ui_tests, [PickLanguage]);
 
 #[gpui::test]
 fn every_control_renders_after_ready(cx: &mut TestAppContext) {
@@ -444,4 +518,180 @@ fn control_before_ready_panics(cx: &mut TestAppContext) {
     cx.update(|cx| init(cx, Strings::of(Locale::En)));
     let _window = cx.add_window(|_, _| Early);
     cx.run_until_parked();
+}
+
+/// The turn of the disclosure arrow: right at `0`, a quarter turn
+/// clockwise (down) at `1`, in proportion between, clamped outside.
+#[test]
+fn disclosure_rotates_with_its_value() {
+    use std::f32::consts::FRAC_PI_2;
+    assert_eq!(Disclosure::angle(0.0), 0.0);
+    assert!((Disclosure::angle(0.5) - FRAC_PI_2 / 2.0).abs() < 1e-6);
+    assert!((Disclosure::angle(1.0) - FRAC_PI_2).abs() < 1e-6);
+    assert_eq!(Disclosure::angle(-1.0), 0.0);
+    assert_eq!(Disclosure::angle(2.0), Disclosure::angle(1.0));
+}
+
+actions!(lectern_ui_tests, [PickFirst, PickSecond]);
+
+/// A view that takes the menu actions on its focus path, as a screen's
+/// root does.
+struct MenuProbe {
+    focus: FocusHandle,
+    picked: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl Focusable for MenuProbe {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for MenuProbe {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let picked = self.picked.clone();
+        let second = self.picked.clone();
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(move |_, _: &PickFirst, _, _| picked.borrow_mut().push("first")))
+            .on_action(
+                cx.listener(move |_, _: &PickSecond, _, _| second.borrow_mut().push("second")),
+            )
+            .child(PopUpButton::new(
+                NodeId::new("probe", "menu", None),
+                verbatim("Language"),
+                verbatim("First"),
+                menu_items(),
+            ))
+    }
+}
+
+fn menu_items() -> Vec<MenuItem> {
+    vec![
+        MenuItem {
+            text: verbatim("First"),
+            action: Box::new(PickFirst),
+            checked: true,
+        },
+        MenuItem {
+            text: verbatim("Second"),
+            action: Box::new(PickSecond),
+            checked: false,
+        },
+    ]
+}
+
+/// A selected menu item reaches the screen as its `Action` through
+/// `Window::dispatch_action`, the path `NativeMenu` takes. The system menu
+/// itself is not opened.
+#[gpui::test]
+fn popup_items_dispatch_their_action(cx: &mut TestAppContext) {
+    fixed(cx, false);
+    let picked = Rc::new(RefCell::new(Vec::new()));
+    let (view, cx) = cx.add_window_view({
+        let picked = picked.clone();
+        move |_, cx| MenuProbe {
+            focus: cx.focus_handle(),
+            picked,
+        }
+    });
+    cx.update(|window, cx| {
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
+    });
+    cx.run_until_parked();
+
+    // The items are cloned the way `show_menu` consumes them: each action
+    // is its own.
+    let items = menu_items();
+    let copies: Vec<MenuItem> = items.to_vec();
+    assert_eq!(copies.len(), 2);
+    assert!(copies[0].checked && !copies[1].checked);
+    assert_eq!(copies[1].text.as_str(), "Second");
+
+    for item in copies.into_iter().rev() {
+        cx.update(|window, cx| window.dispatch_action(item.action, cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(*picked.borrow(), ["second", "first"]);
+}
+
+/// A right click on a row runs `select` before the menu would open, and a
+/// left click does not.
+#[gpui::test]
+fn context_menu_selects_the_row_first(cx: &mut TestAppContext) {
+    fixed(cx, false);
+    let selected = Rc::new(Cell::new(0u32));
+    let clicked = Rc::new(Cell::new(0u32));
+    let (_, cx) = cx.add_window_view({
+        let (selected, clicked) = (selected.clone(), clicked.clone());
+        move |_, _| {
+            struct Rows(Rc<Cell<u32>>, Rc<Cell<u32>>);
+            impl Render for Rows {
+                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                    let (selected, clicked) = (self.0.clone(), self.1.clone());
+                    let (selected_side, clicked_side) = (selected.clone(), clicked.clone());
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div().w(px(200.0)).child(
+                                SidebarRow::new(NodeId::new("probe", "side", None))
+                                    .compact()
+                                    .on_click(move |_, _| clicked_side.set(clicked_side.get() + 1))
+                                    .context_menu(menu_items(), move |_, _| {
+                                        selected_side.set(selected_side.get() + 1)
+                                    })
+                                    .child(verbatim("side").shared()),
+                            ),
+                        )
+                        .child(
+                            div().w(px(200.0)).child(
+                                Row::new(NodeId::new("probe", "row", None))
+                                    .on_click(move |_, _| clicked.set(clicked.get() + 1))
+                                    .context_menu(menu_items(), move |_, _| {
+                                        selected.set(selected.get() + 10)
+                                    })
+                                    .child(verbatim("row").shared()),
+                            ),
+                        )
+                }
+            }
+            Rows(selected, clicked)
+        }
+    });
+    cx.run_until_parked();
+
+    let side = point(px(20.0), px(14.0));
+    cx.simulate_mouse_down(side, MouseButton::Right, Modifiers::default());
+    cx.simulate_mouse_up(side, MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(selected.get(), 1, "the sidebar row selected itself");
+    assert_eq!(clicked.get(), 0, "a right click is not a click");
+
+    let row = point(px(20.0), px(28.0 + 20.0));
+    cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::default());
+    cx.simulate_mouse_up(row, MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(selected.get(), 11, "the row selected itself");
+
+    cx.simulate_click(side, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(clicked.get(), 1);
+    assert_eq!(selected.get(), 11, "a left click does not select-for-menu");
+}
+
+/// `Action` is object safe through `boxed_clone`, which `MenuItem::clone`
+/// relies on.
+#[test]
+fn menu_item_clone_keeps_its_action() {
+    let item = MenuItem {
+        text: verbatim("First"),
+        action: Box::new(PickFirst),
+        checked: false,
+    };
+    let copy = item.clone();
+    assert_eq!(copy.action.name(), item.action.name());
 }

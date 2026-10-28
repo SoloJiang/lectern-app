@@ -1,0 +1,50 @@
+---
+source: crates/ui/src/tests/probe.rs
+---
+[
+    Node {
+        id: "snap.root.recent.item[a]",
+        role: ListItem,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+    Node {
+        id: "snap.root.recent.item[b]",
+        role: ListItem,
+        label: None,
+        state: State {
+            selected: true,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+    Node {
+        id: "snap.root.sidebar.item[worktrees]",
+        role: ListItem,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+]

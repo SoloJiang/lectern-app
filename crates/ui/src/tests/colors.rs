@@ -144,6 +144,8 @@ fn all_colors(palette: &Palette) -> Vec<(&'static str, Hsla)> {
             "diff_removed_inline_background",
             palette.diff_removed_inline_background,
         ),
+        ("fill", palette.fill),
+        ("fill_strong", palette.fill_strong),
         ("agent_claude", palette.agent_claude),
         ("agent_codex", palette.agent_codex),
     ];
@@ -154,12 +156,12 @@ fn all_colors(palette: &Palette) -> Vec<(&'static str, Hsla)> {
 }
 
 #[test]
-fn palette_builtin_has_29_colors_with_alpha_in_range() {
+fn palette_builtin_has_31_colors_with_alpha_in_range() {
     for appearance in Appearance::ALL {
         let palette = Palette::builtin(appearance);
         assert_eq!(palette.appearance, appearance);
         let colors = all_colors(&palette);
-        assert_eq!(colors.len(), 29);
+        assert_eq!(colors.len(), 31);
         for (name, color) in colors {
             assert!(
                 (0.0..=1.0).contains(&color.a) && (0.0..=1.0).contains(&color.l),
@@ -303,6 +305,18 @@ fn palette_from_system_derives_the_diff_backgrounds() {
         (Appearance::Dark, 0.18, 0.36),
     ] {
         let palette = Palette::from_system(appearance, &colors);
+        // `fill` and `fill_strong` take the label's RGB (mid grey here) at
+        // the appearance's opacities, also on the system-colour path.
+        let (fill, strong) = match appearance {
+            Appearance::Light => (0.04, 0.08),
+            Appearance::Dark => (0.05, 0.10),
+        };
+        assert_eq!(rgb(palette.fill), rgb(palette.label));
+        assert!((palette.fill.a - fill).abs() < 1e-6, "{appearance:?}");
+        assert!(
+            (palette.fill_strong.a - strong).abs() < 1e-6,
+            "{appearance:?}"
+        );
         // Over mid grey the source's channel gains, the other two fade.
         for (name, actual, opacity, hot, cold) in [
             ("added", palette.diff_added_background, opacity, 1, 0),
@@ -331,6 +345,57 @@ fn palette_from_system_derives_the_diff_backgrounds() {
                 (actual[cold] - 0.5 * (1.0 - opacity)).abs() < 1e-3,
                 "{appearance:?} {name}: {actual:?}"
             );
+        }
+    }
+}
+
+/// `fill` and `fill_strong` are the `label` colour at 4 % / 8 % (light) and
+/// 5 % / 10 % (dark).
+#[test]
+fn palette_builtin_fill_is_the_label_at_a_fixed_opacity() {
+    for (appearance, fill, strong) in [
+        (Appearance::Light, 0.04, 0.08),
+        (Appearance::Dark, 0.05, 0.10),
+    ] {
+        let palette = Palette::builtin(appearance);
+        assert_eq!(rgb(palette.fill), rgb(palette.label), "{appearance:?}");
+        assert_eq!(
+            rgb(palette.fill_strong),
+            rgb(palette.label),
+            "{appearance:?}"
+        );
+        assert!((palette.fill.a - fill).abs() < 1e-6, "{appearance:?}");
+        assert!(
+            (palette.fill_strong.a - strong).abs() < 1e-6,
+            "{appearance:?}"
+        );
+    }
+}
+
+/// Over the surfaces they are drawn on, both are a notch darker (light) or
+/// lighter (dark) than the surface, and `fill_strong` more than `fill`.
+#[test]
+fn palette_builtin_fill_is_a_notch_off_the_surfaces() {
+    for appearance in Appearance::ALL {
+        let palette = Palette::builtin(appearance);
+        for (name, surface) in [
+            ("window_background", palette.window_background),
+            ("control_background", palette.control_background),
+            ("under_page_background", palette.under_page_background),
+        ] {
+            let base = luminance(rgb(surface));
+            let fill = luminance(composite(surface, palette.fill));
+            let strong = luminance(composite(surface, palette.fill_strong));
+            match appearance {
+                Appearance::Light => assert!(
+                    strong < fill && fill < base,
+                    "{appearance:?} {name}: {base} {fill} {strong}"
+                ),
+                Appearance::Dark => assert!(
+                    strong > fill && fill > base,
+                    "{appearance:?} {name}: {base} {fill} {strong}"
+                ),
+            }
         }
     }
 }

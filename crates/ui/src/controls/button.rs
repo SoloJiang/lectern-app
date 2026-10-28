@@ -36,6 +36,7 @@ pub struct Button {
     size: ButtonSize,
     icon: Option<Icon>,
     icon_only: bool,
+    pill: bool,
     active: Option<bool>,
     disabled: bool,
     on_click: Option<ClickHandler>,
@@ -94,6 +95,10 @@ const ACTIVE_SHADE: f32 = -0.10;
 /// and when pressed.
 const PLAIN_HOVER_ALPHA: f32 = 0.06;
 const PLAIN_ACTIVE_ALPHA: f32 = 0.12;
+/// The same for a secondary pill, which lies on `fill_strong`.
+const PILL_ACTIVE_ALPHA: f32 = 0.16;
+/// A pill's padding at the sides.
+const PILL_PADDING_X: Pixels = px(14.0);
 /// How much of the `secondary_label` a disabled button's text keeps.
 const DISABLED_TEXT_OPACITY: f32 = 0.5;
 
@@ -106,6 +111,7 @@ impl Button {
             size: ButtonSize::default(),
             icon: None,
             icon_only: false,
+            pill: false,
             active: None,
             disabled: false,
             on_click: None,
@@ -123,6 +129,14 @@ impl Button {
             size: ButtonSize::Toolbar,
             ..Button::new(id, label)
         }
+    }
+
+    /// The capsule form: radius half the height, 14pt at the sides (the
+    /// floating bar's Looks Good and Send). A `Secondary` pill is
+    /// `fill_strong` with no border; a `Primary` one is the accent.
+    pub fn pill(mut self) -> Button {
+        self.pill = true;
+        self
     }
 
     /// Makes the button a toggle that is `active` (the inspector toggle:
@@ -179,6 +193,11 @@ impl Button {
                 .foreground(on_accent())
                 .hover(shade(palette.accent, HOVER_SHADE))
                 .active(shade(palette.accent, ACTIVE_SHADE)),
+            ButtonKind::Secondary if self.pill => base
+                .color(palette.fill_strong)
+                .foreground(palette.label)
+                .hover(palette.label.alpha(PLAIN_ACTIVE_ALPHA))
+                .active(palette.label.alpha(PILL_ACTIVE_ALPHA)),
             ButtonKind::Secondary => base
                 .color(palette.control_background)
                 .foreground(palette.label)
@@ -216,6 +235,7 @@ impl RenderOnce for Button {
         // state, so it is set only while enabled.
         let fill = match self.kind {
             ButtonKind::Primary => Some(palette.accent),
+            ButtonKind::Secondary if self.pill => Some(palette.fill_strong),
             ButtonKind::Secondary => Some(palette.control_background),
             ButtonKind::Plain => None,
         };
@@ -240,7 +260,11 @@ impl RenderOnce for Button {
         let mut button = gpui_component::button::Button::new(self.id.element_id())
             .custom(style)
             .with_size(gpui_size)
-            .rounded(ButtonRounded::Size(self.size.radius()))
+            .rounded(ButtonRounded::Size(if self.pill {
+                self.size.height() / 2.0
+            } else {
+                self.size.radius()
+            }))
             .disabled(self.disabled)
             .accessibility_label(self.text.shared())
             .h(self.size.height());
@@ -252,12 +276,17 @@ impl RenderOnce for Button {
                 .text_color(text_color)
                 .whitespace_nowrap()
                 .child(self.text.shared());
-            button = button.px(self.size.horizontal_padding()).child(label);
+            let padding = if self.pill {
+                PILL_PADDING_X
+            } else {
+                self.size.horizontal_padding()
+            };
+            button = button.px(padding).child(label);
         }
         if let (false, Some(fill)) = (self.disabled, fill) {
             button = button.bg(fill);
         }
-        if self.kind == ButtonKind::Secondary {
+        if self.kind == ButtonKind::Secondary && !self.pill {
             button = button.border_1().border_color(palette.separator);
         }
         if let Some(icon) = self.icon {
