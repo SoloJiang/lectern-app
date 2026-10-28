@@ -21,6 +21,14 @@ use lectern_usage::{LocalZone, UsageDeps};
 use lectern_welcome::WelcomeDeps;
 use lectern_workspace::{WorkspaceHost, WorkspacePlugin};
 
+/// The package version cut to "major.minor", for Welcome's subtitle
+/// (docs/design/welcome.md「对其他 crate 的要求」E).
+const APP_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR")
+);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
     /// What the release build runs.
@@ -135,6 +143,7 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
     for (id, plugin) in lectern_welcome::plugins(WelcomeDeps {
         executor: r.executor.clone(),
         data_dir: r.app_data.join("welcome"),
+        version: Some(APP_VERSION.into()),
     }) {
         set = set.with(id, plugin);
         count += 1;

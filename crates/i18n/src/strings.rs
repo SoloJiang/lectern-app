@@ -312,8 +312,8 @@ mod tests {
     #[test]
     fn terms_are_expanded() {
         assert_eq!(
-            Strings::of(Locale::En).get(keys::welcome::TITLE),
-            "Welcome to Lectern"
+            Strings::of(Locale::En).get(keys::welcome::OPEN_FAILED_PERMISSION),
+            "Lectern can't read that folder."
         );
         assert_eq!(
             Strings::of(Locale::ZhCn).get(common::RESTART),

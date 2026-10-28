@@ -478,7 +478,13 @@ pub(crate) struct Rig {
 }
 
 impl Rig {
+    /// A rig whose app version is "0.1".
     pub(crate) fn new() -> Rig {
+        Rig::with_version(Some("0.1"))
+    }
+
+    /// A rig with the given app version ("major.minor"), or none.
+    pub(crate) fn with_version(version: Option<&'static str>) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let executor = Executor::manual();
         let clock = Arc::new(AtomicI64::new(NOW));
@@ -497,6 +503,7 @@ impl Rig {
             model.clone(),
             prefs.clone(),
             Some(PathBuf::from("/Users/example")),
+            version.map(gpui::SharedString::from),
         );
         let screen = TestKernel::new(screen)
             .mock::<dyn Contributions>(contributions.clone())

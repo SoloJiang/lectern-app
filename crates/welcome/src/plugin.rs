@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::AppContext;
+use gpui::{AppContext, SharedString};
 use lectern_executor::Executor;
 use lectern_kernel::{
     Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, ServiceRef,
@@ -39,19 +39,24 @@ pub struct WelcomeDeps {
     /// joined with `welcome/`. It is created by the first write, after the
     /// first frame.
     pub data_dir: PathBuf,
+    /// The app's version as "major.minor", for the subtitle under the name;
+    /// `app` cuts it from the package version. With `None` the subtitle has no
+    /// version and the rest of the layout stays.
+    pub version: Option<SharedString>,
 }
 
 /// The two plugins, sharing one model. `app` puts them in the `PluginSet`
 /// one by one. Builds an empty model; no IO.
 pub fn plugins(deps: WelcomeDeps) -> [(Name, WelcomePlugin); 2] {
     let model = WelcomeModel::new(deps.executor, deps.data_dir);
-    from_model(model, Arc::new(PlatformPrefs), home_dir())
+    from_model(model, Arc::new(PlatformPrefs), home_dir(), deps.version)
 }
 
 pub(crate) fn from_model(
     model: Arc<WelcomeModel>,
     prefs: Arc<dyn LanguagePrefs>,
     home: Option<PathBuf>,
+    version: Option<SharedString>,
 ) -> [(Name, WelcomePlugin); 2] {
     [
         (
@@ -61,6 +66,7 @@ pub(crate) fn from_model(
                 model: model.clone(),
                 prefs: prefs.clone(),
                 home: home.clone(),
+                version: version.clone(),
             },
         ),
         (
@@ -70,6 +76,7 @@ pub(crate) fn from_model(
                 model,
                 prefs,
                 home,
+                version,
             },
         ),
     ]
@@ -88,6 +95,8 @@ pub struct WelcomePlugin {
     prefs: Arc<dyn LanguagePrefs>,
     /// The home directory, shown as `~` in the paths.
     home: Option<PathBuf>,
+    /// The "major.minor" of the subtitle.
+    version: Option<SharedString>,
 }
 
 impl WelcomePlugin {
@@ -178,6 +187,7 @@ impl WelcomePlugin {
         let model = self.model.clone();
         let prefs = self.prefs.clone();
         let home = self.home.clone();
+        let version = self.version.clone();
         Screen {
             build: Arc::new(move |_, window, cx| {
                 let deps = ViewDeps {
@@ -185,6 +195,7 @@ impl WelcomePlugin {
                     contributions: contributions.clone(),
                     prefs: prefs.clone(),
                     home: home.clone(),
+                    version: version.clone(),
                 };
                 let view = cx.new(|cx| WelcomeView::new(deps, cx));
                 let focus = view.read(cx).focus_handle().clone();
