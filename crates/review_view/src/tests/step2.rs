@@ -620,6 +620,16 @@ fn usage_rows_and_turn_tokens(cx: &mut TestAppContext) {
     assert_eq!(attr(other, "shared").as_deref(), Some("false"));
     let turn = must(&records, "review.turn.item[0:1]");
     assert_eq!(attr(turn, "tokens").as_deref(), Some("1234"));
+    // The toolbar's second line names the agent, the branch of the worktree
+    // under review (from its usage row) and the turns.
+    let strings = lectern_i18n::Strings::of(lectern_i18n::Locale::En);
+    let subtitle = opened
+        .read(cx, |model| model.toolbar_subtitle(&strings))
+        .map(|text| text.as_str().to_owned());
+    assert_eq!(
+        subtitle.as_deref(),
+        Some("Claude Code \u{00B7} feat \u{00B7} 1 turn")
+    );
 
     // A change of the snapshot reaches the screen through the event.
     let UsageSnapshot::Session(mut changed) = session_usage() else {

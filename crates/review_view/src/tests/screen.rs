@@ -41,6 +41,11 @@ pub fn attr(record: &Record, key: &str) -> Option<String> {
         .map(|(_, value)| value.to_string())
 }
 
+/// The height of a node (a line of a diff), for measuring other nodes against.
+pub fn line_height(records: &[Record], id: &str) -> gpui::Pixels {
+    must(records, id).bounds.size.height
+}
+
 pub fn session() -> ReviewTarget {
     ReviewTarget::Session(session_key())
 }
@@ -125,11 +130,16 @@ fn the_toolbar_names_the_session(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(title, "Fix the parser");
-    assert_eq!(subtitle.as_deref(), Some("0/2 reviewed"));
+    // The agent and the turns; the branch needs the session's usage.
+    assert_eq!(subtitle.as_deref(), Some("Claude Code \u{00B7} 1 turn"));
     // The toolbar closure reads the same model.
     let items = cx.update(crate::screen::toolbar);
     assert_eq!(items.title.as_str(), "Fix the parser");
-    assert_eq!(items.controls.len(), 2, "the mode switch and Refresh");
+    assert_eq!(
+        items.subtitle.as_ref().map(lectern_ui::Text::as_str),
+        Some("Claude Code \u{00B7} 1 turn")
+    );
+    assert_eq!(items.controls.len(), 1, "Mark Reviewed alone");
 }
 
 #[gpui::test]
@@ -166,7 +176,7 @@ fn changed_event_reaches_the_main_thread_and_keeps_the_scroll(cx: &mut TestAppCo
     });
     assert_eq!(before.0, after.0, "the same item is at the top");
     assert_eq!(before.1, after.1);
-    assert!(opened.read(cx, |model| matches!(model.items[1], Item::Notice(_))));
+    assert!(opened.read(cx, |model| matches!(model.items[2], Item::Notice(_))));
 }
 
 #[gpui::test]
@@ -413,7 +423,10 @@ fn v_marks_seen_and_scrolls_to_the_next_unseen(cx: &mut TestAppContext) {
     }
     assert_eq!(opened.read(cx, |model| model.snapshot.progress.seen), 6);
     let records = opened.record(cx);
-    assert!(find(&records, "review.bar.progress").is_some());
+    assert!(
+        find(&records, "review.bar.progress").is_none(),
+        "no bar in the capsule"
+    );
     assert!(
         find(&records, "review.bar.looks-good").is_none(),
         "all reviewed: the button gives way to the text"
@@ -725,18 +738,15 @@ fn folder_project_has_no_progress(cx: &mut TestAppContext) {
     let opened = rig.open(cx, session(), Some(snapshot));
     let records = opened.record(cx);
     assert!(find(&records, "review.notice.item[folder]").is_some());
-    assert!(find(&records, "review.bar.progress").is_none());
     assert!(find(&records, "review.bar.looks-good").is_none());
+    assert!(find(&records, "review.bar.send").is_none());
     assert!(
         find(&records, "review.bar.comments").is_some(),
         "the comment count stays"
     );
-    let strings = lectern_i18n::Strings::of(lectern_i18n::Locale::En);
-    assert!(
-        opened
-            .read(cx, |model| model.toolbar_subtitle(&strings))
-            .is_none()
-    );
+    // Nothing to mark: the toolbar's button is off.
+    let toolbar = cx.update(crate::screen::toolbar);
+    assert_eq!(toolbar.controls.len(), 1);
     // The Progress page says there is nothing to list.
     let tab = rig.open_tab(cx);
     let records = tab.record(cx);

@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，已实现的部分要随之修改，见「与设计的差异」。
+状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画（标题区、轮次标题与折叠行、文件卡片、检查器的 Files 页、胶囊浮条、工具栏的 Mark Reviewed；`Switch`、包数、Drifted 的编辑时间、统一 / 双栏与 Refresh 的 View 菜单不在内），实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、检查器里的 Progress 列表、底部浮条，以及 J / K / V 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -95,14 +95,13 @@ pub struct ReviewScreen {
     model: Entity<ReviewModel>,
     list: ListState,              // 叙事列表（gpui `list`：变高、虚拟，只排版可见项）
     focus: FocusHandle,
-    mode_slider: Transition,      // 统一 / 双栏分段控件的滑块（#283 之后切换在 View 菜单里，没有滑块，实现时删）
-    progress: Transition,         // Files 页的已看进度条（#283 之前在浮条里）
+    // #283 之后没有 `mode_slider`（统一 / 双栏的切换在 View 菜单里）；Files 页的已看进度条的 `Transition` 在 `ProgressTab` 里。
     milestone_reported: bool,
 }
 
 /// 检查器 Files 页：Progress 列表。`InspectorTab("files")` 的工厂建，检查器隐藏或换页时 drop。
 /// 它从 GPUI 全局 `Current`（主线程，栈顶审阅屏幕的 `WeakEntity<ReviewModel>`）取模型；没有时显示空状态。
-pub struct ProgressTab { model: Option<WeakEntity<ReviewModel>>, focus: FocusHandle, selected: Option<FileKey> }
+pub struct ProgressTab { model: Option<WeakEntity<ReviewModel>>, focus: FocusHandle, selected: Option<FileKey>, progress: Transition /* 已看进度条，PROGRESS */ }
 
 /// 屏幕与 Progress 页共用的状态，一个审阅一份。只在主线程上读写；没有 IO。
 pub struct ReviewModel {
@@ -120,6 +119,7 @@ pub struct ReviewModel {
     context: HashMap<FileKey, u32>,             // 每个文件的上下文行数（默认 3，展开折叠时加大）
     mode: DiffMode,
     earlier_collapsed: bool,                    // 最近一次已看之前的轮次折叠成一行（「未决问题」3）
+    collapsed_turns: HashSet<TurnRef>,          // 用户点标题折叠成一行的轮次（#283）
     noise_expanded: HashSet<FileKey>,
     selection: Option<ItemKey>,                 // J / K / 点击选中的项
     anchor: Option<(ItemKey, Pixels)>,          // 刷新前记下的 `logical_scroll_top`
@@ -154,6 +154,8 @@ pub(crate) enum Job {
 /// 叙事列表的项由快照算出。纯函数，任何线程；`review_view/items_5000` 基准和 `items_*` 测试直接调它。
 pub mod items {
     pub fn build(snapshot: &ReviewSnapshot, rows: &HashMap<RowsKey, Arc<FileRows>>, opts: &BuildOptions) -> Vec<Item>;
+    /// `build`，另带用户折叠的轮次（每个折叠的轮次只有一个 `Item::Turn { collapsed: true }`）。
+    pub fn build_with(snapshot: &ReviewSnapshot, rows: &HashMap<RowsKey, Arc<FileRows>>, opts: &BuildOptions, collapsed: &HashSet<TurnRef>) -> Vec<Item>;
     pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow>;
 }
 
@@ -187,10 +189,11 @@ pub mod testing {
 
 ```rust
 pub enum Item {
+    Header,                                  // 标题区：会话标题（Title 1）和统计行（#283）
     Brief,                                   // 简报整块（最多 12 条，一项）
     Notice(Notice),                          // `BaseHow::CurrentHead`、`Degraded`、`unclaimed`、`invalid_paths` 的提示行
     EarlierTurns { count: u32 },             // 折叠的早先轮次（`earlier_collapsed`）
-    Turn(TurnRef),                           // 轮次标题：序号、agent 圆点、开始时间、这一轮的 token
+    Turn { at: TurnRef, collapsed: bool },   // 轮次标题：序号、开始时间、文件数、这一轮的 token；折叠时是整行，这一轮的其余项不在列表里（#283）
     Prompt(TextKey), Text(TextKey), Injected(TextKey),
     Step(StepId),                            // 改动步标题：路径、+a −r、对齐、存活、圆形勾选
     File(FileKey),                           // 规则分组视图里的文件标题（`turns` 为 None 时）
@@ -205,7 +208,7 @@ pub enum Item {
 
 /// 项的稳定键：刷新后按它找回滚动位置和选中项。`Row` 的键是两侧行号，不是下标。
 pub enum ItemKey {
-    Brief, Notice(NoticeKind), EarlierTurns, Turn(TurnRef), Text(TextKey), Step(StepId), File(FileKey), Group(GroupKind), Noise,
+    Header, Brief, Notice(NoticeKind), EarlierTurns, Turn(TurnRef), Text(TextKey), Step(StepId), File(FileKey), Group(GroupKind), Noise,
     Hunk { rows: RowsKey, old: u32, new: u32 }, Row { rows: RowsKey, old: Option<u32>, new: Option<u32> },
     Fold { rows: RowsKey, old: u32 }, Placeholder(RowsKey), Call(ToolCallId),
 }
@@ -217,8 +220,8 @@ pub struct Side { pub line: u32, pub byte: Option<u64>, pub kind: RowKind }
 pub enum RowKind { Context, Removed, Added }
 ```
 
-- 顺序（会话审阅，`turns` 为 Some）：`Brief`、`Notice*`、`EarlierTurns`（有时）、每轮 `Turn` → `Prompt` → 按 `items` 顺序的 `Text` / `Injected` / `Step`（紧跟它的 `Hunk` / `Row` / `Fold` 或 `Placeholder`）/ `Command` / `Subagent` / `Tool`；最后 `Noise`。噪声文件的 `Step` 不在轮次里出现，折叠成 `Noise` 一行，展开后按叙事顺序出现在各自的轮次里。
-- 规则分组视图（`turns` 为 None：认不出格式、会话外的改动、比较范围）：`Brief`、`Notice*`、每个 `Group` → 组内 `File` 与它的行；`Noise(…)` 组折叠成 `Noise`。
+- 顺序（会话审阅，`turns` 为 Some）：`Header`、`Brief`、`Notice*`、`EarlierTurns`（有时）、每轮 `Turn` → `Prompt` → 按 `items` 顺序的 `Text` / `Injected` / `Step`（紧跟它的 `Hunk` / `Row` / `Fold` 或 `Placeholder`）/ `Command` / `Subagent` / `Tool`；最后 `Noise`。噪声文件的 `Step` 不在轮次里出现，折叠成 `Noise` 一行，展开后按叙事顺序出现在各自的轮次里。
+- 规则分组视图（`turns` 为 None：认不出格式、会话外的改动、比较范围）：`Header`、`Brief`、`Notice*`、每个 `Group` → 组内 `File` 与它的行；`Noise(…)` 组折叠成 `Noise`。
 - `Prompt` 在正文到达前显示 `TurnEntry::prompt_preview`，到达后换成 `texts[key]`；`Text` / `Injected` 到达前显示一块 `Skeleton`（一行高）。
 - `Step` 的行用 `RowsKey::Step { step, context }`；`File` 的行用 `RowsKey::Final { file, context }`。`context` 取 `ReviewModel::context[file]`，默认 3；点 `Fold` 时把这个文件的 `context` 加大到覆盖那段折叠（上限 `u32::MAX` 表示全部），重新 `Prepare`，不自己切两侧文本。
 - `Placeholder` 的高度 = 估计的行数 × `MonoMetrics::line_height`：`ChangeDetail::Text { hunks, added, removed }` 时取 `added + removed + hunks × (2 × context + 1)`；`StepEntry` 取 `added + removed + 7`；其余 1 行。行准备好后用 `ListState::splice(range, new_count)` 换成真实的项，列表总高度只在这一处变化。
@@ -452,10 +455,10 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review.notice[<kind>]` | `Text` | `Label::key` |
   | `review.toolbar.mark-reviewed` | `Button` | `disabled` |
   | `review.toolbar.hide-formatting` | `Toggle` | `checked`；#21 之前不出现 |
-  | `review.header` | `Group` | 标题区；`attrs`：`turns`、`files`、`packages`、`added`、`removed` |
+  | `review.header` | `Group` | 标题区；`attrs`：`turns`、`files`、`packages`、`added`、`removed`（没有轮次时没有 `turns`；包数没有来源时没有 `packages`） |
   | `review.narrative` | `List` | `attrs`：`items`（总数）、`visible`（可见范围）、`mode` |
   | `review.earlier` | `Group` | `expanded` |
-  | `review.turn[<session>:<ordinal>]` | `Group` | `Label::text` 是轮次标题；`attrs`：`tokens`、`after_last_seen`、`running` |
+  | `review.turn[<session>:<ordinal>]` | `Group` | `Label::text` 是轮次标题；`State::expanded`（折叠成一行时为 false）；`attrs`：`tokens`、`after_last_seen`、`running` |
   | `review.turn[…].prompt`、`.text[<pos>]`、`.injected[<pos>]` | `Text` | `Label::text` 是正文（探针关闭时不构造） |
   | `review.step[<id>]` | `Group` | `Label::text` 是路径；`attrs`：`added`、`removed`、`alignment`、`survival`、`seen` |
   | `review.step[<id>].check`、`review.file[<path>].check` | `Toggle` | `checked` = 已看 |
@@ -469,6 +472,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review.diff[…].placeholder` | `Group` | `attrs`：`lines` |
   | `review.call[<id>]` | `Text` | `attrs`：`kind`（`command` / `subagent` / `tool`）、`files`、`status` |
   | `review.progress` | `List` | `attrs`：`total`、`seen`、`changed` |
+  | `review.progress.bar` | `Progress` | Files 页的已看进度条（`fraction`）；在 `review.progress` 之外，是它的兄弟节点 |
   | `review.progress.item[<path>]` | `ListItem` | `Label::text` 是路径；`selected`；`attrs`：`seen`（`unseen` / `seen` / `changed`）、`group`、`noise` |
   | `review.progress.item[<path>].check` | `Toggle` | `checked` |
   | `review.bar` | `Group` | 浮条（在 `workspace.bar` 之下） |
@@ -708,7 +712,44 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - `just bench review_view/`：`review_view/items_5000` 中位数 27 µs（两次运行 27 µs，第 1 步 18 µs；多了每份行的 `display_rows`，预算 < 4 ms）。`just test -p lectern-bench` 78 个通过。本步没有新的基准条目：设计的 `review_view/scroll_5000` 与 `app/open_diff` 在第 3 步。
 - 没有验证：真实窗口里双栏的版面（每半宽的裁剪、分隔线、行号栏）、负的 `margin-left` 做的横向偏移在真实字体下的外观、触控板横向抖动、`on_scroll_wheel` 与列表自己的纵向滚动同时存在时的手感；高亮 8 ms 的预算在真实文件上够不够（`#[gpui::test]` 的示例只有 4 行）；`Segmented` 滑块的动画（测试只验证终态）；折叠展开的 `Expander` 动画没有做。以上随第 3 步在 macOS 上手动运行发布构建时检查。
 
+### 为 #283 重画屏幕
+
+标题区、轮次标题与折叠行、文件卡片、Files 页、胶囊浮条、工具栏的 Mark Reviewed（叠在 `ui` 第二批控件和 Welcome 的重画上），在 macOS（arm64，Rust 1.97.0）上运行。屏幕锁定，没有运行应用，也没有截图：下面全部是无窗口的 `#[gpui::test]`、纯函数测试和 `just` 入口。
+
+- `just fmt`、`just check`（含 clippy `-D warnings`、文档链接和架构检查）、`just deny` 通过；`cargo metadata --format-version 1 --locked --all-features` 通过，`Cargo.lock` 没有变。
+- 「验收」的五条 `rg` 检查都没有结果（颜色、字体、时长、控件只来自 `ui`；字符串只经 Fluent）。
+- `just test -p lectern-review-view -p lectern-workspace -p lectern-i18n`：262 个测试通过，其中 `review_view` 129 个（原 117 个，新增 12 个）；`just doctest` 通过。
+  - 新增（`src/tests/redraw.rs`）：`the_header_names_the_review_and_counts_it`、`the_grouped_view_has_the_header_without_turns`、`a_card_is_cut_into_its_title_and_the_items_of_its_diff`（`Slice` 的四个位置）、`the_pieces_of_a_card_share_its_width`（标题、hunk、行的 x 与宽一致，两侧留 `GUTTER`）、`a_hunk_of_a_session_draws_only_the_drift_note` / `a_hunk_of_the_grouped_view_keeps_its_attribution_title`、`a_turn_folds_into_one_line_and_a_jump_opens_it`、两个胶囊测试（会话里 `Send to Claude Code ⌘↩`，会话外 `Send ⌘↩` 与副标题）、`the_files_page_*`（短名、百分比、条与计数）。`usage_rows_and_turn_tokens` 加了副标题「Claude Code · feat · 1 turn」。
+  - 改了断言的旧测试：`items_*`（下标加一，`Header`）、`the_toolbar_names_the_session`（副标题、一个控件）、`changed_event_*`、`folder_project_has_no_progress`、`v_marks_seen_*`（`review.bar.progress` 去掉）。
+  - 快照：`items_snapshot` 加 `header`；`review_tree_session` / `review_tree_groups` 加 `review.header`、`review.turn` 的 `expanded`、Analyze 按钮的标签（`Analyze with Claude Code`）、`Open File`、浮条（`No review notes`、`Looks Good`、`Send to Claude Code ⌘↩` 在 Looks Good 之后，`review.bar.progress` 去掉）；`review_tree_progress` 加 `review.progress.bar`。`i18n` 的 `plurals` 快照随 `review-comments` 的 en 值更新。
+- `just bench review_view/`：`review_view/items_5000` 中位数 27.2 µs、27.4 µs（预算 < 4 ms；第 2 步 27 µs，多了一个 `Header` 项）。
+- 没有验证：真实的帧。卡片的外圈线（局部圆角加局部边线）、圆角裁剪、行高与字体下的间距、`Disclosure` 与 `Capsule` 的外观、浮条与列表底部的留白（`BAR_RESERVE` 72pt）、阅读栏 32pt 两侧的观感、深色外观、`Send` / `Mark Reviewed` 标签里的键提示的观感，都只用测试平台里的布局（固定的字体度量）看过；窗口里的视觉检查随 `app` 的手动检查一起做。
+
 ## 与设计的差异
+
+### 为 #283 实现「界面」
+
+屏幕按上一节的「界面」重画（`render.rs`、`render_diff.rs`、`screen.rs`、`progress_tab.rs`、两份 `review.ftl`）。没有做、或做法与「界面」不同的地方：
+
+- **文件卡片按列表项切开画，不用 `GroupedList`。** 一个 diff 是列表里一串各自独立的项（标题、`Hunk`、`Row`、`Fold`、`Placeholder`、`Incomplete`），一个元素包不住它们。每一项自己画卡片的一段：`control_background` 底、左右 0.5pt `separator`；标题项加上圆角 12pt 的上缘，diff 的最后一项加下缘；标题与 diff 之间的 0.5pt 线是标题项的下边线。某一项在卡片里的位置（`Slice`：第一项、最后一项、diff 上下的 6pt）由相邻的项算出（`ReviewModel::slice_of`），渲染时不查表。外圈线画在内容之上、不占位置（与 `GroupedList` 同一做法），所以卡片和页面同色时边也看得见。`diff` 的探针节点（`review.diff[…]`）画在卡片之外、紧跟在卡片后面：它高度为 0，放在被裁剪的卡片里会被探针算作不可见。
+- **阅读栏两侧各留 32pt**（画布的 `padding: 32px`），`render::GUTTER`；原来是 16pt。栏宽仍是 760pt（含这两侧的 32pt）。
+- **会话审阅里 `Hunk` 项还在，画得很少**（「未决问题」7 的默认）。它是 J / K 的停靠点、探针的 `DiffHunk` 节点和锚点的键，所以不能去掉。无法对齐（`drifted > 0` 或步骤 `Unaligned`）时画一行橙色（`SystemColor::Orange`）的 `review-drift-note-untimed`，与代码列对齐；否则只有 0.5pt 的高度（零高度会被探针算作不可见）。选中 hunk 时，选中的样子画在它的第一个 `Row` 上（`DiffLine` 节点的 `selected` 仍只在行本身被选中时为 true）。规则分组视图（`RowsKey::Final`）里 hunk 的标题保留，去掉了单独一个「Drifted」标签（那一行由警示色的说明表达，「N 行已漂移」仍在）。
+- **Drifted 提示没有图标，没有 Compare 链接，没有编辑时间。** `ui` 没有警示图标（16 个图标里没有），Compare 的界面没有设计，编辑时间要 `review` 提供（要求 H）；所以总是 `review-drift-note-untimed`。`review-drift-note`、`review-compare` 两个键已加进 .ftl，没有调用方。
+- **每一轮都能折叠成一行**（点标题折叠 / 展开；`ReviewModel::collapsed_turns`，`Item::Turn { collapsed }`）：折叠的轮次只有这一项，它的提示、说明、改动步和调用都不在列表里。默认仍只折叠「最近一次已看之前的轮次」（「未决问题」3 的默认 (a)，没有改）。Progress、简报的跳转遇到折叠的轮次时先把它展开（与折叠的早先轮次、噪声文件同一做法）；V 之后的「下一个未看文件」只看列表里还在的步，折叠的轮次里的不算。`Disclosure` 画在折叠的轮次行和「之前的 n 轮」行上，值是 0 或 1，没有转动的动画（`Disclosure` 要调用方的 `Transition`；与 `Expander` 同样，随后做）。展开的轮次标题上没有箭头（画布没有）。
+- **不做文件卡片折叠成一行**（画布的折叠文件行）。「未决问题」6 的默认是全部展开，折叠行只给用户自己收起的文件，但「界面」没有定义怎么收起一张展开的卡片（画布的展开卡片头上没有控件，点标题现在是选中）。需要产品决定收起的入口之后再做；`Disclosure` 已经可以用。
+- **轮次标题里的开始时间用相对时间**（「3 分钟前」，进行中是 `review-turn-running`），不是时:分。`i18n` 和 `platform` 都没有本地时间的格式化（本地时区要读系统，不能在 UI 线程上做）；有了之后换成时:分。文件数是这一轮改动步的不同文件数，0 个时省略；token 仍要交接插件。
+- **标题区没有包数**（要求 H 之前）：`review-stats-files-packages` 已加进 .ftl，没有调用方。`FileEntry::package` 已经在快照里，按它数不同的值就能得到包数，可以不等 `review` 加字段；本 PR 按范围没有做。
+- **没有「隐藏格式改动」开关**（`Switch` 随 #21 实现）：`review-hide-formatting`、`review-formatting-hidden` 已加进 .ftl，没有调用方。
+- **工具栏只有 Mark Reviewed。** 统一 / 双栏和 Refresh 的 Action（`review::ToggleDiffMode`、`review::Refresh`）和键值保留，菜单项在 `app` 的 View 菜单里（要求 G，不在本 PR）；在那之前这两个操作只能按名字触发。`mode_slider` 与分段控件去掉。Mark Reviewed 是 `Button`（`Secondary`、`ButtonSize::Toolbar` 的 28pt），不是画布的 `fill_strong` 无边框样式；未就绪、文件夹项目或没有文件时置灰。
+- **副标题的分支来自用量。** 「agent · 分支 · N 轮」里的分支取会话用量里审阅 worktree 那一行的分支（需要交接插件，没有时省略）；`ReviewSnapshot` 和 `SessionSummary` 里没有 worktree 的分支。会话外的改动和比较范围的副标题只有 `review-files-changed`（它们没有用量，分支没有来源）。agent 名用 `keys::project_home::AGENT_*`（项目主页的卡片同一份）。
+- **键提示用 Fluent 键，不是由键绑定给出。** 没有从 `KeyBindings` 取键名的接口，所以 V、⇧⌘O、⌘↩ 是 `review-mark-reviewed-shortcut`、`review-open-file-shortcut`、`review-send-to-shortcut`（与 Welcome 的 `welcome-open-folder-shortcut` 同一做法）。`Button` 没有放键提示的位置：Open File 的提示是紧跟按钮的次要色文字；Mark Reviewed 和 Send 的提示接在按钮的标签后面，颜色同标签（画布里是次要色 / 75% 白）。这两个按钮的探针标签因此是原样文本，没有消息 ID。`review-open-file` 的 `.tooltip` 去掉（没有调用方）。要次要色的提示在按钮里，需要 `ui` 给 `Button` 一个 `hint`。
+- **Analyze 按钮：** 标签用被审阅会话的 agent 名（`review-analyze-with`；分析用哪个 agent 由 `review` 决定，快照里没有这个字段，取会话的）；会话外的审阅用 `review-analyze`。按钮左边没有画布的 8pt agent 圆点（`Button` 不能放前导圆点）。进行中的状态在标题行右端，结果和失败的说明在条目下面。简报没有卡片，条目前是 8pt 圆点，用量行前是 `Icon::Worktrees`（git-branch）。
+- **浮条：** `Capsule` 里按顺序是意见数、Looks Good（`pill` 的 `Secondary`）、Send to {agent} ⌘↩（`pill` 的 `Primary`，置灰）；全部已看时 Looks Good 换成文字 `review-all-reviewed`。会话外的审阅里发送按钮是 `review-send`（没有 agent 名）。探针：`review.bar.progress` 去掉，`review.bar.send` 在 `review.bar.looks-good` 之后。
+- **Files 页：** 进度条的 `Transition` 在 `ProgressTab` 里（不在 `ReviewScreen`）；页面打开时从当前进度开始，不会从 0 增长。进度条是 `review.progress.bar`（`Progress` 节点，`review.progress` 的兄弟）。紧凑行的短名是路径最后一段，列表里有重名时带上一级目录（`short_names`）；右端的 `Turn N` 是 `attribution.turns` 的第一个，规则分组视图里没有。`ChangedSinceSeen` 的次要文字仍在短名下面。`review-progress` 不再有调用方（`Progress` 控件没有无障碍名称的参数）。
+- **规则分组视图的第一个组标题（`review-files-changed`）去掉**：标题区的统计已经说了文件数。
+- **数字：** 增删行数的某一项为 0 时不显示（画布的 `+38`），两项都是 0 时显示 `+0`；标题区的 `+`/`−` 取 `ChangeTotals`（改动集的总数，含会话没有声明的文件），卡片头取这一步或这个文件的数。diff 行：行号栏 6 格宽、右对齐、`tertiary_label`，`+` / `−` 用绿 / 红；选中行保留增删底色、左边 2pt 的强调色竖条、行号用强调色；折叠行的文字与代码列对齐。
+- **`items::build_with`：** `BuildOptions` 没有加字段（`bench` 的 `review_view/items_5000` 用它，不在本 PR 范围），折叠的轮次由新函数 `build_with` 的参数带；`build` 是不折叠任何轮次的 `build_with`。`Item::Header` 在下标 0，简报在下标 1（`model::BRIEF_ITEM`，用量和交接变化时重新测量的那一项）。
+- **其他 crate 的测试字符串：** `review-looks-good` 的 en 值改成 `Looks Good`（键表），`i18n` 的 `get_returns_static_text` 和 `ui` 的 `text_key_and_fmt_carry_the_message_id` 里各有一处断言了旧字符串（`Looks good`），随之改了；`i18n` 的 `plurals` 快照随 `review-comments` 的 en 值（review note）更新。没有改这两个 crate 的代码。
 
 ### 为 #283 修订「界面」
 
@@ -731,11 +772,11 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 ### 第 2 步
 
 - **`plugins(executor)`**：设计的 `plugins()` 没有参数，但高亮任务要 `Executor`（`own_with` 只给 `SubmitGate`，`spawn_gated` 要执行器本身；`review` 的插件同样在构造时拿执行器）。`app` 装配随第 3 步：`plugins(executor.clone())` 返回的两个插件放进 `PluginSet`（`Profile::Desktop` 加两行）。`Shared` 另有 `executor`、`handoff`（`Handoff { reader, code_intel, usage }`）、`handle`、`mode`、`warned`（`highlight unavailable` 每种语言一次）。
-- **`mode` 与 `mode_slider` 在 `ReviewModel` 里**，不在 `ReviewScreen`：`Screen::toolbar` 只有 `&mut App`，没有视图状态，分段控件在工具栏里画，它读 `Current` 的模型。选择的模式记在 `Shared::mode`，之后打开的屏幕从它开始（「未决问题」1 的默认：本次运行记住）；开屏时是双栏就 `dispatch(SetReadingColumn(false))`。
+- **`mode` 与 `mode_slider` 在 `ReviewModel` 里**，不在 `ReviewScreen`：`Screen::toolbar` 只有 `&mut App`，没有视图状态，分段控件在工具栏里画，它读 `Current` 的模型。（#283 之后分段控件和 `mode_slider` 去掉，切换只剩 Action，见「为 #283 实现「界面」」。）选择的模式记在 `Shared::mode`，之后打开的屏幕从它开始（「未决问题」1 的默认：本次运行记住）；开屏时是双栏就 `dispatch(SetReadingColumn(false))`。
 - **模式不进 `RowsKey`**：切换只重建显示行和项（`rebuild_in_place`），不重新 `Prepare`。`Item::Row` 的 `ix` 是显示行的下标，`displays: HashMap<RowsKey, Arc<[DisplayRow]>>` 随 `rows` 存取。`DisplayRow` 多一个 `fold: Option<Range<u32>>`（折叠的一段旧侧行号），`Folded` 不是两侧相同的 `Side`。统一视图里删除行只有 `left`，新增行只有 `right`，上下文行两侧都有。
 - **`anchor::find` 对 diff 项的键放宽**：先按整个键找，找不到时，`Row` 按同一份 diff（同一步或同一文件，不论 `context`）里任一侧仍有的行号找，再找不到取这份 diff 的占位（展开折叠后整份 diff 换了 `RowsKey`，锚点留在这份 diff 里）。配对行在统一视图里是 `(Some(old), None)`、双栏里是 `(Some(old), Some(new))`，不放宽的话切换模式会让锚点和选中项落到下一行；找到后选中项换成新项的键。
 - **词级差异的归属**：`FileRows::inline` 以删除行的下标为键，新增行只有 `pair`（旧侧行号）而没有指回的下标，所以 `display_rows` 先从删除行建「新行号 → 条目」的表，新增行用它找到同一个条目。
-- **`review.diff[…]` 是标题后的零高度兄弟节点**，不是包住 hunk 和行的节点（叙事是平铺的 `list`，行是各自的项）：它在步骤或文件标题的下面，属性 `rows`（`DiffRow` 数）、`context`、`prepared`、`highlighted`（`old=spans|plain,new=…`）。配对行的 `kind` 是 `changed`。步骤标题与文件标题多一个 `open` 按钮（`review-open-file`，没有交接时置灰，用文字作标签：`ui` 没有「打开文件」的图标，也没有提示气泡）。
+- **`review.diff[…]` 是标题后的零高度兄弟节点**，不是包住 hunk 和行的节点（叙事是平铺的 `list`，行是各自的项）：它在步骤或文件标题的下面（#283 之后在卡片之外、紧跟卡片），属性 `rows`（`DiffRow` 数）、`context`、`prepared`、`highlighted`（`old=spans|plain,new=…`）。配对行的 `kind` 是 `changed`。步骤标题与文件标题多一个 `open` 按钮（`review-open-file`，没有交接时置灰，用文字作标签：`ui` 没有「打开文件」的图标，也没有提示气泡）。
 - **高亮窗口按行拆，不按 hunk**：从行的 `*_byte` 最小值到最大值所在行的行尾，超过 256 KiB 时在加入下一行会超限的地方切开。`JsonPad::default()`（设计写的 `::empty()` 在 `syntax` 里叫这个）。任务的预算是 `syntax::limits::FIRST_WINDOW_DEADLINE`（8 ms），窗口上限是 `limits::WINDOW_MAX`，本 crate 不写时长常量。缓存键在主线程上查语言（`Languages::core().for_path`：`syntax` 保证只查表、不编译、不做 IO）取 `query_version`，同一个 `(OID, 窗口)` 同时只有一个任务，等它的行是 `owners`；窗口超时、`Unavailable`、被取消的这一侧本次保持纯文本，不重试。`highlight` 的 debug 记录的 `outcome` 另有 `unavailable`。
 - **折叠展开 = 当前 context 加折叠段的行数**，不是「刚好盖住这一段」：这个文件的 `context` 表加上这段的长度，该文件的所有 `RowsKey` 都换成新的 `context`；点 `Fold` 先选中它，再展开；↵ 在选中 `Fold` 时展开它，选中 hunk 或行时展开同一份 diff 里它下面第一个折叠（`Fold` 本身不在 J / K 的停靠点里）。新键的占位按旧行数加折叠行数估高，列表不跳。`Expander` 的展开动画没有做。
 - **横向偏移**：每份 diff 一个 `hscroll`，`on_scroll_wheel` 的横向增量移动（两种模式都有），范围是画出过的最宽一行减 8 格，所以只滚到已经画过的最长一行；真实的触控板手感未验证。
@@ -750,7 +791,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **只有一个插件**：设计的 `plugins()` 返回 `(ReviewViewPlugin, HandoffPlugin)`。交接插件在第 2 步，所以第 1 步导出 `plugin() -> ReviewViewPlugin`，`Shared` 没有 `handoff`、`handle` 两项；第 2 步改成 `plugins()`，`app` 装配随第 3 步，现在没有调用方。
 - **`testing::harness` 在测试里**：`testing`（`test-support`）有 `FakeReview`（加 `set_emitter`、`set_auto_prepare`、`announce`、`emit_event`、`last_needs`、`prepares`、`closed`、`rows_calls` 等供测试读的方法，第一个审阅的 ID 是 `FIRST_ID`）、`snapshot_fixture` 与带标记的 `snapshot_fixture_tagged`（金丝雀测试用）；窗口、假的 `dyn Contributions` 和 `dyn SessionSource` 在 `src/tests/support.rs` 的 `Rig`：基准只要纯函数，不该带上这些。`snapshot_fixture` 返回每一步和每个文件的展示行（`Step` 与 `Final` 两种键）。
 - **项的形状**：`Item` 带它在快照里的位置（`Pos { turn, item }`、`ix`），渲染时不查表；`Prompt` 的键是 `TurnRef`（`prompt` 可以为 `None`，这时只有预览）；新增 `Item::Incomplete`（无完整 diff 的文件的提示行，设计只写在「状态与异常」里）。`index: HashMap<ItemKey, u32>` 没有做：找键只发生在刷新、跳转和 J / K 时，`anchor::find` 线性扫描。`NodeId` 不存在项里，渲染时按业务键现建（每帧只建可见项的，约 60 个）。
-- **`display_rows`、`DisplayRow`、`DiffMode`、`SetReadingColumn`、统一 / 双栏的 `Segmented` 随第 2 步**：第 1 步只有统一视图，行直接按 `DiffRow` 画；工具栏右侧只有 Refresh。`Fold` 是一行说明，点不开；`context` 表（`BuildOptions::context`）已经决定 `RowsKey`，第 2 步的展开只要写它。
+- **`display_rows`、`DisplayRow`、`DiffMode`、`SetReadingColumn`、统一 / 双栏的 `Segmented` 随第 2 步**：第 1 步只有统一视图，行直接按 `DiffRow` 画；工具栏右侧只有 Refresh（#283 之后工具栏只有 Mark Reviewed）。`Fold` 是一行说明，点不开；`context` 表（`BuildOptions::context`）已经决定 `RowsKey`，第 2 步的展开只要写它。
 - **`ListState` 在 `ReviewModel` 里**，不在 `ReviewScreen`：Progress 页的跳转和刷新后的找回都在模型里做，`ListState` 是 `Rc` 的句柄，屏幕从模型取。屏幕保留焦点、进度条的 `Transition` 和里程碑标记。
 - **可见范围由屏幕每次 render 从列表量**：`ListState::set_scroll_handler` 只在用户滚动（滚轮、滚动条）时触发，首次布局、`scroll_to` 和 `splice` 都不触发。`ReviewModel::measure_visible` 用 `logical_scroll_top`、`viewport_bounds` 和 `bounds_for_item` 算出可见的项：遇到还没布局的项就返回 None、留到下一帧，已知视口被填满后的未布局项不算；首次重建时先假定可见 40 项，使第一屏的 `Prepare` 不必等第一帧。`splice` 之后可见范围按「碰到那一段就整段算可见」调整（`shift_visible`），下一帧再量真实的范围；否则刚展开的行会被当成不在范围内、立刻放回占位。
 - **早先轮次的折叠规则**（「未决问题」3 的默认 (a) 的细化）：折叠的是开头那一串 `after_last_seen == false` 的轮次，且只在至少有一轮更新的时候折叠；没有已看记录（全是 true）或没有新轮次（全是 false）时不折叠。这样「之前的 n 轮」总是后面跟着新内容。
@@ -765,6 +806,6 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **`Current`**：屏幕建好时设成 GPUI 全局 `Current` 的是它的 `WeakEntity<ReviewModel>`，工具栏和 Progress 页读它；屏幕 drop 后弱引用升级失败，页面显示空状态。同时有两个审阅屏幕时（不应发生）后建的赢。
 - **`ReviewModel::missing`**：工厂收到不是 `Target::Review` 的目标时，建一个不打开任何审阅、直接是 `Failed(Missing)` 的模型，显示 `review-failed-missing` 加返回按钮。
 - **日志**：`snapshot inconsistent` 只检查 `turn_ref`（轮次的 `session` 超出 `sessions`），`step`、`file_index` 两种不查：文件夹项目里叙事的文件本来可以不在 `files` 里。
-- **`Screen::toolbar` 的 `Refresh` 没有提示文字**（见 Analyze 一条）。Progress 页的标题用 `review-progress`（已看 n/m），`review-progress-title` 只作检查器页的标签。
+- **`Screen::toolbar` 的 `Refresh` 没有提示文字**（见 Analyze 一条）。Progress 页的标题用 `review-progress`（已看 n/m），`review-progress-title` 只作检查器页的标签。（#283 之后：Refresh 不在工具栏；Files 页顶上一行用 `review-files-reviewed`。）
 - **基准**：`review_view/items_5000` 加进预算表（`share_macos`，中位数 < 4 ms）和 bench 的 `time` 目标，`lectern-bench` 在 macOS 上加 dev 依赖 `lectern-review-view`（`test-support`）；设计把预算表与 `scroll_5000` 放在前置条件 D（第 3 步），这里只加第 1 步要判定的这一条，`scroll_5000` 与 `app/open_diff` 仍是 `Planned`。基准夹具是纯函数，不开窗口。
 - **默认的产品问题**（「未决问题」）：1 统一视图是默认（双栏随第 2 步，所以现在没有切换）；2 Looks good 之后留在审阅页，浮条显示 `review-all-reviewed`；3 折叠早先轮次（见上）；4 agent 说明按纯文本、保留换行，行内代码块不识别。

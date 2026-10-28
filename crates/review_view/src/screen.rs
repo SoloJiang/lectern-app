@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable,
+    AnyElement, AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, ParentElement, Pixels, Render, Styled, Subscription, Window,
     div, list, px,
 };
@@ -18,11 +18,10 @@ use lectern_services::changes::{BaseSpec, ChangeError};
 use lectern_services::review::{LoadState, ReviewError, ReviewTarget};
 use lectern_services::workspace::{Milestone, Target, WorkspaceCommand};
 use lectern_ui::contrib::ToolbarItems;
-use lectern_ui::motion::{self, Transition};
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
-    Button, ButtonKind, ButtonSize, LoadingPhase, Progress, ProgressShape, Segmented, Skeleton,
-    Text, TextRole, TextRoleExt, colors, loading_phase, mono_metrics,
+    Button, ButtonKind, ButtonSize, Capsule, LoadingPhase, Skeleton, Text, TextRole, TextRoleExt,
+    loading_phase, mono_metrics,
 };
 
 use crate::actions::{
@@ -30,7 +29,7 @@ use crate::actions::{
     NextHunk, OpenContext, OpenFile, PreviousHunk, Refresh, ToggleDiffMode, ToggleEarlierTurns,
     ToggleNoise, ToggleSeen,
 };
-use crate::items::DiffMode;
+use crate::brief;
 use crate::model::{self, Direction, ReviewModel};
 use crate::nodes;
 use crate::plugin::Shared;
@@ -45,8 +44,6 @@ pub struct ReviewScreen {
     model: Entity<ReviewModel>,
     focus: FocusHandle,
     shared: Arc<Shared>,
-    /// The seen-progress bar's fraction (`PROGRESS`).
-    progress: Transition,
     milestone_reported: bool,
     _observe: Subscription,
 }
@@ -93,13 +90,11 @@ impl ReviewScreen {
         model: Entity<ReviewModel>,
         cx: &mut Context<ReviewScreen>,
     ) -> ReviewScreen {
-        let fraction = model.read(cx).progress_fraction();
         let observe = cx.observe(&model, |_, _, cx| cx.notify());
         ReviewScreen {
             model,
             focus: cx.focus_handle(),
             shared,
-            progress: Transition::new(fraction),
             milestone_reported: false,
             _observe: observe,
         }
@@ -119,7 +114,6 @@ impl Focusable for ReviewScreen {
 
 impl Render for ReviewScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = *colors(window, cx);
         let strings = lectern_ui::strings(cx);
         let mono = mono_metrics(window, cx);
         let model = self.model.clone();
@@ -129,15 +123,13 @@ impl Render for ReviewScreen {
                 model.list.remeasure();
             }
             model.tick_glide(window, Instant::now());
-            model.mode_slider.tick(Instant::now(), window);
             model.sync_layout(cx);
         });
-        let (state, shows_rows, fraction, ready, degraded_folder) = {
+        let (state, shows_rows, ready, degraded_folder) = {
             let model = model.read(cx);
             (
                 model.snapshot.state.clone(),
                 model.shows_rows(),
-                model.progress_fraction(),
                 model.is_ready(),
                 model.snapshot.degraded == Some(lectern_services::review::Degraded::FolderProject),
             )
@@ -148,16 +140,6 @@ impl Render for ReviewScreen {
             let shared = self.shared.clone();
             window.on_next_frame(move |_, _| shared.report_milestone(Milestone::DiffShown));
         }
-        let now = Instant::now();
-        if ready {
-            if self.progress.target() != fraction {
-                self.progress.go(fraction, motion::PROGRESS, now, cx);
-            }
-        } else {
-            self.progress.set(fraction);
-        }
-        let shown = self.progress.tick(now, window);
-
         let body: AnyElement = match &state {
             LoadState::Failed(error) => self.render_failed(error, &strings, window, cx),
             LoadState::Loading => self.render_loading(&strings, window, cx),
@@ -189,7 +171,6 @@ impl Render for ReviewScreen {
             .track_focus(&self.focus)
             .relative()
             .size_full()
-            .bg(palette.window_background)
             .on_action(cx.listener(|this, _: &NextHunk, _, cx| {
                 this.model
                     .update(cx, |model, cx| model.walk_hunks(Direction::Forward, cx));
@@ -259,7 +240,7 @@ impl Render for ReviewScreen {
             }))
             .child(body);
         if ready {
-            root = root.child(self.render_bar(shown, degraded_folder, &strings, window, cx));
+            root = root.child(self.render_bar(degraded_folder, &strings, window, cx));
         }
         root
     }
@@ -363,20 +344,22 @@ impl ReviewScreen {
         semantic(spec, div().size_full().child(content)).into_any_element()
     }
 
-    /// The floating bar: the seen progress, the comment count, Send (not
-    /// available before #22) and Looks good.
+    /// The floating bar: a capsule with the comment count, Looks Good and
+    /// Send (not available before #22).
     fn render_bar(
         &self,
-        shown: f32,
         folder: bool,
         strings: &Strings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let palette = *colors(window, cx);
-        let (progress, comments) = {
+        let (progress, comments, agent) = {
             let model = self.model.read(cx);
-            (model.progress(), model.snapshot.notes.len() as u32)
+            (
+                model.progress(),
+                model.snapshot.notes.len() as u32,
+                model.agent_label(strings),
+            )
         };
         let bar = nodes::plain("bar");
         let comment_text = Text::fmt(
@@ -384,67 +367,51 @@ impl ReviewScreen {
             keys::review::COMMENTS,
             &Args::new().num("count", comments),
         );
-        let mut inner = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(14.0))
-            .py(px(8.0))
-            .rounded(px(12.0))
-            .bg(palette.control_background)
-            .border(px(0.5))
-            .border_color(palette.separator)
-            .shadow_md()
-            .text_role(TextRole::Secondary, window, cx);
-        if !folder {
-            inner = inner
-                .child(div().w(px(120.0)).child(Progress::new(
-                    bar.child("progress"),
-                    ProgressShape::Bar,
-                    shown,
-                )))
-                .child(
-                    div().child(
-                        Text::fmt(
-                            strings,
-                            keys::review::PROGRESS,
-                            &Args::new()
-                                .num("reviewed", progress.seen)
-                                .num("total", progress.total),
-                        )
-                        .shared(),
-                    ),
-                );
-        }
-        inner = inner.child(semantic(
+        let mut capsule = Capsule::new().child(semantic(
             Semantic::new(bar.child("comments"), Role::Text).label(&comment_text),
-            div().child(comment_text.shared()),
+            div()
+                .text_role(TextRole::Body, window, cx)
+                .font_weight(FontWeight::MEDIUM)
+                .child(comment_text.shared()),
         ));
         if !folder {
-            inner = inner.child(
-                Button::new(bar.child("send"), Text::key(strings, keys::review::SEND))
-                    .disabled(true),
-            );
             let all_seen = progress.total > 0 && progress.seen == progress.total;
             if all_seen {
-                inner = inner
-                    .child(div().child(Text::key(strings, keys::review::ALL_REVIEWED).shared()));
+                capsule = capsule.child(
+                    div()
+                        .text_role(TextRole::Secondary, window, cx)
+                        .child(Text::key(strings, keys::review::ALL_REVIEWED).shared()),
+                );
             } else {
                 let weak = self.model.downgrade();
-                inner = inner.child(
+                capsule = capsule.child(
                     Button::new(
                         bar.child("looks-good"),
                         Text::key(strings, keys::review::LOOKS_GOOD),
                     )
-                    .kind(ButtonKind::Primary)
+                    .kind(ButtonKind::Secondary)
                     .size(ButtonSize::Regular)
+                    .pill()
                     .disabled(progress.total == 0)
                     .on_click(move |_, cx| {
                         let _ = weak.update(cx, |model, cx| model.looks_good(cx));
                     }),
                 );
             }
+            let send = match &agent {
+                Some(agent) => {
+                    strings.format(keys::review::SEND_TO, &Args::new().str("agent", agent))
+                }
+                None => strings.get(keys::review::SEND).to_owned(),
+            };
+            let hint = strings.get(keys::review::SEND_TO_SHORTCUT);
+            capsule = capsule.child(
+                Button::new(bar.child("send"), Text::verbatim(format!("{send} {hint}")))
+                    .kind(ButtonKind::Primary)
+                    .size(ButtonSize::Regular)
+                    .pill()
+                    .disabled(true),
+            );
         }
         semantic(
             Semantic::new(bar, Role::Group),
@@ -455,7 +422,7 @@ impl ReviewScreen {
                 .right_0()
                 .flex()
                 .justify_center()
-                .child(inner),
+                .child(capsule),
         )
         .into_any_element()
     }
@@ -490,49 +457,31 @@ pub(crate) fn toolbar(cx: &mut App) -> ToolbarItems {
             model.toolbar_subtitle(&strings),
         )
     };
-    let (mode, slider) = {
+    let (ready, folder, no_files) = {
         let model = model.read(cx);
-        (model.mode, model.mode_slider.value())
+        (
+            model.is_ready(),
+            model.snapshot.degraded == Some(lectern_services::review::Degraded::FolderProject),
+            model.progress().total == 0,
+        )
     };
-    let tab = nodes::plain("mode").child("tab");
-    let switch_weak = model.downgrade();
-    let modes = Segmented::new(
-        nodes::plain("mode"),
-        vec![
-            (
-                tab.item(DiffMode::Unified.name()),
-                Text::key(&strings, keys::review::MODE_UNIFIED),
-            ),
-            (
-                tab.item(DiffMode::SideBySide.name()),
-                Text::key(&strings, keys::review::MODE_SIDE_BY_SIDE),
-            ),
-        ],
-        usize::from(mode == DiffMode::SideBySide),
-    )
-    .slider(slider)
-    .on_select(move |index, _, cx| {
-        let mode = if index == 1 {
-            DiffMode::SideBySide
-        } else {
-            DiffMode::Unified
-        };
-        let _ = switch_weak.update(cx, |model, cx| model.set_mode(mode, cx));
-    });
     let weak = model.downgrade();
-    let refresh = Button::new(
-        nodes::plain("toolbar").child("refresh"),
-        Text::key(&strings, keys::review::REFRESH),
+    let label = strings.get(keys::review::MARK_REVIEWED);
+    let hint = strings.get(keys::review::MARK_REVIEWED_SHORTCUT);
+    let mark = Button::new(
+        nodes::plain("toolbar").child("mark-reviewed"),
+        Text::verbatim(format!("{label} {hint}")),
     )
-    .kind(ButtonKind::Plain)
-    .size(ButtonSize::Small)
+    .kind(ButtonKind::Secondary)
+    .size(ButtonSize::Toolbar)
+    .disabled(!ready || folder || no_files)
     .on_click(move |_, cx| {
-        let _ = weak.update(cx, |model, _| model.refresh());
+        let _ = weak.update(cx, |model, cx| model.mark_seen_and_next(cx));
     });
     ToolbarItems {
         title,
         subtitle,
-        controls: vec![modes.into_any_element(), refresh.into_any_element()],
+        controls: vec![mark.into_any_element()],
     }
 }
 
@@ -553,21 +502,40 @@ impl ReviewModel {
         }
     }
 
-    /// `2/6 reviewed`, once the review is ready.
+    /// The line under the title, once the review is ready: a session's agent,
+    /// its branch (when usage knows it) and its turns; for changes outside a
+    /// session and against a base, the branch and how many files changed.
     pub(crate) fn toolbar_subtitle(&self, strings: &Strings) -> Option<Text> {
-        if !self.is_ready()
-            || self.snapshot.degraded == Some(lectern_services::review::Degraded::FolderProject)
-        {
+        if !self.is_ready() {
             return None;
         }
-        let progress = self.progress();
-        Some(Text::fmt(
-            strings,
-            keys::review::PROGRESS,
-            &Args::new()
-                .num("reviewed", progress.seen)
-                .num("total", progress.total),
-        ))
+        let mut parts: Vec<String> = Vec::new();
+        match &self.target {
+            ReviewTarget::Session(_) => {
+                parts.extend(self.agent_label(strings));
+                parts.extend(self.branch_label());
+                if let Some(turns) = self.snapshot.turns.as_deref() {
+                    let count = turns.iter().filter(|turn| turn.at.session == 0).count() as u32;
+                    parts.push(
+                        strings.format(keys::review::STATS_TURNS, &Args::new().num("count", count)),
+                    );
+                }
+            }
+            _ => {
+                parts.extend(self.branch_label());
+                parts.push(strings.format(
+                    keys::review::FILES_CHANGED,
+                    &Args::new().num("count", self.snapshot.files.len() as u32),
+                ));
+            }
+        }
+        (!parts.is_empty()).then(|| Text::verbatim(parts.join(" \u{00B7} ")))
+    }
+
+    /// The branch of the worktree under review, from the session's usage
+    /// (the row of that worktree); None without it.
+    pub(crate) fn branch_label(&self) -> Option<String> {
+        brief::branch_of(self.session_usage()?, self.focus_worktree().as_ref())
     }
 
     /// The seen share, `0` without files.

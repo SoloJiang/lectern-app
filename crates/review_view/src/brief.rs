@@ -267,6 +267,22 @@ fn usage_line(row: &SessionRow, strings: &Strings) -> UsageLine {
     }
 }
 
+/// The branch of `worktree` as usage knows it: the branch of that
+/// worktree's row (a row of an MR names its branch too). None without a row.
+pub fn branch_of(usage: &SessionUsage, worktree: Option<&WorktreeKey>) -> Option<String> {
+    let worktree = worktree?;
+    usage
+        .rows
+        .iter()
+        .find(|row| row.worktree.as_ref() == Some(worktree))
+        .and_then(|row| match &row.key {
+            RowKey::Branch { branch, .. } | RowKey::Mrs { branch, .. } => {
+                Some(branch_name(&branch.name))
+            }
+            RowKey::Unassigned { .. } => None,
+        })
+}
+
 /// A branch as the interface names it: without `refs/heads/`.
 fn branch_name(name: &str) -> String {
     name.strip_prefix("refs/heads/").unwrap_or(name).to_owned()

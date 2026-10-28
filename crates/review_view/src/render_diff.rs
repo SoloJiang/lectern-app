@@ -13,7 +13,7 @@ use gpui::{
 use lectern_i18n::{Args, Strings, keys};
 use lectern_services::review::{FileRows, RowsKey};
 use lectern_ui::semantic::{Role, Semantic, State, semantic, semantic_interactive};
-use lectern_ui::{Palette, Text, TextRole, TextRoleExt, mono_metrics};
+use lectern_ui::{Palette, SystemColor, Text, TextRole, TextRoleExt, mono_metrics};
 
 use crate::highlight::{Half, SideSpans};
 use crate::items::{self, DiffMode, DisplayRow, ItemKey, RowKind, Side};
@@ -24,17 +24,25 @@ use crate::nodes;
 /// One side of a side-by-side row: the line, its text and its runs.
 type Half2 = (Side, DisplayLine, Vec<(Range<usize>, HighlightStyle)>);
 
-/// The side margin of every item.
-const GUTTER: Pixels = px(16.0);
+/// The cells of a line-number column: five digits and the room after them.
+const NUMBER_CELLS: f32 = 6.0;
 
-/// The cells of a line-number column.
-const NUMBER_CELLS: f32 = 5.0;
+/// The bar at a row's left edge, where a selected row shows the accent.
+const BAR: Pixels = px(2.0);
 
 /// A line that has nothing to scroll to keeps this many cells in view when
 /// the diff is scrolled sideways to its end.
 const KEEP_CELLS: f32 = 8.0;
 
 impl ReviewModel {
+    /// Where the code of a line starts, counted from the card's left edge:
+    /// past the bar, the two line numbers and the sign. A fold's text and a
+    /// drift note line up with it.
+    pub(crate) fn code_indent(&self, window: &mut Window, cx: &mut gpui::App) -> Pixels {
+        let cell = mono_metrics(window, cx).cell_width;
+        BAR + cell * (2.0 * NUMBER_CELLS + 1.0)
+    }
+
     pub(crate) fn render_row(
         &mut self,
         rows_key: RowsKey,
@@ -68,14 +76,36 @@ impl ReviewModel {
             old,
             new,
         };
-        let selected = self.selection.as_ref() == Some(&key);
+        // A selected hunk shows on its first row: in a session's narrative
+        // the hunk has no line of its own.
+        let first_of_hunk = row.hunk.is_some()
+            && (ix == 0
+                || self
+                    .displays
+                    .get(&rows_key)
+                    .and_then(|display| display.get(ix as usize - 1))
+                    .is_none_or(|before| before.hunk != row.hunk));
+        let hunk_selected = first_of_hunk
+            && match (
+                &self.selection,
+                row.hunk.and_then(|h| rows.hunks.get(h as usize)),
+            ) {
+                (Some(ItemKey::Hunk { rows: at, old, new }), Some(info)) => {
+                    *at == rows_key && *old == info.old.start && *new == info.new.start
+                }
+                _ => false,
+            };
+        // The probe's node says only whether this row is the selection; the
+        // row draws as selected also for the hunk it opens.
+        let chosen = self.selection.as_ref() == Some(&key);
+        let selected = chosen || hunk_selected;
         let kind = row_kind(&row);
         let node = nodes::keyed("diff", &nodes::rows_key_text(&rows_key))
             .child("row")
             .item(&nodes::lines_key(old, new));
         let spec = Semantic::new(node.clone(), Role::DiffLine)
             .state(State {
-                selected,
+                selected: chosen,
                 ..State::default()
             })
             .attr("kind", kind)
@@ -96,7 +126,8 @@ impl ReviewModel {
                 self.unified_row(
                     old,
                     new,
-                    tint(side.kind, selected),
+                    Some(side.kind),
+                    selected,
                     &line,
                     code(&line, &spans, half, side, &rows, &row, palette),
                     offset,
@@ -133,15 +164,12 @@ impl ReviewModel {
             .whitespace_nowrap()
             .child(
                 div()
-                    .w(px(2.0))
+                    .w(BAR)
                     .h_full()
                     .flex_shrink_0()
-                    .when_drifted(drifted, palette),
+                    .bg(palette.accent.alpha(if selected { 1.0 } else { 0.0 })),
             )
             .child(content);
-        if selected {
-            line = line.bg(palette.unemphasized_selected_content_background);
-        }
         let click_key = key;
         let scroll_key = rows_key.clone();
         let line_height = self.line_height;
@@ -209,17 +237,25 @@ impl ReviewModel {
         old: Option<u32>,
         new: Option<u32>,
         kind: Option<RowKind>,
+        selected: bool,
         line: &DisplayLine,
         runs: Vec<(Range<usize>, HighlightStyle)>,
         offset: Pixels,
         cell: Pixels,
         palette: &Palette,
     ) -> AnyElement {
+        let number_color = if selected {
+            palette.accent
+        } else {
+            palette.tertiary_label
+        };
         let number = |line: Option<u32>| {
             div()
                 .w(cell * NUMBER_CELLS)
+                .pr(cell)
                 .flex_shrink_0()
-                .text_color(palette.secondary_label)
+                .text_right()
+                .text_color(number_color)
                 .child(SharedString::from(
                     line.map_or_else(String::new, |line| (line + 1).to_string()),
                 ))
@@ -237,12 +273,7 @@ impl ReviewModel {
         }
         row.child(number(old))
             .child(number(new))
-            .child(
-                div()
-                    .w(cell)
-                    .flex_shrink_0()
-                    .child(sign(kind.unwrap_or(RowKind::Context))),
-            )
+            .child(sign_cell(kind.unwrap_or(RowKind::Context), cell, palette))
             .child(text_cell(line, runs, offset))
             .into_any_element()
     }
@@ -282,20 +313,24 @@ impl ReviewModel {
                 .items_center()
                 .overflow_hidden();
             if let Some((side, line, runs)) = half {
-                if let Some(background) =
-                    tint(side.kind, selected).and_then(|kind| kind_background(kind, palette))
-                {
+                if let Some(background) = kind_background(side.kind, palette) {
                     cell_div = cell_div.bg(background);
                 }
                 cell_div = cell_div
                     .child(
                         div()
                             .w(cell * NUMBER_CELLS)
+                            .pr(cell)
                             .flex_shrink_0()
-                            .text_color(palette.secondary_label)
+                            .text_right()
+                            .text_color(if selected {
+                                palette.accent
+                            } else {
+                                palette.tertiary_label
+                            })
                             .child(SharedString::from((side.line + 1).to_string())),
                     )
-                    .child(div().w(cell).flex_shrink_0().child(sign(side.kind)))
+                    .child(sign_cell(side.kind, cell, palette))
                     .child(text_cell(&line, runs, offset));
             }
             row = row.child(cell_div);
@@ -338,7 +373,8 @@ impl ReviewModel {
             .id(&node)
             .w_full()
             .h(self.line_height)
-            .px(GUTTER)
+            .pl(self.code_indent(window, cx))
+            .pr(px(14.0))
             .flex()
             .items_center()
             .cursor_pointer()
@@ -436,18 +472,19 @@ fn text_cell(
         .into_any_element()
 }
 
-/// The kind whose tint a row shows: none for a selected row, which has the
-/// selection's colour instead.
-fn tint(kind: RowKind, selected: bool) -> Option<RowKind> {
-    (!selected).then_some(kind)
-}
-
-fn sign(kind: RowKind) -> &'static str {
-    match kind {
-        RowKind::Added => "+",
-        RowKind::Removed => "\u{2212}",
-        RowKind::Context => " ",
+/// The sign column: `+` in green, `\u{2212}` in red.
+fn sign_cell(kind: RowKind, cell: Pixels, palette: &Palette) -> AnyElement {
+    let (text, color) = match kind {
+        RowKind::Added => ("+", Some(palette.system(SystemColor::Green))),
+        RowKind::Removed => ("\u{2212}", Some(palette.system(SystemColor::Red))),
+        RowKind::Context => (" ", None),
+    };
+    let sign = div().w(cell).flex_shrink_0().child(text);
+    match color {
+        Some(color) => sign.text_color(color),
+        None => sign,
     }
+    .into_any_element()
 }
 
 fn kind_background(kind: RowKind, palette: &Palette) -> Option<gpui::Hsla> {
@@ -476,17 +513,3 @@ fn row_kind(row: &DisplayRow) -> &'static str {
         (None, None) => "context",
     }
 }
-
-trait Shade: Styled + Sized {
-    /// The thin line at the left edge of a row whose lines Lectern cannot
-    /// attribute.
-    fn when_drifted(self, drifted: bool, palette: &Palette) -> Self {
-        if drifted {
-            self.bg(palette.tertiary_label)
-        } else {
-            self
-        }
-    }
-}
-
-impl<T: Styled + Sized> Shade for T {}

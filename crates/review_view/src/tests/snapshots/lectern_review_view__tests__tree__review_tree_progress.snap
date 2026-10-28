@@ -2,6 +2,7 @@
 source: crates/review_view/src/tests/tree.rs
 expression: text
 ---
+review.progress.bar Progress fraction=0.333
 review.progress List total=3 seen=1 changed=1
   review.progress-file.item[src/file_000.rs] Group seen=seen group=code noise=false
     review.progress.item[src/file_000.rs] ListItem

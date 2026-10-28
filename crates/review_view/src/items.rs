@@ -6,7 +6,7 @@
 //! one frame. This module reads no side text and touches no window; its cost
 //! is linear in `files + turns + items + prepared rows`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -36,6 +36,8 @@ pub struct Pos {
 /// One element of the narrative list.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Item {
+    /// The title and the statistics line above the brief.
+    Header,
     /// The brief, as one block (12 entries at most).
     Brief,
     /// A notice line (`BaseHow::CurrentHead`, `Degraded`, `unclaimed`,
@@ -46,10 +48,12 @@ pub enum Item {
         count: u32,
         expanded: bool,
     },
-    /// A turn's title: `ix` indexes `ReviewSnapshot::turns`.
+    /// A turn's title: `ix` indexes `ReviewSnapshot::turns`. A collapsed
+    /// turn is this one line, the rest of the turn is not in the list.
     Turn {
         at: TurnRef,
         ix: u32,
+        collapsed: bool,
     },
     /// The prompt of a turn: the preview until the text arrives.
     Prompt {
@@ -181,6 +185,7 @@ impl NoticeKind {
 /// its index.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ItemKey {
+    Header,
     Brief,
     Notice(NoticeKind),
     EarlierTurns,
@@ -213,6 +218,7 @@ pub enum ItemKey {
 impl Item {
     pub fn key(&self) -> ItemKey {
         match self {
+            Item::Header => ItemKey::Header,
             Item::Brief => ItemKey::Brief,
             Item::Notice(notice) => ItemKey::Notice(notice.kind()),
             Item::EarlierTurns { .. } => ItemKey::EarlierTurns,
@@ -256,6 +262,16 @@ impl Item {
             | Item::Incomplete { rows, .. } => Some(rows),
             _ => None,
         }
+    }
+
+    /// Whether the item belongs to the card of a diff, below its title.
+    pub fn is_card_body(&self) -> bool {
+        self.rows_key().is_some()
+    }
+
+    /// Whether the item is the title of a card (a step or a file).
+    pub fn is_card_head(&self) -> bool {
+        matches!(self, Item::Step { .. } | Item::File { .. })
     }
 
     /// Whether the item is a place the hunk keys (J / K) stop at.
@@ -544,7 +560,18 @@ pub fn build(
     rows: &HashMap<RowsKey, Arc<FileRows>>,
     opts: &BuildOptions<'_>,
 ) -> Vec<Item> {
+    build_with(snapshot, rows, opts, &HashSet::new())
+}
+
+/// [`build`] with the turns the user folded into one line each.
+pub fn build_with(
+    snapshot: &ReviewSnapshot,
+    rows: &HashMap<RowsKey, Arc<FileRows>>,
+    opts: &BuildOptions<'_>,
+    collapsed: &HashSet<TurnRef>,
+) -> Vec<Item> {
     let mut out = Vec::with_capacity(64 + rows.values().map(|r| r.rows.len() + 2).sum::<usize>());
+    out.push(Item::Header);
     out.push(Item::Brief);
     push_notices(snapshot, &mut out);
     let files: HashMap<&FileKey, u32> = snapshot
@@ -559,7 +586,7 @@ pub fn build(
         .filter(|entry| entry.noise.is_some())
         .count() as u32;
     match snapshot.turns.as_deref() {
-        Some(turns) => build_turns(snapshot, turns, &files, rows, opts, &mut out),
+        Some(turns) => build_turns(snapshot, turns, &files, rows, opts, collapsed, &mut out),
         None => build_groups(snapshot, rows, opts, &mut out),
     }
     if noise_count > 0 && snapshot.turns.is_some() {
@@ -599,6 +626,7 @@ fn build_turns(
     files: &HashMap<&FileKey, u32>,
     rows: &HashMap<RowsKey, Arc<FileRows>>,
     opts: &BuildOptions<'_>,
+    collapsed: &HashSet<TurnRef>,
     out: &mut Vec<Item>,
 ) {
     use lectern_services::review::NarrativeItem;
@@ -612,10 +640,15 @@ fn build_turns(
     let earlier = if opts.earlier_collapsed { fold } else { 0 };
     for (turn_ix, turn) in turns.iter().enumerate().skip(earlier as usize) {
         let turn_ix = turn_ix as u32;
+        let is_collapsed = collapsed.contains(&turn.at);
         out.push(Item::Turn {
             at: turn.at,
             ix: turn_ix,
+            collapsed: is_collapsed,
         });
+        if is_collapsed {
+            continue;
+        }
         if turn.prompt.is_some() || !turn.prompt_preview.is_empty() {
             out.push(Item::Prompt {
                 at: turn.at,
