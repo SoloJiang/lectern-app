@@ -628,7 +628,7 @@ level     := off | error | warn | info | debug | trace
 - **首帧前 panic 写出的文件头没有 `version`、`build`、`os`、`arch`**：这些在 `start` 的 `Config` 里才有。写盘线程启动后接着写这个文件，不再写第二个文件头。
 - **详细文件的开关。** 过滤来自 `--log`、`LECTERN_LOG` 或设置时，都算详细日志开启（文件头 `verbose` 为 true），另写详细文件。
 - **`testing` 多了基准用的入口**：`third_party`、`set_callsite_limit`、`flush`、`install_early_again`（见「测试辅助」）。panic 记录的 `tg` 是 `logging`。
-- **基准的写法。** bench 的统计量没有 p99：`log/contended_call` 在测量模式下正好采 10 000 次，预算写成「超过 5 µs 的不超过 100 次」，与 p99 ≤ 5 µs 相同。`log/enabled_call` 每个样本是写盘线程清空缓冲后的 256 次调用，期间调高调用点上限，测的是写出的路径而不是限流。`log/idle_memory/verbose` 是「性能」里「另报一个数」的那一项，只记录。
+- **基准的写法。** bench 的统计量没有 p99：`log/contended_call` 在测量模式下正好采 10 000 次，预算写成「超过 5 µs 的不超过 100 次」，与 p99 ≤ 5 µs 相同（现为 300 次、p97，[ADR 0055](../adr/0055.md)）。`log/enabled_call` 每个样本是写盘线程清空缓冲后的 256 次调用，期间调高调用点上限，测的是写出的路径而不是限流。`log/idle_memory/verbose` 是「性能」里「另报一个数」的那一项，只记录。
 - **单元测试只在开启 `sink` 时编译**（`just test` 用 `--all-features`）；`cargo test -p lectern-logging` 不带 feature 时只跑文档测试。
 
 「对其他 crate 的要求」第 4 项（`kernel`，[#182](https://github.com/SoloJiang/lectern-app/pull/182)）：
