@@ -3,11 +3,21 @@
 status-level = "fail"
 final-status-level = "fail"
 failure-output = "final"
+# The app's window tests (tests/startup.rs, tests/probe.rs, tests/bench_probe.rs)
+# launch the real `lectern`: each one opens a window on the screen of whoever
+# runs `just test` and takes the focus. A local run leaves them out; CI
+# (`--profile ci`) and `just test --profile windows` run them.
+default-filter = 'not (package(lectern-app) & (binary(startup) | binary(probe) | binary(bench_probe)))'
 
 [profile.ci]
+default-filter = 'all()'
 fail-fast = false
 retries = 0
 failure-output = "immediate-final"
+
+# Local opt-in to the window tests: `just test --profile windows -p lectern-app`.
+[profile.windows]
+default-filter = 'all()'
 
 [profile.ci.junit]
 # Read by scripts/ci_annotate_failures.py when the tests fail in CI.

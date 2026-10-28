@@ -23,9 +23,12 @@
 依赖 GPUI，只在 macOS 上编译和测试：
 
 ```sh
-just test -p lectern-app
+just test -p lectern-app                     # 不含会打开窗口的测试
+just test --profile windows -p lectern-app   # 含 tests/startup.rs、probe.rs、bench_probe.rs
 just ci                 # macOS 上包含构建 lectern 与性能基准，与 CI 相同
 ```
+
+- `tests/startup.rs`、`tests/probe.rs`、`tests/bench_probe.rs` 启动真实的 `lectern`，每个测试在运行者的屏幕上打开一个窗口并取得焦点。本机的 `just test` 默认跳过这三个测试二进制（`.config/nextest.toml` 的 `default-filter`）；CI 的 `--profile ci` 和本机的 `--profile windows` 运行它们。agent 在用户的 Mac 上工作时不要用 `--profile windows`，除非用户同意。
 
 - 冷启动、空闲内存由 `bench` 测量（[#7](https://github.com/SoloJiang/lectern-app/issues/7)），安装包体积由 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 检查。
 - 装配逻辑用 test profile 注入模拟服务验证，不依赖真实的项目目录。
