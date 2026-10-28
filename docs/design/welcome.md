@@ -427,7 +427,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   ```
 
   在 [platform 设计](platform.md)「系统首选语言」一节下补上这三个函数。与 [i18n 设计「数据流与线程」](i18n.md#数据流与线程)的差异：那里写 `language_override() -> Option<Locale>`；`platform` 在基础设施层、不依赖 `i18n`，所以返回 BCP 47 标签，调用方用 `Locale::negotiate([tag])` 转换。前置条件 B 的 PR 同时把 i18n 设计里的那一行改成了标签。
-- **C. `app`**（已实现，见 [app 设计「welcome 的装配」](app.md#welcome-的装配)）：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
+- **C. `app`**（已实现，见 [app 设计「welcome 的装配」](app.md#welcome-的装配)）：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome"), version })`（`version` 随 #283 加上，见 E） 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
 - **D. `ui`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增；已实现，[ui 设计「第二批控件」](ui.md#第二批控件283)，PR [#289](https://github.com/SoloJiang/lectern-app/pull/289)）：`ActionCard`（Open Folder、Clone）、`PopUpButton` 与 `MenuItem`（语言）、`SidebarRow`（`accent()`、`context_menu(items, select)`；右栏的行）、`AppIcon`、`Palette::fill`。
 - **E. `app`**（已实现）：应用版本（主.次）经 `WelcomeDeps::version` 传入，`app` 从包版本的主、次版本号拼成（[app 设计「welcome 的装配」](app.md#welcome-的装配)）。应用图标不再需要 `app` 提供：`ui::AppIcon` 画的是 `ui` 自带的 SVG（`IconAssets`），`app` 早已把 `IconAssets` 交给 `Application::with_assets`。`version` 为 None 时副标题不带版本，其余布局不变。
 
@@ -550,7 +550,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - **`↑` 没有选中时选最后一项**（设计只写了 `↓` 的情形）。产品上没有别的要求，是默认值。
 - **移除按钮带文字**（第 2 步，已取代）：#283 的重绘去掉了移除按钮，移除只有 ⌫ 和行的右键菜单；`Button` 的只有图标形态、隐藏与悬停显示的写法都不再用。Open Folder 的 `.tooltip` 键仍没有用（操作卡片没有提示的接口），`welcome-recent-remove` 的 `.tooltip` 也一样；两个键留在资源里，`i18n` 的检查不要求删掉。
 - **点击、右键菜单的 `select` 和 ⌫ 按路径找回行，不按下标。** 行里的闭包带着 `path`，点击时在当前快照里重新查找：在画出这一帧之后、点击之前行已经被移除或被遮住时，什么也不打开（`a_click_on_a_row_that_is_gone_does_nothing`），右键的 `select` 也什么都不选。
-- **选中的行滚动到可见。** 设计没有写：键盘移动选择后，选中行的元素里放一个 `canvas`，在 prepaint 里把右栏的 `ScrollHandle` 滚到这一行可见（留 12 pt），只在移动选择或移除之后做一次。
+- **选中的行滚动到可见。** 设计没有写：键盘移动选择后，选中行的元素里放一个 `canvas`，在 prepaint 里把右栏的 `ScrollHandle` 滚到这一行可见（留 `REVEAL_MARGIN`，#283 起为 18 pt），只在移动选择或移除之后做一次。
 - **空状态和骨架画在列表标题的下面。** 第 2 步时因为 `GroupedList` 没有行时是一个高度为零的卡片；#283 的重绘没有卡片了，仍是标题、列表节点、空状态文字（或骨架）三层，间距见「#283 的重绘（实现）」。
 - **`LanguagePrefs`（`src/prefs.rs`）代替 `platform` 的 `test-support`。** 设计写「假的 `platform` 写入函数经 `test-support` 注入」，`platform` 没有这样的接口（也不应为此加）；视图经一个 crate 内的 trait 调 `platform::system`，`plugins()` 用真实的实现，测试用内存里的假实现。
 - **「现在」与主目录经模型和插件传入。** 发现行的「几分钟前」用 `WelcomeModel::now_millis`（模型的时钟，测试里固定），主目录（路径里的 `~`）由 `plugins()` 读一次环境变量 `HOME`，测试传固定值；视图本身不读系统时间和环境。
@@ -571,6 +571,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 [#283](https://github.com/SoloJiang/lectern-app/issues/283)，`Refs`。叠在 `ui` 第 5 步之上。「界面」写的都已实现，下面是实现与文字不同或文字没有写到的地方。
 
+- **Fluent 的方向隔离符。** `$version`、`$agent` 这类字符串参数在 Fluent 的结果里被 U+2068 / U+2069 包住（双向文字的隔离，fluent-bundle 的默认行为），屏幕上的文字带着它们，显示没有差别；测试比较文字前先去掉。
 - **多一个 Fluent 键 `welcome-open-folder-shortcut`（`⌘O`，en 与 zh-CN 相同）。** 「界面」的表没有它。快捷键提示放进 Fluent 而不是 `Text::verbatim`，是因为界面字符串只走 `Text` / Fluent，`review-open-file` 的 `⇧⌘O` 也在资源里。它与 `workspace::OpenFolder` 的 ⌘O 绑定要人工保持一致。
 - **发现项的 agent 名取 `project-home-agent-claude-code`、`project-home-agent-codex`，不新增键。** `welcome-row-agent-sessions` 的 `$agent` 对 Claude Code 和 Codex 用这两个已有的产品名消息，别的 `Agent::Other(name)` 用它自己的名字。代价是 `welcome` 的界面字符串依赖 `project-home` 的两个键名（都在 `i18n`，不是 crate 依赖）；以后若两处要不同的写法，再各自加键。
 - **版本由 `app` 在编译期截取。** `profile.rs` 的常量 `APP_VERSION` 是 `concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"))`，不是对 `CARGO_PKG_VERSION` 做字符串解析；结果相同。工作区版本现在是 `0.0.0`，所以副标题现在显示「Version 0.0 · …」。
