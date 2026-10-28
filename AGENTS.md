@@ -36,7 +36,7 @@
 
 ```sh
 just check   # 格式 + 架构规则 + 文档链接 + clippy（警告即失败）
-just test    # cargo nextest；参数透传，如 just test -p lectern-review
+just test    # cargo nextest；参数透传，如 just test -p lectern-review；本机默认跳过会打开真实窗口的 app 测试，CI 运行它们
 just doctest # 文档测试（nextest 不跑）
 just bench   # 性能预算基准
 just deny    # 许可证、来源、安全公告
