@@ -1,13 +1,13 @@
 # welcome 设计
 
-状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，已实现的部分要随之修改，见「与设计的差异」。
 
-对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
+对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用图标、应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
 ## 范围
 
 - 做：
-  - `Screen(WELCOME)` 的视图：标题、Open Folder 按钮、语言选择、最近项目列表、发现的文件夹列表、打开失败的提示。
+  - `Screen(WELCOME)` 的视图：应用图标、标题、Open Folder 操作卡片、语言选择、最近项目列表、发现的文件夹列表、打开失败的提示。
   - 最近项目列表：存在本 crate 自己的文件里（`platform::dirs::app_data()` 下的 `welcome/recent.json`），首帧之后在 executor 的后台任务里读写；项目打开成功时更新；用户可以移除一条。
   - 发现的文件夹：从 `dyn SessionSource::sessions()` 的会话列表按 `Place` 归并出还没有打开过的项目根目录，带 agent、会话数、运行中数和最近活动时间；`SessionsChanged`、`ProjectEvent` 和最近项目变化时重算。
   - 打开：最近项目、发现的文件夹、Open Folder 都经 `Contributions::dispatch` 交给 `workspace`，本 crate 只监听 `ProjectEvent::Opened` 的结果。
@@ -32,7 +32,7 @@
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
 | `gpui` | 视图、`FocusHandle`、Action、`cx.spawn` 的前台任务 | 已锁定（[ADR 0016](../adr/0016.md)） |
-| `lectern-ui` | `Text`、`strings`、`set_locale`、`colors`、`TextRole`、`Button`、`Segmented`、`GroupedList`、`Row`、`AgentDot`、`Icon`、`semantic`、`ui::contrib` 的载荷类型 | 视图层的公共库，非插件；颜色和动效只从这里取 |
+| `lectern-ui` | `Text`、`strings`、`set_locale`、`colors`、`TextRole`、操作卡片、弹出菜单、侧栏列表的行、`AgentDot`、`Icon`、`semantic`、`ui::contrib` 的载荷类型 | 视图层的公共库，非插件；颜色和动效只从这里取 |
 | `lectern-i18n` | `keys::welcome::*`、`keys::common::*`、`Locale`、`Args` | [ADR 0013](../adr/0013.md) |
 | `lectern-kernel`、`lectern-services` | `Plugin`、`PluginHandle`、`ServiceRef<dyn Contributions>`、`ServiceRef<dyn Projects>`、`ServiceSet<dyn SessionSource>`；`WorkspaceCommand`、`ProjectEvent`、`SessionsChanged`、`Place`、`ProjectKey` | 架构规则 7（[ADR 0025](../adr/0025.md)）：插件只经 `services` 的接口往来 |
 | `lectern-executor` | 读写最近项目文件、重算发现列表的 `Background` 任务 | UI 线程不做 IO；实例由 `app` 创建，经 `WelcomeDeps` 传入 |
@@ -263,7 +263,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 4. 唤醒视图：`WelcomeModel` 持有 `futures::channel::mpsc::unbounded` 的发送端（`subscribe` 登记）；视图建立时 `cx.spawn` 一个前台任务循环 `await` 接收端，每收到一项就 `this.update(cx, |_, cx| cx.notify())`。发送端的 `wake` 经 GPUI 的平台分发器唤醒主线程（与 [workspace 设计「数据流与线程」](workspace.md#数据流与线程)的主线程队列同一机制），任何线程都能发，不轮询。视图 drop 时守卫注销，之后的 `wake` 不做任何事。
 5. 打开：最近项目和发现的文件夹：视图在主线程上先 `model.begin_open(path, source)`（清 `notice`、记 `opening`），再 `dispatch(WorkspaceCommand::OpenProject(path))`；`opening` 有值期间，视图对同一路径的再次 ↵ 或点击不发出命令，对其他路径照常（`workspace` 自己排队）。Open Folder 按钮：`model.clear_notice()` 后 `dispatch(PromptOpenProject)`（⌘O 是 `workspace` 的全局绑定，不经本视图，只有 `workspace` 的流程）。`workspace` 问守卫、调 `Projects::open`，`Opened { Ok }` 到达后换基底屏幕、drop 本视图，本 crate 的监听同时清 `opening`（第 2 步）。`Opened { Err(e) }` 时 `workspace` 停在 Welcome 并记 warn，本 crate 的监听把 `Notice::OpenFailed(e 的种类)` 放进快照、清 `opening`；`opening` 有值并且 `e` 是 `NotFound` / `NotADirectory` 时，`path` 等于 `opening.path` 的最近项目标 `missing`。`Opened` 不带路径（[project 设计「事件」](project.md#事件)只有 `OpenRequest`），所以本屏幕发起的打开同一时刻只能有一个在进行，`opening` 就是那一个；不是本屏幕发起的失败（`restore` 的路径已不存在、⌘O 选的目录不可读）只显示提示，不标 `missing`。
 6. 移除最近项目：视图调 `model.remove_recent(path)`：在调用线程（主线程）上只改内存里的列表并换快照（常数时间，不做 IO；`loaded` 还没置位时只进变更队列），然后置写入的脏标记：没有写任务在排队时用 `started` 存下的 `PluginHandle::own_with` 排一个 `Background` 写任务（同第 2 步；`welcome` 已停用时 `own_with` 返回 false，不写，视图这时也已经被 `workspace` 撤下），再置第 3 步的脏标记（被遮住的发现项可能重新出现）。
-7. 语言选择：视图在主线程上调 `lectern_ui::set_locale(locale, cx)`（立即换全局 `Strings`、刷新窗口），再调 `platform::system::set_language_override(tag, done)`（立即返回，写入在 `platform` 的串行队列里，[i18n 设计「数据流与线程」](i18n.md#数据流与线程)）；`done` 收到 `Err(WriteFailed)` 时调 `model.language_not_saved()`（`Superseded` 是被更新的选择顶掉，不提示），视图显示 `welcome-language-not-saved`（i18n 设计「状态与异常」要求的一次提示）。选「跟随系统」时 `locale = Locale::negotiate(platform::system::system_languages())`，`tag` 为 None。分段控件的初始选项来自 `platform::system::language_override()`（一次内存里的偏好读取，主线程，视图建立时读一次），有值时用 `Locale::negotiate([tag])` 转成 `Locale`。
+7. 语言选择：视图在主线程上调 `lectern_ui::set_locale(locale, cx)`（立即换全局 `Strings`、刷新窗口），再调 `platform::system::set_language_override(tag, done)`（立即返回，写入在 `platform` 的串行队列里，[i18n 设计「数据流与线程」](i18n.md#数据流与线程)）；`done` 收到 `Err(WriteFailed)` 时调 `model.language_not_saved()`（`Superseded` 是被更新的选择顶掉，不提示），视图显示 `welcome-language-not-saved`（i18n 设计「状态与异常」要求的一次提示）。选「跟随系统」时 `locale = Locale::negotiate(platform::system::system_languages())`，`tag` 为 None。弹出菜单的初始选项来自 `platform::system::language_override()`（一次内存里的偏好读取，主线程，视图建立时读一次），有值时用 `Locale::negotiate([tag])` 转成 `Locale`。
 8. UI 线程上不做 IO、解析和 git 操作：视图只调 `snapshot()`（取锁复制）、`dispatch`、`begin_open` / `clear_notice` / `remove_recent`（改内存）、`set_locale`、`language_override`（内存里的偏好）。所有 `std::fs` 调用都在 `src/recent/store.rs`，只从 `Background` 任务调用（验收用 `rg` 检查）。
 9. 派生数据：没有以内容为键的派生数据（架构规则 5 不适用）。发现列表以会话列表的代数为准：任务开始时记下每个来源的 `generation`，结束时有更新的来源就按第 3 步的脏标记再跑一次。
 10. `welcome-discovery` 停用（会话来源的最后一个提供者停用、本插件失败）：kernel 先撤销监听、关闭闸门（排队中的重算丢弃），最后 drop `Active`，它把 `discovered` 置为 `Unavailable`、换快照并唤醒；列表显示空状态。重新激活时回到 `Pending`。
@@ -271,7 +271,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 ## 性能
 
 - 冷启动（[ADR 0017](../adr/0017.md)）：首帧之前本 crate 没有代码运行。首帧是 `app` 的中性骨架；`workspace::install` 在屏障放开后替换根视图，本 crate 的插件在 kernel 线程上激活，`Screen` 贡献应用后的下一帧才画出 Welcome。`plugin/welcome/activate`、`plugin/welcome-discovery/activate` 各 < 1 ms（取服务引用、登记贡献或监听，不做 IO）。
-- Welcome 的第一次渲染（屏障放开后的第 2–3 帧）：只有标题、一个按钮、一个分段控件、两个标题行和两条空状态文字，从视图自己的状态画出，不等任何后台任务：排版十几段文字，< 1 ms，远在一帧 8.3 ms 之内。列表在后台任务完成后填入：最近项目在第 1 步后（读文件 < 1 ms，加任务调度，用户可感知为与首帧同时出现）；发现的文件夹在 `agents` 第一次发布会话列表之后（[agents 设计「性能」](agents.md#性能)：1000 个会话 < 500 ms）。按[交互规范「状态与异常」](interaction.md#状态与异常)，100 ms 内不显示加载态，所以两个列表在到达之前只显示标题、不显示骨架；超过 100 ms 还没到时显示 2 行骨架（`ui::Skeleton`），由 `ui::loading_phase` 判断。
+- Welcome 的第一次渲染（屏障放开后的第 2–3 帧）：只有图标、标题、一张操作卡片、一个弹出菜单、两个小标题和两条空状态文字，从视图自己的状态画出，不等任何后台任务：排版十几段文字，< 1 ms，远在一帧 8.3 ms 之内。列表在后台任务完成后填入：最近项目在第 1 步后（读文件 < 1 ms，加任务调度，用户可感知为与首帧同时出现）；发现的文件夹在 `agents` 第一次发布会话列表之后（[agents 设计「性能」](agents.md#性能)：1000 个会话 < 500 ms）。按[交互规范「状态与异常」](interaction.md#状态与异常)，100 ms 内不显示加载态，所以两个列表在到达之前只显示标题、不显示骨架；超过 100 ms 还没到时显示 2 行骨架（`ui::Skeleton`），由 `ui::loading_phase` 判断。
 - 重算发现列表：`discover::build` 对 1000 个会话约 0.3 ms，10 000 个约 3 ms（一次哈希分组加一次排序），在 `Background` 线程上，持有 `busy()` 守卫；发现阶段最多再跑一次（脏标记合并），不让 kernel 长时间忙碌。
 - 空闲内存：快照最多 10 条最近项目加 50 条发现项（每条约 200 字节），模型和视图合计 < 64 KiB；本 crate 不保留 `SessionList` 的 `Arc`（任务结束即放下），不保留 `ProjectSnapshot`。
 - 帧时间：`render` 只克隆一个 `Arc` 和构造至多 60 行的元素；悬停和选中用 `ui::Row` 的动画（`HOVER_IN` / `HOVER_OUT`），不自定义动画参数。
@@ -279,28 +279,34 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 ## 界面
 
-- 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)画板 01，常驻层；没有侧栏、工具栏、检查器、浮条（`ScreenLayout { sidebar: Hidden, back_button: false, reading_column: false, inspector: false, floating_bar: false }`）。窗口 820 × 520 pt（[app 设计「界面」](app.md#界面)）。布局：左栏 300 pt（应用名 `TextRole::LargeTitle`、一行副标题、Open Folder 主按钮、底部的语言分段控件），右栏为剩余宽度，两个分组列表（`ui::GroupedList`）上下排列，各带标题行；右栏整体可滚动。
-- `ui` 的控件与动效原语（名字以 `ui` 设计「控件」为准，PR [#218](https://github.com/SoloJiang/lectern-app/pull/218)）：`Text`（全部文字）、`Button`（Open Folder：`Primary`、`Regular`、`Icon::Folder`；移除：`Plain`、`Small`、`Icon::Close`）、`Segmented`（语言）、`GroupedList` + `Row`（两个列表）、`AgentDot`（发现项的 agent 圆点）、`Skeleton`（加载态）；颜色经 `colors(cx)`，字号经 `TextRole`。本 crate 不写任何颜色值、字体名和动画时长（验收用 `rg` 检查）。
+- 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)画板 01，常驻层；没有侧栏、工具栏、检查器、浮条（`ScreenLayout { sidebar: Hidden, back_button: false, reading_column: false, inspector: false, floating_bar: false }`）。窗口 820 × 520 pt（[app 设计「界面」](app.md#界面)）。布局以设计画布的 Welcome 画板为准（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）：窗口分左右两栏，宽度按 360 : 320 的比例伸缩。左栏的内容水平居中，从上到下：应用图标（圆角方块，深色底，画布里是一个讲台图形；图标资源见「对其他 crate 的要求」E，没有资源时不画这一块）、应用名（Large Title 层级，粗体）、一行次要文字的版本说明、两张操作卡片（Open Folder…、Clone Repository…，宽度撑满、最宽 300pt；Clone 卡片见「未决问题」2）、最下面一行语言选择（`welcome-language` 的小标签加一个弹出菜单）。右栏铺在侧栏材质上（不是页面底色），左边一条 0.5pt 分隔线，里面是两组平铺的行：没有卡片、没有行间分隔线，每组上面一行小标题（Subheadline 层级，半粗，次要色）；右栏整体可滚动。
+- `ui` 的控件与动效原语（名字以 `ui` 设计「控件」为准，PR [#218](https://github.com/SoloJiang/lectern-app/pull/218)）：`Text`（全部文字）、操作卡片（Open Folder、Clone：填充 `fill` 色、圆角 10pt、左边 20pt 的强调色图标 `Icon::Folder` / `Icon::Clone`、中间标题加一行次要说明、右边快捷键提示；`ui` 设计里还没有，见「对其他 crate 的要求」D）、弹出菜单（语言；同上）、侧栏列表的行（右栏的行：圆角 8pt，两侧内缩；悬停是淡填充，选中是强调色填充；`ui` 的 `Row` 现在是分组列表里的行，平铺样式见 D）、`AgentDot`（发现项的 agent 圆点）、`Skeleton`（加载态）；颜色经 `colors(cx)`，文字层级经 `TextRole`（见[交互规范「视觉」](interaction.md#视觉)的文字样式）。本 crate 不写任何颜色值、字体名和动画时长（验收用 `rg` 检查）。
 - 每一行的内容：
-  - 最近项目：第一行 `name`（`TextRole::Body`），第二行次要文字：`path`（主目录写成 `~`，`Text::verbatim`）；`sessions > 0` 时在第二行末尾加 `welcome-row-sessions` 和（`running > 0` 时）`welcome-row-running`；`missing` 时第二行换成 `welcome-recent-missing`。行尾悬停或选中时显示移除按钮。会话数和运行中数来自与发现列表同一次 `discover::build`（按 `key` 匹配，见「发现的文件夹」）；`welcome-discovery` 没有激活时为 0，不显示。
-  - 发现的文件夹：行首 `AgentDot`（每种 agent 一个，最多 4 个），第一行 `name`，第二行 `path`、`welcome-row-sessions`、`welcome-row-running`、`Strings::relative_time(now - newest_activity)`。
+  - 最近项目：第一行 `name`（Headline 层级，半粗）；第二行次要文字（Callout 层级），各项用 ` · ` 连接，按这个顺序，不成立的项省略：`welcome-row-folder`（`key` 是文件夹而不是 git 仓库时）、`welcome-row-sessions`（`sessions > 0`）、`welcome-row-running`（`running > 0`）、所在目录（`path` 去掉最后一段，即项目的上一级；主目录写成 `~`，`Text::verbatim`，如 `~/work`）；`missing` 时第二行换成 `welcome-recent-missing`。画布在计数的位置画的是「3 to review」；待审数是「未决问题」1，没有决定之前这个位置显示会话数。会话数和运行中数来自与发现列表同一次 `discover::build`（按 `key` 匹配，见「发现的文件夹」）；`welcome-discovery` 没有激活时为 0，不显示。行上没有移除按钮：移除用 ⌫ 和行的右键菜单（`welcome-recent-remove`，菜单需要 `ui` 提供，见 D；在那之前只有 ⌫）。
+  - 发现的文件夹：行首 `AgentDot`（每种 agent 一个，最多 4 个），第一行 `name`（Headline 层级，半粗）；第二行次要文字（Callout 层级）：只有一种 agent 时是 `welcome-row-agent-sessions`（点名 agent，如「2 Claude Code sessions」），有几种时是 `welcome-row-sessions`（圆点已经表示各个 agent），然后（`running > 0` 时）`welcome-row-running`，最后 `Strings::relative_time(now - newest_activity)`，用 ` · ` 连接。路径不画在行里（画布没有）；完整路径仍是行的业务键和探针节点的 `NodeId`。
+  - 选中的行（键盘选择或点击）：整行用强调色（`accent`）填充，文字用强调色上的字色，第二行用同一字色的 85% 不透明度；悬停的行用淡填充。选中状态由键盘和鼠标共用。画布画的是第一个最近项目已被选中；本屏幕没有选中项时 ↵ 什么也不做（见「Action 与快捷键」），所以进入屏幕时不预选。
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/welcome.ftl`；已有的 6 个键保留，新增的在前置条件 A 里加）：
 
   | 键 | en | zh-CN | 用途 |
   |---|---|---|---|
-  | `welcome-title` | Welcome to { -app-name } | 欢迎使用 { -app-name } | 左栏标题（已有） |
-  | `welcome-subtitle` | Open a folder to see what your agents changed. | 打开一个文件夹，看 agent 改了什么。 | 标题下的一行次要文字 |
-  | `welcome-open-folder`（`.tooltip`） | Open Folder… | 打开文件夹… | 主按钮（已有） |
-  | `welcome-clone` | Clone… | 克隆… | 保留给 Clone 的 issue（已有，本 issue 不显示） |
-  | `welcome-recent` | Recent Projects | 最近的项目 | 列表标题（已有） |
+  | `welcome-title` | { -app-name } | { -app-name } | 左栏标题，应用名（已有，值随 #283 改） |
+  | `welcome-subtitle` | Version { $version } · Read what your agents wrote. | 版本 { $version } · 看 agent 写了什么。 | 标题下的一行次要文字；`$version` 是应用版本的「主版本.次版本」（`Args::str`），由 `app` 装配时经 `WelcomeDeps` 传入（「对其他 crate 的要求」E）；没有版本时用 `welcome-subtitle-plain` |
+  | `welcome-subtitle-plain` | Read what your agents wrote. | 看 agent 写了什么。 | 没有版本号时的副标题 |
+  | `welcome-open-folder` | Open Folder… | 打开文件夹… | Open Folder 卡片的标题（已有） |
+  | `welcome-open-folder-hint` | A repository or any folder | 仓库或任意文件夹 | Open Folder 卡片的说明 |
+  | `welcome-clone` | Clone Repository… | 克隆仓库… | Clone 卡片的标题（已有，本 issue 不显示） |
+  | `welcome-clone-hint` | From GitHub or GitLab | 来自 GitHub 或 GitLab | Clone 卡片的说明（同上） |
+  | `welcome-recent` | Recent | 最近 | 列表小标题（已有，值随 #283 改） |
   | `welcome-recent-empty` | No recent projects | 没有最近的项目 | 空状态（已有） |
   | `welcome-recent-missing` | Folder no longer exists | 文件夹已不存在 | `missing` 行的第二行 |
-  | `welcome-recent-remove` | Remove from Recents | 从最近的项目移除 | 移除按钮的辅助名与 `.tooltip` |
-  | `welcome-discovered`（`.tooltip`） | From Claude Code and Codex | 来自 Claude Code 与 Codex | 列表标题（已有） |
+  | `welcome-recent-remove` | Remove from Recents | 从最近的项目移除 | 行的右键菜单项 |
+  | `welcome-discovered` | Found in Agent History | 在 agent 历史中发现 | 列表小标题（已有，值随 #283 改） |
   | `welcome-discovered-empty` | No agent sessions found yet | 还没有发现 agent 会话 | 空状态 |
   | `welcome-row-sessions` | { $count -> [one] { $count } session *[other] { $count } sessions } | { $count } 个会话 | 行的次要文字 |
+  | `welcome-row-agent-sessions` | { $count -> [one] { $count } { $agent } session *[other] { $count } { $agent } sessions } | { $count } 个 { $agent } 会话 | 发现项的次要文字（只有一种 agent；`$agent` 是产品名，`Args::str` 原样） |
+  | `welcome-row-folder` | Folder | 文件夹 | 最近项目的次要文字：不是 git 仓库 |
   | `welcome-row-running` | { $count } running | { $count } 个运行中 | 行的次要文字 |
-  | `welcome-language` | Language | 语言 | 分段控件的辅助名 |
+  | `welcome-language` | Language | 语言 | 语言弹出菜单旁的小标签 |
   | `welcome-language-not-saved` | The language setting couldn't be saved. The next launch uses the previous setting. | 语言设置未能保存，下次启动仍使用上一次保存的设置。 | `Notice::LanguageNotSaved` |
   | `welcome-open-failed-not-found` | That folder no longer exists. | 这个文件夹已不存在。 | `OpenError::NotFound` |
   | `welcome-open-failed-not-a-directory` | That path isn't a folder. | 这个路径不是文件夹。 | `OpenError::NotADirectory` |
@@ -316,15 +322,14 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   |---|---|---|
   | `welcome.root` | `Group` | `recent`（`loading` / `ready`）、`discovered`（`unavailable` / `pending` / `ready`）、`opening`（`true` 时才有） |
   | `welcome.title` | `Text` | `Label::key = welcome-title` |
-  | `welcome.open-folder` | `Button` | `Label::key = welcome-open-folder` |
-  | `welcome.language` | `TabBar` | —（`ui::Segmented` 不声明 `Label`，见「与设计的差异」第 2 步） |
-  | `welcome.language.item[system]`、`[en]`、`[zh-CN]` | `Tab` | `State::selected`；`Label::key` 是对应的 `common-language-*` |
+  | `welcome.open-folder` | `Button` | `Label::key = welcome-open-folder`（操作卡片） |
+  | `welcome.language` | `Button` | `Label::key = welcome-language`；`attrs`：`value`（当前选择：`system` / `en` / `zh-CN`）。弹出菜单的控件 |
+  | `welcome.language.item[system]`、`[en]`、`[zh-CN]` | `MenuItem` | `State::selected`；`Label::key` 是对应的 `common-language-*`；菜单关闭时不出现 |
   | `welcome.notice` | `Text` | `Label::key` 是 `welcome-open-failed-*` 或 `welcome-language-not-saved`；没有提示时不出现 |
   | `welcome.recent` | `List` | — |
   | `welcome.recent.empty` | `Text` | `Label::key = welcome-recent-empty`；列表非空时不出现 |
   | `welcome.recent.item[<path>]` | `ListItem` | `State::selected`（`ui::Row` 声明，没有 `Label` 和 `attrs`） |
   | `welcome.recent.item[<path>].name` | `Text` | `Label` 是 `name`（`key` None）；`attrs`：`kind`（`git` / `folder`，取自 `key` 的变体）、`sessions`、`running`、`missing`（`true` 时才有） |
-  | `welcome.recent.item[<path>].remove` | `Button` | `Label::key = welcome-recent-remove` |
   | `welcome.discovered` | `List` | — |
   | `welcome.discovered.empty` | `Text` | `Label::key = welcome-discovered-empty` |
   | `welcome.discovered.item[<path>]` | `ListItem` | `State::selected` |
@@ -339,8 +344,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   | `welcome::SelectNext` | ↓ | 选择线性序列里的下一项；没有选中时选第一项；已是最后一项时不动 |
   | `welcome::SelectPrevious` | ↑ | 上一项；在第一项时不动；没有选中时选最后一项 |
   | `welcome::OpenSelected` | ↵ | 对选中项 `begin_open` 后 `dispatch(OpenProject(path))`；没有选中、或 `opening.path` 就是它时不做任何事 |
-  | `welcome::RemoveSelected` | ⌫ | 选中的是最近项目时 `remove_recent(path)`，选择移到同位置的下一项（没有则上一项）；选中的是发现项时不做任何事 |
-  | `welcome::SelectLanguage { locale: Option<Locale> }` | — | 分段控件的点击；探针用它切换语言，构造时的 JSON 是 `{"locale": "en"}`、`{"locale": "zh-CN"}`、`{"locale": null}`（`Locale` 没有 serde，所以这个 `Action` 手写 `build`，见「与设计的差异」第 2 步） |
+  | `welcome::RemoveSelected` | ⌫（也是行的右键菜单项） | 选中的是最近项目时 `remove_recent(path)`，选择移到同位置的下一项（没有则上一项）；选中的是发现项时不做任何事 |
+  | `welcome::SelectLanguage { locale: Option<Locale> }` | — | 弹出菜单的选择；探针用它切换语言，构造时的 JSON 是 `{"locale": "en"}`、`{"locale": "zh-CN"}`、`{"locale": null}`（`Locale` 没有 serde，所以这个 `Action` 手写 `build`，见「与设计的差异」第 2 步） |
 
   ⌘O 不在这里绑定：它是 `workspace::OpenFolder` 的全局绑定，Open Folder 按钮和它都走 `PromptOpenProject`。Esc、⌘[ 在 Welcome 上由 `workspace` 忽略（[workspace 设计「导航状态机」](workspace.md#导航状态机)）。鼠标点击一行同时把选择移到这一行，键盘和鼠标触发同一个 `Row` 的选中样式。
 
@@ -420,12 +425,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
   在 [platform 设计](platform.md)「系统首选语言」一节下补上这三个函数。与 [i18n 设计「数据流与线程」](i18n.md#数据流与线程)的差异：那里写 `language_override() -> Option<Locale>`；`platform` 在基础设施层、不依赖 `i18n`，所以返回 BCP 47 标签，调用方用 `Locale::negotiate([tag])` 转换。前置条件 B 的 PR 同时把 i18n 设计里的那一行改成了标签。
 - **C. `app`**（已实现，见 [app 设计「welcome 的装配」](app.md#welcome-的装配)）：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
-- **D. `ui`**：本 crate 只用 `ui` 设计已列出的控件和 `ui::contrib` 的载荷类型，没有新增要求。`Segmented` 的探针角色按 `ui` 的实现（本文按 `TabBar` / `Tab` 写，以 `ui` 为准）。
+- **D. `ui`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：现在的 `ui` 没有下面几项，右栏和左栏按画布重画之前要有：操作卡片；弹出菜单；右键菜单（只用于「从最近的项目移除」，没有它时只有 ⌫）；侧栏列表的行（平铺、圆角 8pt、选中用强调色填充，文字层级由行内的元素给出）。名字和接口由 `ui` 设计定，`ui` 设计另有一个 PR 在补。探针角色：弹出菜单按 `Button` 加打开后的 `Menu` / `MenuItem` 写，以 `ui` 的实现为准。
+- **E. `app`**：应用图标的资源（左栏顶部）和应用版本（主.次，传给 `WelcomeDeps`）。现在 bundle 里没有图标，`WelcomeDeps` 也没有版本字段；没有时视图不画图标、副标题不带版本，其余布局不变。
 
 ## 未决问题
 
-1. **最近项目行是否显示待审数。** issue 写「最近项目（待审数、运行中数）」。待审数要对没有打开的项目算审阅概览：读 worktree 的改动、按会话归因（[review 设计](review.md)），每个项目几十到几百毫秒的 git 操作，Welcome 显示 10 个项目就是最多几秒的后台工作，并且会在用户还没选项目之前打开 10 个仓库。默认（本文按它写）：Welcome 只显示会话数和运行中数（都来自已经在内存里的会话列表，没有额外 IO），待审数在打开项目后的项目主页显示；以后 `review` 有廉价的按项目计数时再加一列，行的结构不变。另一个选项：Welcome 对最近项目逐个 `Review::watch_overview`，显示概览里的会话数，接受上述开销。
-2. **Clone 按钮在这个 issue 里是否出现。** 交互规范写「Open Folder（⌘O）/ Clone」，但克隆流程（目标目录、进度、forge 登录）没有设计。默认：本 issue 不显示 Clone 按钮，`welcome-clone` 的键保留，Clone 的 issue 把按钮加回左栏。另一个选项：显示一个禁用的 Clone 按钮并在悬停时说明「即将推出」。
+1. **最近项目行是否显示待审数。** issue 写「最近项目（待审数、运行中数）」。待审数要对没有打开的项目算审阅概览：读 worktree 的改动、按会话归因（[review 设计](review.md)），每个项目几十到几百毫秒的 git 操作，Welcome 显示 10 个项目就是最多几秒的后台工作，并且会在用户还没选项目之前打开 10 个仓库。默认（本文按它写）：Welcome 只显示会话数和运行中数（都来自已经在内存里的会话列表，没有额外 IO），待审数在打开项目后的项目主页显示；以后 `review` 有廉价的按项目计数时再加一列，行的结构不变。另一个选项：Welcome 对最近项目逐个 `Review::watch_overview`，显示概览里的会话数，接受上述开销。设计画布（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）的最近项目行显示「3 to review」，即选了后一个选项；这个问题仍未决定，默认不变。
+2. **Clone 按钮在这个 issue 里是否出现。** 交互规范写「Open Folder（⌘O）/ Clone」，但克隆流程（目标目录、进度、forge 登录）没有设计。默认：本 issue 不显示 Clone 按钮，`welcome-clone` 的键保留，Clone 的 issue 把按钮加回左栏。另一个选项：显示一个禁用的 Clone 按钮并在悬停时说明「即将推出」。设计画布（#283）在 Open Folder 下面画了一张 Clone Repository… 卡片（说明「From GitHub or GitLab」）；这个问题仍未决定，默认不变，卡片的样式和文字（`welcome-clone`、`welcome-clone-hint`）已经按画布写好，Clone 的 issue 把卡片加回左栏。
 
 ## 已知限制
 
@@ -527,3 +533,11 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - **`futures` 用了**（第 1 步的差异说不依赖它）：视图把模型的唤醒回调接到 `mpsc::unbounded`，前台任务 `await` 接收端。
 - **`app` 的装配不在本 PR。** 前置条件 C（`Profile::Desktop` 加这两个插件、`every_profile_graph_validates` 的插件数加二）由另一个 PR 做，见 PR 描述。
 - **给 `ui` 的建议**（不在本 PR 做）：`Row` 的 `label` / `attr`、`Segmented` 的 `Label`、`Button` 的只有图标形态与提示、只有一段的 `NodeId`。
+
+### 为 #283 修订「界面」
+
+- **「界面」按设计画布重写**（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，Refs；实现随后的 PR 跟随本文）：应用名从「Welcome to Lectern」改成「Lectern」，加应用图标和版本说明；Open Folder 从主按钮改成操作卡片（图标、标题、说明、⌘O）；右栏从两个分组列表改成侧栏材质上的平铺行（选中用强调色填充，名字半粗）；小标题从「Recent Projects」「From Claude Code and Codex」改成「Recent」「Found in Agent History」；语言选择从三段分段控件改成带「Language」标签的弹出菜单；最近项目行的第二行从「完整路径 · 会话 · 运行中」改成「文件夹 · 会话 · 运行中 · 上级目录」；发现项的第二行去掉路径、点名 agent；移除按钮去掉，改成 ⌫ 和右键菜单。
+- **仍按已记录的默认**：「未决问题」1（不显示待审数）和 2（不显示 Clone）没有变，画布与它们不同的地方写在各自的问题里。
+- **「界面」之外的几处**（范围、依赖、性能、数据流、对其他 crate 的要求）只改了与新控件一致的措辞。上面「第 2 步」里关于移除按钮、`Segmented`、`GroupedList` 的差异描述的是已实现的状态，实现 PR 改掉它们时再更新。
+- **语言菜单保留三项**（跟随系统、English、简体中文）：画布的菜单只画了两项，「跟随系统」是行为（[交互规范「语言」](interaction.md#语言)），不是视觉，所以保留。
+
