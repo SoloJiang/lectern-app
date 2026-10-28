@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、「项目」窗口第一次使用时的 1180 × 760 居中、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、「项目」窗口第一次使用时的 1180 × 760 居中、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -361,9 +361,9 @@ pub struct WindowState {
 | 区域 | 规格（[交互规范「窗口结构」](interaction.md#窗口结构)） | 层 | 内容来源 |
 |---|---|---|---|
 | Sidebar | 248pt，vibrancy，占满窗口高度，顶部一行（与工具栏同高）留给窗口控件；当前侧栏面板 | 常驻（项目侧栏）/ 按需（Files 等替换面板） | `SidebarPanel` 贡献；项目侧栏里的条目来自 `SidebarEntry` 贡献 |
-| Toolbar | 52pt，半透明材质，下沿 0.5pt 分隔线；从侧栏右边起横跨内容区和检查器（没有侧栏时横跨整个窗口宽，窗口控件在它里面，检查器在它下面）；标题 + 副标题；左侧是图标按钮：返回（有 `back_button` 的屏幕）或侧栏开关（有侧栏的屏幕）；右侧至多 3 个控件，检查器开关（图标按钮）算其中一个 | 常驻 | 本 crate 画容器和三个图标按钮（返回、侧栏开关、检查器开关，都不带文字）；标题、副标题、其余右侧控件由当前屏幕经 `ui::contrib::Screen::toolbar` 提供（下节） |
+| Toolbar | 52pt，半透明材质，下沿 0.5pt 分隔线；从侧栏右边起横跨内容区和检查器（没有侧栏时横跨整个窗口宽，窗口控件在它里面，左边让出 88pt 给窗口控件，检查器在它下面）；标题 + 副标题；左侧是图标按钮：返回（有 `back_button` 的屏幕）或侧栏开关（有侧栏的屏幕）；右侧至多 3 个控件，检查器开关（图标按钮）算其中一个 | 常驻 | 本 crate 画容器和三个图标按钮（返回、侧栏开关、检查器开关，都不带文字）；标题、副标题、其余右侧控件由当前屏幕经 `ui::contrib::Screen::toolbar` 提供（下节） |
 | Content | 居中 760pt 阅读栏（`reading_column`）或整个内容区 | 常驻 / 收起（阅读视图） | 栈顶 `Screen` |
-| Inspector | 300pt，侧栏材质；顶部撑满宽度的分段控件切换页 | 按需（⌥⌘I） | `InspectorTab` 贡献 |
+| Inspector | 300pt，侧栏材质（GPUI 的元素画不了模糊，用不透明的 `under_page_background`，[ui 设计「与设计的差异」](ui.md#与设计的差异)）；顶部撑满宽度的分段控件切换页 | 按需（⌥⌘I） | `InspectorTab` 贡献 |
 | Panel | 浮在检查器上方，检查器隐藏时占它的位置，300pt（设计画布画的是 420pt 宽、内缩 8pt，产品负责人 2026-10-23 的决定按 300pt，见「未决问题」3），圆角 14pt，阴影，不加遮罩 | 按需（Space 打开，Esc 关闭） | `Panel` 贡献 |
 | Overlay | 窗口中央 | 按需（⌘K） | `Overlay` 贡献 |
 | Floating bar | 贴底居中的胶囊 | 常驻（只在审阅） | 本 crate 留出并摆放区域（在内容区底部居中，离底边留白，滚动内容在它下面）；胶囊容器（材质、阴影、半径）是 `ui` 的浮条容器，内容由审阅屏幕的视图画 |
@@ -585,6 +585,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   - 屏障放开后在 executor 的 `Background` 任务里读 `app_data()/workspace/window.json`，解析成 `WindowState`（认不出或没有文件时为默认值），调 `host.restore`；`app_data()` 为 None 时不读不写。`on_state_changed` 去抖 500 ms 后在 `Background` 任务里写同一个文件（写临时文件再 `rename`，不建目录以外的任何东西）。读写失败只记 warn（不记路径）。
   - `Quit` 的第 1 步：`host.ask_leave(LeaveScope::App, done)`，`done(false)` 时什么也不做。
   - 把 `Milestone` 转给探针的 `milestone`，把 `FrameRecord` 转成 `FrameStats` 交给 `frames`（`bench-probe` feature）；`Driver` 的滚动、动画和输入场景调 `host.record_frames(scenario, stop)`，输入场景用 `RecordStop::Manual`，注入结束后 `stop_recording`。
+- **G. `app`**（为 #283 新增，`Refs #283`）：窗口控件在 52pt 的工具栏里竖直居中：`TitlebarOptions::traffic_light_position` 设为 `point(px(20.0), px(19.0))`（按钮高 14pt，(52 − 14) / 2 = 19）。三个按钮到 x ≈ 78pt 为止，本 crate 在没有侧栏的屏幕上让工具栏左边留 88pt，有侧栏时它们在侧栏顶部与工具栏同高的一行里。
 - **F. `bench`**：`Milestone` 的来源改为 `workspace::Milestone` 的映射（bench 设计「需要其他 crate 提供的接口」已写明由 `workspace` 报告）。
 
 ## 未决问题
@@ -696,6 +697,16 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 没有运行：`tests/startup.rs`（8 个，其中新增 `window_state_stays_out_of_the_log`，`startup_writes_a_header_and_an_end_record` 的 `plugins` 改为 5，`home_path_stays_out_of_the_log` 加检查 `window.json`）：锁屏时屏障不放开，全部 30 s 超时（[app 设计「已知限制」](app.md#已知限制)），结果以 macOS CI 为准。
 - 没有做（「验收」第 3 步的手动项）：发布构建（临时 `HOME`）首次启动是 820 × 520 的 Welcome、没有 `workspace` 的记录早于 `first frame drawn`、移动窗口后重启位置保留、打开文件夹后重启回到项目主页（`screen changed` 的 `to` 为 `project-home`）；这一条还要 `welcome` 和 `project_home` 的屏幕装配（见「与设计的差异」第 3 步）。`app/cold_start`（bench 第 5 步之后判定）和空闲内存（与 40 MB 比较增加不超过 1 MB）也没有测。第 2 步留下的 `on_next_frame` 驱动的 `Tick`、里程碑的 `presented`、`RecordStop::AnimationsSettled`、面板滑入、窗口关闭后点 Dock 图标重开，同样要在真实窗口里手动检查。
 
+### 为 #283 实现「界面」
+
+区域的摆放，在 macOS（arm64，Rust 1.97.0）上运行，叠在 [#285](https://github.com/SoloJiang/lectern-app/pull/285)（工具栏的图标按钮、检查器的 `Segmented`、阅读栏屏幕的 `under_page_background`）和审阅屏幕的重画（[#295](https://github.com/SoloJiang/lectern-app/pull/295)）之上。屏幕锁定，没有运行应用：
+
+- 根视图的结构改为 `侧栏？| 列[工具栏, 行[内容区, 检查器？]]`：工具栏从侧栏右边起横跨内容区和检查器，检查器在工具栏下面；上下文面板仍从工具栏下沿起、占检查器的位置。
+- 侧栏容器顶部留出与工具栏同高（52pt）的一行给窗口控件，侧栏面板从它下面开始（project_home 设计「界面」）。没有侧栏的屏幕上，工具栏左边留 88pt（`WINDOW_CONTROLS_INSET`）。
+- 检查器的底色由 `window_background` 改为 `under_page_background`（侧栏材质，见「区域与三层」）。
+- `just check` 通过。`just test -p lectern-workspace -p lectern-review-view -p lectern-project-home`：274 个测试通过；语义树的 insta 快照没有变化（区域的节点与它们的 ID 不随摆放改变）。
+- 没有验证：真实窗口里的样子（工具栏横跨检查器、窗口控件与返回按钮的间距、检查器与侧栏的底色在两种外观下的对比）；窗口控件在 52pt 工具栏里的竖直位置（前置条件 G，[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。
+
 ## 与设计的差异
 
 ### 为 #283 修订「界面」
@@ -708,6 +719,11 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - **浮条**：区域贴底居中不变；容器改成胶囊（`ui` 的浮条容器），内容仍由审阅屏幕画（[review_view 设计「界面」](review_view.md#界面)）。
 - **上下文面板**：仍是 300pt、占检查器的位置（2026-10-23 的产品决定）；画布的 420pt 与内缩 8pt 不采用，已写在「未决问题」3 和[交互规范「窗口结构」](interaction.md#窗口结构)。
 - **键**：加 `workspace-sidebar-toggle`；`workspace-back`、`workspace-inspector-toggle` 的用途改为图标按钮的辅助名与提示。.ftl 文件由实现 PR 改。
+
+### 为 #283 实现「界面」
+
+- **88pt 的左边距是本 crate 定的数**：交互规范和画布只写了「窗口控件在工具栏里」，没有给数。按前置条件 G 的位置，三个按钮到 x ≈ 78pt 为止，再留 10pt 给返回按钮的悬停底色。
+- **侧栏开关没有画**：它的命令和 Action 还没有设计（「界面」）。
 
 ### `SetReadingColumn`（review_view 前置条件 A）
 
