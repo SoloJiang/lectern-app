@@ -26,10 +26,12 @@ pub enum ProgressShape {
     Ring,
 }
 
-/// The bar's height, the ring's side and the ring's stroke.
+/// The bar's height, the ring's side and the ring's stroke. The ring is the
+/// canvas's 20pt with a 2.5pt stroke: a determinate ring has no HIG size
+/// (16pt is the indeterminate spinner's), so the canvas decides.
 const BAR_HEIGHT: Pixels = px(4.0);
-const RING_SIDE: Pixels = px(16.0);
-const RING_WIDTH: Pixels = px(2.0);
+const RING_SIDE: Pixels = px(20.0);
+const RING_WIDTH: Pixels = px(2.5);
 
 impl Progress {
     /// `fraction` is clamped to `0..=1`.

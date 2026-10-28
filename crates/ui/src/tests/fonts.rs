@@ -67,20 +67,28 @@ fn mono_is_taken_as_resolved_when_the_text_system_cannot_tell_families_apart() {
 
 #[test]
 fn text_roles_have_the_spec_sizes() {
-    assert_eq!(TextRole::LargeTitle.size(), px(40.0));
-    assert_eq!(TextRole::Title.size(), px(26.0));
-    assert_eq!(TextRole::Subtitle.size(), px(22.0));
+    assert_eq!(TextRole::LargeTitle.size(), px(26.0));
+    assert_eq!(TextRole::Title1.size(), px(22.0));
+    assert_eq!(TextRole::Title2.size(), px(17.0));
+    assert_eq!(TextRole::Title3.size(), px(15.0));
+    assert_eq!(TextRole::Headline.size(), px(13.0));
     assert_eq!(TextRole::Body.size(), px(13.0));
     assert_eq!(TextRole::Secondary.size(), px(13.0));
+    assert_eq!(TextRole::Callout.size(), px(12.0));
     assert_eq!(TextRole::Caption.size(), px(11.0));
+    assert_eq!(TextRole::Footnote.size(), px(10.0));
     assert_eq!(TextRole::Code.size(), px(12.0));
     for role in [
         TextRole::LargeTitle,
-        TextRole::Title,
-        TextRole::Subtitle,
+        TextRole::Title1,
+        TextRole::Title2,
+        TextRole::Title3,
+        TextRole::Headline,
         TextRole::Body,
         TextRole::Secondary,
+        TextRole::Callout,
         TextRole::Caption,
+        TextRole::Footnote,
         TextRole::Code,
     ] {
         assert!(role.line_height() > role.size(), "{role:?}");
@@ -92,5 +100,13 @@ fn text_roles_have_the_spec_sizes() {
         assert_eq!(role.font().family.as_ref(), expected, "{role:?}");
     }
     assert_eq!(TextRole::LargeTitle.font().weight, FontWeight::BOLD);
+    for role in [
+        TextRole::Title1,
+        TextRole::Title2,
+        TextRole::Title3,
+        TextRole::Headline,
+    ] {
+        assert_eq!(role.font().weight, FontWeight::SEMIBOLD, "{role:?}");
+    }
     assert_eq!(TextRole::Body.font().weight, FontWeight::NORMAL);
 }

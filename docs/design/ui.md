@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -185,21 +185,31 @@ pub const MONO_FAMILY: &str = ".AppleSystemUIFontMonospaced";
 /// `MONO_FAMILY` 解析失败时的后备；用它时记一条 warn（「日志与诊断」）。
 pub const MONO_FALLBACK_FAMILY: &str = "Menlo";
 
-/// 字号层级（交互规范「视觉」）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// 字号层级（交互规范「视觉」），按 macOS HIG 的文本样式：Large Title 26、Title 1 22、Title 2 17、Title 3 15、
+/// Headline 13 semibold、Body 13、Callout 12、Subheadline 11（`Caption`）、Footnote 10。
+/// 比 `Body` 小的几档和 `Secondary` 用 `secondary_label`。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TextRole {
-    /// 40pt，项目主页的大标题
+    /// 26pt 粗体（bold），行高 32：项目主页的大标题
     LargeTitle,
-    /// 26pt
-    Title,
-    /// 22pt
-    Subtitle,
-    /// 13pt，正文
+    /// 22pt semibold，行高 26（HIG Title 1）
+    Title1,
+    /// 17pt semibold，行高 22（HIG Title 2）
+    Title2,
+    /// 15pt semibold，行高 20（HIG Title 3）
+    Title3,
+    /// 13pt semibold，行高 16：行标题、分组标题、工具栏标题
+    Headline,
+    /// 13pt，行高 16：正文
     Body,
     /// 13pt，`secondary_label`
     Secondary,
-    /// 11pt，`secondary_label`
+    /// 12pt，行高 15，`secondary_label`：行标题下面的几行
+    Callout,
+    /// 11pt，行高 14，`secondary_label`（HIG 的 Subheadline）
     Caption,
+    /// 10pt，行高 13，`secondary_label`
+    Footnote,
     /// SF Mono 12pt
     Code,
 }
@@ -385,16 +395,20 @@ pub mod motion {
 只列第一批屏幕需要、而 gpui-component 没有或与 macOS 不一致的。每个控件都是 `RenderOnce` 元素（按 [gpui 技能](../../.claude/skills/gpui/SKILL.md)的指南选择），接受 `Text`，不接受 `&str`；都自带探针的角色、文字和状态（见「探针」），视图只给 `NodeId`。
 
 ```rust
-/// 按钮：macOS 的推按钮高度 24pt（`Small`）/ 30pt（`Regular`），主按钮用 `accent`。包装 gpui-component 的 `Button`，
+/// 按钮：macOS 的推按钮高度 24pt（`Small`）/ 30pt（`Regular`），主按钮用 `accent`；工具栏的图标按钮 28pt（`Toolbar`）。包装 gpui-component 的 `Button`，
 /// 把它的变体、圆角和颜色换成系统的；视图不直接用 gpui-component 的 `Button`。
 pub struct Button { /* id, text, kind, size, icon, disabled, on_click */ }
 pub enum ButtonKind { Primary, Secondary, Plain }
-pub enum ButtonSize { Small, Regular }
+pub enum ButtonSize { Small, Regular, Toolbar }
 impl Button {
     pub fn new(id: NodeId, text: Text) -> Button;
     pub fn kind(self, kind: ButtonKind) -> Button;
     pub fn size(self, size: ButtonSize) -> Button;
     pub fn icon(self, icon: Icon) -> Button;
+    /// 只画图标的方形按钮（`Toolbar` 大小、`Plain`）：工具栏的 Back 与 Inspector。`label` 不画出来，是辅助名和探针节点的文字。
+    pub fn icon_only(id: NodeId, icon: Icon, label: Text) -> Button;
+    /// 把按钮变成开关并给出开关状态（检查器是否打开）：探针节点是带 `checked` 的 `Toggle`，开着时图标按钮的图标用强调色。
+    pub fn active(self, active: bool) -> Button;
     pub fn disabled(self, disabled: bool) -> Button;
     pub fn on_click(self, f: impl Fn(&mut Window, &mut App) + 'static) -> Button;
 }
@@ -425,7 +439,7 @@ impl CircleCheck {
     pub fn on_change(self, f: impl Fn(bool, &mut Window, &mut App) + 'static) -> CircleCheck;
 }
 
-/// 已看进度：`Bar`（宽度增长，`PROGRESS`）或 `Ring`（Overview 行尾的进度环，同一曲线）。
+/// 已看进度：`Bar`（宽度增长，`PROGRESS`）或 `Ring`（Overview 行尾的进度环，同一曲线；20pt，线宽 2.5pt）。
 /// 值由调用方的 `Transition` 给出，控件本身不保存状态。
 pub struct Progress { /* id, shape, fraction: f32 */ }
 pub enum ProgressShape { Bar, Ring }
@@ -433,7 +447,7 @@ impl Progress {
     pub fn new(id: NodeId, shape: ProgressShape, fraction: f32) -> Progress;
 }
 
-/// 分段控件（检查器的 Files / Conversation，Usage 的 7D / 14D / 30D）：滑块平移到新选项，`SEGMENT`。
+/// 分段控件（检查器的 Files / Conversation，Usage 的 7D / 14D / 30D）：高 24pt、圆角 8pt、边距 2pt、滑块圆角 6pt、文字 medium；滑块平移到新选项，`SEGMENT`。
 /// 滑块位置是调用方状态里的一个 `Transition`，所以切换到一半再切回去时从当前位置返回。
 pub struct Segmented { /* id, items: Vec<(NodeId, Text)>, selected: usize, slider: f32, on_select */ }
 impl Segmented {
@@ -446,20 +460,29 @@ impl Segmented {
     pub fn select(slider: &mut Transition, index: usize, now: Instant, cx: &App);
 }
 
-/// 分组列表：圆角 12pt，`control_background` 底，行间 0.5pt `separator`（交互规范「视觉」的「分组」）。
-pub struct GroupedList { /* id, header: Option<Text>, rows */ }
+/// 分组列表：圆角 12pt 的卡片，`control_background` 底，外圈 0.5pt `separator`（画在行上方、不占位置，所以页面底色和卡片同色时也有边），
+/// 行间 0.5pt `separator`，从文字起点开始（`separator_inset`，默认 16pt = 行的左边距；行首有 10pt 圆点和 14pt 间距的行传 40pt）。
+/// 标题 13pt semibold（`Headline`）、`secondary_label`，缩进 12pt，与卡片相距 8pt。
+pub struct GroupedList { /* id, header: Option<Text>, separator_inset, rows */ }
 impl GroupedList {
     pub fn new(id: NodeId) -> GroupedList;
     pub fn header(self, text: Text) -> GroupedList;
+    pub fn separator_inset(self, inset: Pixels) -> GroupedList;
     pub fn row(self, row: Row) -> GroupedList;
 }
 
-/// 列表行：悬停背景 `HOVER_IN` / `HOVER_OUT`，选中用 `selected_content_background`。
-/// 内容由调用方给（agent 圆点、两行文字、进度环都是它的子元素）。
-pub struct Row { /* id, selected, on_click, children */ }
+/// 列表行：悬停背景 `HOVER_IN` / `HOVER_OUT`。内容由调用方给（agent 圆点、几行文字、进度环都是它的子元素），
+/// 文字默认 `Body`；行标题要 semibold 的调用方自己用 `TextRole::Headline`（画板里只有会话卡片的标题是 600，
+/// 其余行是常规字重，所以不由行统一设置）。
+/// 在 `GroupedList` 里是卡片行：左右 16pt、上下 14pt，子元素间距 14pt。
+/// 在 `GroupedList` 之外是紧凑行（检查器的文件列表）：高 30pt、左右 6pt、间距 8pt、圆角 6pt。
+/// 选中默认是安静的：`unemphasized_selected_content_background`（卡片里随卡片裁成方的，紧凑行圆角 6pt），文字仍是 `label`。
+/// `accent()` 改用 `selected_content_background` 与 `on_accent`：只给 macOS 标准里用强调色的获得焦点的源列表（Welcome 的两个列表）。
+pub struct Row { /* id, selected, accent, in_card, on_click, children */ }
 impl Row {
     pub fn new(id: NodeId) -> Row;
     pub fn selected(self, selected: bool) -> Row;
+    pub fn accent(self) -> Row;
     pub fn on_click(self, f: impl Fn(&mut Window, &mut App) + 'static) -> Row;
     pub fn child(self, child: impl IntoElement) -> Row;
 }
@@ -649,7 +672,7 @@ pub mod semantic {
 
 - 用到的控件与动效原语见「接口」；本 crate 自己不定义任何颜色值、字体名和时长之外的东西：颜色来自 `platform` 或内置表，时长来自交互规范的表。
 - Fluent 键：没有。本 crate 不显示自己的文字；`Text` 只是容器。
-- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Toggle`（`checked`），`Progress` → `Role::Progress`（`attrs` 里 `fraction`），`Segmented` → `Role::TabBar` 与每项 `Role::Tab`（`selected`），`GroupedList` → `Role::List`，`Row` → `Role::ListItem`（`selected`），`AgentDot` → `Role::Badge`（`attrs` 里 `agent`），`Expander` → `Role::Group`（`expanded`），`Hint` → `Role::Text`），`Label` 来自它们的 `Text`，`disabled` 来自 `Button::disabled`；ID 由视图给。
+- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Toggle`（`checked`），`Progress` → `Role::Progress`（`attrs` 里 `fraction`），`Segmented` → `Role::TabBar` 与每项 `Role::Tab`（`selected`），`Button` 调了 `.active(bool)` 的 → `Role::Toggle`（`checked`），`GroupedList` → `Role::List`，`Row` → `Role::ListItem`（`selected`），`AgentDot` → `Role::Badge`（`attrs` 里 `agent`），`Expander` → `Role::Group`（`expanded`），`Hint` → `Role::Text`），`Label` 来自它们的 `Text`，`disabled` 来自 `Button::disabled`；ID 由视图给。
 - Action 与快捷键：没有。控件只回调，Action 在视图里定义（技术调研：探针只经 Action 操作）。
 
 ## 状态与异常
@@ -850,6 +873,15 @@ pub mod semantic {
 - `rg 'Recorder::begin' crates --glob '!crates/ui_probe/**' --glob '!**/tests*' --glob '!**/benches/**'` 没有结果；三条 `rg`（时长、颜色、IO）与 `rg 'set_reduce_motion'` 都没有结果；`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果。
 - 没有做：`ui_probe` 读记录器的部分（`ui_probe` 自己的 PR）；用屏幕阅读器读控件的无障碍树（`#[gpui::test]` 拿不到 AccessKit 树，映射由 `semantic_access_writes_the_declaration` 在纯函数上验证）；手动的视觉检查。
 
+控件对齐设计画布（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR；macOS，Apple 芯片，macOS 27.0.1）：
+
+- `just check`、`just deny`、`just doctest`、`cargo metadata --format-version 1 --locked --all-features` 通过。
+- `just test -p lectern-ui`：75 个测试通过，新增 `card_rows_are_16_by_14_and_standalone_rows_are_compact`（卡片行高 44pt = 16 + 28，卡片外的行 30pt）和 `icon_only_button_is_a_28pt_square_with_a_label`（28 × 28、辅助名、`active` 时是带 `checked` 的 `Toggle`）；`text_roles_have_the_spec_sizes` 改为新的 11 档；`semantic_records_bounds_and_parents` 改为计入行间 0.5pt 的分隔线。控件的 insta 快照没有变（节点的角色、标签、状态没有变，分隔线与卡片外圈是不声明节点的装饰元素）。
+- `just test -p lectern-workspace -p lectern-welcome -p lectern-project-home -p lectern-review-view`：329 个测试通过，没有快照变化；`welcome` 的 `the_selected_row_is_scrolled_into_view` 因行内边距由 8 变 14pt 失败过一次，`REVEAL_MARGIN` 12 → 18 之后通过。
+- `just bench ui/`：`ui/transition_tick` 中位数 14 ns（≤ 100 ns）、`ui/bezier_eval` 9 ns（≤ 50 ns）、`ui/semantic_disarmed` 0 ns（≤ 2 ns），`ui/transition_tick_frame` 42 ns（只记录）；本改动不在这些基准的路径上。
+- 三条 `rg`（颜色值、`Duration::from_millis`、IO）在改动的 crate 里没有新增的结果。
+- **没有做：看真实窗口的效果。** 这台机器的屏幕锁着，无法看到窗口，下面这些只能解锁后在真实窗口里看：卡片外圈 0.5pt 在 1x / 2x 屏上的清晰度；卡片对页面底色的边界（页面是 `under_page_background`，深色下它比 `control_background` 浅，卡片显得凹下去，要看是否合适；系统的实际读数可能与内置表不同）；工具栏的 Lucide 图标（`arrow-left`、`inspector`）真的画出来、28pt 方形的悬停底色；检查器 `Segmented` 的 24pt 高度、滑块平移与减弱动态效果下的淡入；紧凑行（检查器的文件列表）30pt 的密度；Welcome 的强调色选中行在 16 × 14pt 内边距下的样子；进度环 20pt / 2.5pt 的描边与端点。
+
 ## 与设计的差异
 
 第 1 步：
@@ -906,6 +938,17 @@ pub mod semantic {
 - `ui/semantic_disarmed` 测的是 `Recorder::is_armed()`，即包装元素在关闭时自己读的那一次原子加载；包装元素把 `request_layout`、`prepaint`、`paint` 转给子元素的 `AnyElement` 调用是 GPUI 的元素管道，不在这条预算里，也无法在一帧的噪声里分辨 2 ns。预算表登记为 `share_macos`，与第 2 步的两条相同。
 - 每个控件的快照放在 `tests/probe.rs`（和记录器的测试一起），`tests/semantic.rs` 仍是 `NodeId` 与构造器的测试；快照去掉 `bounds` 和 `declared_at`，保留 `visible` 与 `parent`。
 
+### 控件对齐设计画布（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）
+
+- 以设计画布（`Welcome` / `Main` / `Review`）为准，控件的数值取画布，类名与颜色仍是系统语义色（ADR 0015）。画布与 HIG 不一致的地方取 HIG：进度环 20pt / 2.5pt 取画布（HIG 对确定进度的环没有规定尺寸，16pt 是不确定进度的小转轮），`Segmented` 总高取 HIG 的 24pt（画板的按钮 24pt 加两边各 2pt 的内边距是 28pt），圆角 8pt、滑块圆角 6pt、文字 medium 取画布。
+- `TextRole` 的名字：`Title`（26pt）→ `Title1`（22pt），`Subtitle`（22pt，没有调用方）→ `Title2`（17pt），新增 `Title3`、`Headline`、`Callout`、`Footnote`；`Caption`（11pt）就是 HIG 的 Subheadline，没有改名，因为设计文档里到处在用。`LargeTitle` 40 → 26pt。唯一的调用方变化是 `project_home` 的空状态 `Title` → `Title1`。比 `Body` 小的档（`Callout`、`Caption`、`Footnote`）都是 `secondary_label`，与 `Secondary` 一致。
+- 卡片边线用一个绝对定位的 0.5pt 外圈画在行的上方，不是边框：边框会占 0.5pt，让行的内容区偏移，选中行的底色也盖不到边。页面底色在 `workspace`：有阅读栏的屏幕（`layout.reading_column`）的内容区用 `under_page_background`，其他（Welcome）仍是 `window_background`。内置表里浅色下 `under_page_background`（0.9647）比卡片的白色深一点；深色下它（0.1569）反而比 `control_background`（0.1176）浅，卡片看起来凹下去，画布的深色是卡片比页面浅。系统颜色里没有更合适的一对，外圈保证了两种外观下卡片都有边；要不要为深色另取一对由真实窗口的效果决定。`review_view` 的根元素自己画了 `window_background`，盖住了阅读栏的底色，它的屏幕 PR 去掉那一行之后才会显示。
+- `Row` 有两种密度：在 `GroupedList` 里是卡片行（16 × 14pt、间距 14pt），在外面是紧凑行（30pt、6pt、间距 8pt、圆角 6pt，检查器的文件列表）。`GroupedList` 在渲染时把自己的行标成卡片行（私有的 `in_card`）。行标题的 semibold 不由 `Row` 统一设置：画板里只有会话卡片的标题是 600，Outside 与 Recently Done 的行是常规字重，所以提供 `TextRole::Headline`，由屏幕给标题用。
+- 分隔线从文字起点开始：`GroupedList::separator_inset`，默认是行的左内边距 16pt（画板的 Recently Done）。行首有圆点的行（会话卡片）要传 40pt（16 + 10 + 14），这在 `project_home` 的屏幕 PR 里传。`Row` 看不到子元素，所以不自己猜。
+- 选中默认是安静的灰底，`Row::accent()` 才是强调色：Welcome 的两个列表是获得焦点的源列表，传 `accent()`（机械改动）。`project_home` 卡片选中时副行用 `on_accent` 的淡色，在灰底上看不清，已去掉这一支（机械改动）。
+- `Button::icon_only` 与 `ButtonSize::Toolbar`（28pt）：画板的工具栏按钮是 28pt 方形，标准的推按钮 24 / 30pt 都不是。图标按钮的 `label` 是辅助名，不画出来；`active` 让图标变强调色并把探针节点换成 `Toggle`。
+- `welcome` 的 `REVEAL_MARGIN` 12 → 18pt：卡片行内边距由 8pt 变 14pt，滚到选中行时行底部多出的部分要计入（机械改动）。
+
 ### project_home 第 2 步
 
-- `on_accent()` 公开（`lectern_ui::on_accent`）：视图在选中的 `Row` 里放自己的文字时，次要文字要用强调色上的字色（`TextRole::Secondary` 的灰色在强调色上看不清）。仍然不是 `Palette` 的字段，值仍只在 `palette/builtin.rs`。
+- `on_accent()` 公开（`lectern_ui::on_accent`）：视图在选中的 `Row` 里放自己的文字时，次要文字要用强调色上的字色（`TextRole::Secondary` 的灰色在强调色上看不清）。仍然不是 `Palette` 的字段，值仍只在 `palette/builtin.rs`。控件对齐画布之后，选中默认是安静的灰底，`on_accent` 只剩 `Row::accent()` 的行（Welcome 的源列表）、`Button`、`CircleCheck` 和 gpui-component 的主题投影用。

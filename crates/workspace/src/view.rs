@@ -14,8 +14,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, Context, FocusHandle, InteractiveElement,
     IntoElement, KeyBinding, KeyBindingContextPredicate, KeyContext, ParentElement,
-    PathPromptOptions, Pixels, Render, StatefulInteractiveElement, Styled, Task, WeakEntity,
-    Window, div, prelude::FluentBuilder, px,
+    PathPromptOptions, Pixels, Render, Styled, Task, WeakEntity, Window, div,
+    prelude::FluentBuilder, px,
 };
 use lectern_i18n::keys;
 use lectern_kernel::{Name, PluginError, contain};
@@ -25,7 +25,8 @@ use lectern_services::workspace::{
 };
 use lectern_ui::contrib::{InspectorTab, KeyBindings, Overlay, Panel, Screen, SidebarPanel};
 use lectern_ui::motion::{self, Effective, PANEL_CLOSE, PANEL_OPEN, Transition};
-use lectern_ui::{Text, TextRole, TextRoleExt, colors, strings};
+use lectern_ui::semantic::NodeId as UiNode;
+use lectern_ui::{Button, Icon, Segmented, Text, TextRole, TextRoleExt, colors, strings};
 
 use crate::actions::{
     self, Back, CloseWindow, Command, Escape, OpenFolder, ShowConversation, ToggleInspector,
@@ -46,6 +47,8 @@ pub const INSPECTOR_WIDTH: Pixels = px(300.0);
 pub const READING_COLUMN_WIDTH: Pixels = px(760.0);
 pub const PANEL_RADIUS: Pixels = px(14.0);
 const SEPARATOR: Pixels = px(0.5);
+/// The inspector's padding around its segmented control.
+const INSPECTOR_PADDING: Pixels = px(14.0);
 /// The sidebar panel shown when no other replaces it.
 const PROJECT_SIDEBAR: &str = "project";
 const VIEW: &str = "workspace";
@@ -80,6 +83,10 @@ pub struct Workspace {
     overlay: Option<(Name, AnyView)>,
     /// 0 = collapsed, 1 = open (ui design「控件」: the panel's slide).
     panel_slide: Transition,
+    /// The inspector's segmented control: the slider's position, and the
+    /// index it was last drawn on (None before the first draw).
+    inspector_slider: Transition,
+    inspector_drawn: Option<usize>,
     /// The one-time notice's message key; cleared by the next command.
     notice: Option<lectern_i18n::Key>,
     recording: Option<Recording>,
@@ -107,6 +114,8 @@ impl Workspace {
             panel: None,
             overlay: None,
             panel_slide: Transition::new(0.0),
+            inspector_slider: Transition::new(0.0),
+            inspector_drawn: None,
             notice: None,
             recording: None,
             tick_scheduled: false,
@@ -725,6 +734,8 @@ impl Workspace {
         let inspector_label = Text::key(&strings, keys::workspace::INSPECTOR_TOGGLE);
         let back_label = Text::key(&strings, keys::workspace::BACK);
         let inspector_on = nav.nav().inspector;
+        let this = cx.weak_entity();
+        let toolbar_node = UiNode::new(VIEW, "toolbar", None);
         div()
             .id("workspace-toolbar")
             .flex()
@@ -737,16 +748,15 @@ impl Workspace {
             .border_b(SEPARATOR)
             .border_color(palette.separator)
             .when(layout.back_button, |toolbar| {
+                let this = this.clone();
                 toolbar.child(
-                    div()
-                        .id("workspace-toolbar-back")
-                        .cursor_pointer()
-                        .text_role(TextRole::Body, window, cx)
-                        .text_color(palette.accent)
-                        .child(back_label.shared())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.command(WorkspaceCommand::PopToBase, window, cx);
-                        })),
+                    Button::icon_only(toolbar_node.child("back"), Icon::Back, back_label).on_click(
+                        move |window, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                this.command(WorkspaceCommand::PopToBase, window, cx);
+                            });
+                        },
+                    ),
                 )
             })
             .child(
@@ -758,14 +768,14 @@ impl Workspace {
                     .when_some(title, |column, title| {
                         column.child(
                             div()
-                                .text_role(TextRole::Body, window, cx)
+                                .text_role(TextRole::Headline, window, cx)
                                 .child(title.shared()),
                         )
                     })
                     .when_some(subtitle, |column, subtitle| {
                         column.child(
                             div()
-                                .text_role(TextRole::Secondary, window, cx)
+                                .text_role(TextRole::Caption, window, cx)
                                 .child(subtitle.shared()),
                         )
                     }),
@@ -779,23 +789,21 @@ impl Workspace {
                     .children(controls)
                     .when(layout.inspector, |row| {
                         row.child(
-                            div()
-                                .id("workspace-toolbar-inspector")
-                                .cursor_pointer()
-                                .text_role(TextRole::Body, window, cx)
-                                .text_color(if inspector_on {
-                                    palette.accent
-                                } else {
-                                    palette.secondary_label
-                                })
-                                .child(inspector_label.shared())
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            Button::icon_only(
+                                toolbar_node.child("inspector"),
+                                Icon::Inspector,
+                                inspector_label,
+                            )
+                            .active(inspector_on)
+                            .on_click(move |window, cx| {
+                                let _ = this.update(cx, |this, cx| {
                                     this.command(
                                         WorkspaceCommand::SetInspector(!inspector_on),
                                         window,
                                         cx,
                                     );
-                                })),
+                                });
+                            }),
                         )
                     }),
             )
@@ -808,6 +816,13 @@ impl Workspace {
         let layout = self.driver.nav().layout(&registry_env(registry));
         let strings = strings(cx);
         let screen = self.screens.last().and_then(|built| built.view.clone());
+        // Screens that hold grouped lists sit on the grouped page background,
+        // so that the cards (`control_background`) show against it.
+        let page = if layout.reading_column {
+            palette.under_page_background
+        } else {
+            palette.window_background
+        };
         let missing = Text::key(&strings, keys::workspace::SCREEN_MISSING);
         let body = match screen {
             Some(view) => view.into_any_element(),
@@ -828,7 +843,7 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .h_full()
-            .bg(palette.window_background)
+            .bg(page)
             .child(if layout.reading_column {
                 div()
                     .size_full()
@@ -860,13 +875,43 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_inspector(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = *colors(window, cx);
-        let registry = self.driver.registry();
         let strings = strings(cx);
-        let tabs = self.inspector_tabs();
+        let tabs = self
+            .inspector_tabs()
+            .into_iter()
+            .filter_map(|tab| {
+                let label =
+                    payload::<InspectorTab>(self.driver.registry(), Kind::InspectorTab, &tab)
+                        .map(|payload| Text::key(&strings, payload.label))?;
+                Some((tab, label))
+            })
+            .collect::<Vec<_>>();
         let selected = self.selected_tab();
+        let index = selected
+            .as_ref()
+            .and_then(|selected| tabs.iter().position(|(tab, _)| tab == selected))
+            .unwrap_or(0);
+        // The slider sits on the first drawn selection and moves on a
+        // change (`SEGMENT`; under reduced motion it jumps and fades in).
+        let now = Instant::now();
+        match self.inspector_drawn.replace(index) {
+            None => self.inspector_slider = Transition::new(index as f32),
+            Some(drawn) if drawn != index => {
+                Segmented::select(&mut self.inspector_slider, index, now, cx);
+            }
+            Some(_) => {}
+        }
+        let slider = self.inspector_slider.tick(now, window);
         let page = self.inspector.as_ref().map(|(_, view)| view.clone());
+        let this = cx.weak_entity();
+        let bar = UiNode::new(VIEW, "inspector", None).child("tabs");
+        let names = tabs.iter().map(|(tab, _)| tab.clone()).collect::<Vec<_>>();
+        let items = tabs
+            .into_iter()
+            .map(|(tab, label)| (bar.item(&tab), label))
+            .collect::<Vec<_>>();
         div()
             .id("workspace-inspector")
             .key_context(actions::INSPECTOR)
@@ -880,34 +925,17 @@ impl Workspace {
             .child(
                 div()
                     .id("workspace-inspector-tabs")
-                    .flex()
-                    .flex_row()
-                    .justify_center()
-                    .gap_3()
-                    .px_3()
-                    .py_2()
-                    .children(tabs.into_iter().enumerate().map(|(index, tab)| {
-                        let label = payload::<InspectorTab>(registry, Kind::InspectorTab, &tab)
-                            .map(|tab| Text::key(&strings, tab.label).shared());
-                        let is_selected = selected.as_ref() == Some(&tab);
-                        div()
-                            .id(("workspace-inspector-tab", index))
-                            .cursor_pointer()
-                            .text_role(TextRole::Secondary, window, cx)
-                            .text_color(if is_selected {
-                                palette.label
-                            } else {
-                                palette.secondary_label
-                            })
-                            .children(label)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.command(
-                                    WorkspaceCommand::SelectInspectorTab(tab.clone()),
-                                    window,
-                                    cx,
-                                );
-                            }))
-                    })),
+                    .p(INSPECTOR_PADDING)
+                    .child(Segmented::new(bar, items, index).slider(slider).on_select(
+                        move |index, window, cx| {
+                            let Some(tab) = names.get(index).cloned() else {
+                                return;
+                            };
+                            let _ = this.update(cx, |this, cx| {
+                                this.command(WorkspaceCommand::SelectInspectorTab(tab), window, cx);
+                            });
+                        },
+                    )),
             )
             .child(div().flex_1().min_h_0().children(page))
             .into_any_element()
@@ -1067,6 +1095,11 @@ impl Render for Workspace {
                 this.run(Item::Proxy(Name::Owned(action.name.clone())), window, cx);
             }));
 
+        let inspector = inspector_shown.then(|| self.render_inspector(window, cx));
+        if !inspector_shown {
+            // Shown again later, the slider starts on the then-selected tab.
+            self.inspector_drawn = None;
+        }
         if project {
             root = root.child(
                 div()
@@ -1097,9 +1130,7 @@ impl Render for Workspace {
                             .child(self.render_toolbar(window, cx))
                             .child(self.render_content(window, cx)),
                     )
-                    .when(inspector_shown, |row| {
-                        row.child(self.render_inspector(window, cx))
-                    }),
+                    .children(inspector),
             );
         } else {
             root = root.child(self.render_content(window, cx));

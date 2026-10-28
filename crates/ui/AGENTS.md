@@ -32,7 +32,7 @@
 | `code.rs` | `CodeStyle`、`code_style`、`code_styles` |
 | `contrib.rs` | `workspace` 贡献的载荷类型与 `into_payload` |
 | `icon.rs` | `Icon` 枚举、Lucide 文件名的对应、`IconAssets`（`icon_assets!` 只嵌入这 10 个 SVG） |
-| `controls/` | 共用控件，每个一个文件：`Button`、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
+| `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
 | `semantic.rs` | `NodeId`、`Role`、`Label`、`State`、`Semantic`、`Record`、`Recorder`、包装元素 `semantic(...)` / `semantic_interactive(...)`（`SemanticElement`）、无障碍属性的映射，以及控件声明节点的接缝 `declare` |
 | `state.rs` | 唯一的 GPUI 全局 `UiState` |
 | `testing.rs` | `test-support` feature：`simulate_appearance_change`、`simulate_platform_change`、`mono_resolutions` |

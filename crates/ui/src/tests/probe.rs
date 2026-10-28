@@ -68,7 +68,7 @@ fn semantic_records_bounds_and_parents(cx: &mut TestAppContext) {
     let cx = window_of(cx, {
         let (list, a, b) = (list.clone(), a.clone(), b.clone());
         move |_, _| {
-            // 20pt tall and clipped: the first row (36pt) shows, the second
+            // 20pt tall and clipped: the first row (44pt) shows, the second
             // starts below the clip.
             div()
                 .w(px(200.0))
@@ -105,9 +105,17 @@ fn semantic_records_bounds_and_parents(cx: &mut TestAppContext) {
     assert_eq!(records[0].bounds.size.width, px(200.0));
     assert_eq!(records[1].bounds.origin, at(0.0, 0.0));
     assert_eq!(records[1].bounds.size.width, px(200.0));
-    assert_eq!(records[2].bounds.origin, at(0.0, row_height.into()));
+    // The rows are 0.5pt apart: the separator between them.
+    let separator = px(0.5);
+    assert_eq!(
+        records[2].bounds.origin,
+        at(0.0, (row_height + separator).into())
+    );
     assert_eq!(records[2].bounds.size, records[1].bounds.size);
-    assert_eq!(records[0].bounds.size.height, row_height + row_height);
+    assert_eq!(
+        records[0].bounds.size.height,
+        row_height + separator + row_height
+    );
     assert!(
         row_height > px(20.0),
         "the second row starts below the clip"
@@ -335,6 +343,80 @@ fn semantic_interactive_declares_like_semantic(cx: &mut TestAppContext) {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].semantic.role, Role::Toggle);
     assert_eq!(records[0].bounds.size.width, px(16.0));
+}
+
+#[gpui::test]
+fn card_rows_are_16_by_14_and_standalone_rows_are_compact(cx: &mut TestAppContext) {
+    let list = NodeId::new("probe", "metrics", None);
+    let alone = NodeId::new("probe", "alone", None);
+    let records = record_scene(cx, {
+        let (list, alone) = (list.clone(), alone.clone());
+        move |_, _| {
+            div()
+                .w(px(300.0))
+                .child(
+                    GroupedList::new(list.clone())
+                        .row(Row::new(list.item("a")).child(verbatim("a").shared())),
+                )
+                .child(Row::new(alone.clone()).child(verbatim("b").shared()))
+                .into_any_element()
+        }
+    });
+    let height_of = |id: &NodeId| {
+        records
+            .iter()
+            .find(|r| r.semantic.id.as_str() == id.as_str())
+            .map(|r| r.bounds.size.height)
+            .expect("recorded")
+    };
+    // 13pt text on a 16pt line plus 14pt above and below.
+    assert_eq!(height_of(&list.item("a")), px(16.0 + 28.0));
+    // A row outside a card is the inspector's: 30pt.
+    assert_eq!(height_of(&alone), px(30.0));
+}
+
+#[gpui::test]
+fn icon_only_button_is_a_28pt_square_with_a_label(cx: &mut TestAppContext) {
+    let records = record_scene(cx, |_, cx| {
+        let strings = strings(cx);
+        div()
+            .child(
+                Button::icon_only(
+                    root().child("back"),
+                    Icon::Back,
+                    Text::key(&strings, keys::common::OK),
+                )
+                .on_click(|_, _| {}),
+            )
+            .child(
+                Button::icon_only(
+                    root().child("inspector"),
+                    Icon::Inspector,
+                    verbatim("Inspector"),
+                )
+                .active(true),
+            )
+            .child(
+                Button::icon_only(root().child("off"), Icon::Inspector, verbatim("Inspector"))
+                    .active(false),
+            )
+            .into_any_element()
+    });
+    assert_eq!(records.len(), 3);
+    for record in &records {
+        assert_eq!(record.bounds.size.width, px(28.0));
+        assert_eq!(record.bounds.size.height, px(28.0));
+    }
+    assert_eq!(records[0].semantic.role, Role::Button);
+    assert_eq!(
+        records[0].semantic.label.as_ref().and_then(|l| l.key),
+        Some("common-ok")
+    );
+    assert_eq!(records[1].semantic.role, Role::Toggle);
+    assert_eq!(records[1].semantic.state.checked, Some(true));
+    // Off is still a toggle: a probe tells "toggle, off" from a button.
+    assert_eq!(records[2].semantic.role, Role::Toggle);
+    assert_eq!(records[2].semantic.state.checked, Some(false));
 }
 
 /// What a snapshot keeps of a record: no bounds (they depend on fonts) and
