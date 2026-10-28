@@ -11,6 +11,7 @@ mod labels;
 mod logs;
 mod needs;
 mod plugin;
+mod redraw;
 mod screen;
 mod scroll;
 mod step2;

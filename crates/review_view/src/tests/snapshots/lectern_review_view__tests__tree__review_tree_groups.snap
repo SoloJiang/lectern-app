@@ -2,16 +2,17 @@
 source: crates/review_view/src/tests/tree.rs
 expression: render_tree(& records)
 ---
-review.narrative List items=17 visible=0..17 mode=unified
+review.narrative List items=18 visible=0..18 mode=unified
+  review.header Group <review-title-untitled> "Untitled session" files=2 added=0 removed=0
   review.brief Group items=2 omitted=0 pending=0 analysis=unavailable
+    review.brief.analyze Button <review-analyze-with> "Analyze with \u{2068}Claude Code\u{2069}" [disabled]
     review.brief.item[sensitive-ci:src/file_000.rs] ListItem <review-brief-sensitive-ci> "\u{2068}src/file_000.rs\u{2069} runs in CI" critical=true
     review.brief.item[edit-failed:src/file_001.rs] ListItem <review-brief-edit-failed> "An edit to \u{2068}src/file_001.rs\u{2069} failed; the agent may think it applied" critical=false
-    review.brief.analyze Button <review-analyze> "Analyze" [disabled]
   review.notice.item[unrecognized] Text <review-notice-unrecognized> "Lectern can't read this session's log; changes are shown by file."
   review.group.item[2] Group
   review.file.item[src/file_000.rs] Group "src/file_000.rs" seen=unseen attribution=lines drifted_hunks=0
     review.file.item[src/file_000.rs].check Toggle [checked=false]
-    review.file.item[src/file_000.rs].open Button <review-open-file> "Open file (⇧⌘O)" [disabled]
+    review.file.item[src/file_000.rs].open Button <review-open-file> "Open File" [disabled]
   review.diff.item[final:src/file_000.rs] Diff rows=5 context=3 prepared=true highlighted=old=plain,new=plain
   review.diff.item[final:src/file_000.rs].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
   review.diff.item[final:src/file_000.rs].row.item[0:0] DiffLine kind=context drifted=false
@@ -21,7 +22,7 @@ review.narrative List items=17 visible=0..17 mode=unified
   review.diff.item[final:src/file_000.rs].row.item[2:3] DiffLine kind=context drifted=false
   review.file.item[src/file_001.rs] Group "src/file_001.rs" seen=unseen attribution=lines drifted_hunks=0
     review.file.item[src/file_001.rs].check Toggle [checked=false]
-    review.file.item[src/file_001.rs].open Button <review-open-file> "Open file (⇧⌘O)" [disabled]
+    review.file.item[src/file_001.rs].open Button <review-open-file> "Open File" [disabled]
   review.diff.item[final:src/file_001.rs] Diff rows=5 context=3 prepared=true highlighted=old=plain,new=plain
   review.diff.item[final:src/file_001.rs].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
   review.diff.item[final:src/file_001.rs].row.item[0:0] DiffLine kind=context drifted=false
@@ -30,7 +31,6 @@ review.narrative List items=17 visible=0..17 mode=unified
   review.diff.item[final:src/file_001.rs].row.item[-:2] DiffLine kind=added drifted=false
   review.diff.item[final:src/file_001.rs].row.item[2:3] DiffLine kind=context drifted=false
 review.bar Group
-  review.bar.progress Progress fraction=0.000
-  review.bar.comments Text <review-comments> "No comments"
-  review.bar.send Button <review-send> "Send" [disabled]
-  review.bar.looks-good Button <review-looks-good> "Looks good"
+  review.bar.comments Text <review-comments> "No review notes"
+  review.bar.looks-good Button <review-looks-good> "Looks Good"
+  review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" [disabled]

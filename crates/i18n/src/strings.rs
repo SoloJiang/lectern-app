@@ -300,7 +300,7 @@ mod tests {
     fn get_returns_static_text() {
         assert_eq!(
             Strings::of(Locale::En).get(review::LOOKS_GOOD),
-            "Looks good"
+            "Looks Good"
         );
         assert_eq!(
             Strings::of(Locale::ZhCn).get(review::LOOKS_GOOD_TOOLTIP),

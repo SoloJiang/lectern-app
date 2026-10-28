@@ -1,8 +1,11 @@
-//! The inspector's Files page: the Progress list (docs/design/review_view.md
-//! 「视图」「界面」). It reads the model of the review screen on top from the
-//! GPUI global `Current`; with no review open it says so.
+//! The inspector's Files page: how much is reviewed, the bar, and the files
+//! (docs/design/review_view.md「视图」「界面」). It reads the model of the
+//! review screen on top from the GPUI global `Current`; with no review open
+//! it says so.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     AnyElement, App, Context, EntityId, FocusHandle, Focusable, InteractiveElement, IntoElement,
@@ -11,8 +14,9 @@ use gpui::{
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_services::review::{Degraded, FileEntry, FileKey, ReviewSnapshot, SeenState};
+use lectern_ui::motion::{self, Transition};
 use lectern_ui::semantic::{Role, Semantic, semantic};
-use lectern_ui::{CircleCheck, Row, Text, TextRole, TextRoleExt, colors};
+use lectern_ui::{CircleCheck, Progress, ProgressShape, Row, Text, TextRole, TextRoleExt};
 
 use crate::actions::{self, JumpToSelected, MarkSeenAndNext, SelectNext, SelectPrevious};
 use crate::brief::file_text;
@@ -43,6 +47,47 @@ pub(crate) fn entries(snapshot: &ReviewSnapshot) -> Vec<Entry> {
     out
 }
 
+/// The names the list shows for `paths`: the last segment, with the
+/// directory above it for the names that more than one path has.
+pub(crate) fn short_names(paths: &[String]) -> Vec<String> {
+    fn last(path: &str) -> (&str, &str) {
+        let path = path.trim_end_matches('/');
+        match path.rsplit_once('/') {
+            Some((dir, name)) => (dir, name),
+            None => ("", path),
+        }
+    }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for path in paths {
+        *counts.entry(last(path).1).or_default() += 1;
+    }
+    paths
+        .iter()
+        .map(|path| {
+            let (dir, name) = last(path);
+            if counts.get(name).copied().unwrap_or(0) > 1 {
+                let parent = dir.rsplit_once('/').map_or(dir, |(_, parent)| parent);
+                if parent.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{parent}/{name}")
+                }
+            } else {
+                name.to_owned()
+            }
+        })
+        .collect()
+}
+
+/// The seen share as a whole percent: `0` without files.
+pub(crate) fn percent(seen: u32, total: u32) -> u32 {
+    if total == 0 {
+        0
+    } else {
+        (u64::from(seen) * 100 / u64::from(total)) as u32
+    }
+}
+
 /// The Progress page: `InspectorTab("files")`'s factory builds it, hiding
 /// the inspector or switching the page drops it.
 pub struct ProgressTab {
@@ -55,6 +100,11 @@ pub struct ProgressTab {
     /// The files the list's lines were made for.
     shown: Option<Arc<[FileEntry]>>,
     lines: Arc<Vec<Entry>>,
+    /// The names of the files, as the list shows them (the snapshot's order).
+    names: Arc<Vec<String>>,
+    /// The bar's fraction (`PROGRESS`): it starts where the review is, so a
+    /// page that opens later does not grow from nothing.
+    progress: Transition,
 }
 
 impl ProgressTab {
@@ -67,6 +117,8 @@ impl ProgressTab {
             list: ListState::new(0, ListAlignment::Top, px(200.0)),
             shown: None,
             lines: Arc::new(Vec::new()),
+            names: Arc::new(Vec::new()),
+            progress: Transition::new(0.0),
         }
     }
 
@@ -83,6 +135,10 @@ impl ProgressTab {
         self.model = current.map(|model| model.downgrade());
         self.shown = None;
         self.selected = None;
+        let fraction = self
+            .upgrade()
+            .map_or(0.0, |model| model.read(cx).progress_fraction());
+        self.progress.set(fraction);
     }
 
     fn upgrade(&self) -> Option<gpui::Entity<ReviewModel>> {
@@ -149,7 +205,6 @@ impl Render for ProgressTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach(cx);
         let strings = lectern_ui::strings(cx);
-        let palette = *colors(window, cx);
         let model = self.upgrade();
         let snapshot = model.as_ref().map(|model| model.read(cx).snapshot.clone());
         let usable = snapshot.as_ref().is_some_and(|snapshot| {
@@ -196,28 +251,47 @@ impl Render for ProgressTab {
             .is_some_and(|shown| Arc::ptr_eq(shown, &snapshot.files));
         if fresh {
             self.lines = Arc::new(entries(&snapshot));
+            let paths: Vec<String> = snapshot.files.iter().map(|f| file_text(&f.key)).collect();
+            self.names = Arc::new(short_names(&paths));
             self.list.reset(self.lines.len());
             self.shown = Some(snapshot.files.clone());
         }
         let progress = snapshot.progress;
+        let fraction = if progress.total == 0 {
+            0.0
+        } else {
+            progress.seen as f32 / progress.total as f32
+        };
+        let now = Instant::now();
+        if self.progress.target() != fraction {
+            self.progress.go(fraction, motion::PROGRESS, now, cx);
+        }
+        let shown = self.progress.tick(now, window);
         let heading = Text::fmt(
             &strings,
-            keys::review::PROGRESS,
+            keys::review::FILES_REVIEWED,
             &Args::new()
                 .num("reviewed", progress.seen)
                 .num("total", progress.total),
+        );
+        let share = Text::fmt(
+            &strings,
+            keys::review::FILES_PERCENT,
+            &Args::new().num("percent", percent(progress.seen, progress.total)),
         );
         let list_spec = Semantic::new(nodes::plain("progress"), Role::List)
             .attr("total", progress.total.to_string())
             .attr("seen", progress.seen.to_string())
             .attr("changed", progress.changed_since_seen.to_string());
         let lines = self.lines.clone();
+        let names = self.names.clone();
         let selected = self.selected.clone();
         let weak = cx.weak_entity();
         let view_snapshot = snapshot.clone();
         let rows = list(self.list.clone(), move |ix, window, cx| {
             line(
                 lines.get(ix).copied(),
+                &names,
                 &view_snapshot,
                 selected.as_ref(),
                 &weak,
@@ -232,26 +306,42 @@ impl Render for ProgressTab {
             .gap(px(8.0))
             .child(
                 div()
-                    .px(px(4.0))
-                    .text_role(TextRole::Body, window, cx)
-                    .child(heading.shared()),
+                    .px(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .text_role(TextRole::Body, window, cx)
+                            .child(div().flex_1().child(heading.shared()))
+                            .child(
+                                div()
+                                    .text_role(TextRole::Secondary, window, cx)
+                                    .child(share.shared()),
+                            ),
+                    )
+                    .child(Progress::new(
+                        nodes::plain("progress").child("bar"),
+                        ProgressShape::Bar,
+                        shown,
+                    )),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .rounded(px(12.0))
-                    .bg(palette.control_background)
-                    .overflow_hidden()
-                    .child(semantic(list_spec, rows)),
-            )
+            .child(div().flex_1().min_h_0().child(semantic(list_spec, rows)))
             .into_any_element()
     }
 }
 
 /// One line of the list.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a list row: the entry, the names, the snapshot and the page's own pieces"
+)]
 fn line(
     entry: Option<Entry>,
+    names: &[String],
     snapshot: &ReviewSnapshot,
     selected: Option<&FileKey>,
     tab: &WeakEntity<ProgressTab>,
@@ -296,27 +386,16 @@ fn line(
                         let _ = model.update(cx, |model, cx| model.toggle_seen(key, cx));
                     }
                 });
+            let name = names
+                .get(ix as usize)
+                .cloned()
+                .unwrap_or_else(|| path.clone());
             let mut text = div().flex_1().min_w_0().flex().flex_col().child(
                 div()
                     .text_role(TextRole::Body, window, cx)
                     .truncate()
-                    .child(SharedString::from(path.clone())),
+                    .child(SharedString::from(name)),
             );
-            if is_selected {
-                text = text.child(
-                    div()
-                        .text_role(TextRole::Caption, window, cx)
-                        .truncate()
-                        .child(
-                            Text::fmt(
-                                &strings,
-                                keys::review::REVIEWING,
-                                &Args::new().str("path", &path),
-                            )
-                            .shared(),
-                        ),
-                );
-            }
             if let SeenState::ChangedSinceSeen { since } = seen {
                 text = text.child(
                     div().text_role(TextRole::Caption, window, cx).child(
@@ -346,6 +425,23 @@ fn line(
                 })
                 .child(check)
                 .child(text);
+            // The turn that first changed the file (a session's review).
+            let row = match (snapshot.turns.is_some(), file.attribution.turns.first()) {
+                (true, Some(turn)) => row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_role(TextRole::Callout, window, cx)
+                        .child(
+                            Text::fmt(
+                                &strings,
+                                keys::review::TURN,
+                                &Args::new().num("ordinal", turn.ordinal),
+                            )
+                            .shared(),
+                        ),
+                ),
+                _ => row,
+            };
             semantic(spec, row).into_any_element()
         }
     }

@@ -2,7 +2,11 @@
 
 review-looks-good = 看起来没问题
     .tooltip = 将所有文件标记为已看
+# 进度条的无障碍名称；文件页顶上一行用 review-files-reviewed。
 review-progress = 已看 { $reviewed }/{ $total }
+# 文件页进度条上面的一行，和它右端的百分比。
+review-files-reviewed = 已看 { $reviewed }/{ $total }
+review-files-percent = { $percent }%
 review-files-changed = { $count } 个文件有改动
 review-comments = { $count ->
     [0] 没有审阅意见
@@ -17,20 +21,36 @@ review-title-untitled = 未命名会话
 review-title-outside = 会话外的改动
 # $base 是引用名或提交，原样显示。
 review-title-range = 相对 { $base } 的改动
-# 对话视图完成之前不可用。
+# 对话视图完成之前不可用。$agent 是产品名，原样显示。
 review-send = 发送
+review-send-to = 发送给 { $agent }
+review-send-to-shortcut = ⌘↩
+review-mark-reviewed = 标记为已看
+review-mark-reviewed-shortcut = V
+review-hide-formatting = 隐藏格式改动
+# 结构化 diff（#21）之前不显示。
+review-formatting-hidden = 已隐藏 { $count } 行纯格式改动
 review-all-reviewed = 全部已看
 review-mode-unified = 统一
 review-mode-side-by-side = 双栏
+# View 菜单的菜单项。
 review-refresh = 刷新
     .tooltip = 重新比较工作区
 review-loading = 正在准备审阅…
 review-cancel = 取消
 review-back = 返回
 
+## 标题区
+
+review-stats-turns = { $count } 轮
+review-stats-files = { $count } 个文件
+# review 统计出改动涉及的包数之前不显示。
+review-stats-files-packages = { $files } 个文件，涉及 { $packages } 个包
+
 ## 简报
 
 review-brief-title = 值得先看
+review-brief-source = 来自本地规则
 review-brief-empty = 没有需要特别注意的地方。
 review-brief-omitted = 还有 { $count } 条
 review-brief-pending = 还在补充…
@@ -67,6 +87,8 @@ review-brief-usage-unassigned = 不属于任何分支
 ## 分析
 
 review-analyze = 分析
+# $agent 是产品名，原样显示。
+review-analyze-with = 用 { $agent } 分析
 # $reason 原样显示。
 review-analyze-unavailable = 无法分析：{ $reason }
 review-analyze-running = 正在分析…
@@ -89,7 +111,10 @@ review-earlier-turns = 之前的 { $count } 轮
 review-turn = 第 { $ordinal } 轮
 review-turn-tokens = { $tokens } token
 review-turn-running = 进行中…
-review-step-counts = +{ $added } −{ $removed }
+review-added = +{ $count }
+review-removed = −{ $count }
+review-turn-files = { $count } 个文件
+review-turn-none = 没有改动
 review-step-partial = 这次改动有一部分没有应用上
 review-step-unaligned = 按记录显示，与工作区对不上
 review-step-survival-partly = 之后被部分覆盖
@@ -116,12 +141,16 @@ review-mark-unseen = 标记为未看
     .tooltip = 标记为未看
 # $when 是相对时间，如“3 分钟前”。
 review-seen-changed = 看过之后在{ $when }又被改过
-review-open-file = 打开文件（⇧⌘O）
-    .tooltip = 打开文件（⇧⌘O）
+review-open-file = 打开文件
+review-open-file-shortcut = ⇧⌘O
+# $time 是一天里的时刻。review 提供无法对齐的改动块的编辑时间之前不显示。
+review-drift-note = 已漂移：你在 { $time } 改过这些行，晚于会话。
+review-drift-note-untimed = 已漂移：这些行在会话之后又变了。
+review-compare = 比较
 
 ## 进度列表（检查器的页）
 
-review-progress-title = 进度
+review-progress-title = 文件
 review-progress-empty = 没有打开的审阅
 review-progress-noise = 已折叠的文件
 

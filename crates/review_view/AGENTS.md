@@ -3,7 +3,7 @@
 审阅视图：会话简报、按轮次的改动叙事、文件已看进度、Drifted 提示、行内审阅意见与底部发送栏。
 
 - 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：两个插件，都是 `AfterFirstFrame`："review-view" 依赖 `dyn Contributions`、`dyn Review`、`dyn SessionSource`；"review-view-handoff" 依赖 `dyn Reader`、`dyn CodeIntel`、`dyn Usage`（交接：⇧⌘O、焦点、`share_object`、用量；不在时屏幕照常，只少交接）。`plugins(executor)` 一次建出两个，共用一个 `Shared`。可以依赖视图、领域、基础设施和 kernel 层的非插件 crate；不得依赖其他插件 crate（`lectern-review`、`lectern-file-reader`、`lectern-workspace` 等，dev-dependency 也不行）和 `app`、tool 层；只有 `app` 和 tool 层依赖本 crate。
-- 设计文档：[docs/design/review_view.md](../../docs/design/review_view.md)（已接受）。实现按它的「验收」分三步：第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配只装了 "review-view"（"review-view-handoff" 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装），`app/open_diff`、帧基准尚未实现。
+- 设计文档：[docs/design/review_view.md](../../docs/design/review_view.md)（已接受）。实现按它的「验收」分三步：第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；屏幕已按设计画布重画（[#283](https://github.com/SoloJiang/lectern-app/issues/283)：标题区、文件卡片、轮次折叠、Files 页、胶囊浮条、工具栏只有 Mark Reviewed；统一 / 双栏与 Refresh 只剩 Action，菜单项是 `app` 的要求 G）。第 3 步的 `app` 装配只装了 "review-view"（"review-view-handoff" 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装），`app/open_diff`、帧基准尚未实现。
 - issue：[#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#22](https://github.com/SoloJiang/lectern-app/issues/22)
 - ADR：[0012](../../docs/adr/0012.md)、[0019](../../docs/adr/0019.md)
 
@@ -28,7 +28,7 @@
 | `lines.rs` | 一行 diff 的显示文本（tab、截断）与着色段（token 加词级差异） |
 | `diffs.rs` | 模型对已准备的 diff 做的事：提交高亮任务和收结果、`share_object` 登记、统一 / 双栏切换、折叠展开 |
 | `handoff.rs` | 交接：⇧⌘O / ⌘E 打开文件、`CodeIntel::set_focus`、Space、用量的关注 |
-| `screen.rs`、`render.rs`、`render_diff.rs`、`progress_tab.rs` | `ReviewScreen`（加载 / 失败 / 内容、浮条、工具栏的模式切换与刷新）、各项的元素、diff 行（统一与双栏）与折叠、检查器的 Progress 页 |
+| `screen.rs`、`render.rs`、`render_diff.rs`、`progress_tab.rs` | `ReviewScreen`（加载 / 失败 / 内容、胶囊浮条、工具栏的 Mark Reviewed 与副标题）、各项的元素（标题区、简报、轮次、文件卡片按列表项切开画：`Slice`）、diff 行（统一与双栏）与折叠、检查器的 Files 页（已看数、进度条、紧凑行） |
 | `actions.rs`、`nodes.rs`、`diag.rs` | Action 与 `KeyBindings`、探针的节点 ID、日志字段 |
 | `testing.rs` | `test-support`：`FakeReview`、`snapshot_fixture`；GPUI 的测试台在 `src/tests/support.rs`，交接三个服务的假实现在 `src/tests/fakes.rs` |
 

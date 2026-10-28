@@ -1,16 +1,20 @@
 # Review: session brief, change narrative, floating bar (docs/design/review_view.md「界面」).
 
-review-looks-good = Looks good
+review-looks-good = Looks Good
     .tooltip = Mark every file as reviewed
+# The accessible name of the progress bar; the Files page shows review-files-reviewed.
 review-progress = { $reviewed }/{ $total } reviewed
+# The line above the Files page's bar and the percentage at its end.
+review-files-reviewed = { $reviewed } of { $total } reviewed
+review-files-percent = { $percent }%
 review-files-changed = { $count ->
     [one] { $count } file changed
    *[other] { $count } files changed
 }
 review-comments = { $count ->
-    [0] No comments
-    [one] { $count } comment
-   *[other] { $count } comments
+    [0] No review notes
+    [one] { $count } review note
+   *[other] { $count } review notes
 }
 # $path is shown as written.
 review-reviewing = Reviewing { $path }
@@ -21,20 +25,51 @@ review-title-untitled = Untitled session
 review-title-outside = Outside any session
 # $base is a reference name or a commit, shown as written.
 review-title-range = Changes against { $base }
-# Not available until the conversation view exists.
+# Not available until the conversation view exists. $agent is a product name, shown as written.
 review-send = Send
+review-send-to = Send to { $agent }
+review-send-to-shortcut = ⌘↩
+review-mark-reviewed = Mark Reviewed
+review-mark-reviewed-shortcut = V
+review-hide-formatting = Hide formatting
+# Not shown until structured diffs exist (#21).
+review-formatting-hidden = { $count ->
+    [one] { $count } formatting-only line hidden
+   *[other] { $count } formatting-only lines hidden
+}
 review-all-reviewed = All reviewed
 review-mode-unified = Unified
 review-mode-side-by-side = Side by side
+# The View menu's items.
 review-refresh = Refresh
     .tooltip = Compare the working tree again
 review-loading = Preparing the review…
 review-cancel = Cancel
 review-back = Back
 
+## Header
+
+review-stats-turns = { $count ->
+    [one] { $count } turn
+   *[other] { $count } turns
+}
+review-stats-files = { $count ->
+    [one] { $count } file
+   *[other] { $count } files
+}
+# Not shown until the review counts the packages a change touches.
+review-stats-files-packages = { $files ->
+    [one] { $files } file
+   *[other] { $files } files
+} in { $packages ->
+    [one] { $packages } package
+   *[other] { $packages } packages
+}
+
 ## Brief
 
 review-brief-title = Worth a look first
+review-brief-source = from local rules
 review-brief-empty = Nothing stands out.
 review-brief-omitted = { $count } more
 review-brief-pending = Still gathering…
@@ -110,6 +145,8 @@ review-brief-usage-unassigned = Not on any branch
 ## Analyze
 
 review-analyze = Analyze
+# $agent is a product name, shown as written.
+review-analyze-with = Analyze with { $agent }
 # $reason is shown as written.
 review-analyze-unavailable = Analyze isn't available: { $reason }
 review-analyze-running = Analyzing…
@@ -141,7 +178,13 @@ review-earlier-turns = { $count ->
 review-turn = Turn { $ordinal }
 review-turn-tokens = { $tokens } tokens
 review-turn-running = Running…
-review-step-counts = +{ $added } −{ $removed }
+review-added = +{ $count }
+review-removed = −{ $count }
+review-turn-files = { $count ->
+    [one] { $count } file
+   *[other] { $count } files
+}
+review-turn-none = no changes
 review-step-partial = Part of this edit didn't apply
 review-step-unaligned = Shown as recorded; it doesn't match the working tree
 review-step-survival-partly = Partly overwritten since
@@ -183,12 +226,16 @@ review-mark-unseen = Mark as not reviewed
     .tooltip = Mark as not reviewed
 # $when is a relative time such as "3 min ago".
 review-seen-changed = Changed { $when } after you reviewed it
-review-open-file = Open file (⇧⌘O)
-    .tooltip = Open file (⇧⌘O)
+review-open-file = Open File
+review-open-file-shortcut = ⇧⌘O
+# $time is a time of day. Not shown until the review knows when a drifted block was edited.
+review-drift-note = Drifted — you edited these lines at { $time }, after the session.
+review-drift-note-untimed = Drifted — these lines changed after the session.
+review-compare = Compare
 
 ## Progress list (the inspector page)
 
-review-progress-title = Progress
+review-progress-title = Files
 review-progress-empty = No review open
 review-progress-noise = Folded files
 

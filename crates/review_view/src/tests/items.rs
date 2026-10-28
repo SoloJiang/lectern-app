@@ -48,12 +48,16 @@ pub fn dump(items: &[Item], snapshot: &ReviewSnapshot) -> String {
     let mut out = String::new();
     for item in items {
         let line = match item {
+            Item::Header => "header".to_owned(),
             Item::Brief => "brief".to_owned(),
             Item::Notice(notice) => format!("notice {notice:?}"),
             Item::EarlierTurns { count, expanded } => {
                 format!("earlier {count} expanded={expanded}")
             }
-            Item::Turn { at, ix } => format!("turn {}:{} (#{ix})", at.session, at.ordinal),
+            Item::Turn { at, ix, collapsed } => {
+                let folded = if *collapsed { " folded" } else { "" };
+                format!("turn {}:{} (#{ix}){folded}", at.session, at.ordinal)
+            }
             Item::Prompt { at, .. } => format!("prompt {}:{}", at.session, at.ordinal),
             Item::Text { at, .. } => format!("text @{}", at.item),
             Item::Injected { at, .. } => format!("injected @{}", at.item),
@@ -97,6 +101,7 @@ fn items_session_order() {
     let kinds: Vec<&str> = items
         .iter()
         .map(|item| match item {
+            Item::Header => "header",
             Item::Brief => "brief",
             Item::Turn { .. } => "turn",
             Item::Prompt { .. } => "prompt",
@@ -108,13 +113,14 @@ fn items_session_order() {
             other => panic!("unexpected {other:?}"),
         })
         .collect();
-    // Brief, then turn 1 (files 0 and 2), turn 2 (file 1): prompt, text,
-    // the steps each with their hunk and rows, the tool call last.
-    assert_eq!(kinds[0], "brief");
-    assert_eq!(&kinds[1..4], ["turn", "prompt", "text"]);
-    assert_eq!(kinds[4], "step");
-    assert_eq!(kinds[5], "hunk");
-    assert!(kinds[6..14].iter().all(|k| *k == "row"));
+    // The title block and the brief, then turn 1 (files 0 and 2), turn 2
+    // (file 1): prompt, text, the steps each with their hunk and rows, the
+    // tool call last.
+    assert_eq!(&kinds[..2], ["header", "brief"]);
+    assert_eq!(&kinds[2..5], ["turn", "prompt", "text"]);
+    assert_eq!(kinds[5], "step");
+    assert_eq!(kinds[6], "hunk");
+    assert!(kinds[7..15].iter().all(|k| *k == "row"));
     let steps: Vec<u32> = items
         .iter()
         .filter_map(|item| match item {
@@ -254,10 +260,11 @@ fn items_notices_come_after_the_brief() {
     });
     snapshot.totals.invalid_paths = Arc::from(vec![Arc::<[u8]>::from(&b"\xff"[..])]);
     let items = build(&snapshot, &HashMap::new(), true, false);
-    assert_eq!(items[0], Item::Brief);
-    assert_eq!(items[1], Item::Notice(Notice::BaseCurrentHead));
-    assert_eq!(items[2], Item::Notice(Notice::Unclaimed(3)));
-    assert_eq!(items[3], Item::Notice(Notice::InvalidPaths(1)));
+    assert_eq!(items[0], Item::Header);
+    assert_eq!(items[1], Item::Brief);
+    assert_eq!(items[2], Item::Notice(Notice::BaseCurrentHead));
+    assert_eq!(items[3], Item::Notice(Notice::Unclaimed(3)));
+    assert_eq!(items[4], Item::Notice(Notice::InvalidPaths(1)));
 }
 
 #[test]
@@ -269,6 +276,7 @@ fn items_without_turns_are_grouped_by_rule() {
     let kinds: Vec<String> = items
         .iter()
         .map(|item| match item {
+            Item::Header => "header".to_owned(),
             Item::Brief => "brief".to_owned(),
             Item::Notice(_) => "notice".to_owned(),
             Item::Group { kind, .. } => format!("group {kind:?}"),
@@ -278,7 +286,10 @@ fn items_without_turns_are_grouped_by_rule() {
             other => panic!("unexpected {other:?}"),
         })
         .collect();
-    assert_eq!(&kinds[..4], ["brief", "notice", "group Code", "file"]);
+    assert_eq!(
+        &kinds[..5],
+        ["header", "brief", "notice", "group Code", "file"]
+    );
     assert_eq!(
         items
             .iter()
@@ -359,7 +370,7 @@ fn items_earlier_turns_fold_only_when_something_is_new() {
     assert_eq!(items::earlier_count(&snapshot), 2);
     let items_folded = build(&snapshot, &rows, true, false);
     assert_eq!(
-        items_folded[1],
+        items_folded[2],
         Item::EarlierTurns {
             count: 2,
             expanded: false
@@ -374,7 +385,7 @@ fn items_earlier_turns_fold_only_when_something_is_new() {
     );
     let items_open = build(&snapshot, &rows, false, false);
     assert_eq!(
-        items_open[1],
+        items_open[2],
         Item::EarlierTurns {
             count: 2,
             expanded: true

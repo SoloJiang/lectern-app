@@ -41,6 +41,10 @@ const INITIAL_VISIBLE: usize = 40;
 /// a scroll does not show items popping in.
 const OVERDRAW: Pixels = px(400.0);
 
+/// The brief's place in the list, after the title block: the one item whose
+/// height changes without the structure doing so.
+pub(crate) const BRIEF_ITEM: usize = 1;
+
 /// The state of the screen on top, for the toolbar and the Progress page:
 /// both read it from here (docs/design/review_view.md「视图」).
 pub(crate) struct Current(pub WeakEntity<ReviewModel>);
@@ -119,8 +123,6 @@ pub struct ReviewModel {
     /// through it.
     pub(crate) tx: Option<JobSender>,
     pub(crate) mode: DiffMode,
-    /// The slider of the unified / side-by-side control.
-    pub(crate) mode_slider: Transition,
     /// The display rows of every diff held in `rows`, in `mode`.
     pub(crate) displays: HashMap<RowsKey, Arc<[DisplayRow]>>,
     pub(crate) spans: SpansCache,
@@ -158,6 +160,8 @@ pub struct ReviewModel {
     pub(crate) texts: HashMap<TextKey, Arc<str>>,
     pub(crate) context: HashMap<FileKey, u32>,
     earlier_collapsed: bool,
+    /// The turns the user folded into one line each.
+    pub(crate) collapsed_turns: HashSet<TurnRef>,
     pub(crate) noise_expanded: bool,
     pub(crate) selection: Option<ItemKey>,
     needs: Arc<[Need]>,
@@ -220,11 +224,6 @@ impl ReviewModel {
             shared,
             tx,
             mode,
-            mode_slider: Transition::new(if mode == DiffMode::SideBySide {
-                1.0
-            } else {
-                0.0
-            }),
             displays: HashMap::new(),
             spans: SpansCache::new(),
             highlighted: HashMap::new(),
@@ -252,6 +251,7 @@ impl ReviewModel {
             texts: HashMap::new(),
             context: HashMap::new(),
             earlier_collapsed: true,
+            collapsed_turns: HashSet::new(),
             noise_expanded: false,
             selection: None,
             needs: Arc::from(Vec::new()),
@@ -305,7 +305,6 @@ impl ReviewModel {
             shared,
             tx: None,
             mode: DiffMode::Unified,
-            mode_slider: Transition::new(0.0),
             displays: HashMap::new(),
             spans: SpansCache::new(),
             highlighted: HashMap::new(),
@@ -333,6 +332,7 @@ impl ReviewModel {
             texts: HashMap::new(),
             context: HashMap::new(),
             earlier_collapsed: true,
+            collapsed_turns: HashSet::new(),
             noise_expanded: false,
             selection: None,
             needs: Arc::from(Vec::new()),
@@ -513,7 +513,7 @@ impl ReviewModel {
         }
         if old.state == LoadState::Ready && same_structure(&old, &new) {
             if !Arc::ptr_eq(&old.brief, &new.brief) {
-                self.list.remeasure_items(0..1);
+                self.list.remeasure_items(BRIEF_ITEM..BRIEF_ITEM + 1);
             }
             debug!(
                 "snapshot applied";
@@ -562,7 +562,8 @@ impl ReviewModel {
             context: &self.context,
             known_lines: &self.known_lines,
         };
-        let new_items = items::build(&self.snapshot, &self.rows, &options);
+        let new_items =
+            items::build_with(&self.snapshot, &self.rows, &options, &self.collapsed_turns);
         let target = if old.is_empty() {
             ListOffset::default()
         } else {
@@ -893,9 +894,17 @@ impl ReviewModel {
         let Some(item) = self.items.get(ix) else {
             return;
         };
-        self.selection = Some(item.key());
+        let key = item.key();
+        // A hunk may have no height of its own (nothing is drawn for it in
+        // a session's narrative): its first row is what to bring in view.
+        let reveal = if item.is_hunk() && self.items.get(ix + 1).is_some_and(Item::is_card_body) {
+            ix + 1
+        } else {
+            ix
+        };
+        self.selection = Some(key);
         self.sync_current();
-        self.list.scroll_to_reveal_item(ix);
+        self.list.scroll_to_reveal_item(reveal);
         cx.notify();
     }
 
@@ -1000,6 +1009,9 @@ impl ReviewModel {
         // folded noise file is unfolded to be shown.
         let mut target = self.file_item(&file);
         if target.is_none() && self.unfold_earlier(cx) {
+            target = self.file_item(&file);
+        }
+        if target.is_none() && self.unfold_turn_of(&file, cx) {
             target = self.file_item(&file);
         }
         if target.is_none()
@@ -1264,6 +1276,32 @@ impl ReviewModel {
     pub(crate) fn toggle_earlier(&mut self, cx: &mut Context<ReviewModel>) {
         self.earlier_collapsed = !self.earlier_collapsed;
         self.rebuild_in_place(cx);
+    }
+
+    /// A click on a turn's title: the turn folds into one line, or opens.
+    pub(crate) fn toggle_turn(&mut self, at: TurnRef, cx: &mut Context<ReviewModel>) {
+        if !self.collapsed_turns.remove(&at) {
+            self.collapsed_turns.insert(at);
+        }
+        self.rebuild_in_place(cx);
+    }
+
+    /// Opens the folded turn that has a step on `file`, so that a jump can
+    /// reach it; false when no folded turn has one.
+    fn unfold_turn_of(&mut self, file: &FileKey, cx: &mut Context<ReviewModel>) -> bool {
+        let Some(turns) = self.snapshot.turns.clone() else {
+            return false;
+        };
+        let found = turns.iter().find(|turn| {
+            self.collapsed_turns.contains(&turn.at)
+                && turn.items.iter().any(|item| {
+                    matches!(item, lectern_services::review::NarrativeItem::Step(step) if step.file == *file)
+                })
+        });
+        let Some(turn) = found else { return false };
+        self.collapsed_turns.remove(&turn.at);
+        self.rebuild_in_place(cx);
+        true
     }
 
     /// Rebuilds the items of the same snapshot after a fold changed.

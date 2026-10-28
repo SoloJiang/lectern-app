@@ -606,7 +606,7 @@ impl Button {
 pub struct Capsule { /* children */ }
 impl Capsule { pub fn new() -> Capsule; pub fn child(self, child: impl IntoElement) -> Capsule; }
 
-/// 展开箭头（轮次折叠行、文件折叠行）：`ChevronRight`，`expanded` 为 0 时朝右、1 时朝下，中间按比例旋转。
+/// 展开箭头（轮次折叠行）：`ChevronRight`，`expanded` 为 0 时朝右、1 时朝下，中间按比例旋转。
 /// 值是调用方状态里的 `Transition`（`EXPAND_HEIGHT` 的曲线），减弱动态效果时直接到位。装饰元素，不声明节点（行自己声明展开状态）。
 pub struct Disclosure { /* expanded: f32 */ }
 impl Disclosure { pub fn new(expanded: f32) -> Disclosure; }

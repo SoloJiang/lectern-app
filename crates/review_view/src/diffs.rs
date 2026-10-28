@@ -7,14 +7,12 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
 use gpui::Context;
 use lectern_logging::debug;
 use lectern_services::review::{FileRows, RowsKey};
 use lectern_services::workspace::WorkspaceCommand;
 use lectern_syntax::WindowSpans;
-use lectern_ui::Segmented;
 
 use crate::anchor;
 use crate::highlight::{self, Half, SideSpans, SpanKey, Work};
@@ -234,12 +232,6 @@ impl ReviewModel {
         }
         self.mode = mode;
         self.shared.set_mode(mode);
-        Segmented::select(
-            &mut self.mode_slider,
-            usize::from(mode == DiffMode::SideBySide),
-            Instant::now(),
-            cx,
-        );
         self.shared.dispatch(WorkspaceCommand::SetReadingColumn(
             mode == DiffMode::Unified,
         ));

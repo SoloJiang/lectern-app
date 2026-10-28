@@ -378,7 +378,8 @@ impl ReviewModel {
                 );
             }
             // The brief grew or shrank by a line per branch.
-            self.list.remeasure_items(0..1);
+            self.list
+                .remeasure_items(crate::model::BRIEF_ITEM..crate::model::BRIEF_ITEM + 1);
             cx.notify();
         }
     }
@@ -414,7 +415,8 @@ impl ReviewModel {
             self.usage = None;
             self.shares.clear();
         }
-        self.list.remeasure_items(0..1);
+        self.list
+            .remeasure_items(crate::model::BRIEF_ITEM..crate::model::BRIEF_ITEM + 1);
         cx.notify();
     }
 

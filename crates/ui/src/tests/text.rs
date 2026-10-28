@@ -24,7 +24,7 @@ fn text_key_and_fmt_carry_the_message_id() {
     let en = Strings::of(Locale::En);
     let zh = Strings::of(Locale::ZhCn);
     let key = Text::key(&en, keys::review::LOOKS_GOOD);
-    assert_eq!(key.as_str(), "Looks good");
+    assert_eq!(key.as_str(), "Looks Good");
     assert_eq!(key.message_id(), Some("review-looks-good"));
     assert_eq!(
         Text::key(&zh, keys::review::LOOKS_GOOD).message_id(),
