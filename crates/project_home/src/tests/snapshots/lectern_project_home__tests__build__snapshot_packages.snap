@@ -2,7 +2,7 @@
 source: crates/project_home/src/tests/build.rs
 expression: render(&with.snapshot)
 ---
-project "app" branch=main settled=true
+project "app" branch=main worktrees=1 settled=true
 sources project=1 sessions=[] overview=None usage=None
 sidebar groups=0 session_rows=0 packages=5 counts=true
   package "" name=root depth=0 today=0
@@ -19,6 +19,6 @@ rows
   package 2
   package 3
   package 4
-main overview_ready=false needs_review=0 done=0
+main running=0 overview_ready=false needs_review=0 done=0
   outside pending
 usage none

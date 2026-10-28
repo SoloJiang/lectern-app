@@ -7,17 +7,18 @@
 use std::sync::Arc;
 
 use gpui::{AppContext, Focusable};
-use lectern_i18n::{Args, keys};
+use lectern_i18n::keys;
 use lectern_kernel::Name;
 use lectern_services::workspace::{
     Contribution, ContributionKind, Contributions, Registration, ScreenLayout, SidebarSection,
     Visibility, WorkspaceCommand, screens,
 };
 use lectern_ui::contrib::{KeyBindings, Screen, SidebarItem, SidebarPanel, ToolbarItems};
-use lectern_ui::{Text, strings};
+use lectern_ui::{Icon, Text, strings};
 
 use crate::actions;
 use crate::home::Home;
+use crate::present;
 use crate::screen::HomeScreen;
 use crate::sidebar::{HomeSidebar, OVERVIEW_ENTRY};
 
@@ -54,11 +55,7 @@ pub(crate) fn register(contributions: &dyn Contributions, home: &Arc<Home>) -> V
                 match toolbar_home.snapshot() {
                     Some(snapshot) => ToolbarItems {
                         title: Text::verbatim(snapshot.name.clone()),
-                        subtitle: Some(Text::fmt(
-                            &strings,
-                            keys::project_home::SUBTITLE,
-                            &Args::new().num("count", snapshot.main.needs_review.len() as f64),
-                        )),
+                        subtitle: present::subtitle(&strings, &snapshot),
                         controls: Vec::new(),
                     },
                     None => ToolbarItems {
@@ -81,7 +78,7 @@ pub(crate) fn register(contributions: &dyn Contributions, home: &Arc<Home>) -> V
     };
     let overview = SidebarItem {
         label: keys::project_home::OVERVIEW,
-        icon: None,
+        icon: Some(Icon::Overview),
         on_select: WorkspaceCommand::PopToBase,
     };
     let bindings = KeyBindings(actions::key_bindings());

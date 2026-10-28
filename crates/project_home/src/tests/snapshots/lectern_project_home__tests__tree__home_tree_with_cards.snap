@@ -3,22 +3,26 @@ source: crates/project_home/src/tests/tree.rs
 expression: "tree(vcx, main_part)"
 ---
 project-home.title Text label=[project-home-title] count=4 ready=true
+project-home.lede Text label="1 agent is running. 4 files changed outside any session." running=1 outside=4
 project-home.needs-review List label=[project-home-needs-review]
   project-home.needs-review.item[s1] ListItem
     project-home.needs-review.item[s1].facts Group label="Fix the login redirect" agent=claude-code critical=1 changed=0 drifted=true seen=2 total=5
-      project-home.needs-review.item[s1].progress Progress fraction=0.400
+      project-home.needs-review.item[s1].seen Text label=[project-home-progress]
+        project-home.needs-review.item[s1].progress Progress fraction=0.400
   project-home.needs-review.item[s2] ListItem selected
     project-home.needs-review.item[s2].facts Group label="Add the search index" agent=codex critical=0 changed=0 drifted=false seen=0 total=3
-      project-home.needs-review.item[s2].progress Progress fraction=0.000
+      project-home.needs-review.item[s2].seen Text label=[project-home-progress]
+        project-home.needs-review.item[s2].progress Progress fraction=0.000
   project-home.needs-review.item[s5] ListItem
     project-home.needs-review.item[s5].facts Group label=[project-home-untitled-session] agent=other critical=0 changed=0 drifted=false
   project-home.needs-review.item[s6] ListItem
     project-home.needs-review.item[s6].facts Group label="Tidy the error messages" agent=claude-code critical=0 changed=2 drifted=false seen=3 total=3
-      project-home.needs-review.item[s6].progress Progress fraction=1.000
+      project-home.needs-review.item[s6].seen Text label=[project-home-progress]
+        project-home.needs-review.item[s6].progress Progress fraction=1.000
 project-home.outside.group List label=[project-home-outside]
   project-home.outside ListItem
     project-home.outside.facts Group label=[project-home-outside-files] files=4
+      project-home.outside.review Button label=[project-home-outside-review]
 project-home.done List label=[project-home-done]
   project-home.done.item[s4] ListItem
     project-home.done.item[s4].facts Group label="Rename the config keys" agent=claude-code critical=0 changed=0 drifted=false seen=4 total=4
-      project-home.done.item[s4].progress Progress fraction=1.000

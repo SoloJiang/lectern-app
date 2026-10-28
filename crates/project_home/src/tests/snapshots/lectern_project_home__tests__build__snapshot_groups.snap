@@ -2,7 +2,7 @@
 source: crates/project_home/src/tests/build.rs
 expression: render(&built.snapshot)
 ---
-project "app" branch=main settled=true
+project "app" branch=main worktrees=3 settled=true
 sources project=1 sessions=["a@3", "b@3"] overview=None usage=None
 sidebar groups=3 session_rows=5 packages=0 counts=false
   group worktree main active=true
@@ -15,14 +15,11 @@ sidebar groups=3 session_rows=5 packages=0 counts=false
     s8 "title of s8" agent=claude-code ago=3m running=false pending=false
 rows
   sessions-header
-  worktree-header 0
-  session 0.0
-  session 0.1
-  worktree-header 1
-  session 1.0
-  worktree-header 2
   session 2.0
   session 2.1
-main overview_ready=false needs_review=0 done=0
+  session 0.0
+  session 0.1
+  session 1.0
+main running=0 overview_ready=false needs_review=0 done=0
   outside pending
 usage none

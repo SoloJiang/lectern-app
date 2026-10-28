@@ -40,14 +40,26 @@ pub(crate) fn sidebar_sessions() -> NodeId {
     sidebar().child("sessions")
 }
 
-/// A worktree's small heading; the key is the worktree directory, or
-/// `other` / `folder` for a group without one.
+/// A worktree group's node in the snapshot; the key is the worktree
+/// directory, or `other` / `folder` for a group without one. The sidebar
+/// draws no heading for it any more (the sessions of all worktrees are
+/// mixed).
 pub(crate) fn sidebar_worktree(key: &str) -> NodeId {
     item(&sidebar_sessions().child("worktree"), key)
 }
 
 pub(crate) fn sidebar_session(id: &str) -> NodeId {
     item(&sidebar_sessions(), id)
+}
+
+/// The row that unfolds the older sessions and folds them again.
+pub(crate) fn sidebar_more() -> NodeId {
+    sidebar_sessions().child("more")
+}
+
+/// The small heading over the contributed `Views` entries.
+pub(crate) fn sidebar_views() -> NodeId {
+    sidebar().child("views")
 }
 
 pub(crate) fn sidebar_packages() -> NodeId {
@@ -75,6 +87,10 @@ pub(crate) fn title() -> NodeId {
 
 pub(crate) fn empty() -> NodeId {
     area("empty")
+}
+
+pub(crate) fn lede() -> NodeId {
+    area("lede")
 }
 
 pub(crate) fn needs_review() -> NodeId {

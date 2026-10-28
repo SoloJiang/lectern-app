@@ -2,7 +2,7 @@
 source: crates/project_home/src/tests/build.rs
 expression: render(&built.snapshot)
 ---
-project "app" branch=main settled=true
+project "app" branch=main worktrees=1 settled=true
 sources project=1 sessions=["a@3"] overview=Some(7) usage=None
 sidebar groups=1 session_rows=5 packages=0 counts=false
   group worktree main active=true
@@ -13,16 +13,15 @@ sidebar groups=1 session_rows=5 packages=0 counts=false
     empty "title of empty" agent=claude-code ago=5m running=false pending=false
 rows
   sessions-header
-  worktree-header 0
   session 0.0
   session 0.1
   session 0.2
   session 0.3
   session 0.4
-main overview_ready=true needs_review=3 done=1
-  needs-review none "title of none" agent=claude-code ago=1m running=false pending=false progress=- drifted=false critical=0 changed=0
-  needs-review partial "title of partial" agent=claude-code ago=2m running=false pending=false progress=2/5 drifted=false critical=2 changed=0
-  needs-review changed "title of changed" agent=claude-code ago=4m running=false pending=false progress=5/5 drifted=true critical=0 changed=1
-  outside files=3
-  done all "title of all" agent=claude-code ago=3m running=false pending=false progress=5/5 drifted=false critical=0 changed=0
+main running=0 overview_ready=true needs_review=3 done=1
+  needs-review none "title of none" agent=claude-code ago=1m running=false pending=false branch=main status=None progress=- drifted=false critical=0 changed=0
+  needs-review partial "title of partial" agent=claude-code ago=2m running=false pending=false branch=main status=None progress=2/5 drifted=false critical=2 changed=0
+  needs-review changed "title of changed" agent=claude-code ago=4m running=false pending=false branch=main status=None progress=5/5 drifted=true critical=0 changed=1
+  outside files=3 names=[]
+  done all "title of all" agent=claude-code ago=3m running=false pending=false branch=main status=None progress=5/5 drifted=false critical=0 changed=0
 usage none

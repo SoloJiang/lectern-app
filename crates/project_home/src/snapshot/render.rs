@@ -13,9 +13,10 @@ pub(crate) fn render(snapshot: &HomeSnapshot) -> String {
     let w = &mut out;
     let _ = writeln!(
         w,
-        "project {:?} branch={} settled={}",
+        "project {:?} branch={} worktrees={} settled={}",
         &*snapshot.name,
         snapshot.branch.as_deref().unwrap_or("-"),
+        snapshot.worktree_count,
         snapshot.files_settled,
     );
     let _ = writeln!(
@@ -64,7 +65,6 @@ pub(crate) fn render(snapshot: &HomeSnapshot) -> String {
     for row in sidebar.rows.iter() {
         let _ = match row {
             SidebarRow::SessionsHeader => writeln!(w, "  sessions-header"),
-            SidebarRow::WorktreeHeader(g) => writeln!(w, "  worktree-header {g}"),
             SidebarRow::Session { group, index } => writeln!(w, "  session {group}.{index}"),
             SidebarRow::SessionsEmpty => writeln!(w, "  sessions-empty"),
             SidebarRow::PackagesHeader => writeln!(w, "  packages-header"),
@@ -75,7 +75,8 @@ pub(crate) fn render(snapshot: &HomeSnapshot) -> String {
     let main = &snapshot.main;
     let _ = writeln!(
         w,
-        "main overview_ready={} needs_review={} done={}",
+        "main running={} overview_ready={} needs_review={} done={}",
+        main.running,
         main.overview_ready,
         main.needs_review.len(),
         main.done.len(),
@@ -83,10 +84,12 @@ pub(crate) fn render(snapshot: &HomeSnapshot) -> String {
     for card in main.needs_review.iter() {
         let _ = writeln!(w, "  needs-review {}", card_line(card));
     }
-    let _ = match main.outside {
+    let _ = match &main.outside {
         OutsideRow::Hidden => writeln!(w, "  outside hidden"),
         OutsideRow::Pending => writeln!(w, "  outside pending"),
-        OutsideRow::Files(n) => writeln!(w, "  outside files={n}"),
+        OutsideRow::Files { count, names } => {
+            writeln!(w, "  outside files={count} names={:?}", names.as_ref())
+        }
         OutsideRow::Capped(n) => writeln!(w, "  outside capped={n}"),
     };
     for card in main.done.iter() {
@@ -104,6 +107,7 @@ pub(crate) fn render(snapshot: &HomeSnapshot) -> String {
                 usage.tightest.as_ref().map(|t| (
                     agent(&t.agent),
                     t.used_percent,
+                    t.window_minutes,
                     t.resets_at.map(|r| r.0)
                 )),
             );
@@ -142,7 +146,9 @@ fn card_line(card: &Card) -> String {
         .progress
         .map_or("-".to_owned(), |p| format!("{}/{}", p.seen, p.total));
     format!(
-        "{} progress={progress} drifted={drifted} critical={critical} changed={changed_since_seen}",
+        "{} branch={} status={:?} progress={progress} drifted={drifted} critical={critical} changed={changed_since_seen}",
         session_line(&card.session),
+        card.branch.as_deref().unwrap_or("-"),
+        card.status,
     )
 }
