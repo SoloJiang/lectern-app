@@ -115,6 +115,8 @@ pub fn set_frame_autosave_name_or_center(
 }
 
 /// `size` with each side cut to the visible area's, when there is one.
+/// Elsewhere only the tests use it (the stub does not touch the window).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn clamp_to_visible(size: (f64, f64), visible: Option<(f64, f64)>) -> (f64, f64) {
     match visible {
         Some((width, height)) => (size.0.min(width), size.1.min(height)),
