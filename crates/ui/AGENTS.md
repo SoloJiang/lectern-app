@@ -32,8 +32,8 @@
 | `font.rs` | 字体家族常量、`TextRole`、`TextRoleExt`、`MonoMetrics`、`mono_metrics` |
 | `code.rs` | `CodeStyle`、`code_style`、`code_styles` |
 | `contrib.rs` | `workspace` 贡献的载荷类型与 `into_payload` |
-| `icon.rs` | `Icon` 枚举、Lucide 文件名的对应、`IconAssets`（`icon_assets!` 只嵌入这 16 个 SVG） |
-| `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`，第二批的 `ActionCard`、`menu.rs`（`MenuItem`、`show_menu`、`PopUpButton`、行的右键菜单）、`SidebarRow`、`Capsule`、`Disclosure`，以及共用的悬停过渡 `hover.rs`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
+| `icon.rs` | `Icon` 枚举、Lucide 文件名的对应、`IconAssets`（包着 `icon_assets!` 生成的来源，只嵌入这 16 个 SVG 和应用图标 `assets/app-icon.svg`） |
+| `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`，第二批的 `ActionCard`、`menu.rs`（`MenuItem`、`show_menu`、`PopUpButton`、行的右键菜单）、`SidebarRow`、`Capsule`、`Disclosure`、`AppIcon`（整块是一个 SVG，颜色在文件里，不在 Rust 里），以及共用的悬停过渡 `hover.rs`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
 | `semantic.rs` | `NodeId`、`Role`、`Label`、`State`、`Semantic`、`Record`、`Recorder`、包装元素 `semantic(...)` / `semantic_interactive(...)`（`SemanticElement`）、无障碍属性的映射，以及控件声明节点的接缝 `declare` |
 | `state.rs` | 唯一的 GPUI 全局 `UiState` |
 | `testing.rs` | `test-support` feature：`simulate_appearance_change`、`simulate_platform_change`、`mono_resolutions` |

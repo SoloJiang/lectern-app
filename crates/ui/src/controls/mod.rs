@@ -1,7 +1,7 @@
 //! The shared controls (docs/design/ui.md「控件」): the few the first
 //! screens need that gpui-component lacks or draws unlike macOS (step 5 adds
 //! the second batch: `ActionCard`, `PopUpButton`, `SidebarRow`, `Capsule`,
-//! `Disclosure`). Each is a
+//! `Disclosure`, and the decorative `AppIcon`). Each is a
 //! `RenderOnce` element that takes `Text` (never `&str`), draws with the
 //! `Palette`, animates with `motion` and declares its semantic node through
 //! `semantic::declare`, so a view gives only the `NodeId`.
@@ -12,6 +12,7 @@
 
 mod action_card;
 mod agent_dot;
+mod app_icon;
 mod button;
 mod capsule;
 mod circle_check;
@@ -28,6 +29,7 @@ mod sidebar_row;
 
 pub use action_card::ActionCard;
 pub use agent_dot::{Agent, AgentDot};
+pub use app_icon::AppIcon;
 pub use button::{Button, ButtonKind, ButtonSize};
 pub use capsule::Capsule;
 pub use circle_check::CircleCheck;

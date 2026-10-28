@@ -40,16 +40,16 @@ mod tests;
 
 pub use code::{CodeStyle, code_style, code_styles};
 pub use controls::{
-    ActionCard, Agent, AgentDot, Button, ButtonKind, ButtonSize, Capsule, CircleCheck, Disclosure,
-    Expander, GroupedList, Hint, HintFrame, LoadingPhase, MenuItem, PopUpButton, Progress,
-    ProgressShape, Row, Segmented, SidebarRow, Skeleton, loading_phase, show_menu,
+    ActionCard, Agent, AgentDot, AppIcon, Button, ButtonKind, ButtonSize, Capsule, CircleCheck,
+    Disclosure, Expander, GroupedList, Hint, HintFrame, LoadingPhase, MenuItem, PopUpButton,
+    Progress, ProgressShape, Row, Segmented, SidebarRow, Skeleton, loading_phase, show_menu,
 };
 pub use font::{
     MONO_FALLBACK_FAMILY, MONO_FAMILY, MonoMetrics, TextRole, TextRoleExt, UI_FAMILY, mono_metrics,
 };
 pub use icon::Icon;
-/// The SVG source of the sixteen icons of `Icon`, and only those; every other
-/// path answers `Ok(None)`. `app` passes it to `Application::with_assets`
+/// The SVG source of the sixteen icons of `Icon` and of the app icon, and
+/// only those; every other path answers `Ok(None)`. `app` passes it to `Application::with_assets`
 /// before `run`, the one place GPUI takes an asset source; without it every
 /// icon paints blank.
 pub use icon::IconAssets;

@@ -21,10 +21,10 @@ use crate::motion::{HINT_DURATION, HOVER_OUT, Transition};
 use crate::semantic::NodeId;
 use crate::tests::motion::{at, in_render};
 use crate::{
-    ActionCard, Agent, AgentDot, Appearance, Button, ButtonKind, ButtonSize, Capsule, CircleCheck,
-    Disclosure, Expander, GroupedList, Hint, Icon, IconAssets, LoadingPhase, MenuItem, PopUpButton,
-    Progress, ProgressShape, Row, Segmented, SidebarRow, Skeleton, Text, init, init_fixed,
-    loading_phase, strings,
+    ActionCard, Agent, AgentDot, AppIcon, Appearance, Button, ButtonKind, ButtonSize, Capsule,
+    CircleCheck, Disclosure, Expander, GroupedList, Hint, Icon, IconAssets, LoadingPhase, MenuItem,
+    PopUpButton, Progress, ProgressShape, Row, Segmented, SidebarRow, Skeleton, Text, init,
+    init_fixed, loading_phase, strings,
 };
 
 fn fixed(cx: &mut TestAppContext, reduced_motion: bool) {
@@ -146,6 +146,16 @@ fn icon_assets_hold_every_icon() {
     assert_eq!(
         IconAssets.list("icons/").expect("lists").len(),
         Icon::ALL.len()
+    );
+    // The app icon is served from the same source, outside `icons/`.
+    let app_icon = IconAssets
+        .load(crate::icon::APP_ICON_PATH)
+        .expect("the source answers")
+        .expect("the app icon is embedded");
+    assert!(app_icon.starts_with(b"<svg") && app_icon.len() > 100);
+    assert_eq!(
+        IconAssets.list("").expect("lists").len(),
+        Icon::ALL.len() + 1
     );
     assert!(
         IconAssets
@@ -455,6 +465,7 @@ impl Render for Gallery {
                     ),
             )
             .child(Disclosure::new(0.5))
+            .child(AppIcon::new(px(96.0)))
             .child(Expander::new(
                 root.child("comment"),
                 px(self.height.tick(now, window)),
