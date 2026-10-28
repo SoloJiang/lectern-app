@@ -333,7 +333,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   - 标题区（新的 `Item::Header`，会话审阅和规则分组视图都有）：标题（Title 1 层级，粗体；文字同工具栏标题），下面一行统计（Body 层级，次要色），用 ` · ` 连接：轮数（`review-stats-turns`，规则分组视图没有）、文件数（`review-stats-files`；有包数时用 `review-stats-files-packages`）、增删行数（`review-added` 绿色、`review-removed` 红色，取 `ChangeTotals::added` / `removed`）。包数（涉及几个子项目）要 `review` 的快照提供（「对其他 crate 的要求」H），没有时只写文件数。
   - 简报（没有卡片）：标题行 `review-brief-title`，旁边次要文字 `review-brief-source`，右边是 Analyze 的按钮（`review-analyze-with`，点名分析用的 agent）或进行中 / 重新分析的状态（下面「简报」一节写了状态）；条目前的标记是 8pt 圆点，不用画布 Review 画板里的 16pt 图标（[交互规范「视觉」](interaction.md#视觉)：状态用圆点）；条目末尾的 See impact 链接打开上下文面板，要 `context_drawer`（[#20](https://github.com/SoloJiang/lectern-app/issues/20)），没有它时不画；分支用量行前有分支图标。Analyze 进行中的说明和进度条、结果卡片的内容归 [#66](https://github.com/SoloJiang/lectern-app/issues/66)，这里只留出位置：说明在条目列表下面，结果卡片在同一位置。
   - 轮次：每轮之间一条 0.5pt 分隔线。展开的轮次：标题行是 `Turn N`（Headline 层级，次要色）和一段次要文字（Callout 层级）「开始时间（时:分）· 文件数 · token」，用 ` · ` 连接（`review-turn-files`、`review-turn-tokens`；token 要交接插件，没有时省略）；没有 agent 圆点。prompt 用 Title 2 层级、主文字色，没有引用块的左边线；agent 说明用 Body 层级、次要文字色，保留换行。折叠的轮次是一行：展开箭头、`Turn N`（半粗）、prompt 的预览、右端次要文字（没有改动是 `review-turn-none`，否则是 `review-turn-files`）；点一下展开，再点收起。哪些轮次默认折叠见「未决问题」3。
-  - 文件卡片：一个文件（会话审阅里是一轮里的一步，规则分组视图里是最终改动的一个文件）一张卡片，头部和 diff 在同一个圆角卡片里，头部与 diff 之间一条 0.5pt 分隔线。头部：`CircleCheck`、路径（`Code` 层级的等宽字）、增删行数（`review-added` / `review-removed`）、右端一个朴素的 Open File 文字按钮（`review-open-file`，后面跟次要色的键提示 ⇧⌘O；没有交接插件时置灰）。diff 里的折叠行（`Fold`）与代码文字左对齐，次要色。同一轮里的文件可以折叠成一行（`CircleCheck`、路径、增删行数、›），展开就是上面的卡片。画布把第一个文件画成展开的、后面两个画成折叠行；这是原型的状态，不是规则，默认见「未决问题」6。
+  - 文件卡片：一个文件（会话审阅里是一轮里的一步，规则分组视图里是最终改动的一个文件）一张卡片，头部和 diff 在同一个圆角卡片里，头部与 diff 之间一条 0.5pt 分隔线。头部：`CircleCheck`、路径（`Code` 层级的等宽字）、增删行数（`review-added` / `review-removed`）、右端一个朴素的 Open File 文字按钮（`review-open-file`，后面跟次要色的键提示 ⇧⌘O；没有交接插件时置灰）。diff 里的折叠行（`Fold`）与代码文字左对齐，次要色。文件卡片一直展开，没有折叠成一行的文件行，也没有收起卡片的控件。画布把后面两个文件画成折叠行，这是原型的状态；产品已决定不做文件卡片的折叠（「未决问题」6）。
   - Drifted 提示：diff 里无法对齐的改动块之前画一行警示色（橙）的字，带图标：`review-drift-note`（「Drifted — you edited these lines at 14:02, after the session.」）和一个 Compare 链接（`review-compare`）。编辑时间要 `review` 提供；没有时用 `review-drift-note-untimed`。Compare 的界面还没有设计，没有它时不画链接。原来的 2pt 竖条和「Drifted」标签去掉。规则分组视图的 hunk 标题（`review-hunk-turn`、`review-hunk-other-session`）保留：那里一个文件的改动可能来自几轮、几个会话。会话审阅的每一步已经在某一轮之下，hunk 不再画归因标题（是否保留见「未决问题」7）。
   - 审阅意见的输入框（点行尾的 + 展开）、行内的意见：归 [#22](https://github.com/SoloJiang/lectern-app/issues/22)；展开动画 `EXPAND_HEIGHT` / `EXPAND_FADE` 已有。
 - 检查器：页签是撑满宽度的分段控件（`Segmented`），画布是 Files / Conversation 两项；本 crate 登记 Files 页（`InspectorTab`，标签 `review-progress-title`，值改成 Files），Conversation 页归 `conversation`（[#23](https://github.com/SoloJiang/lectern-app/issues/23)）。Files 页：顶上一行「已看 2/6」（`review-files-reviewed`）和右端的百分比（`review-files-percent`），下面一条细进度条（`Progress::Bar`，增长动画 `PROGRESS`）；再下面是文件列表，每行：`CircleCheck`、短名（路径的最后一段，列表里有重名时加上上一级目录）、右端次要色的 `Turn N`（该文件最早被改动的那一轮，规则分组视图里没有）；选中的行用淡灰填充（不是强调色），两侧内缩、圆角，没有分隔线；噪声组和折叠的文件不变。选中行的辅助文字 `review-reviewing` 去掉（画布没有）。
@@ -624,7 +624,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **F. `ui`**（#214 的设计加两个字段，随它的第 1 步或之后一个小 PR）：`Palette` 加 `diff_added_inline_background`、`diff_removed_inline_background`：词级差异的底色，`system(Green)` / `system(Red)` 按浅色 28%、深色 36% 的透明度叠在 `control_background` 上（比 `diff_*_background` 深一档），内置表与系统色两条路径都给出，`palette_builtin_*` 里一并检查对比度。本 crate 第 2 步之前合并。已实现：[#238](https://github.com/SoloJiang/lectern-app/pull/238)。
 - **G. `app`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：应用菜单加一个 View 菜单，放统一 / 双栏（`review::ToggleDiffMode`）和刷新（`review::Refresh`）两项，没有审阅屏幕时置灰。实现在 `app` 的 View 菜单 PR（分支 `impl/app-view-menu`，与本屏幕的重画一起合并）：菜单项的文字用 `app` 自己的键（`app-menu-toggle-diff-mode`、`app-menu-refresh`，[app 设计「界面」](app.md#界面)的菜单表），刷新另有 ⌘R；菜单只设置一次，统一 / 双栏不显示勾选状态。
 - **H. `review`**（同上，不阻塞）：`ReviewSnapshot` 带涉及的子项目数（标题区「in 2 packages」）、每个无法对齐的改动块的编辑时间（Drifted 提示）。没有时标题区只写文件数，Drifted 提示用 `review-drift-note-untimed`。
-- **I. `ui`**（为 #283 新增）：撑满宽度的分段控件（检查器页签）、胶囊形的浮条容器、开关（#21 之后）、轮次折叠行 / 文件折叠行用的展开箭头；名字和接口见 [ui 设计「第二批控件」](ui.md#第二批控件283)：`Segmented::fill`、`Capsule` 加 `Button::pill`、`Switch`、`Disclosure`。
+- **I. `ui`**（为 #283 新增）：撑满宽度的分段控件（检查器页签）、胶囊形的浮条容器、开关（#21 之后）、轮次折叠行用的展开箭头；名字和接口见 [ui 设计「第二批控件」](ui.md#第二批控件283)：`Segmented::fill`、`Capsule` 加 `Button::pill`、`Switch`、`Disclosure`。
 
 ## 未决问题
 
@@ -634,7 +634,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 4. **agent 说明按纯文本还是 Markdown 显示。** 选项：(a) 纯文本、保留换行、等宽的代码块不识别；(b) 渲染 Markdown（标题、列表、代码块）。默认 (a)，Markdown 渲染另开 issue。
 
 5. **统一 / 双栏的切换和 Refresh 放在哪里。** 画布的 Review 工具栏只有「隐藏格式改动」开关和 Mark Reviewed（加上检查器开关就到了「最多 3 个控件」），没有给统一 / 双栏和 Refresh 留位置。选项：(a) 放进应用菜单栏的 View 菜单，工具栏只有画布上的控件；(b) 保留工具栏上的分段控件，Mark Reviewed 换位置；(c) 工具栏放一个「…」菜单。默认 (a)：画布为准，菜单是 macOS 放这类开关的地方；缺点是双栏不容易被发现。需要产品确认。
-6. **文件卡片默认展开还是折叠。** 画布把一轮里第一个文件画成展开、其余画成一行。选项：(a) 全部展开（现在的行为，J / K 在改动块之间移动，不用先展开）；(b) 只展开第一个，其余折叠，展开后再读。默认 (a)：折叠会让 J / K 和 V 多一步；折叠行只用于用户自己收起的文件。需要产品确认。用户怎样收起一张卡片也没有定：点卡片头已经是选中文件；一个选项是在文件头最左边加一个展开箭头（`ui::Disclosure`），点箭头收起、点头部其他位置仍是选中。没有决定之前不画折叠行，卡片一直展开（#283 的实现）。
+6. **文件卡片默认展开还是折叠。** 已决定（2026-10-28，产品）：文件卡片一直全部展开，不做折叠。没有折叠的文件行，卡片头上也没有收起的控件；J / K 和 V 不用先展开。噪声文件的折叠（`Noise`）和轮次的折叠不受影响。
 7. **会话审阅里 hunk 的归因标题（Turn N、另外 n 个会话）还要不要。** 画布的文件卡片里没有这一行，Drifted 是一行警示色的字。会话审阅的每一步已经在某一轮之下，归因标题是重复的；规则分组视图（会话外的改动、比较范围）里一个文件的改动可能来自几轮、几个会话，那里需要。默认：会话审阅里去掉，规则分组视图里保留。需要产品确认。
 
 技术问题都已在上文决定。
@@ -736,7 +736,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **会话审阅里 `Hunk` 项还在，画得很少**（「未决问题」7 的默认）。它是 J / K 的停靠点、探针的 `DiffHunk` 节点和锚点的键，所以不能去掉。无法对齐（`drifted > 0` 或步骤 `Unaligned`）时画一行橙色（`SystemColor::Orange`）的 `review-drift-note-untimed`，与代码列对齐；否则只有 0.5pt 的高度（零高度会被探针算作不可见）。选中 hunk 时，选中的样子画在它的第一个 `Row` 上（`DiffLine` 节点的 `selected` 仍只在行本身被选中时为 true）。规则分组视图（`RowsKey::Final`）里 hunk 的标题保留，去掉了单独一个「Drifted」标签（那一行由警示色的说明表达，「N 行已漂移」仍在）。
 - **Drifted 提示没有图标，没有 Compare 链接，没有编辑时间。** `ui` 没有警示图标（16 个图标里没有），Compare 的界面没有设计，编辑时间要 `review` 提供（要求 H）；所以总是 `review-drift-note-untimed`。`review-drift-note`、`review-compare` 两个键已加进 .ftl，没有调用方。
 - **每一轮都能折叠成一行**（点标题折叠 / 展开；`ReviewModel::collapsed_turns`，`Item::Turn { collapsed }`）：折叠的轮次只有这一项，它的提示、说明、改动步和调用都不在列表里。默认仍只折叠「最近一次已看之前的轮次」（「未决问题」3 的默认 (a)，没有改）。Progress、简报的跳转遇到折叠的轮次时先把它展开（与折叠的早先轮次、噪声文件同一做法）；V 之后的「下一个未看文件」只看列表里还在的步，折叠的轮次里的不算。`Disclosure` 画在折叠的轮次行和「之前的 n 轮」行上，值是 0 或 1，没有转动的动画（`Disclosure` 要调用方的 `Transition`；与 `Expander` 同样，随后做）。展开的轮次标题上没有箭头（画布没有）。
-- **不做文件卡片折叠成一行**（画布的折叠文件行）。「未决问题」6 的默认是全部展开，折叠行只给用户自己收起的文件，但「界面」没有定义怎么收起一张展开的卡片（画布的展开卡片头上没有控件，点标题现在是选中）。需要产品决定收起的入口之后再做；`Disclosure` 已经可以用。
+- **不做文件卡片折叠成一行**（画布的折叠文件行）。产品已决定文件卡片一直全部展开（「未决问题」6），所以没有折叠的文件行，也没有收起卡片的控件。
 - **轮次标题里的开始时间用相对时间**（「3 分钟前」，进行中是 `review-turn-running`），不是时:分。`i18n` 和 `platform` 都没有本地时间的格式化（本地时区要读系统，不能在 UI 线程上做）；有了之后换成时:分。文件数是这一轮改动步的不同文件数，0 个时省略；token 仍要交接插件。
 - **标题区没有包数**（要求 H 之前）：`review-stats-files-packages` 已加进 .ftl，没有调用方。`FileEntry::package` 已经在快照里，按它数不同的值就能得到包数，可以不等 `review` 加字段；本 PR 按范围没有做。
 - **没有「隐藏格式改动」开关**（`Switch` 随 #21 实现）：`review-hide-formatting`、`review-formatting-hidden` 已加进 .ftl，没有调用方。
