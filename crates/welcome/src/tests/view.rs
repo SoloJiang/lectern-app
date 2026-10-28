@@ -8,8 +8,9 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use gpui::{
-    AnyView, Bounds, Context, InteractiveElement, IntoElement, Modifiers, ParentElement, Pixels,
-    Render, Styled, TestAppContext, VisualTestContext, Window, div, px, size,
+    AnyView, Bounds, Context, InteractiveElement, IntoElement, Modifiers, MouseButton,
+    ParentElement, Pixels, Render, Styled, TestAppContext, VisualTestContext, Window, div, px,
+    size,
 };
 use lectern_i18n::{Locale, Strings};
 use lectern_platform::system::PrefError;
@@ -148,6 +149,41 @@ fn click(cx: &mut VisualTestContext, id: &str) {
     let bounds = bounds(&records, id);
     cx.simulate_click(bounds.center(), Modifiers::default());
     cx.run_until_parked();
+}
+
+/// A right click on the node, which opens the row's context menu.
+fn right_click(cx: &mut VisualTestContext, id: &str) {
+    let records = frame(cx);
+    let at = bounds(&records, id).center();
+    cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+    cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+}
+
+/// What the menu item of the language pop-up button does: the action it
+/// dispatches, built by name from its JSON like the probe does.
+fn select_language(cx: &mut VisualTestContext, value: serde_json::Value) {
+    let action = cx
+        .update(|_, cx| cx.build_action("welcome::SelectLanguage", Some(value)))
+        .expect("SelectLanguage is registered");
+    cx.update(|window, cx| window.dispatch_action(action, cx));
+    cx.run_until_parked();
+}
+
+/// The `value` attribute of the pop-up button.
+fn language_value(cx: &mut VisualTestContext) -> String {
+    frame(cx)
+        .iter()
+        .find(|record| record.semantic.id.as_str() == "welcome.language")
+        .and_then(|record| {
+            record
+                .semantic
+                .attrs
+                .iter()
+                .find(|(key, _)| *key == "value")
+                .map(|(_, value)| value.to_string())
+        })
+        .expect("welcome.language has a value")
 }
 
 /// Moves the test clock and lets the timers that came due run.
@@ -486,19 +522,32 @@ fn backspace_removes_the_selected_recent_and_moves_selection(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn the_remove_button_removes_its_row_and_does_not_open_it(cx: &mut TestAppContext) {
+fn the_context_menu_selects_its_row_and_does_not_open_it(cx: &mut TestAppContext) {
     let mut rig = Rig::new();
     with_lists(&mut rig);
     let cx = open(cx, &rig);
-    // A selected row shows its button.
-    cx.simulate_keystrokes("down down");
-    click(cx, &format!("{}.remove", recent_row(NOTES)));
-    assert_eq!(rig.recent_paths(), paths(&[LECTERN, BILLING]));
+    // A selection elsewhere moves to the row that was right-clicked.
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(cx), [recent_row(LECTERN)]);
+    right_click(cx, &recent_row(NOTES));
+    assert_eq!(selected(cx), [recent_row(NOTES)]);
     assert!(
         rig.contributions.dispatched.lock().unwrap().is_empty(),
-        "the click on the button is not a click on the row"
+        "a right click is not a click on the row"
     );
     assert_eq!(rig.model.snapshot().opening, None);
+    assert_eq!(rig.recent_paths(), paths(&[LECTERN, NOTES, BILLING]));
+
+    // The menu's one item is `RemoveSelected`: it acts on the selected row.
+    let item = RemoveSelected;
+    cx.dispatch_action(item);
+    cx.run_until_parked();
+    assert_eq!(rig.recent_paths(), paths(&[LECTERN, BILLING]));
+    assert!(rig.contributions.dispatched.lock().unwrap().is_empty());
+
+    // A discovered row has no menu: the right click does not select it.
+    right_click(cx, &discovered_row(FRESH));
+    assert_eq!(selected(cx), [recent_row(BILLING)]);
 }
 
 #[gpui::test]
@@ -584,43 +633,42 @@ fn language_picker_switches_strings_and_calls_platform(cx: &mut TestAppContext) 
     let cx = open(cx, &rig);
     let text = tree(cx);
     assert!(
-        text.contains(
-            "welcome.language.item[system] Tab [common-language-system] \"Match System\" selected"
-        ),
+        text.contains("welcome.language Button [welcome-language] \"Language\" value=system"),
         "{text}"
     );
-    assert!(text.contains("welcome.title Text [welcome-title] \"Welcome to Lectern\""));
+    assert!(text.contains("welcome.title Text [welcome-title] \"Lectern\""));
+    assert!(text.contains("welcome.open-folder Button [welcome-open-folder] \"Open Folder…\""));
 
-    click(cx, "welcome.language.item[zh-CN]");
+    select_language(cx, serde_json::json!({"locale": "zh-CN"}));
     let text = tree(cx);
     assert!(
-        text.contains("welcome.title Text [welcome-title] \"欢迎使用 Lectern\""),
+        text.contains("welcome.language Button [welcome-language] \"语言\" value=zh-CN"),
         "{text}"
     );
-    assert!(text.contains(
-        "welcome.language.item[zh-CN] Tab [common-language-zh-cn] \"简体中文\" selected"
-    ));
+    assert!(text.contains("welcome.open-folder Button [welcome-open-folder] \"打开文件夹…\""));
     assert_eq!(
         *rig.prefs.writes.lock().unwrap(),
         [Some("zh-CN".to_owned())]
     );
 
-    click(cx, "welcome.language.item[en]");
+    select_language(cx, serde_json::json!({"locale": "en"}));
     assert_eq!(
         *rig.prefs.writes.lock().unwrap(),
         [Some("zh-CN".to_owned()), Some("en".to_owned())]
     );
-    assert!(tree(cx).contains("\"Welcome to Lectern\""));
+    assert_eq!(language_value(cx), "en");
+    assert!(tree(cx).contains("\"Open Folder…\""));
 
     // Match System: the strings follow the system's languages, the
     // override is removed.
     *rig.prefs.system.lock().unwrap() = vec!["zh-Hans-CN".to_owned()];
-    click(cx, "welcome.language.item[system]");
+    select_language(cx, serde_json::json!({"locale": null}));
     assert_eq!(rig.prefs.writes.lock().unwrap().last(), Some(&None));
-    assert!(tree(cx).contains("\"欢迎使用 Lectern\""));
+    assert_eq!(language_value(cx), "system");
+    assert!(tree(cx).contains("\"打开文件夹…\""));
     // Choosing what is chosen writes nothing.
     let writes = rig.prefs.writes.lock().unwrap().len();
-    click(cx, "welcome.language.item[system]");
+    select_language(cx, serde_json::json!({"locale": null}));
     assert_eq!(rig.prefs.writes.lock().unwrap().len(), writes);
     assert_eq!(rig.model.snapshot().notice, None);
 }
@@ -632,12 +680,7 @@ fn the_picker_starts_on_the_saved_choice(cx: &mut TestAppContext) {
     rig.start_screen();
     rig.settle();
     let cx = open(cx, &rig);
-    assert!(
-        tree(cx).contains(
-            "welcome.language.item[zh-CN] Tab [common-language-zh-cn] \"简体中文\" selected"
-        ),
-        "the picker starts on the saved choice"
-    );
+    assert_eq!(language_value(cx), "zh-CN");
 }
 
 #[gpui::test]
@@ -647,14 +690,14 @@ fn a_failed_language_write_shows_the_notice_once(cx: &mut TestAppContext) {
     rig.settle();
     let cx = open(cx, &rig);
     *rig.prefs.outcome.lock().unwrap() = Some(Err(PrefError::Superseded));
-    click(cx, "welcome.language.item[en]");
+    select_language(cx, serde_json::json!({"locale": "en"}));
     assert_eq!(
         rig.model.snapshot().notice,
         None,
         "superseded is no failure"
     );
     *rig.prefs.outcome.lock().unwrap() = Some(Err(PrefError::WriteFailed));
-    click(cx, "welcome.language.item[zh-CN]");
+    select_language(cx, serde_json::json!({"locale": "zh-CN"}));
     assert_eq!(rig.model.snapshot().notice, Some(Notice::LanguageNotSaved));
     let text = tree(cx);
     assert!(
@@ -709,7 +752,7 @@ fn actions_are_triggerable_by_name(cx: &mut TestAppContext) {
     }));
     cx.update(|window, cx| window.dispatch_action(zh, cx));
     cx.run_until_parked();
-    assert!(tree(cx).contains("欢迎使用"));
+    assert!(tree(cx).contains("打开文件夹…"));
     assert_eq!(
         *rig.prefs.writes.lock().unwrap(),
         [Some("zh-CN".to_owned())]
@@ -752,6 +795,42 @@ fn the_bindings_are_the_designs_and_below_content() {
             ),
         ]
     );
+}
+
+#[gpui::test]
+fn the_columns_follow_the_canvas(cx: &mut TestAppContext) {
+    let mut rig = Rig::new();
+    with_lists(&mut rig);
+    let cx = open(cx, &rig);
+    let records = frame(cx);
+    let left_width = 820.0 * 360.0 / 680.0;
+    let card = bounds(&records, "welcome.open-folder");
+    // The card is as wide as it may be (300 pt) and centred in the left
+    // column; the title is centred too.
+    assert!((card.size.width.as_f32() - 300.0).abs() < 0.5, "{card:?}");
+    assert!(
+        (card.center().x.as_f32() - left_width / 2.0).abs() < 0.5,
+        "{card:?}"
+    );
+    let title = bounds(&records, "welcome.title");
+    assert!(
+        (title.center().x.as_f32() - left_width / 2.0).abs() < 1.0,
+        "{title:?}"
+    );
+    // The language choice is at the bottom of the left column.
+    let language = bounds(&records, "welcome.language");
+    assert!(language.right().as_f32() < left_width, "{language:?}");
+    assert!(language.bottom().as_f32() > 520.0 - 40.0, "{language:?}");
+    // The rows are in the right column and as wide as it, less its padding.
+    let row = bounds(&records, &recent_row(LECTERN));
+    assert!(row.left().as_f32() >= left_width, "{row:?}");
+    assert!(
+        (row.right().as_f32() - (820.0 - 10.0)).abs() < 0.5,
+        "{row:?}"
+    );
+    // The sidebar rows are flat: no gap but the 4 pt between them.
+    let next = bounds(&records, &recent_row(NOTES));
+    assert!(((next.top() - row.bottom()).as_f32() - 4.0).abs() < 0.5);
 }
 
 #[gpui::test]

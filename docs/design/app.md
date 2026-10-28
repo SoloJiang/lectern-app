@@ -330,7 +330,7 @@ Logging::shutdown(500 ms)
 |---|---|---|---|
 | `workspace` | `WorkspacePlugin::new(host)`，`host` 是 `workspace::install(window, deps, cx)` 的返回值（`Resources::workspace`） | `dyn Contributions` | `dyn Projects` |
 
-- `welcome`、`welcome-discovery`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 返回的两个插件，逐个放进 `PluginSet::with`）在 `workspace` 之后装配，见「welcome 的装配」。`project_home` 和 `usage` 的装配见「usage 与 project_home 的装配」。
+- `welcome`、`welcome-discovery`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome"), version })` 返回的两个插件，逐个放进 `PluginSet::with`）在 `workspace` 之后装配，见「welcome 的装配」。`project_home` 和 `usage` 的装配见「usage 与 project_home 的装配」。
 - `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架。正常启动时 `install` 总会运行，`welcome` 已装配，首次启动和没有项目时显示 Welcome；`project_home` 的视图合并之前，恢复出来的项目没有基底屏幕，窗口显示空的 `Workspace`（内容区是 `workspace-screen-missing` 的文字），这是过渡状态（workspace 设计「与设计的差异」第 3 步）。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
 - `startup::arm` 的第二个帧回调把窗口句柄交给 `release_in(Some(window), cx)`；`release(cx)` 是 `release_in(None, cx)`，test profile 用它。没有窗口句柄的 desktop 屏障不装配（记 warn `plugins not assembled`，`missing` 为 `window`），只在直接调用 `release` 时出现。
 - `Started::shell`（`Option<Shell>`）：`Shell { host, window_state }`，`Quit` 用 `host` 问离开守卫，Dock 重开用两者。
@@ -427,9 +427,10 @@ target 为 `app`。
 
 | 插件 ID | 构造 | 提供 | 依赖 |
 |---|---|---|---|
-| `welcome` | `lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的第一个 | 无 | `dyn Contributions`、`dyn Projects` |
+| `welcome` | `lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome"), version })` 的第一个 | 无 | `dyn Contributions`、`dyn Projects` |
 | `welcome-discovery` | 同一次 `plugins` 调用的第二个 | 无 | `dyn Projects`、`dyn SessionSource` |
 
+- `version`（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，[welcome 设计「对其他 crate 的要求」](welcome.md#对其他-crate-的要求)E）是 `Some(APP_VERSION)`：`profile.rs` 里的常量，编译期用 `concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"))` 从包版本截取「主版本.次版本」（不解析字符串，不读环境）。Welcome 的副标题用它（`welcome-subtitle` 的 `$version`）。
 - 两个插件在 `workspace` 之后逐个放进 `PluginSet::with`，共用 `plugins` 建的一个 `WelcomeModel`。`WelcomeDeps::data_dir` 只拼路径，不创建；`recent.json` 由 `welcome` 在 `started` 提交的后台任务里读，第一次写时才建 `welcome/` 目录（`create_dir_all`）。
 - 会话来源（`agents` 的两个插件）在同一张表里，`welcome-discovery` 的 `requires` 有提供者。没有会话来源的 profile 必须同时不装 `welcome-discovery`；`Profile::Test` 什么也不装。
 - `Resources::app_data` 非可选；`app_data()` 为 None 时 `app` 不装配任何插件（「workspace 的装配」），所以这里不处理没有目录的情况。

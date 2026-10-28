@@ -1,6 +1,6 @@
 # welcome 设计
 
-状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，已实现的部分要随之修改，见「与设计的差异」。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，并且已按修订实现（`Refs #283`）：两栏、应用图标、操作卡片、语言弹出菜单、平铺的侧栏行、⌫ 与右键菜单；见「实际验证」的「#283 的重绘」和「与设计的差异」。
 
 对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用图标、应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
@@ -55,6 +55,9 @@ pub struct WelcomeDeps {
     /// 最近项目文件所在目录：`app` 取 `platform::dirs::app_data()` 下的 `welcome/`
     /// （`Resources::app_data` 没有值时 `app` 不装配任何插件，[app 设计「装配」](app.md#装配)）。
     pub data_dir: PathBuf,
+    /// 应用版本的「主版本.次版本」，副标题 `welcome-subtitle` 的 `$version`；`app` 从包版本截取。
+    /// None 时副标题用 `welcome-subtitle-plain`，其余布局不变。
+    pub version: Option<SharedString>,
 }
 
 /// 两个插件：ID "welcome" 与 "welcome-discovery"，共用一个 `Arc<WelcomeModel>`。`app` 逐个放进 `PluginSet::with`。
@@ -274,17 +277,17 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - Welcome 的第一次渲染（屏障放开后的第 2–3 帧）：只有图标、标题、一张操作卡片、一个弹出菜单、两个小标题和两条空状态文字，从视图自己的状态画出，不等任何后台任务：排版十几段文字，< 1 ms，远在一帧 8.3 ms 之内。列表在后台任务完成后填入：最近项目在第 1 步后（读文件 < 1 ms，加任务调度，用户可感知为与首帧同时出现）；发现的文件夹在 `agents` 第一次发布会话列表之后（[agents 设计「性能」](agents.md#性能)：1000 个会话 < 500 ms）。按[交互规范「状态与异常」](interaction.md#状态与异常)，100 ms 内不显示加载态，所以两个列表在到达之前只显示标题、不显示骨架；超过 100 ms 还没到时显示 2 行骨架（`ui::Skeleton`），由 `ui::loading_phase` 判断。
 - 重算发现列表：`discover::build` 对 1000 个会话约 0.3 ms，10 000 个约 3 ms（一次哈希分组加一次排序），在 `Background` 线程上，持有 `busy()` 守卫；发现阶段最多再跑一次（脏标记合并），不让 kernel 长时间忙碌。
 - 空闲内存：快照最多 10 条最近项目加 50 条发现项（每条约 200 字节），模型和视图合计 < 64 KiB；本 crate 不保留 `SessionList` 的 `Arc`（任务结束即放下），不保留 `ProjectSnapshot`。
-- 帧时间：`render` 只克隆一个 `Arc` 和构造至多 60 行的元素；悬停和选中用 `ui::Row` 的动画（`HOVER_IN` / `HOVER_OUT`），不自定义动画参数。
+- 帧时间：`render` 只克隆一个 `Arc` 和构造至多 60 行的元素；悬停和选中用 `ui::SidebarRow` 的动画（`HOVER_IN` / `HOVER_OUT`），不自定义动画参数。
 - 基准：两个插件的 `plugin/*/activate`、`plugin/*/resident` 随 bench 的插件基准自动覆盖；不新增进程内基准。`app/cold_start` 不受影响（首帧前没有本 crate 的代码）。
 
 ## 界面
 
-- 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)画板 01，常驻层；没有侧栏、工具栏、检查器、浮条（`ScreenLayout { sidebar: Hidden, back_button: false, reading_column: false, inspector: false, floating_bar: false }`）。窗口 820 × 520 pt（[app 设计「界面」](app.md#界面)）。布局以设计画布的 Welcome 画板为准（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）：窗口分左右两栏，宽度按 360 : 320 的比例伸缩。左栏的内容水平居中，从上到下：应用图标（圆角方块，深色底，画布里是一个讲台图形；图标资源见「对其他 crate 的要求」E，没有资源时不画这一块）、应用名（Large Title 层级，粗体）、一行次要文字的版本说明、两张操作卡片（Open Folder…、Clone Repository…，宽度撑满、最宽 300pt；Clone 卡片见「未决问题」2）、最下面一行语言选择（`welcome-language` 的小标签加一个弹出菜单）。右栏铺在侧栏材质上（不是页面底色；不透明，`under_page_background`，见 [ui 设计「第二批控件」](ui.md#第二批控件283)），左边一条 0.5pt 分隔线，里面是两组平铺的行：没有卡片、没有行间分隔线，每组上面一行小标题（Subheadline 层级，半粗，次要色）；右栏整体可滚动。
-- `ui` 的控件与动效原语（名字以 `ui` 设计「控件」为准，PR [#218](https://github.com/SoloJiang/lectern-app/pull/218)）：`Text`（全部文字）、操作卡片（Open Folder、Clone：填充 `fill` 色、圆角 10pt、左边 20pt 的强调色图标 `Icon::Folder` / `Icon::Clone`、中间标题加一行次要说明、右边快捷键提示；`ui` 设计里还没有，见「对其他 crate 的要求」D）、弹出菜单（语言；同上）、侧栏列表的行（右栏的行：圆角 8pt，两侧内缩；悬停是淡填充，选中是强调色填充；`ui` 的 `Row` 现在是分组列表里的行，平铺样式见 D）、`AgentDot`（发现项的 agent 圆点）、`Skeleton`（加载态）；颜色经 `colors(cx)`，文字层级经 `TextRole`（见[交互规范「视觉」](interaction.md#视觉)的文字样式）。本 crate 不写任何颜色值、字体名和动画时长（验收用 `rg` 检查）。
+- 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)画板 01，常驻层；没有侧栏、工具栏、检查器、浮条（`ScreenLayout { sidebar: Hidden, back_button: false, reading_column: false, inspector: false, floating_bar: false }`）。窗口 820 × 520 pt（[app 设计「界面」](app.md#界面)）。布局以设计画布的 Welcome 画板为准（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）：窗口分左右两栏，宽度按 360 : 320 的比例伸缩。左栏的内容水平居中，从上到下：应用图标（`ui::AppIcon`，96pt 的圆角方块，深色底，画布里是一个讲台图形；图形是 `ui` 里的 SVG 资源，不需要 `app` 提供，见「对其他 crate 的要求」E）、应用名（Large Title 层级，粗体）、一行次要文字的版本说明、两张操作卡片（Open Folder…、Clone Repository…，宽度撑满、最宽 300pt；Clone 卡片见「未决问题」2）、最下面一行语言选择（`welcome-language` 的小标签加一个弹出菜单）。右栏铺在侧栏材质上（不是页面底色；不透明，`under_page_background`，见 [ui 设计「第二批控件」](ui.md#第二批控件283)），左边一条 0.5pt 分隔线，里面是两组平铺的行：没有卡片、没有行间分隔线，每组上面一行小标题（Subheadline 层级，半粗，次要色）；右栏整体可滚动。
+- `ui` 的控件与动效原语（名字以 `ui` 设计「控件」为准，PR [#218](https://github.com/SoloJiang/lectern-app/pull/218)）：`Text`（全部文字）、操作卡片（`ui::ActionCard`；Open Folder、Clone：填充 `fill` 色、圆角 10pt、左边 20pt 的强调色图标 `Icon::Folder` / `Icon::Clone`、中间标题加一行次要说明、右边快捷键提示，见「对其他 crate 的要求」D）、弹出菜单（`ui::PopUpButton`，语言）、侧栏列表的行（`ui::SidebarRow::accent()`，右栏的行：圆角 8pt，两侧内缩；悬停是淡填充，选中是强调色填充）、`AgentDot`（发现项的 agent 圆点）、`Skeleton`（加载态）；颜色经 `colors(cx)`，文字层级经 `TextRole`（见[交互规范「视觉」](interaction.md#视觉)的文字样式）。本 crate 不写任何颜色值、字体名和动画时长（验收用 `rg` 检查）。
 - 每一行的内容：
-  - 最近项目：第一行 `name`（Headline 层级，半粗）；第二行次要文字（Callout 层级），各项用 ` · ` 连接，按这个顺序，不成立的项省略：`welcome-row-folder`（`key` 是文件夹而不是 git 仓库时）、`welcome-row-sessions`（`sessions > 0`）、`welcome-row-running`（`running > 0`）、所在目录（`path` 去掉最后一段，即项目的上一级；主目录写成 `~`，`Text::verbatim`，如 `~/work`）；`missing` 时第二行换成 `welcome-recent-missing`。画布在计数的位置画的是「3 to review」；待审数是「未决问题」1，没有决定之前这个位置显示会话数。会话数和运行中数来自与发现列表同一次 `discover::build`（按 `key` 匹配，见「发现的文件夹」）；`welcome-discovery` 没有激活时为 0，不显示。行上没有移除按钮：移除用 ⌫ 和行的右键菜单（`welcome-recent-remove`，菜单需要 `ui` 提供，见 D；在那之前只有 ⌫）。
+  - 最近项目：第一行 `name`（Headline 层级，半粗）；第二行次要文字（Callout 层级），各项用 ` · ` 连接，按这个顺序，不成立的项省略：`welcome-row-folder`（`key` 是文件夹而不是 git 仓库时）、`welcome-row-sessions`（`sessions > 0`）、`welcome-row-running`（`running > 0`）、所在目录（`path` 去掉最后一段，即项目的上一级；主目录写成 `~`，`Text::verbatim`，如 `~/work`）；`missing` 时第二行换成 `welcome-recent-missing`。画布在计数的位置画的是「3 to review」；待审数是「未决问题」1，没有决定之前这个位置显示会话数。会话数和运行中数来自与发现列表同一次 `discover::build`（按 `key` 匹配，见「发现的文件夹」）；`welcome-discovery` 没有激活时为 0，不显示。行上没有移除按钮：移除用 ⌫ 和行的右键菜单（一项，`welcome-recent-remove` → `welcome::RemoveSelected`；`SidebarRow::context_menu` 的 `select` 回调把选择移到这一行、不打开它，菜单项再作用于选中的行）。
   - 发现的文件夹：行首 `AgentDot`（每种 agent 一个，最多 4 个），第一行 `name`（Headline 层级，半粗）；第二行次要文字（Callout 层级）：只有一种 agent 时是 `welcome-row-agent-sessions`（点名 agent，如「2 Claude Code sessions」），有几种时是 `welcome-row-sessions`（圆点已经表示各个 agent），然后（`running > 0` 时）`welcome-row-running`，最后 `Strings::relative_time(now - newest_activity)`，用 ` · ` 连接。路径不画在行里（画布没有）；完整路径仍是行的业务键和探针节点的 `NodeId`。
-  - 选中的行（键盘选择或点击）：整行用强调色（`accent`）填充，文字用强调色上的字色，第二行用同一字色的 85% 不透明度；悬停的行用淡填充。选中状态由键盘和鼠标共用。画布画的是第一个最近项目已被选中；本屏幕没有选中项时 ↵ 什么也不做（见「Action 与快捷键」），所以进入屏幕时不预选。
+  - 选中的行（键盘选择、点击或右键）：整行用强调色（`accent`）填充，文字用强调色上的字色（`on_accent`），第二行用同一字色的 85% 不透明度；悬停的行用淡填充。选中状态由键盘和鼠标共用。画布画的是第一个最近项目已被选中；本屏幕没有选中项时 ↵ 什么也不做（见「Action 与快捷键」），所以进入屏幕时不预选。
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/welcome.ftl`；已有的 6 个键保留，新增的在前置条件 A 里加）：
 
   | 键 | en | zh-CN | 用途 |
@@ -294,6 +297,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   | `welcome-subtitle-plain` | Read what your agents wrote. | 看 agent 写了什么。 | 没有版本号时的副标题 |
   | `welcome-open-folder` | Open Folder… | 打开文件夹… | Open Folder 卡片的标题（已有） |
   | `welcome-open-folder-hint` | A repository or any folder | 仓库或任意文件夹 | Open Folder 卡片的说明 |
+  | `welcome-open-folder-shortcut` | ⌘O | ⌘O | Open Folder 卡片右边的快捷键提示（实现时加，见「与设计的差异」） |
   | `welcome-clone` | Clone Repository… | 克隆仓库… | Clone 卡片的标题（已有，本 issue 不显示） |
   | `welcome-clone-hint` | From GitHub or GitLab | 来自 GitHub 或 GitLab | Clone 卡片的说明（同上） |
   | `welcome-recent` | Recent | 最近 | 列表小标题（已有，值随 #283 改） |
@@ -303,7 +307,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   | `welcome-discovered` | Found in Agent History | 在 agent 历史中发现 | 列表小标题（已有，值随 #283 改） |
   | `welcome-discovered-empty` | No agent sessions found yet | 还没有发现 agent 会话 | 空状态 |
   | `welcome-row-sessions` | { $count -> [one] { $count } session *[other] { $count } sessions } | { $count } 个会话 | 行的次要文字 |
-  | `welcome-row-agent-sessions` | { $count -> [one] { $count } { $agent } session *[other] { $count } { $agent } sessions } | { $count } 个 { $agent } 会话 | 发现项的次要文字（只有一种 agent；`$agent` 是产品名，`Args::str` 原样） |
+  | `welcome-row-agent-sessions` | { $count -> [one] { $count } { $agent } session *[other] { $count } { $agent } sessions } | { $count } 个 { $agent } 会话 | 发现项的次要文字（只有一种 agent；`$agent` 是产品名，`Args::str` 原样：Claude Code、Codex 的名字取 `project-home-agent-*`，别的 agent 用它自己的名字） |
   | `welcome-row-folder` | Folder | 文件夹 | 最近项目的次要文字：不是 git 仓库 |
   | `welcome-row-running` | { $count } running | { $count } 个运行中 | 行的次要文字 |
   | `welcome-language` | Language | 语言 | 语言弹出菜单旁的小标签 |
@@ -327,7 +331,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   | `welcome.notice` | `Text` | `Label::key` 是 `welcome-open-failed-*` 或 `welcome-language-not-saved`；没有提示时不出现 |
   | `welcome.recent` | `List` | — |
   | `welcome.recent.empty` | `Text` | `Label::key = welcome-recent-empty`；列表非空时不出现 |
-  | `welcome.recent.item[<path>]` | `ListItem` | `State::selected`（`ui::Row` 声明，没有 `Label` 和 `attrs`） |
+  | `welcome.recent.item[<path>]` | `ListItem` | `State::selected`（`ui::SidebarRow` 声明，没有 `Label` 和 `attrs`） |
   | `welcome.recent.item[<path>].name` | `Text` | `Label` 是 `name`（`key` None）；`attrs`：`kind`（`git` / `folder`，取自 `key` 的变体）、`sessions`、`running`、`missing`（`true` 时才有） |
   | `welcome.discovered` | `List` | — |
   | `welcome.discovered.empty` | `Text` | `Label::key = welcome-discovered-empty` |
@@ -396,7 +400,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   - `recent::push_front_dedupes_by_path_and_caps_at_10`、`recent::remove_keeps_order`、`recent::decode_rejects_unknown_version`、`recent::decode_ignores_unknown_fields`、`recent::encode_roundtrips`（用 `fixtures/recent_v1.json`）、`recent::entry_from_snapshot_joins_root_and_opened_at`（子目录打开、linked worktree、裸仓库三种）。
   - `discover::groups_by_project_and_takes_the_newest_root`、`discover::root_strips_rel_from_cwd`、`discover::skips_open_projects_and_recent_keys`（同一仓库的其他 worktree 里的会话不再出现）、`discover::skips_pending_missing_and_unresolvable`、`discover::running_needs_open_turn_within_10_min`、`discover::subagents_count_as_sessions_not_running`、`discover::caps_at_50`、`discover::recent_rows_get_counts_by_key_from_located_and_resolved`。
 - 模型（`#[test]`，`TestKernel` 注入假的 `dyn Projects`、`dyn SessionSource`、`dyn Contributions`，executor 用测试队列）：`welcome_started_loads_the_file`、`welcome_started_records_projects_opened_before_it`（假 `Projects` 在 `started` 之前已有一个打开的项目，`Opened` 没有送达，列表最前仍是它）、`discovery_started_builds_the_list`、`recent_loaded_after_discovery_triggers_a_rebuild`（先发现后读文件，最近项目不留在发现列表里）、`welcome_activates_without_any_session_source`（只装 `welcome`：屏幕已注册，`discovered` 是 `Unavailable`）、`discovery_drop_sets_unavailable`、`opened_records_a_recent_entry_with_its_key_and_writes_the_file`、`opened_without_a_snapshot_records_nothing`、`opened_before_the_file_is_loaded_does_not_overwrite_it`（先 `Opened` 后读完文件：文件里原有的条目都还在，新条目在最前）、`writes_are_serialized_and_coalesced`（写任务开始之前的两次变化只写一次；写的过程中又来一次变化，再写一次，最后写出的是最新列表）、`sessions_changed_rebuilds_once_when_events_pile_up`（任务开始之前的三次事件只跑一轮；运行中到达的再多跑一轮）、`remove_recent_updates_the_snapshot_before_writing`、`rebuild_merges_counts_without_restoring_a_removed_entry`、`begin_open_then_error_marks_the_entry_missing_and_clears_opening`、`error_without_opening_only_shows_the_notice`、`wake_is_called_once_per_snapshot`。
-- `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`）：`first_render_shows_title_and_open_folder_before_any_snapshot`（模型还是 `Loading` / `Pending` 时的语义树只有标题、按钮、分段控件和两个列表标题）、`skeleton_appears_after_100ms_and_rows_replace_it`、`click_and_enter_dispatch_open_project_once`（`opening` 期间对同一行再按 ↵ 不重复，失败后可以再试）、`open_folder_dispatches_prompt`、`arrows_move_selection_across_both_lists`、`backspace_removes_the_selected_recent_and_moves_selection`、`open_error_shows_a_notice_and_clears_on_the_next_open`、`discovered_rows_update_on_wake`、`unavailable_discovery_shows_the_empty_state_without_a_skeleton`、`language_picker_switches_strings_and_calls_platform`（假的 `platform` 写入函数经 `test-support` 注入；失败时显示 `welcome-language-not-saved`）、`actions_are_triggerable_by_name`（探针契约：五个 `Action` 都经 `App::build_action` 按名字构造，`SelectLanguage` 从 JSON 构造）。实现里另加：`enter_opens_a_discovered_folder`、`up_without_a_selection_selects_the_last_item`、`the_remove_button_removes_its_row_and_does_not_open_it`、`a_click_on_a_row_that_is_gone_does_nothing`、`the_selection_stays_in_place_when_the_lists_change`、`the_picker_starts_on_the_saved_choice`、`a_failed_language_write_shows_the_notice_once`、`the_selected_row_is_scrolled_into_view`、`the_bindings_are_the_designs_and_below_content`（普通 `#[test]`）。视图的测试窗口 820 × 520，外面套一个 `Content` 区域的 `KeyContext`（`workspace` 的做法），按键走真实的 `KeyBindings` 载荷；屏幕由登记到假 `dyn Contributions` 里的 `ui::contrib::Screen` 载荷的工厂建出。语言偏好经 `prefs::LanguagePrefs`（`src/prefs.rs`）的假实现，测试从不碰真实的用户默认值。纯函数：`src/tests/selection.rs`（`Selection::next` / `previous` / `clamped`、`display_path`、`node_key`）。
+- `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`）：`first_render_shows_title_and_open_folder_before_any_snapshot`（模型还是 `Loading` / `Pending` 时的语义树只有标题、Open Folder、语言弹出按钮和两个空的列表）、`skeleton_appears_after_100ms_and_rows_replace_it`、`click_and_enter_dispatch_open_project_once`（`opening` 期间对同一行再按 ↵ 不重复，失败后可以再试）、`open_folder_dispatches_prompt`、`arrows_move_selection_across_both_lists`、`backspace_removes_the_selected_recent_and_moves_selection`、`open_error_shows_a_notice_and_clears_on_the_next_open`、`discovered_rows_update_on_wake`、`unavailable_discovery_shows_the_empty_state_without_a_skeleton`、`language_picker_switches_strings_and_calls_platform`（假的 `platform` 写入函数经 `test-support` 注入；失败时显示 `welcome-language-not-saved`）、`actions_are_triggerable_by_name`（探针契约：五个 `Action` 都经 `App::build_action` 按名字构造，`SelectLanguage` 从 JSON 构造）。实现里另加：`enter_opens_a_discovered_folder`、`up_without_a_selection_selects_the_last_item`、`the_context_menu_selects_its_row_and_does_not_open_it`（右键先选中该行、不打开它；菜单项 `RemoveSelected` 再移除选中的行；发现项没有菜单）、`the_columns_follow_the_canvas`（卡片 300pt 且居中、语言行在左栏底部、行在右栏内、行距 4pt）、`a_click_on_a_row_that_is_gone_does_nothing`、`the_selection_stays_in_place_when_the_lists_change`、`the_picker_starts_on_the_saved_choice`、`a_failed_language_write_shows_the_notice_once`、`the_selected_row_is_scrolled_into_view`、`the_bindings_are_the_designs_and_below_content`（普通 `#[test]`）。视图的测试窗口 820 × 520，外面套一个 `Content` 区域的 `KeyContext`（`workspace` 的做法），按键走真实的 `KeyBindings` 载荷；屏幕由登记到假 `dyn Contributions` 里的 `ui::contrib::Screen` 载荷的工厂建出。语言偏好经 `prefs::LanguagePrefs`（`src/prefs.rs`）的假实现，测试从不碰真实的用户默认值。纯函数：`src/tests/selection.rs`（`Selection::next` / `previous` / `clamped`、`display_path`、`node_key`，以及第二行与副标题的文字：`a_recent_row_reads_folder_sessions_running_and_the_parent_directory`、`a_missing_recent_row_says_so_and_nothing_else`、`a_discovered_row_names_a_single_agent_and_not_several`、`the_subtitle_carries_the_version_or_goes_without`；这些文字不是探针节点，所以测纯函数）。语言弹出菜单的菜单项是系统菜单，不在语义树里：测试经 `welcome::SelectLanguage`（按名字从 JSON 构造）切换，读 `welcome.language` 的 `value` 确认。
 - 语义树：`welcome_tree_empty`、`welcome_tree_with_lists`、`welcome_tree_with_error`、`welcome_tree_loading` 的 insta 快照（`semantic::Recorder` 的记录去掉 `bounds` 和 `declared_at` 之后的文本，`src/tests/snapshots/`）。
 - 日志：`canary_stays_out_of_welcome_logs`。
 - fixtures（`crates/welcome/tests/fixtures/`）：`recent_v1.json`（3 条）、`recent_bad_version.json`、`recent_garbage.json`；会话列表在测试里直接构造 `SessionSummary`，不用真实的会话文件、git 和文件 IO（写文件的测试用临时目录）。
@@ -423,9 +427,9 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   ```
 
   在 [platform 设计](platform.md)「系统首选语言」一节下补上这三个函数。与 [i18n 设计「数据流与线程」](i18n.md#数据流与线程)的差异：那里写 `language_override() -> Option<Locale>`；`platform` 在基础设施层、不依赖 `i18n`，所以返回 BCP 47 标签，调用方用 `Locale::negotiate([tag])` 转换。前置条件 B 的 PR 同时把 i18n 设计里的那一行改成了标签。
-- **C. `app`**（已实现，见 [app 设计「welcome 的装配」](app.md#welcome-的装配)）：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
-- **D. `ui`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：现在的 `ui` 没有下面几项，右栏和左栏按画布重画之前要有：操作卡片；弹出菜单；右键菜单（只用于「从最近的项目移除」，没有它时只有 ⌫）；侧栏列表的行（平铺、圆角 8pt、选中用强调色填充，文字层级由行内的元素给出）。名字和接口见 [ui 设计「第二批控件」](ui.md#第二批控件283)：`ActionCard`、`PopUpButton`、`Row` / `SidebarRow` 的 `context_menu`、`SidebarRow`（`accent()`）。
-- **E. `app`**：应用图标的资源（左栏顶部）和应用版本（主.次，传给 `WelcomeDeps`）。现在 bundle 里没有图标，`WelcomeDeps` 也没有版本字段；没有时视图不画图标、副标题不带版本，其余布局不变。
+- **C. `app`**（已实现，见 [app 设计「welcome 的装配」](app.md#welcome-的装配)）：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome"), version })`（`version` 随 #283 加上，见 E） 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
+- **D. `ui`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增；已实现，[ui 设计「第二批控件」](ui.md#第二批控件283)，PR [#289](https://github.com/SoloJiang/lectern-app/pull/289)）：`ActionCard`（Open Folder、Clone）、`PopUpButton` 与 `MenuItem`（语言）、`SidebarRow`（`accent()`、`context_menu(items, select)`；右栏的行）、`AppIcon`、`Palette::fill`。
+- **E. `app`**（已实现）：应用版本（主.次）经 `WelcomeDeps::version` 传入，`app` 从包版本的主、次版本号拼成（[app 设计「welcome 的装配」](app.md#welcome-的装配)）。应用图标不再需要 `app` 提供：`ui::AppIcon` 画的是 `ui` 自带的 SVG（`IconAssets`），`app` 早已把 `IconAssets` 交给 `Application::with_assets`。`version` 为 None 时副标题不带版本，其余布局不变。
 
 ## 未决问题
 
@@ -444,7 +448,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 ## 验收
 
-分两步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-welcome`、`just deny` 通过。前置条件 A、B 各自的 PR 先合并；C 随第 2 步；`workspace` 的第 2 步（根视图与贡献应用）和 `ui` 的实现在第 2 步之前。
+分三步（第 3 步是 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 的重绘），每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-welcome`、`just deny` 通过。前置条件 A、B 各自的 PR 先合并；C 随第 2 步；`workspace` 的第 2 步（根视图与贡献应用）和 `ui` 的实现在第 2 步之前。
 
 **第 1 步：插件、模型、最近项目的存储、发现列表的归并（不依赖 GPUI 的部分，`Refs #29`，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）。**
 
@@ -463,6 +467,12 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加二。
 - 手动在 macOS 上运行发布构建（临时 `HOME`）：首次启动显示 Welcome，两个列表为空状态；打开一个文件夹再重启后回到项目主页，⌘W 关闭、点 Dock 重开后 Welcome 的最近项目里有它；移除它后 `~/Library/Application Support/Lectern/welcome/recent.json` 里没有它；日志里没有这个文件夹的路径；在临时 `HOME` 下放一个 Claude Code 会话目录（`projects/<编码的 cwd>/<uuid>.jsonl`，cwd 指向一个未打开的仓库），启动后它出现在发现列表里，↓ ↵ 打开它。
 - 空闲内存：Welcome 静止后的 `phys_footprint` 与 `workspace` 第 3 步「验收」的数值相比增加不超过 1 MB。
+
+**第 3 步：界面按设计画布重绘（`Refs #283`，叠在 `ui` 第 5 步之上）。**
+
+- 「测试」里的 `#[gpui::test]`、纯函数和语义树快照通过；`just check`、`just test -p lectern-welcome -p lectern-app -p lectern-i18n -p lectern-workspace`、`just doctest` 通过。
+- 第 2 步的三条 `rg`（颜色与动画参数、界面字符串字面量、`Text::verbatim(Arc::from("`）仍没有结果。
+- 手动在 macOS 上运行（临时 `HOME`），对照画布：两栏 360 : 320、应用图标、居中的 Open Folder 卡片、语言弹出菜单的勾、右键菜单、右栏的选中行。
 
 ## 实际验证
 
@@ -500,6 +510,23 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - 真实的 `platform::system::set_language_override`：测试只用假实现（它在 `platform` 里有自己的测试）。
 - Linux CI 的 GPUI-free 任务不再覆盖本 crate（有了 `gpui` 依赖），结果以 macOS CI 为准。
 
+### #283 的重绘
+
+[#283](https://github.com/SoloJiang/lectern-app/issues/283)（`Refs`），在 macOS（arm64，Rust 1.97.0）上运行，叠在 `ui` 第 5 步（[#289](https://github.com/SoloJiang/lectern-app/pull/289)）之上。没有运行应用，下面都是 `#[gpui::test]` 与普通测试：
+
+- `just fmt`、`just check`、`just test -p lectern-welcome -p lectern-app -p lectern-i18n -p lectern-workspace`、`just doctest`、`cargo metadata --format-version 1 --locked --all-features` 通过：`just test -p lectern-welcome -p lectern-app -p lectern-i18n -p lectern-workspace` 共 269 个测试全部通过（含 `i18n` 的 `reference_tests`，它对照 fluent-bundle 检查新键）。第一次运行里 `lectern-app::startup` 的 `home_path_stays_out_of_the_log` 超时（启动的进程 30 s 内没有退出，与本 PR 无关的图形会话测试），重跑两次都通过。
+- `just test -p lectern-welcome`：81 个测试（原 76 个；`the_remove_button_removes_its_row_and_does_not_open_it` 换成 `the_context_menu_selects_its_row_and_does_not_open_it`，新增 `the_columns_follow_the_canvas` 与 `src/tests/selection.rs` 的 4 个文字测试）。
+- 四个语义树快照逐个看过，只有预期的变化：标题从「Welcome to Lectern」变成「Lectern」，`welcome.language` 的 `TabBar` 和三个 `Tab` 变成一个带 `value` 的 `Button`，每个最近项目行的 `….remove` 按钮消失，两个 `List` 节点没有 `Label`。
+- `the_columns_follow_the_canvas` 量了 820 × 520 下节点的边界：Open Folder 卡片 300pt 宽且在左栏（434.1pt）内居中，语言行在左栏底部，行在右栏内且右边距 10pt，行距 4pt。
+- 第 2 步的几条 `rg`（颜色与动画参数、界面字符串字面量、`Text::verbatim(Arc::from("`）仍没有结果。
+
+没有验证的：
+
+- 视觉效果：应用图标的渐变与阴影、字重与字号、强调色选中行、半透明度、`under_page_background` 与分隔线、与画布的逐像素对照；`headless` 的测试不画像素。
+- 系统菜单：测试平台上 `show_menu` 不弹出 `NSMenu`，语言菜单的勾和右键菜单的弹出位置没有看到；菜单项只经 `Window::dispatch_action` 触发。
+- 在 macOS 上运行发布构建和 `just probe`；空闲内存、冷启动（首帧之前本 crate 仍没有代码运行）。
+- 屏幕阅读器读到的无障碍属性。
+
 ## 与设计的差异
 
 ### 第 1 步
@@ -517,26 +544,41 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 ### 第 2 步
 
 - **根节点是 `welcome.root`，不是 `welcome`。** `ui::semantic::NodeId::new(view, area, key)` 总是产生 `view.area`，没有只有一段的构造函数；不为此改 `ui`。
-- **行的名字和计数放在子节点 `….name`（`Role::Text`）上。** `ui::Row` 自己声明一个只有 `selected` 的 `ListItem`，没有 `Label` 和 `attrs` 的接口，同一个 ID 不能声明两次，所以 `Label` 和 `kind` / `sessions` / `running` / `missing` / `agents` 在行里的名字文字上。「界面」的节点表已按这个写。若 `ui` 以后给 `Row` 加上 `label` / `attr`，这两个子节点可以并回去。
-- **`welcome.language` 没有 `Label`。** `ui::Segmented` 声明的 `TabBar` 不带 `Label`，视图没有地方加；`welcome-language` 这个键因此没有用在界面上（保留给以后）。
+- **行的名字和计数放在子节点 `….name`（`Role::Text`）上。** `ui::SidebarRow`（第 2 步时是 `ui::Row`，#283 的重绘换了）自己声明一个只有 `selected` 的 `ListItem`，没有 `Label` 和 `attrs` 的接口，同一个 ID 不能声明两次，所以 `Label` 和 `kind` / `sessions` / `running` / `missing` / `agents` 在行里的名字文字上。「界面」的节点表已按这个写。若 `ui` 以后给 `SidebarRow` 加上 `label` / `attr`，这两个子节点可以并回去。
+- **`welcome.language` 没有 `Label`**（第 2 步，已取代）：当时的 `ui::Segmented` 声明的 `TabBar` 不带 `Label`。#283 的重绘把语言选择换成 `ui::PopUpButton`，它是带 `Label`（`welcome-language`）和 `value` 的 `Button`，这条差异不再存在。
 - **`SelectLanguage` 手写 `Action` 的 `build`。** `#[derive(Action)]` 给带数据的 `Action` 从 `Deserialize` 和 `JsonSchema` 构造，`Locale` 两个都没有（`no_json` 的话 `App::build_action` 返回错误，探针按名字触发不了它），`schemars` 也不是工作区依赖。所以手写 `Action` 的实现并 `register_action!`，`build` 认 `{"locale": "en" | "zh-CN" | null}`（缺省或 `null` 是跟随系统）。若以后 `Locale` 有了 serde，可以换回 derive。
 - **`↑` 没有选中时选最后一项**（设计只写了 `↓` 的情形）。产品上没有别的要求，是默认值。
-- **移除按钮带文字。** `ui::Button` 总是画它的 `Text`，没有只有图标的形态，所以移除按钮是 `Plain`、`Small`、`Icon::Close` 加 `welcome-recent-remove` 的文字；它在未选中的行上用样式的 `visibility: hidden` 隐藏，行被悬停时显示（`group_hover`，组是行内容的元素，不含 `Row` 的内边距），选中的行一直显示。隐藏的按钮不画、不接收点击，但节点每一行都声明（探针看得到）。Open Folder 的 `.tooltip` 键没有用：`Button` 没有提示的接口。
-- **点击和移除按钮按路径找回行，不按下标。** 行里的闭包带着 `path`，点击时在当前快照里重新查找：在画出这一帧之后、点击之前行已经被移除或被遮住时，什么也不打开（`a_click_on_a_row_that_is_gone_does_nothing`）。移除按钮的点击先 `stop_propagation`，不触发行的点击。
-- **选中的行滚动到可见。** 设计没有写：键盘移动选择后，选中行的元素里放一个 `canvas`，在 prepaint 里把右栏的 `ScrollHandle` 滚到这一行可见（留 12 pt），只在移动选择或移除之后做一次。
-- **空状态和骨架画在列表标题的下面，不在卡片里。** `GroupedList` 没有行时是一个高度为零的卡片；空状态文字和骨架放在它下面，与标题的间距是 `GroupedList` 自己的 6 pt。
+- **移除按钮带文字**（第 2 步，已取代）：#283 的重绘去掉了移除按钮，移除只有 ⌫ 和行的右键菜单；`Button` 的只有图标形态、隐藏与悬停显示的写法都不再用。Open Folder 的 `.tooltip` 键仍没有用（操作卡片没有提示的接口），`welcome-recent-remove` 的 `.tooltip` 也一样；两个键留在资源里，`i18n` 的检查不要求删掉。
+- **点击、右键菜单的 `select` 和 ⌫ 按路径找回行，不按下标。** 行里的闭包带着 `path`，点击时在当前快照里重新查找：在画出这一帧之后、点击之前行已经被移除或被遮住时，什么也不打开（`a_click_on_a_row_that_is_gone_does_nothing`），右键的 `select` 也什么都不选。
+- **选中的行滚动到可见。** 设计没有写：键盘移动选择后，选中行的元素里放一个 `canvas`，在 prepaint 里把右栏的 `ScrollHandle` 滚到这一行可见（留 `REVEAL_MARGIN`，#283 起为 18 pt），只在移动选择或移除之后做一次。
+- **空状态和骨架画在列表标题的下面。** 第 2 步时因为 `GroupedList` 没有行时是一个高度为零的卡片；#283 的重绘没有卡片了，仍是标题、列表节点、空状态文字（或骨架）三层，间距见「#283 的重绘（实现）」。
 - **`LanguagePrefs`（`src/prefs.rs`）代替 `platform` 的 `test-support`。** 设计写「假的 `platform` 写入函数经 `test-support` 注入」，`platform` 没有这样的接口（也不应为此加）；视图经一个 crate 内的 trait 调 `platform::system`，`plugins()` 用真实的实现，测试用内存里的假实现。
 - **「现在」与主目录经模型和插件传入。** 发现行的「几分钟前」用 `WelcomeModel::now_millis`（模型的时钟，测试里固定），主目录（路径里的 `~`）由 `plugins()` 读一次环境变量 `HOME`，测试传固定值；视图本身不读系统时间和环境。
 - **加载阈值用执行器的时钟。** 视图建立时记 `cx.background_executor().now()`，并 `spawn` 一个 `timer(LOADING_SKELETON_AT)` 的任务到点重绘；`ui::loading_phase` 判断阶段，`Skeleton` 与 `Progress` 阶段都显示骨架（设计不显示进度）。
 - **`KeyBindings` 贡献的 ID 是 `welcome`**（与 `Screen` 的 ID 相同，种类不同，不冲突）；谓词 `Content > welcome`，视图根元素的 `KeyContext` 是 `welcome`，渲染时只在整个窗口没有焦点时取回焦点（有别的层在上面时不抢）。
 - **`futures` 用了**（第 1 步的差异说不依赖它）：视图把模型的唤醒回调接到 `mpsc::unbounded`，前台任务 `await` 接收端。
 - **`app` 的装配不在本 PR。** 前置条件 C（`Profile::Desktop` 加这两个插件、`every_profile_graph_validates` 的插件数加二）由另一个 PR 做，见 PR 描述。
-- **给 `ui` 的建议**（不在本 PR 做）：`Row` 的 `label` / `attr`、`Segmented` 的 `Label`、`Button` 的只有图标形态与提示、只有一段的 `NodeId`。
+- **给 `ui` 的建议**（不在本 PR 做）：`SidebarRow` 的 `label` / `attr`、只有一段的 `NodeId`。第 2 步时提的 `Segmented` 的 `Label`、`Button` 的只有图标形态与提示，因为重绘不再用它们而撤回。
 
 ### 为 #283 修订「界面」
 
-- **「界面」按设计画布重写**（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，Refs；实现随后的 PR 跟随本文）：应用名从「Welcome to Lectern」改成「Lectern」，加应用图标和版本说明；Open Folder 从主按钮改成操作卡片（图标、标题、说明、⌘O）；右栏从两个分组列表改成侧栏材质上的平铺行（选中用强调色填充，名字半粗）；小标题从「Recent Projects」「From Claude Code and Codex」改成「Recent」「Found in Agent History」；语言选择从三段分段控件改成带「Language」标签的弹出菜单；最近项目行的第二行从「完整路径 · 会话 · 运行中」改成「文件夹 · 会话 · 运行中 · 上级目录」；发现项的第二行去掉路径、点名 agent；移除按钮去掉，改成 ⌫ 和右键菜单。
+- **「界面」按设计画布重写**（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，Refs；实现见下面的「#283 的重绘（实现）」）：应用名从「Welcome to Lectern」改成「Lectern」，加应用图标和版本说明；Open Folder 从主按钮改成操作卡片（图标、标题、说明、⌘O）；右栏从两个分组列表改成侧栏材质上的平铺行（选中用强调色填充，名字半粗）；小标题从「Recent Projects」「From Claude Code and Codex」改成「Recent」「Found in Agent History」；语言选择从三段分段控件改成带「Language」标签的弹出菜单；最近项目行的第二行从「完整路径 · 会话 · 运行中」改成「文件夹 · 会话 · 运行中 · 上级目录」；发现项的第二行去掉路径、点名 agent；移除按钮去掉，改成 ⌫ 和右键菜单。
 - **仍按已记录的默认**：「未决问题」1（不显示待审数）和 2（不显示 Clone）没有变，画布与它们不同的地方写在各自的问题里。
-- **「界面」之外的几处**（范围、依赖、性能、数据流、对其他 crate 的要求）只改了与新控件一致的措辞。上面「第 2 步」里关于移除按钮、`Segmented`、`GroupedList` 的差异描述的是已实现的状态，实现 PR 改掉它们时再更新。
+- **「界面」之外的几处**（范围、依赖、性能、数据流、对其他 crate 的要求）只改了与新控件一致的措辞。第 2 步里关于移除按钮、`Segmented`、`GroupedList` 的差异描述的是第 2 步时的实现，实现 PR 已经更新（见上面各条）。
 - **语言菜单保留三项**（跟随系统、English、简体中文）：画布的菜单只画了两项，「跟随系统」是行为（[交互规范「语言」](interaction.md#语言)），不是视觉，所以保留。
 
+### #283 的重绘（实现）
+
+[#283](https://github.com/SoloJiang/lectern-app/issues/283)，`Refs`。叠在 `ui` 第 5 步之上。「界面」写的都已实现，下面是实现与文字不同或文字没有写到的地方。
+
+- **Fluent 的方向隔离符。** `$version`、`$agent` 这类字符串参数在 Fluent 的结果里被 U+2068 / U+2069 包住（双向文字的隔离，fluent-bundle 的默认行为），屏幕上的文字带着它们，显示没有差别；测试比较文字前先去掉。
+- **多一个 Fluent 键 `welcome-open-folder-shortcut`（`⌘O`，en 与 zh-CN 相同）。** 「界面」的表没有它。快捷键提示放进 Fluent 而不是 `Text::verbatim`，是因为界面字符串只走 `Text` / Fluent，`review-open-file` 的 `⇧⌘O` 也在资源里。它与 `workspace::OpenFolder` 的 ⌘O 绑定要人工保持一致。
+- **发现项的 agent 名取 `project-home-agent-claude-code`、`project-home-agent-codex`，不新增键。** `welcome-row-agent-sessions` 的 `$agent` 对 Claude Code 和 Codex 用这两个已有的产品名消息，别的 `Agent::Other(name)` 用它自己的名字。代价是 `welcome` 的界面字符串依赖 `project-home` 的两个键名（都在 `i18n`，不是 crate 依赖）；以后若两处要不同的写法，再各自加键。
+- **版本由 `app` 在编译期截取。** `profile.rs` 的常量 `APP_VERSION` 是 `concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"))`，不是对 `CARGO_PKG_VERSION` 做字符串解析；结果相同。工作区版本现在是 `0.0.0`，所以副标题现在显示「Version 0.0 · …」。
+- **探针节点。** `welcome.recent`、`welcome.discovered` 的 `List` 由视图自己声明（原来是 `GroupedList` 声明的），没有 `Label`（原来的标题文字作 `Label`；「界面」的表本来写「—」）；列表标题是普通文字，不是节点。`welcome.language` 是 `PopUpButton` 的 `Button`，`Label` 是 `welcome-language`，`attrs.value` 是 `system` / `en` / `zh-CN`；`welcome.language.item[...]` 不再存在。副标题和行的第二行不是节点（表里没有），所以它们的文字由纯函数 `subtitle`、`recent_detail`、`discovered_detail` 的测试覆盖。
+- **布局的数值取画布，表里没有写的：** 左栏宽度是窗口宽度的 360/680（右栏取余下的，两栏伸缩比 360 : 320，`relative` 宽度而不是 flex 比例）；左栏内边距上 28、两侧 32、下 32pt，块间距 22pt，图标上方再空 24pt（画布里那里是红绿灯那一行，真实窗口的标题栏不画它），标题与副标题间 4pt，卡片上方再空 8pt；右栏内边距上下 16、两侧 10pt，行间距 4pt，标题两侧内缩 8pt，上方 4pt（第一组）和 14pt（第二组）。应用名用 `TextRole::LargeTitle`（26pt，画布是 30px）。
+- **标题的半粗用 `font_weight(FontWeight::SEMIBOLD)` 叠在 `TextRole::Caption` 上。** `TextRole` 没有「11pt 半粗」；字重不是字体名，验收的 `rg` 不受影响。选中行的名字和第二行的颜色在 `text_role` 之后用 `on_accent()`（第二行是它的 85% 不透明度，`Hsla::opacity`），因为 `text_role` 自己设了 `label` / `secondary_label`。
+- **右键先选中。** 最近项目行的 `context_menu` 的 `select` 回调只移动选择（`select_row`），不打开；菜单项是 `RemoveSelected`，作用于选中的行。发现项没有菜单。行已不在列表里时 `select_row` 什么也不做。
+- **没有改 `ui`。** 重绘用的都是 `ui` 第 5 步已有的控件。
+- **`i18n` 的 `terms_are_expanded` 测试换了键。** `welcome-title` 现在就是 `{ -app-name }`，不再是「Welcome to …」，测试改用 `welcome-open-failed-permission`（也含 `-app-name`）。没有删任何键；`welcome-open-folder` 与 `welcome-recent-remove` 的 `.tooltip` 不再有调用方，留着。
+- **Clone 卡片没有画**（「未决问题」2 的默认）；`welcome-clone` 的值按表改成「Clone Repository…」，`welcome-clone-hint` 已加，两者仍没有调用方。

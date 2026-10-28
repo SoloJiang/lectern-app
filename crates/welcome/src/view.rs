@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    AnyElement, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, Task, WeakEntity, Window, canvas, div, px,
+    AnyElement, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Task, WeakEntity,
+    Window, canvas, div, px, relative,
 };
 use lectern_i18n::{Args, Key, Locale, Strings, keys};
 use lectern_kernel::ServiceRef;
@@ -23,11 +24,11 @@ use lectern_logging::debug;
 use lectern_platform::system::PrefError;
 use lectern_services::session::{Agent, Timestamp};
 use lectern_services::workspace::{Contributions, WorkspaceCommand};
-use lectern_ui::motion::{LOADING_SKELETON_AT, Transition};
+use lectern_ui::motion::LOADING_SKELETON_AT;
 use lectern_ui::semantic::{NodeId, Role, Semantic, semantic, semantic_interactive};
 use lectern_ui::{
-    AgentDot, Button, ButtonKind, ButtonSize, GroupedList, Icon, LoadingPhase, Palette, Row,
-    Segmented, Skeleton, SystemColor, Text, TextRole, TextRoleExt, colors, loading_phase,
+    ActionCard, AgentDot, AppIcon, Icon, LoadingPhase, MenuItem, Palette, PopUpButton, SidebarRow,
+    Skeleton, SystemColor, Text, TextRole, TextRoleExt, colors, loading_phase, on_accent,
     set_locale, strings,
 };
 
@@ -42,22 +43,49 @@ use crate::model::{
 use crate::prefs::LanguagePrefs;
 use crate::recent::RecentEntry;
 
-/// The left column's width.
-const LEFT_COLUMN_WIDTH: f32 = 300.0;
-/// The padding of both columns.
-const COLUMN_PADDING: f32 = 24.0;
-/// The gap between the blocks of a column.
-const BLOCK_GAP: f32 = 24.0;
-/// The gap between the items of the left column.
-const LEFT_GAP: f32 = 12.0;
-/// The inset of the empty-state text and the skeleton, the same as the
-/// lists' header.
-const LIST_INSET: f32 = 12.0;
-/// The gap inside a row.
-const ROW_GAP: f32 = 8.0;
-/// A second line on a selected row (accent background) is its row's text
-/// colour at this opacity: no colour value of the view's own.
-const SELECTED_SECONDARY_OPACITY: f32 = 0.8;
+/// The columns resize 360 : 320 (the canvas): the left one's share of the
+/// window's width.
+const LEFT_SHARE: f32 = 360.0 / (360.0 + 320.0);
+/// The left column's padding: top, sides, bottom.
+const LEFT_PADDING_TOP: f32 = 28.0;
+const LEFT_PADDING_X: f32 = 32.0;
+const LEFT_PADDING_BOTTOM: f32 = 32.0;
+/// The gap between the blocks of the left column.
+const LEFT_GAP: f32 = 22.0;
+/// The space above the app icon, under the title bar.
+const ICON_MARGIN_TOP: f32 = 24.0;
+/// The app icon's side.
+const ICON_SIZE: f32 = 96.0;
+/// The gap between the app name and the subtitle.
+const TITLE_GAP: f32 = 4.0;
+/// The space above the Open Folder card, and its widest.
+const CARD_MARGIN_TOP: f32 = 8.0;
+const CARD_MAX_WIDTH: f32 = 300.0;
+/// The gap between the card and the notice under it.
+const CARD_GAP: f32 = 6.0;
+/// The gap between the language label and its button.
+const LANGUAGE_GAP: f32 = 8.0;
+/// The right column's padding: top and bottom, sides.
+const RIGHT_PADDING_Y: f32 = 16.0;
+const RIGHT_PADDING_X: f32 = 10.0;
+/// The gap between the rows of a group, and between a header and its rows.
+const ROW_SPACING: f32 = 4.0;
+/// A group header's side inset and its margin above the first and the
+/// second group.
+const HEADER_INSET: f32 = 8.0;
+const HEADER_MARGIN_FIRST: f32 = 4.0;
+const HEADER_MARGIN_NEXT: f32 = 14.0;
+/// The inset of the empty-state text and the skeleton: the rows' text.
+const LIST_INSET: f32 = 10.0;
+/// The gap inside a row between the agent dots and the text, and between
+/// the dots.
+const ROW_GAP: f32 = 10.0;
+const DOT_GAP: f32 = 4.0;
+/// The gap between a skeleton's rows.
+const SKELETON_GAP: f32 = 8.0;
+/// A second line on a selected row (accent background) is `on_accent` at
+/// this opacity: no colour value of the view's own.
+const SELECTED_SECONDARY_OPACITY: f32 = 0.85;
 /// How much of the row's own padding and of its neighbour shows when the
 /// lists scroll to the selected row.
 const REVEAL_MARGIN: f32 = 18.0;
@@ -72,6 +100,8 @@ pub(crate) struct ViewDeps {
     pub(crate) prefs: Arc<dyn LanguagePrefs>,
     /// The home directory, shown as `~` in the paths.
     pub(crate) home: Option<PathBuf>,
+    /// The app's "major.minor", for the subtitle under the name.
+    pub(crate) version: Option<SharedString>,
 }
 
 /// The keyboard selection: the two lists taken as one sequence, the recent
@@ -187,8 +217,6 @@ pub(crate) struct WelcomeView {
     selection: Option<Selection>,
     /// The picker's choice: `None` follows the system.
     language: Option<Locale>,
-    /// The picker's slider, moved by `Segmented::select`.
-    slider: Transition,
     /// When the view was built, by the executor's clock: the loading
     /// thresholds count from it.
     created: Instant,
@@ -224,12 +252,10 @@ impl WelcomeView {
             .prefs
             .language_override()
             .map(|tag| Locale::negotiate([tag.as_str()]));
-        let slider = Transition::new(language_index(language) as f32);
         WelcomeView {
             focus: cx.focus_handle(),
             selection: None,
             language,
-            slider,
             created: cx.background_executor().now(),
             scroll: ScrollHandle::new(),
             reveal: Rc::new(Cell::new(false)),
@@ -328,6 +354,16 @@ impl WelcomeView {
         self.begin(path, source);
     }
 
+    /// The context menu's `select`: the selection moves to the row, as a
+    /// click would, but the row is not opened. The menu's action acts on the
+    /// selection.
+    fn select_row(&mut self, source: OpenSource, path: &Path, cx: &mut Context<Self>) {
+        let snapshot = self.deps.model.snapshot();
+        if let Some(selection) = Self::find(&snapshot, source, path) {
+            self.select(Some(selection), cx);
+        }
+    }
+
     /// Where a path stands in the current lists.
     fn find(snapshot: &WelcomeSnapshot, source: OpenSource, path: &Path) -> Option<Selection> {
         match (source, &snapshot.recent, &snapshot.discovered) {
@@ -355,7 +391,7 @@ impl WelcomeView {
         }
     }
 
-    /// The remove button of a row, or ⌫. The row is found again by its path.
+    /// Removes a recent project. The row is found again by its path.
     fn remove_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let snapshot = self.deps.model.snapshot();
         let Some(Selection::Recent(index)) = Self::find(&snapshot, OpenSource::Recent, &path)
@@ -385,7 +421,6 @@ impl WelcomeView {
             return;
         }
         self.language = locale;
-        Segmented::select(&mut self.slider, language_index(locale), Instant::now(), cx);
         let effective = locale.unwrap_or_else(|| {
             let languages = self.deps.prefs.system_languages();
             Locale::negotiate(languages.iter().map(String::as_str))
@@ -411,24 +446,6 @@ fn locale_name(locale: Option<Locale>) -> &'static str {
         None => "system",
         Some(Locale::En) => "en",
         Some(Locale::ZhCn) => "zh-cn",
-    }
-}
-
-/// The position of a choice in the picker: Match System, English, 简体中文.
-fn language_index(locale: Option<Locale>) -> usize {
-    match locale {
-        None => 0,
-        Some(Locale::En) => 1,
-        Some(Locale::ZhCn) => 2,
-    }
-}
-
-/// The choice at a position of the picker.
-fn language_at(index: usize) -> Option<Locale> {
-    match index {
-        1 => Some(Locale::En),
-        2 => Some(Locale::ZhCn),
-        _ => None,
     }
 }
 
@@ -516,17 +533,102 @@ fn dot_of(agent: &Agent) -> Option<AgentDot> {
     }
 }
 
+/// The subtitle under the app name: with the version when there is one.
+pub(crate) fn subtitle(strings: &Strings, version: Option<&str>) -> Text {
+    match version {
+        Some(version) => Text::fmt(
+            strings,
+            keys::welcome::SUBTITLE,
+            &Args::new().str("version", version),
+        ),
+        None => Text::key(strings, keys::welcome::SUBTITLE_PLAIN),
+    }
+}
+
+/// The second line of a recent project: Folder (when it is not a git
+/// repository) · sessions · running · the directory it is in (`~` for the
+/// home directory); `missing` replaces all of it.
+pub(crate) fn recent_detail(strings: &Strings, entry: &RecentEntry, home: Option<&Path>) -> String {
+    if entry.missing {
+        return Text::key(strings, keys::welcome::RECENT_MISSING)
+            .as_str()
+            .to_owned();
+    }
+    let mut parts = Vec::new();
+    if matches!(
+        entry.key,
+        lectern_services::project::ProjectKey::Folder { .. }
+    ) {
+        parts.push(
+            Text::key(strings, keys::welcome::ROW_FOLDER)
+                .as_str()
+                .to_owned(),
+        );
+    }
+    if entry.sessions > 0 {
+        parts.push(sessions_text(strings, entry.sessions));
+        if entry.running > 0 {
+            parts.push(running_text(strings, entry.running));
+        }
+    }
+    if let Some(parent) = entry.path.parent() {
+        parts.push(display_path(parent, home));
+    }
+    join_line(&parts)
+}
+
+/// The second line of a discovered folder: the sessions (naming the agent
+/// when there is just one), running, and how long ago, `now` being
+/// milliseconds since the epoch.
+pub(crate) fn discovered_detail(strings: &Strings, folder: &DiscoveredFolder, now: i64) -> String {
+    let mut parts = vec![match folder.agents.as_ref() {
+        [agent] => {
+            let agent = agent_product_name(strings, agent);
+            Text::fmt(
+                strings,
+                keys::welcome::ROW_AGENT_SESSIONS,
+                &Args::new()
+                    .num("count", folder.sessions)
+                    .str("agent", &agent),
+            )
+            .as_str()
+            .to_owned()
+        }
+        _ => sessions_text(strings, folder.sessions),
+    }];
+    if folder.running > 0 {
+        parts.push(running_text(strings, folder.running));
+    }
+    let Timestamp(newest) = folder.newest_activity;
+    let age = Duration::from_secs(u64::try_from((now - newest) / 1000).unwrap_or(0));
+    parts.push(strings.relative_time(age));
+    join_line(&parts)
+}
+
+/// The product name of an agent, as the sentence "2 Claude Code sessions"
+/// has it: the product names are messages of their own, an unknown agent's
+/// name is shown as it is.
+fn agent_product_name(strings: &Strings, agent: &Agent) -> String {
+    match agent {
+        Agent::ClaudeCode => Text::key(strings, keys::project_home::AGENT_CLAUDE_CODE)
+            .as_str()
+            .to_owned(),
+        Agent::Codex => Text::key(strings, keys::project_home::AGENT_CODEX)
+            .as_str()
+            .to_owned(),
+        Agent::Other(name) => name.to_string(),
+    }
+}
+
 /// What differs between the two kinds of row.
 struct RowParts {
-    /// The hover group's name, unique per row.
-    group: String,
     /// The node of the name line: the row's facts.
     name_spec: Semantic,
     name: Text,
     /// The second line.
     detail: String,
+    /// The agent dots before the text.
     leading: Option<AnyElement>,
-    trailing: Option<Button>,
     selected: bool,
 }
 
@@ -564,7 +666,6 @@ impl Render for WelcomeView {
             now: self.deps.model.now_millis(),
             snapshot: &snapshot,
         };
-        let slider = self.slider.tick(Instant::now(), window);
 
         let root = NodeId::new("welcome", "root", None);
         let mut spec = Semantic::new(root, Role::Group)
@@ -586,7 +687,7 @@ impl Render for WelcomeView {
         if snapshot.opening.is_some() {
             spec = spec.attr("opening", "true");
         }
-        let left = self.left_column(&paint, slider, window, cx);
+        let left = self.left_column(&paint, window, cx);
         let right = self.right_column(&paint, window, cx);
         semantic_interactive(
             spec,
@@ -619,25 +720,28 @@ fn skeleton_shown(elapsed: Duration) -> bool {
 }
 
 impl WelcomeView {
-    /// Title, subtitle, Open Folder, the notice, and the language picker at
-    /// the bottom.
+    /// The left column, centred: the app icon, the name and subtitle, the
+    /// Open Folder card with the notice under it, and the language choice
+    /// at the bottom.
     fn left_column(
         &self,
         paint: &Paint<'_>,
-        slider: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = paint.palette;
         let title = Text::key(&paint.strings, keys::welcome::TITLE);
-        let subtitle = Text::key(&paint.strings, keys::welcome::SUBTITLE);
-        let open_folder = Button::new(
+        let subtitle = subtitle(&paint.strings, self.deps.version.as_deref());
+        let open_folder = ActionCard::new(
             NodeId::new("welcome", "open-folder", None),
+            Icon::Folder,
             Text::key(&paint.strings, keys::welcome::OPEN_FOLDER),
+            Text::key(&paint.strings, keys::welcome::OPEN_FOLDER_HINT),
         )
-        .kind(ButtonKind::Primary)
-        .size(ButtonSize::Regular)
-        .icon(Icon::Folder)
+        .shortcut(Text::key(
+            &paint.strings,
+            keys::welcome::OPEN_FOLDER_SHORTCUT,
+        ))
         .on_click({
             let view = paint.view.clone();
             move |_, cx| {
@@ -654,45 +758,23 @@ impl WelcomeView {
                     .child(text.shared()),
             )
         });
-        let picker = {
-            let language = NodeId::new("welcome", "language", None);
-            let item = |key: &str, locale: Option<Locale>| {
-                let text = match locale {
-                    None => Text::key(&paint.strings, keys::common::LANGUAGE_SYSTEM),
-                    Some(locale) => Text::key(&paint.strings, locale.name_key()),
-                };
-                (language.item(key), text)
-            };
-            let items = vec![
-                item("system", None),
-                item("en", Some(Locale::En)),
-                item("zh-CN", Some(Locale::ZhCn)),
-            ];
-            let view = paint.view.clone();
-            Segmented::new(language, items, language_index(self.language))
-                .slider(slider)
-                .on_select(move |index, _, cx| {
-                    let _ = view.update(cx, |this, cx| {
-                        this.select_language(language_at(index), cx);
-                    });
-                })
-        };
-        div()
-            .w(px(LEFT_COLUMN_WIDTH))
-            .flex_shrink_0()
-            .h_full()
-            .p(px(COLUMN_PADDING))
+        let top = div()
+            .w_full()
             .flex()
             .flex_col()
-            .justify_between()
-            .border_r_1()
-            .border_color(palette.separator)
+            .items_center()
+            .gap(px(LEFT_GAP))
+            .child(
+                div()
+                    .mt(px(ICON_MARGIN_TOP))
+                    .child(AppIcon::new(px(ICON_SIZE))),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .items_start()
-                    .gap(px(LEFT_GAP))
+                    .items_center()
+                    .gap(px(TITLE_GAP))
                     .child(semantic(
                         Semantic::new(NodeId::new("welcome", "title", None), Role::Text)
                             .label(&title),
@@ -703,10 +785,77 @@ impl WelcomeView {
                     .child(
                         div()
                             .text_role(TextRole::Secondary, window, cx)
+                            .text_center()
                             .child(subtitle.shared()),
-                    )
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(CARD_MARGIN_TOP))
+                    .w_full()
+                    .max_w(px(CARD_MAX_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .gap(px(CARD_GAP))
                     .child(open_folder)
                     .children(notice),
+            );
+        div()
+            .w(relative(LEFT_SHARE))
+            .flex_shrink_0()
+            .h_full()
+            .pt(px(LEFT_PADDING_TOP))
+            .px(px(LEFT_PADDING_X))
+            .pb(px(LEFT_PADDING_BOTTOM))
+            .flex()
+            .flex_col()
+            .justify_between()
+            .child(top)
+            .child(self.language_row(paint, window, cx))
+            .into_any_element()
+    }
+
+    /// The label and the pop-up button of the language choice. Every item
+    /// dispatches `SelectLanguage`; the current one is checked.
+    fn language_row(
+        &self,
+        paint: &Paint<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = |locale: Option<Locale>| match locale {
+            None => Text::key(&paint.strings, keys::common::LANGUAGE_SYSTEM),
+            Some(locale) => Text::key(&paint.strings, locale.name_key()),
+        };
+        let items = [None, Some(Locale::En), Some(Locale::ZhCn)]
+            .into_iter()
+            .map(|locale| MenuItem {
+                text: name(locale),
+                action: Box::new(SelectLanguage { locale }),
+                checked: locale == self.language,
+            })
+            .collect();
+        let value = match self.language {
+            None => "system",
+            Some(locale) => locale.tag(),
+        };
+        let picker = PopUpButton::new(
+            NodeId::new("welcome", "language", None),
+            Text::key(&paint.strings, keys::welcome::LANGUAGE),
+            name(self.language),
+            items,
+        )
+        .value(SharedString::from(value));
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(LANGUAGE_GAP))
+            .child(
+                div()
+                    .text_role(TextRole::Callout, window, cx)
+                    .child(Text::key(&paint.strings, keys::welcome::LANGUAGE).shared()),
             )
             .child(picker)
             .into_any_element()
@@ -721,143 +870,198 @@ impl WelcomeView {
         contributions.dispatch(WorkspaceCommand::PromptOpenProject);
     }
 
-    /// The two lists, one above the other, scrolling together.
+    /// The two groups of flat rows on the sidebar material, scrolling
+    /// together.
     fn right_column(
         &self,
         paint: &Paint<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let recent = self.recent_list(paint, window, cx);
-        let discovered = self.discovered_list(paint, window, cx);
+        let recent = self.recent_group(paint, window, cx);
+        let discovered = self.discovered_group(paint, window, cx);
         div()
             .id("welcome-lists")
             .flex_1()
             .min_w_0()
             .h_full()
+            .bg(paint.palette.under_page_background)
+            .border_l(px(0.5))
+            .border_color(paint.palette.separator)
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(BLOCK_GAP))
-                    .p(px(COLUMN_PADDING))
+                    .px(px(RIGHT_PADDING_X))
+                    .py(px(RIGHT_PADDING_Y))
                     .child(recent)
                     .child(discovered),
             )
             .into_any_element()
     }
 
-    fn recent_list(
+    /// A group's small header: Caption size, semibold, secondary.
+    fn header(
+        &self,
+        text: Text,
+        margin_top: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .mt(px(margin_top))
+            .mb(px(ROW_SPACING))
+            .mx(px(HEADER_INSET))
+            .text_role(TextRole::Caption, window, cx)
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(text.shared())
+            .into_any_element()
+    }
+
+    /// A group: its header, then the list node around the rows, then (when
+    /// there are none) the empty-state text or the skeleton.
+    fn group(
+        &self,
+        header: AnyElement,
+        list: NodeId,
+        rows: Vec<SidebarRow>,
+        below: Option<AnyElement>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(semantic(
+                Semantic::new(list, Role::List),
+                div().flex().flex_col().gap(px(ROW_SPACING)).children(rows),
+            ))
+            .children(below)
+            .into_any_element()
+    }
+
+    fn recent_group(
         &self,
         paint: &Paint<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = NodeId::new("welcome", "recent", None);
-        let header = Text::key(&paint.strings, keys::welcome::RECENT);
-        let list = GroupedList::new(id.clone()).header(header);
+        let header = self.header(
+            Text::key(&paint.strings, keys::welcome::RECENT),
+            HEADER_MARGIN_FIRST,
+            window,
+            cx,
+        );
         match &paint.snapshot.recent {
-            RecentState::Loading => self.waiting(list, paint),
+            RecentState::Loading => self.group(header, id, Vec::new(), self.waiting(paint)),
             RecentState::Ready(entries) if entries.is_empty() => {
-                let empty = NodeId::new("welcome", "recent", None).child("empty");
-                self.empty(
-                    list,
-                    empty,
+                let empty = self.empty(
+                    id.child("empty"),
                     Text::key(&paint.strings, keys::welcome::RECENT_EMPTY),
                     window,
                     cx,
-                )
+                );
+                self.group(header, id, Vec::new(), Some(empty))
             }
             RecentState::Ready(entries) => {
-                let mut list = list;
-                for (index, entry) in entries.iter().enumerate() {
-                    list = list.row(self.recent_row(entry, index, paint));
-                }
-                list.into_any_element()
+                let rows = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| self.recent_row(entry, index, paint, window, cx))
+                    .collect();
+                self.group(header, id, rows, None)
             }
         }
     }
 
-    fn discovered_list(
+    fn discovered_group(
         &self,
         paint: &Paint<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = NodeId::new("welcome", "discovered", None);
-        let header = Text::key(&paint.strings, keys::welcome::DISCOVERED);
-        let list = GroupedList::new(id.clone()).header(header);
+        let header = self.header(
+            Text::key(&paint.strings, keys::welcome::DISCOVERED),
+            HEADER_MARGIN_NEXT,
+            window,
+            cx,
+        );
+        let empty = |this: &Self, window: &mut Window, cx: &mut Context<Self>| {
+            this.empty(
+                id.child("empty"),
+                Text::key(&paint.strings, keys::welcome::DISCOVERED_EMPTY),
+                window,
+                cx,
+            )
+        };
         match &paint.snapshot.discovered {
-            DiscoveredState::Pending => self.waiting(list, paint),
-            DiscoveredState::Unavailable => self.empty(
-                list,
-                id.child("empty"),
-                Text::key(&paint.strings, keys::welcome::DISCOVERED_EMPTY),
-                window,
-                cx,
-            ),
-            DiscoveredState::Ready(folders) if folders.is_empty() => self.empty(
-                list,
-                id.child("empty"),
-                Text::key(&paint.strings, keys::welcome::DISCOVERED_EMPTY),
-                window,
-                cx,
-            ),
+            DiscoveredState::Pending => {
+                self.group(header, id.clone(), Vec::new(), self.waiting(paint))
+            }
+            DiscoveredState::Unavailable => {
+                let below = empty(self, window, cx);
+                self.group(header, id.clone(), Vec::new(), Some(below))
+            }
+            DiscoveredState::Ready(folders) if folders.is_empty() => {
+                let below = empty(self, window, cx);
+                self.group(header, id.clone(), Vec::new(), Some(below))
+            }
             DiscoveredState::Ready(folders) => {
-                let mut list = list;
-                for (index, folder) in folders.iter().enumerate() {
-                    list = list.row(self.discovered_row(folder, index, paint));
-                }
-                list.into_any_element()
+                let rows = folders
+                    .iter()
+                    .enumerate()
+                    .map(|(index, folder)| self.discovered_row(folder, index, paint, window, cx))
+                    .collect();
+                self.group(header, id.clone(), rows, None)
             }
         }
     }
 
-    /// A list that has not arrived: its header alone, and after the loading
-    /// threshold two skeleton rows.
-    fn waiting(&self, list: GroupedList, paint: &Paint<'_>) -> AnyElement {
-        let mut column = div().flex().flex_col().child(list);
-        if paint.skeleton {
-            column = column.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(ROW_GAP))
-                    .px(px(LIST_INSET))
-                    .pt(px(ROW_GAP))
-                    .children((0..SKELETON_ROWS).map(|_| Skeleton::new(px(220.0), px(12.0)))),
-            );
-        }
-        column.into_any_element()
+    /// A list that has not arrived: nothing, and after the loading threshold
+    /// two skeleton rows.
+    fn waiting(&self, paint: &Paint<'_>) -> Option<AnyElement> {
+        paint.skeleton.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SKELETON_GAP))
+                .px(px(LIST_INSET))
+                .pt(px(SKELETON_GAP))
+                .children((0..SKELETON_ROWS).map(|_| Skeleton::new(px(220.0), px(12.0))))
+                .into_any_element()
+        })
     }
 
-    /// A list with nothing in it: its header and one line of text.
+    /// A list with nothing in it: one line of text.
     fn empty(
         &self,
-        list: GroupedList,
         id: NodeId,
         text: Text,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .child(list)
-            .child(semantic(
-                Semantic::new(id, Role::Text).label(&text),
-                div()
-                    .px(px(LIST_INSET))
-                    .pt(px(ROW_GAP))
-                    .text_role(TextRole::Secondary, window, cx)
-                    .child(text.shared()),
-            ))
-            .into_any_element()
+        semantic(
+            Semantic::new(id, Role::Text).label(&text),
+            div()
+                .px(px(LIST_INSET))
+                .pt(px(SKELETON_GAP))
+                .text_role(TextRole::Secondary, window, cx)
+                .child(text.shared()),
+        )
+        .into_any_element()
     }
 
-    fn recent_row(&self, entry: &RecentEntry, index: usize, paint: &Paint<'_>) -> Row {
+    fn recent_row(
+        &self,
+        entry: &RecentEntry,
+        index: usize,
+        paint: &Paint<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> SidebarRow {
         let list = NodeId::new("welcome", "recent", None);
         let key = node_key(&entry.path);
         let id = list.item(&key);
@@ -873,63 +1077,53 @@ impl WelcomeView {
         } else {
             name_spec
         };
-        let detail = if entry.missing {
-            Text::key(&paint.strings, keys::welcome::RECENT_MISSING)
-                .as_str()
-                .to_owned()
-        } else {
-            let mut parts = vec![display_path(&entry.path, self.deps.home.as_deref())];
-            if entry.sessions > 0 {
-                parts.push(sessions_text(&paint.strings, entry.sessions));
-                if entry.running > 0 {
-                    parts.push(running_text(&paint.strings, entry.running));
-                }
-            }
-            join_line(&parts)
-        };
-        let remove = {
-            let view = paint.view.clone();
-            let path = entry.path.clone();
-            Button::new(
-                id.child("remove"),
-                Text::key(&paint.strings, keys::welcome::RECENT_REMOVE),
-            )
-            .kind(ButtonKind::Plain)
-            .size(ButtonSize::Small)
-            .icon(Icon::Close)
-            .on_click(move |_, cx| {
-                // The row's own click must not open the project too.
-                cx.stop_propagation();
-                let _ = view.update(cx, |this, cx| this.remove_recent(path.clone(), cx));
-            })
-        };
-        let group = format!("welcome-recent-{key}");
+        let detail = recent_detail(&paint.strings, entry, self.deps.home.as_deref());
         let content = self.row_content(
             RowParts {
-                group,
                 name_spec,
                 name,
                 detail,
                 leading: None,
-                trailing: Some(remove),
                 selected,
             },
-            paint,
+            window,
+            cx,
         );
-        let view = paint.view.clone();
-        let path = entry.path.clone();
-        Row::new(id)
+        let click = paint.view.clone();
+        let click_path = entry.path.clone();
+        let select = paint.view.clone();
+        let select_path = entry.path.clone();
+        SidebarRow::new(id)
             .selected(selected)
             .accent()
             .on_click(move |_, cx| {
-                let _ = view.update(cx, |this, cx| {
-                    this.click(OpenSource::Recent, path.clone(), cx);
+                let _ = click.update(cx, |this, cx| {
+                    this.click(OpenSource::Recent, click_path.clone(), cx);
                 });
             })
+            .context_menu(
+                vec![MenuItem {
+                    text: Text::key(&paint.strings, keys::welcome::RECENT_REMOVE),
+                    action: Box::new(RemoveSelected),
+                    checked: false,
+                }],
+                move |_, cx| {
+                    let _ = select.update(cx, |this, cx| {
+                        this.select_row(OpenSource::Recent, &select_path, cx);
+                    });
+                },
+            )
             .child(content)
     }
 
-    fn discovered_row(&self, folder: &DiscoveredFolder, index: usize, paint: &Paint<'_>) -> Row {
+    fn discovered_row(
+        &self,
+        folder: &DiscoveredFolder,
+        index: usize,
+        paint: &Paint<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> SidebarRow {
         let list = NodeId::new("welcome", "discovered", None);
         let key = node_key(&folder.path);
         let id = list.item(&key);
@@ -946,38 +1140,27 @@ impl WelcomeView {
             .attr("agents", agents)
             .attr("sessions", folder.sessions.to_string())
             .attr("running", folder.running.to_string());
-        let mut parts = vec![
-            display_path(&folder.path, self.deps.home.as_deref()),
-            sessions_text(&paint.strings, folder.sessions),
-        ];
-        if folder.running > 0 {
-            parts.push(running_text(&paint.strings, folder.running));
-        }
-        let Timestamp(newest) = folder.newest_activity;
-        let age = Duration::from_secs(u64::try_from((paint.now - newest) / 1000).unwrap_or(0));
-        parts.push(paint.strings.relative_time(age));
+        let detail = discovered_detail(&paint.strings, folder, paint.now);
         let dots = div()
             .flex()
             .flex_shrink_0()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(DOT_GAP))
             .children(folder.agents.iter().filter_map(dot_of));
-        let group = format!("welcome-discovered-{key}");
         let content = self.row_content(
             RowParts {
-                group,
                 name_spec,
                 name,
-                detail: join_line(&parts),
+                detail,
                 leading: Some(dots.into_any_element()),
-                trailing: None,
                 selected,
             },
-            paint,
+            window,
+            cx,
         );
         let view = paint.view.clone();
         let path = folder.path.to_path_buf();
-        Row::new(id)
+        SidebarRow::new(id)
             .selected(selected)
             .accent()
             .on_click(move |_, cx| {
@@ -988,34 +1171,38 @@ impl WelcomeView {
             .child(content)
     }
 
-    /// What a row holds: an optional leading element, the two lines and an
-    /// optional trailing button that shows while the row is hovered or
-    /// selected.
-    fn row_content(&self, parts: RowParts, paint: &Paint<'_>) -> AnyElement {
+    /// What a row holds: an optional leading element and the two lines. The
+    /// name is `Headline`; the second line is `Callout` in the secondary
+    /// colour, or `on_accent` at 85 % on the selected row. The row sets the
+    /// rest of the selected colours.
+    fn row_content(
+        &self,
+        parts: RowParts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let RowParts {
-            group,
             name_spec,
             name,
             detail,
             leading,
-            trailing,
             selected,
         } = parts;
-        let name_line = semantic(name_spec, div().truncate().child(name.shared()));
+        let mut name_line = div()
+            .truncate()
+            .text_role(TextRole::Headline, window, cx)
+            .child(name.shared());
         let mut detail_line = div()
             .truncate()
-            .text_size(TextRole::Caption.size())
-            .line_height(TextRole::Caption.line_height())
+            .text_role(TextRole::Callout, window, cx)
             .child(detail);
-        detail_line = if selected {
-            detail_line.opacity(SELECTED_SECONDARY_OPACITY)
-        } else {
-            detail_line.text_color(paint.palette.secondary_label)
-        };
+        if selected {
+            name_line = name_line.text_color(on_accent());
+            detail_line = detail_line.text_color(on_accent().opacity(SELECTED_SECONDARY_OPACITY));
+        }
         let mut row = div()
-            .group(group.clone())
             .relative()
-            .flex_1()
+            .w_full()
             .min_w_0()
             .flex()
             .items_center()
@@ -1027,20 +1214,9 @@ impl WelcomeView {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(name_line)
+                    .child(semantic(name_spec, name_line))
                     .child(detail_line),
             );
-        if let Some(button) = trailing {
-            let mut slot = div().flex_shrink_0();
-            if !selected {
-                slot.style().visibility = Some(gpui::Visibility::Hidden);
-                slot = slot.group_hover(group, |mut style| {
-                    style.visibility = Some(gpui::Visibility::Visible);
-                    style
-                });
-            }
-            row = row.child(slot.child(button));
-        }
         if selected {
             row = row.child(self.reveal_probe());
         }

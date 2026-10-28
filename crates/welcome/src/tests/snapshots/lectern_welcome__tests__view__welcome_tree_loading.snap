@@ -3,11 +3,8 @@ source: crates/welcome/src/tests/view.rs
 expression: text
 ---
 welcome.root Group recent=loading discovered=pending
-  welcome.title Text [welcome-title] "Welcome to Lectern"
+  welcome.title Text [welcome-title] "Lectern"
   welcome.open-folder Button [welcome-open-folder] "Open Folder…"
-  welcome.language TabBar
-    welcome.language.item[system] Tab [common-language-system] "Match System" selected
-    welcome.language.item[en] Tab [common-language-en] "English"
-    welcome.language.item[zh-CN] Tab [common-language-zh-cn] "简体中文"
-  welcome.recent List [welcome-recent] "Recent Projects"
-  welcome.discovered List [welcome-discovered] "From Claude Code and Codex"
+  welcome.language Button [welcome-language] "Language" value=system
+  welcome.recent List
+  welcome.discovered List

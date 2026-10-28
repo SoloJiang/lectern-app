@@ -3,23 +3,17 @@ source: crates/welcome/src/tests/view.rs
 expression: first
 ---
 welcome.root Group recent=ready discovered=ready
-  welcome.title Text [welcome-title] "Welcome to Lectern"
+  welcome.title Text [welcome-title] "Lectern"
   welcome.open-folder Button [welcome-open-folder] "Open Folder…"
-  welcome.language TabBar
-    welcome.language.item[system] Tab [common-language-system] "Match System" selected
-    welcome.language.item[en] Tab [common-language-en] "English"
-    welcome.language.item[zh-CN] Tab [common-language-zh-cn] "简体中文"
-  welcome.recent List [welcome-recent] "Recent Projects"
+  welcome.language Button [welcome-language] "Language" value=system
+  welcome.recent List
     welcome.recent.item[/Users/example/work/lectern] ListItem
       welcome.recent.item[/Users/example/work/lectern].name Text "lectern" kind=git sessions=1 running=1
-      welcome.recent.item[/Users/example/work/lectern].remove Button [welcome-recent-remove] "Remove from Recents"
     welcome.recent.item[/Users/example/notes] ListItem
       welcome.recent.item[/Users/example/notes].name Text "notes" kind=folder sessions=0 running=0
-      welcome.recent.item[/Users/example/notes].remove Button [welcome-recent-remove] "Remove from Recents"
     welcome.recent.item[/Users/example/work/api/services/billing] ListItem
       welcome.recent.item[/Users/example/work/api/services/billing].name Text "api" kind=git sessions=0 running=0
-      welcome.recent.item[/Users/example/work/api/services/billing].remove Button [welcome-recent-remove] "Remove from Recents"
-  welcome.discovered List [welcome-discovered] "From Claude Code and Codex"
+  welcome.discovered List
     welcome.discovered.item[/Users/example/work/fresh] ListItem
       welcome.discovered.item[/Users/example/work/fresh].name Text "fresh" agents=codex,claude-code sessions=2 running=0
     welcome.discovered.item[/Users/example/scratch] ListItem
