@@ -1,8 +1,10 @@
-//! The two plugins (docs/design/welcome.md「接口」「依赖」): "welcome" keeps the
-//! recent projects and registers the screen; "welcome-discovery" computes the
-//! discovered folders. They are two because the kernel has no optional
-//! dependency: without a session source the screen still exists, only the
-//! discovered list stays empty.
+//! The three plugins (docs/design/welcome.md「接口」「依赖」): "welcome" keeps
+//! the recent projects and registers the screen; "welcome-discovery" computes
+//! the discovered folders; "welcome-review" marks the sessions that need
+//! review on the recent projects. They are three because the kernel has no
+//! optional dependency: without a session source the screen still exists,
+//! only the discovered list stays empty; without `review` the rows show the
+//! session count.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use lectern_kernel::{
     service,
 };
 use lectern_services::project::{ProjectEvent, Projects};
+use lectern_services::review::{Review, ReviewEvent};
 use lectern_services::session::{SessionSource, SessionsChanged};
 use lectern_services::workspace::{
     Contribution, ContributionKind, Contributions, ScreenLayout, Visibility, screens,
@@ -30,6 +33,8 @@ use crate::view::{ViewDeps, WelcomeView};
 pub const WELCOME_ID: &str = "welcome";
 /// The ID of the plugin with the discovered folders.
 pub const DISCOVERY_ID: &str = "welcome-discovery";
+/// The ID of the plugin that marks the sessions to review.
+pub const REVIEW_ID: &str = "welcome-review";
 
 /// What `app` hands over.
 pub struct WelcomeDeps {
@@ -45,9 +50,9 @@ pub struct WelcomeDeps {
     pub version: Option<SharedString>,
 }
 
-/// The two plugins, sharing one model. `app` puts them in the `PluginSet`
+/// The three plugins, sharing one model. `app` puts them in the `PluginSet`
 /// one by one. Builds an empty model; no IO.
-pub fn plugins(deps: WelcomeDeps) -> [(Name, WelcomePlugin); 2] {
+pub fn plugins(deps: WelcomeDeps) -> [(Name, WelcomePlugin); 3] {
     let model = WelcomeModel::new(deps.executor, deps.data_dir);
     from_model(model, Arc::new(PlatformPrefs), home_dir(), deps.version)
 }
@@ -57,7 +62,7 @@ pub(crate) fn from_model(
     prefs: Arc<dyn LanguagePrefs>,
     home: Option<PathBuf>,
     version: Option<SharedString>,
-) -> [(Name, WelcomePlugin); 2] {
+) -> [(Name, WelcomePlugin); 3] {
     [
         (
             Name::Borrowed(WELCOME_ID),
@@ -73,6 +78,16 @@ pub(crate) fn from_model(
             Name::Borrowed(DISCOVERY_ID),
             WelcomePlugin {
                 role: Role::Discovery,
+                model: model.clone(),
+                prefs: prefs.clone(),
+                home: home.clone(),
+                version: version.clone(),
+            },
+        ),
+        (
+            Name::Borrowed(REVIEW_ID),
+            WelcomePlugin {
+                role: Role::Review,
                 model,
                 prefs,
                 home,
@@ -86,6 +101,7 @@ pub(crate) fn from_model(
 enum Role {
     Screen,
     Discovery,
+    Review,
 }
 
 pub struct WelcomePlugin {
@@ -127,6 +143,7 @@ impl Plugin for WelcomePlugin {
         let requires = match self.role {
             Role::Screen => vec![service::<dyn Contributions>(), service::<dyn Projects>()],
             Role::Discovery => vec![service::<dyn Projects>(), service::<dyn SessionSource>()],
+            Role::Review => vec![service::<dyn Review>()],
         };
         Manifest {
             provides: Vec::new(),
@@ -140,6 +157,7 @@ impl Plugin for WelcomePlugin {
         match self.role {
             Role::Screen => self.activate_screen(ctx),
             Role::Discovery => self.activate_discovery(ctx),
+            Role::Review => Ok(self.activate_review(ctx)),
         }
     }
 }
@@ -225,6 +243,17 @@ impl WelcomePlugin {
             model: self.model.clone(),
             services: Some((projects, sources)),
         }))
+    }
+}
+
+impl WelcomePlugin {
+    /// Takes `dyn Review` and listens for the overview updates; holds no
+    /// interest in any overview (the open project's home screen watches it).
+    fn activate_review(&self, ctx: &mut Context<'_>) -> Box<dyn Active> {
+        let review = ctx.service::<dyn Review>();
+        let model = self.model.clone();
+        ctx.on::<ReviewEvent>(move |event, handle| model.review_event(event, handle, &review));
+        Box::new(())
     }
 }
 

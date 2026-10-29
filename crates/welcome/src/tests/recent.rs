@@ -7,7 +7,8 @@ use std::sync::Arc;
 use super::support::*;
 use crate::recent::store::{self, Read, Unreadable, WriteStep};
 use crate::recent::{
-    DecodeError, MAX_ENTRIES, RecentEntry, decode, encode, entry_from_snapshot, push_front, remove,
+    DecodeError, MAX_ENTRIES, RecentEntry, ReviewMark, decode, encode, entry_from_snapshot,
+    push_front, remove,
 };
 
 fn entry(path: &str, last_opened: i64) -> RecentEntry {
@@ -19,6 +20,8 @@ fn entry(path: &str, last_opened: i64) -> RecentEntry {
         missing: false,
         sessions: 0,
         running: 0,
+        review: None,
+        to_review: None,
     }
 }
 
@@ -236,4 +239,64 @@ fn store_write_names_the_failed_step() {
     store::testing::block_dir(&blocked);
     let (step, _) = store::write(&blocked, b"{}").unwrap_err();
     assert_eq!(step, WriteStep::CreateDir);
+}
+
+#[test]
+fn decode_reads_a_file_without_marks() {
+    // `recent_v1.json` is from before the field: it reads as no mark.
+    let entries = decode(FIXTURE_V1).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|e| e.review.is_none()));
+    assert!(entries.iter().all(|e| e.to_review.is_none()));
+}
+
+#[test]
+fn a_mark_roundtrips_and_to_review_stays_in_memory() {
+    let mut marked = entry("/p/a", 1);
+    marked.review = Some(ReviewMark {
+        sessions: vec![session_key("s1"), session_key("s2")],
+        at: 1_780_000_000_000,
+    });
+    marked.to_review = Some(2);
+    let (bytes, _) = encode(&[marked.clone(), entry("/p/b", 0)]);
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(
+        text.contains("review") && !text.contains("to_review"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("review").count(),
+        1,
+        "no mark, nothing written"
+    );
+    let decoded = decode(&bytes).unwrap();
+    assert_eq!(decoded[0].review, marked.review);
+    assert_eq!(decoded[0].to_review, None, "derived on every rebuild");
+    assert_eq!(decoded[1].review, None);
+    // The version stays 1.
+    assert!(text.contains("\"version\": 1"));
+}
+
+#[test]
+fn push_front_keeps_the_mark_of_the_same_project_only() {
+    let mark = ReviewMark {
+        sessions: vec![session_key("s1")],
+        at: 5,
+    };
+    let mut old = entry("/p/a", 1);
+    old.review = Some(mark.clone());
+    let mut entries = vec![old];
+    push_front(&mut entries, entry("/p/a", 2));
+    assert_eq!(
+        entries[0].review,
+        Some(mark),
+        "opened again: the mark stays"
+    );
+    assert_eq!(entries[0].last_opened, 2);
+
+    // The path now belongs to another project: the old mark is not its own.
+    let mut other = entry("/p/a", 3);
+    other.key = folder_key("/elsewhere");
+    push_front(&mut entries, other);
+    assert_eq!(entries[0].review, None);
 }

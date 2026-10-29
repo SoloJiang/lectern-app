@@ -330,7 +330,7 @@ Logging::shutdown(500 ms)
 |---|---|---|---|
 | `workspace` | `WorkspacePlugin::new(host)`，`host` 是 `workspace::install(window, deps, cx)` 的返回值（`Resources::workspace`） | `dyn Contributions` | `dyn Projects` |
 
-- `welcome`、`welcome-discovery`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome"), version })` 返回的两个插件，逐个放进 `PluginSet::with`）在 `workspace` 之后装配，见「welcome 的装配」。`project_home` 和 `usage` 的装配见「usage 与 project_home 的装配」。
+- `welcome`、`welcome-discovery`、`welcome-review`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome"), version })` 返回的三个插件，逐个放进 `PluginSet::with`）在 `workspace` 之后装配，见「welcome 的装配」。`project_home` 和 `usage` 的装配见「usage 与 project_home 的装配」。
 - `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架。正常启动时 `install` 总会运行，`welcome` 已装配，首次启动和没有项目时显示 Welcome；`project_home` 的视图合并之前，恢复出来的项目没有基底屏幕，窗口显示空的 `Workspace`（内容区是 `workspace-screen-missing` 的文字），这是过渡状态（workspace 设计「与设计的差异」第 3 步）。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
 - `startup::arm` 的第二个帧回调把窗口句柄交给 `release_in(Some(window), cx)`；`release(cx)` 是 `release_in(None, cx)`，test profile 用它。没有窗口句柄的 desktop 屏障不装配（记 warn `plugins not assembled`，`missing` 为 `window`），只在直接调用 `release` 时出现。
 - `Started::shell`（`Option<Shell>`）：`Shell { host, window_state }`，`Quit` 用 `host` 问离开守卫，Dock 重开用两者。
@@ -410,12 +410,12 @@ target 为 `app`。
 
 ### 日志与诊断
 
-- `plugins assembled` 的 `plugins` 为 8（`welcome` 装配之后为 10，见「welcome 的装配」）。
+- `plugins assembled` 的 `plugins` 为 8（`welcome` 装配之后为 10，现为 12，见「welcome 的装配」）。
 - 其余记录由 `usage`、`project_home` 自己写（target 为 `usage`、`project_home`），见各自设计的「日志与诊断」。`SystemZone` 不写日志。
 
 ### 测试
 
-- `every_profile_graph_validates`：desktop 的插件数为 8（现为 10，见「welcome 的装配」），图校验通过（`usage` 提供的 `dyn Usage` 满足 `project-home-usage`，`workspace` 提供的 `dyn Contributions` 满足 `project-home`）；临时目录之后仍是空的。
+- `every_profile_graph_validates`：desktop 的插件数为 8（现为 12，见「welcome 的装配」），图校验通过（`usage` 提供的 `dyn Usage` 满足 `project-home-usage`，`workspace` 提供的 `dyn Contributions` 满足 `project-home`）；临时目录之后仍是空的。
 - `zone_rounds_milliseconds_down_to_seconds`、`zone_without_an_offset_is_utc`（`src/profile.rs`）：毫秒到秒的向下取整（负数也是）和 None 时为 0；偏移本身由 `platform` 的 `utc_offset_*` 测试覆盖。
 - `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 8（现为 10）。
 
@@ -429,9 +429,10 @@ target 为 `app`。
 |---|---|---|---|
 | `welcome` | `lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome"), version })` 的第一个 | 无 | `dyn Contributions`、`dyn Projects` |
 | `welcome-discovery` | 同一次 `plugins` 调用的第二个 | 无 | `dyn Projects`、`dyn SessionSource` |
+| `welcome-review`（[#283](https://github.com/SoloJiang/lectern-app/issues/283)） | 同一次 `plugins` 调用的第三个 | 无 | `dyn Review`（`review` 提供） |
 
 - `version`（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，[welcome 设计「对其他 crate 的要求」](welcome.md#对其他-crate-的要求)E）是 `Some(APP_VERSION)`：`profile.rs` 里的常量，编译期用 `concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"))` 从包版本截取「主版本.次版本」（不解析字符串，不读环境）。Welcome 的副标题用它（`welcome-subtitle` 的 `$version`）。
-- 两个插件在 `workspace` 之后逐个放进 `PluginSet::with`，共用 `plugins` 建的一个 `WelcomeModel`。`WelcomeDeps::data_dir` 只拼路径，不创建；`recent.json` 由 `welcome` 在 `started` 提交的后台任务里读，第一次写时才建 `welcome/` 目录（`create_dir_all`）。
+- 三个插件在 `workspace` 之后逐个放进 `PluginSet::with`，共用 `plugins` 建的一个 `WelcomeModel`。`WelcomeDeps::data_dir` 只拼路径，不创建；`recent.json` 由 `welcome` 在 `started` 提交的后台任务里读，第一次写时才建 `welcome/` 目录（`create_dir_all`）。
 - 会话来源（`agents` 的两个插件）在同一张表里，`welcome-discovery` 的 `requires` 有提供者。没有会话来源的 profile 必须同时不装 `welcome-discovery`；`Profile::Test` 什么也不装。
 - `Resources::app_data` 非可选；`app_data()` 为 None 时 `app` 不装配任何插件（「workspace 的装配」），所以这里不处理没有目录的情况。
 
@@ -447,7 +448,7 @@ target 为 `app`。
 
 ### 测试
 
-- `every_profile_graph_validates`：desktop 的插件数为 10，图校验通过（`workspace` 提供的 `dyn Contributions` 满足 `welcome`，`agents` 的会话来源满足 `welcome-discovery`）；临时目录之后仍是空的（`plugins` 不建 `welcome/`）。
+- `every_profile_graph_validates`：desktop 的插件数为 12（`welcome-review` 随 welcome 设计「验收」第 4 步加入，此前是 11），图校验通过（`workspace` 提供的 `dyn Contributions` 满足 `welcome`，`agents` 的会话来源满足 `welcome-discovery`，`review` 提供的 `dyn Review` 满足 `welcome-review`）；临时目录之后仍是空的（`plugins` 不建 `welcome/`）。
 - `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 10。
 - 手动（welcome 设计「验收」第 2 步）：首次启动显示 Welcome，见「实际验证」。
 

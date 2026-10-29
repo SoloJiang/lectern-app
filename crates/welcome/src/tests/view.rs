@@ -449,6 +449,48 @@ fn open_folder_dispatches_prompt(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_clone_card_is_disabled_and_does_nothing(cx: &mut TestAppContext) {
+    let mut rig = Rig::new();
+    with_lists(&mut rig);
+    let cx = open(cx, &rig);
+    let records = frame(cx);
+    // Under Open Folder, with the same width, and disabled.
+    let open_folder = bounds(&records, "welcome.open-folder");
+    let clone = bounds(&records, "welcome.clone");
+    assert!(clone.top() >= open_folder.bottom(), "{clone:?}");
+    assert!((clone.size.width - open_folder.size.width).abs() < px(0.5));
+    let node = records
+        .iter()
+        .find(|record| record.semantic.id.as_str() == "welcome.clone")
+        .unwrap();
+    assert_eq!(node.semantic.role, Role::Button);
+    assert!(node.semantic.state.disabled);
+    assert_eq!(
+        node.semantic.label.as_ref().and_then(|label| label.key),
+        Some("welcome-clone")
+    );
+    assert!(
+        !records
+            .iter()
+            .find(|record| record.semantic.id.as_str() == "welcome.open-folder")
+            .unwrap()
+            .semantic
+            .state
+            .disabled
+    );
+
+    // A click sends no command and clears no notice.
+    click(cx, "welcome.clone");
+    assert!(rig.contributions.dispatched.lock().unwrap().is_empty());
+    assert_eq!(rig.model.snapshot().opening, None);
+
+    // ↓ walks the rows only; ↵ on the last row opens it, never the card.
+    cx.simulate_keystrokes("down down down down down down down");
+    assert_eq!(selected(cx), [discovered_row(SCRATCH)]);
+    assert!(!tree(cx).contains("welcome.clone selected"));
+}
+
+#[gpui::test]
 fn arrows_move_selection_across_both_lists(cx: &mut TestAppContext) {
     let mut rig = Rig::new();
     with_lists(&mut rig);

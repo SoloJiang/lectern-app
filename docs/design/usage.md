@@ -919,7 +919,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 | `usage/rebuild_30d` | 只记录（同一夹具的派生表从观察整体重建） |
 | `usage/resident_bytes` | 存活字节 ≤ 2 MB（同一夹具打开数据库、补读完成并静止后，不含 SQLite 页缓存；`Memory`） |
 | `usage/disk_day_heavy` | 只记录（一个重度日写入后数据库文件的增长，含 `-wal`；乘以 396 天是热数据的上限估算，对照「磁盘」一行的 400 MB） |
-| `usage/archive_month` | 每段中位数 < 150 ms（一个重度月约 30 MB 的热行归档：编码、压缩、解码核对、写段、删热行、提交）；压缩比只记录，低于 3:1 时重新评估「磁盘」一行 |
+| `usage/archive_month` | 每段中位数 < 240 ms（[ADR 0055](../adr/0055.md) 从 150 ms 放宽，托管 runner 上有记录的最差一次 192 ms；一个重度月约 30 MB 的热行归档：编码、压缩、解码核对、写段、删热行、提交）；压缩比只记录，低于 3:1 时重新评估「磁盘」一行 |
 | `usage/cold_read_month` | 中位数 < 1 s（解压一个重度月的 `fact` 段并按日聚合，`History` 的按日明细） |
 
 页缓存的上限由测试检查（`store_page_cache_is_bounded`：两个连接的 `PRAGMA cache_size` 都是 -1024，`mmap_size` 为 0）。

@@ -1,6 +1,6 @@
 # welcome 设计
 
-状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，并且已按修订实现（`Refs #283`）：两栏、应用图标、操作卡片、语言弹出菜单、平铺的侧栏行、⌫ 与右键菜单；见「实际验证」的「#283 的重绘」和「与设计的差异」。「未决问题」1、2 已由产品负责人在 2026-10-29 按设计画布决定（最近项目行显示待审数；显示 Clone 卡片，克隆流程没有实现之前卡片禁用），设计已改，尚未实现（「验收」第 4 步）。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，并且已按修订实现（`Refs #283`）：两栏、应用图标、操作卡片、语言弹出菜单、平铺的侧栏行、⌫ 与右键菜单；见「实际验证」的「#283 的重绘」和「与设计的差异」。「未决问题」1、2 已由产品负责人在 2026-10-29 按设计画布决定（最近项目行显示待审数；显示 Clone 卡片，克隆流程没有实现之前卡片禁用），设计已改，并且已实现（「验收」第 4 步，`Refs #283`）：第三个插件 `welcome-review`、`RecentEntry::review` / `to_review`、禁用的 Clone 卡片；见「实际验证」的「第 4 步」和「与设计的差异」。
 
 对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用图标、应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
@@ -15,7 +15,7 @@
   - 最近项目行的待审数（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的画布决定）：项目打开期间从 `Review::overview` 记下需要审阅的会话，存进 `recent.json`；Welcome 显示这些会话加上之后又有活动的会话的个数（「待审数」）。不为没有打开的项目做 git 操作。
   - Clone Repository… 卡片：按画布画在 Open Folder 下面，禁用，说明行写「即将推出」。
   - 键盘：↑ ↓ 选择、↵ 打开、⌫ 移除最近项目。
-  - 两个插件：`welcome`（注册 `Screen` 和 `KeyBindings` 贡献，维护最近项目，持有快照）和 `welcome-discovery`（依赖 `dyn SessionSource`，算发现列表）。分成两个是因为 kernel 没有可选依赖（[kernel 设计「依赖与自动启停」](kernel.md#依赖与自动启停)、[usage 设计](usage.md)的同一做法）：会话来源的插件没有装或失败时，Welcome 屏幕照常存在，只是发现列表为空。
+  - 三个插件：`welcome`（注册 `Screen` 和 `KeyBindings` 贡献，维护最近项目，持有快照）、`welcome-discovery`（依赖 `dyn SessionSource`，算发现列表）和 `welcome-review`（依赖 `dyn Review`，记下待审会话）。分成三个是因为 kernel 没有可选依赖（[kernel 设计「依赖与自动启停」](kernel.md#依赖与自动启停)、[usage 设计](usage.md)的同一做法）：会话来源的插件没有装或失败时，Welcome 屏幕照常存在，只是发现列表为空。
 - 不做：
   - 系统打开面板与 `Projects::open` 的调用：`workspace`（`PromptOpenProject`、`OpenProject`，[workspace 设计「接口」](workspace.md#接口)）。本 crate 不调用 `Projects::open`。
   - 窗口、工具栏、区域容器：`workspace`。Welcome 的 `ScreenLayout` 全部关闭（没有侧栏、工具栏、检查器、浮条）。
@@ -362,6 +362,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   | `welcome.root` | `Group` | `recent`（`loading` / `ready`）、`discovered`（`unavailable` / `pending` / `ready`）、`opening`（`true` 时才有） |
   | `welcome.title` | `Text` | `Label::key = welcome-title` |
   | `welcome.open-folder` | `Button` | `Label::key = welcome-open-folder`（操作卡片） |
+  | `welcome.clone` | `Button` | `Label::key = welcome-clone`，`State::disabled`（禁用的操作卡片，#283 的画布决定；点击和 ↵ 都不处理，不进键盘选择） |
   | `welcome.language` | `Button` | `Label::key = welcome-language`；`attrs`：`value`（当前选择：`system` / `en` / `zh-CN`）。`ui::PopUpButton`；菜单是系统菜单，菜单项不是探针节点，探针经 `welcome::SelectLanguage` 切换、读 `value` 确认 |
   | `welcome.notice` | `Text` | `Label::key` 是 `welcome-open-failed-*` 或 `welcome-language-not-saved`；没有提示时不出现 |
   | `welcome.recent` | `List` | — |
@@ -467,7 +468,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - **D. `ui`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增；已实现，[ui 设计「第二批控件」](ui.md#第二批控件283)，PR [#289](https://github.com/SoloJiang/lectern-app/pull/289)）：`ActionCard`（Open Folder、Clone）、`PopUpButton` 与 `MenuItem`（语言）、`SidebarRow`（`accent()`、`context_menu(items, select)`；右栏的行）、`AppIcon`、`Palette::fill`。
 - **F. `services`**（#283 的画布决定，`Refs #283`；已实现，测试 `needs_review_is_unknown_unseen_or_changed_since_seen`）：`SessionOverview::needs_review(&self) -> bool`（`progress` 为 None、`seen < total` 或 `changed_since_seen > 0`），`project_home` 的 `main_model` 改用它，判断只写一处。
 - **G. `ui`**（#283 的画布决定，`Refs #283`；已实现，`semantic_snapshot_action_card` 含一张禁用的卡片）：`ActionCard::disabled(bool)`：图标和标题改用次要色（`secondary_label`），说明和右边的提示用 `tertiary_label`，没有悬停变化，不调 `on_click`，探针节点带 `disabled`。见 [ui 设计「第二批控件」](ui.md#第二批控件283)。
-- **H. `app`**（#283 的画布决定，随第 4 步）：`plugins(deps)` 返回三个插件，`Profile::Desktop` 多放进一个 `welcome-review`；`every_profile_graph_validates` 里 desktop 的插件数加一。
+- **H. `app`**（#283 的画布决定，随第 4 步；已实现）：`plugins(deps)` 返回三个插件，`Profile::Desktop` 多放进一个 `welcome-review`；`every_profile_graph_validates` 里 desktop 的插件数加一。
 - **E. `app`**（已实现）：应用版本（主.次）经 `WelcomeDeps::version` 传入，`app` 从包版本的主、次版本号拼成（[app 设计「welcome 的装配」](app.md#welcome-的装配)）。应用图标不再需要 `app` 提供：`ui::AppIcon` 画的是 `ui` 自带的 SVG（`IconAssets`），`app` 早已把 `IconAssets` 交给 `Application::with_assets`。`version` 为 None 时副标题不带版本，其余布局不变。
 
 ## 未决问题
@@ -574,6 +575,28 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - 在 macOS 上运行发布构建和 `just probe`；空闲内存、冷启动（首帧之前本 crate 仍没有代码运行）。
 - 屏幕阅读器读到的无障碍属性。
 
+### 第 4 步
+
+#283 的画布决定（待审数、禁用的 Clone 卡片，[#283](https://github.com/SoloJiang/lectern-app/issues/283)，`Refs`），在 macOS（arm64，Rust 1.97.0）上运行，叠在前置条件 F、G 之上。没有运行应用，也没有运行会打开真实窗口的 `app` 测试（`startup`、`probe`、`bench_probe`，本机的 `just test` 默认跳过它们），下面都是普通测试与 `#[gpui::test]`（测试平台，不开真实窗口）：
+
+- `just check`（格式、架构规则、文档链接、`cargo clippy --workspace --all-targets --all-features -- -D warnings`）、`just doctest` 通过。
+- `just test -p lectern-welcome`：95 个测试全部通过（原 81 个，新增 14 个）。`just test -p lectern-i18n`：57 个通过（含 `reference_tests`，它对照 fluent-bundle 检查两个新键）。`just test -p lectern-app`：43 个通过（`every_profile_graph_validates` 里 desktop 与 probe 的插件数从 11 到 12，图校验通过；`startup`、`probe`、`bench_probe` 三个需要图形会话的二进制被 nextest 的默认过滤跳过）。
+- 新增的测试：
+  - `src/tests/discover.rs`：`to_review_counts_marked_sessions_still_listed_and_later_activity`（标记里不在会话列表的不计；`last_activity` 等于 `at` 的不计，多 1 ms 的计；子 agent 不计；已标记的会话不重复计；没有标记时没有数，标记了但没有会话时是 0）、`to_review_takes_the_later_mark_of_a_key`；其余的 `build` 测试加了一个空的 `marks`。
+  - `src/tests/recent.rs`：`decode_reads_a_file_without_marks`（`recent_v1.json` 读成 `review: None`）、`a_mark_roundtrips_and_to_review_stays_in_memory`（`version` 仍是 1，`to_review` 不写进文件，没有标记时文件里没有 `review`）、`push_front_keeps_the_mark_of_the_same_project_only`。
+  - `src/tests/model.rs`（7 个）：`overview_event_marks_the_entries_of_that_key_and_writes_once`（只标 `key` 相同的条目；同一集合的第二次概览不写文件，`at` 在内存里前移；集合变化才写；不调 `watch_overview`）、`a_session_active_after_the_mark_counts_until_the_next_overview`、`overview_gone_leaves_the_mark`、`an_overview_of_another_project_marks_nothing`、`opening_a_project_again_keeps_its_mark`、`the_numbers_go_when_discovery_stops_and_the_marks_stay`、`welcome_activates_without_review`。夹具里的假 `dyn Review`（`FakeReview`）在 `src/tests/support.rs`，`Rig` 多了 `start_review` / `stop_review`。
+  - `src/tests/selection.rs`：`a_recent_row_shows_to_review_when_known`（`Some(3)`、`Some(0)`、None，zh-CN，文件夹，`missing`）。
+  - `src/tests/view.rs`：`the_clone_card_is_disabled_and_does_nothing`（在 Open Folder 下面、同宽、`disabled`、点击不发命令、↓ 走完所有行也不选中它）。
+  - `src/tests/logs.rs`：`canary_stays_out_of_welcome_logs` 的 `recent.json` 里一条带金丝雀会话键的 `review`，另有一个含金丝雀会话键的假概览经 `ReviewEvent::Overview` 送达，跑完加载、记下、打开、重算、移除、写文件、停用；`review marked` 出现过，没有记录含金丝雀。
+- 四个语义树快照逐个看过，只有预期的变化：每个快照在 `welcome.open-folder` 之后多一行 `welcome.clone Button [welcome-clone] "Clone Repository…" disabled`。
+- `rg 'lectern_git|watch_overview' crates/welcome/src --glob '!**/tests/**'` 没有结果；第 2 步的三条 `rg`（颜色与动画参数、界面字符串字面量、`Text::verbatim(Arc::from("`）仍没有结果。
+
+没有验证的：
+
+- 视觉效果：禁用的 Clone 卡片的灰度、说明与「Coming Soon」的位置，最近项目行上「3 to review」的观感，与画布的逐像素对照。
+- 在 macOS 上运行发布构建：待审数从真实的 `Review::overview` 到 `recent.json` 再到下一次启动的 Welcome 行，没有端到端地看过；`startup` 的 `plugins assembled` 记录（`tests/startup.rs`）和 `bench_probe` 的插件列表（`tests/bench_probe.rs`）里的 12 已按新的插件数改过，但没有运行。
+- 三个插件的 `plugin/*/activate`、`plugin/*/resident` 基准，空闲内存与 `recent.json` 变大之后的读取耗时没有测。
+
 ## 与设计的差异
 
 ### 第 1 步
@@ -629,3 +652,18 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - **没有改 `ui`。** 重绘用的都是 `ui` 第 5 步已有的控件。
 - **`i18n` 的 `terms_are_expanded` 测试换了键。** `welcome-title` 现在就是 `{ -app-name }`，不再是「Welcome to …」，测试改用 `welcome-open-failed-permission`（也含 `-app-name`）。没有删任何键；`welcome-open-folder` 与 `welcome-recent-remove` 的 `.tooltip` 不再有调用方，留着。
 - **Clone 卡片没有画**（「未决问题」2 的默认）；`welcome-clone` 的值按表改成「Clone Repository…」，`welcome-clone-hint` 已加，两者仍没有调用方。
+
+### 第 4 步
+
+#283 的画布决定的实现（`Refs #283`）。「待审数」「界面」「数据流与线程」第 11 项写的都已实现，下面是实现与文字不同或文字没有写到的地方。
+
+- **`at` 每次概览都前移，只有会话集合变了才写文件和换快照。** 「待审数」写「`at` 是当前时刻」「集合变化时才置写文件的脏标记」：实现里每个 `Overview` 事件都把 `key` 相同的条目的 `at` 改成当前时刻（内存里），否则一个概览里没有、但在旧 `at` 之后有过活动的会话会一直被算作「之后的活动」；文件里的 `at` 因此可能比内存里的旧，下一次因别的原因写文件时才带上新值。集合变了才写文件、才为 `review` 换快照；每次概览仍置第 3 步的脏标记；发现列表激活时，重算的 `publish` 因为 `at` 变了而每次都换一份快照（`RecentEntry` 的 `PartialEq` 含 `review`），概览每 2 秒一次就是每 2 秒换一次。项目打开期间 Welcome 屏幕没有视图订阅快照，所以没有重绘；写文件仍然只在会话集合变化时发生。
+- **会话集合不看顺序。** `ReviewMark::sessions` 按 `SessionKey` 排序后存下并比较，概览按活动时间排序，顺序变化不算集合变化。
+- **重新打开同一个项目保留标记。** `recent::push_front` 在同一路径、同一 `key` 的旧条目有 `review` 而新条目没有时，把它带到新条目上；否则 `Opened` 记录的新条目（`review: None`）会抹掉上次的标记，直到下一次概览。路径换了项目（`key` 不同）时不带。
+- **`review` 为 None 时不写进文件**（`skip_serializing_if = "Option::is_none"`）：没有标记的文件与第 1 步的格式逐字节相同，`encode_roundtrips` 的快照不变。读旧文件同样得到 `review: None`。
+- **`discover::build` 多一个参数 `marks: &[(ProjectKey, ReviewMark)]`**（最近项目的标记，取自 `RecentEntry::review`），`Built` 多一个 `to_review: HashMap<ProjectKey, u32>`，有标记的项目才有。同一个 `key` 有两个标记时（不同路径的条目）取 `at` 较大的。已标记的会话只要出现在任何来源的会话列表里就计入（不看 `Place`）；之后的活动只数 `Resolved` 或 `Located` 且属于该项目、不是子 agent 的会话。
+- **行上的运行中数不再依赖会话数。** `recent_detail` 在 `to_review` 为 `Some` 时照样在计数后面显示 `welcome-row-running`（`running > 0`）；为 None 时与第 3 步相同（`sessions > 0` 才显示计数和运行中数）。
+- **Clone 卡片的探针节点是 `welcome.clone`**（`Button`，`Label::key = welcome-clone`，`State::disabled`），已加进「界面」的节点表。卡片没有 `on_click`，不在 `Selection` 的线性序列里，所以 ↓ ↵ 都碰不到它。
+- **「验收」第 4 步的 `rg 'lectern_git|watch_overview' crates/welcome/src` 要排除测试夹具。** 假的 `dyn Review` 必须实现 `watch_overview`（trait 方法），它在 `src/tests/support.rs`；非测试代码里没有结果：`rg 'lectern_git|watch_overview' crates/welcome/src --glob '!**/tests/**'`。`welcome-review` 的插件代码不调用 `watch_overview`，夹具里记录调用，`overview_event_marks_the_entries_of_that_key_and_writes_once` 断言它为空。
+- **概览先于条目到达时标记落空。** 项目刚打开时，`ReviewEvent::Overview` 可能先于 `Opened` 的记录任务到达，此时还没有该 `key` 的条目，这一次什么也不记（`review marked` 的 `entries` 为 0）；概览每 2 秒重算并发出一次事件，下一次就记上了。
+- **`app` 的 `bench_probe` 与 `startup` 端到端测试里的插件数**（`tests/bench_probe.rs` 的 `plugins.len()`，`tests/startup.rs` 的 `plugins assembled`）同步改成 12。它们需要图形会话，本机没有运行（「实际验证」第 4 步）；`app` 设计「welcome 的装配」与 `crates/app/AGENTS.md` 的措辞随之更新。

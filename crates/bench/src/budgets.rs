@@ -1897,10 +1897,10 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // Each segment of a heavy month a sample; the compression ratio in the
-    // note.
+    // note. 240 ms, not 150 (ADR 0055: a hosted runner reached 192 ms).
     share(
         "usage/archive_month",
-        &[median(Limit::TimeBelow(ms(150)))],
+        &[median(Limit::TimeBelow(ms(240)))],
         USAGE,
         ACTIVE,
         Time,

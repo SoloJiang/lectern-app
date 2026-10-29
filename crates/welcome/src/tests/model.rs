@@ -554,3 +554,215 @@ fn wake_is_called_once_per_snapshot() {
     rig.model.language_not_saved();
     assert_eq!(woken.load(Ordering::SeqCst) as u64, generations);
 }
+
+/// The rig of the review tests: the file with the three recent projects, the
+/// three plugins, two sessions of "lectern" in the list (`s1` and `s2`,
+/// both placed in the project, `s3` is not in it).
+fn review_rig() -> Rig {
+    let mut rig = Rig::new();
+    rig.seed(FIXTURE_V1);
+    rig.claude.set(vec![
+        Sess::new("s1", LECTERN, located(&lectern_key(), ""))
+            .at(NOW - 3 * MINUTE)
+            .build(),
+        Sess::new("s2", LECTERN, resolved(&lectern_key(), ""))
+            .at(NOW - 2 * MINUTE)
+            .build(),
+    ]);
+    rig.start_screen();
+    rig.start_discovery();
+    rig.start_review();
+    rig.settle();
+    rig
+}
+
+fn marked(rig: &Rig) -> Vec<Option<crate::ReviewMark>> {
+    recent_of(rig).into_iter().map(|e| e.review).collect()
+}
+
+fn file_marks(rig: &Rig) -> Vec<Option<crate::ReviewMark>> {
+    decode(&rig.file().expect("the file exists"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.review)
+        .collect()
+}
+
+#[test]
+fn overview_event_marks_the_entries_of_that_key_and_writes_once() {
+    let rig = review_rig();
+    assert_eq!(rig.writes(), 0);
+    assert_eq!(
+        recent_of(&rig)
+            .iter()
+            .map(|e| e.to_review)
+            .collect::<Vec<_>>(),
+        [None, None, None],
+        "no mark yet: the rows show the session count"
+    );
+
+    // s1 needs review, s2 is done, s3 needs review and is not in the list.
+    let key = lectern_key();
+    rig.review
+        .set(&key, &[("s1", true), ("s2", false), ("s3", true)]);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    let mark = |ids: &[&str], at: i64| crate::ReviewMark {
+        sessions: ids.iter().map(|id| session_key(id)).collect(),
+        at,
+    };
+    assert_eq!(
+        marked(&rig),
+        [Some(mark(&["s1", "s3"], NOW)), None, None],
+        "only the entry with the project's key"
+    );
+    assert_eq!(rig.writes(), 1);
+    assert_eq!(file_marks(&rig), marked(&rig));
+    assert_eq!(
+        recent_of(&rig)[0].to_review,
+        Some(1),
+        "s1 is listed, s3 is gone, s2 is not marked and has no later activity"
+    );
+    assert_eq!(recent_of(&rig)[1].to_review, None);
+
+    // The same set again, later: no write; the time moves on in memory.
+    rig.clock
+        .store(NOW + 5 * MINUTE, std::sync::atomic::Ordering::SeqCst);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    assert_eq!(rig.writes(), 1, "the set did not change");
+    assert_eq!(marked(&rig)[0], Some(mark(&["s1", "s3"], NOW + 5 * MINUTE)));
+    assert_eq!(file_marks(&rig)[0], Some(mark(&["s1", "s3"], NOW)));
+
+    // Another set is written, and the number follows: s1 and s2 are listed.
+    rig.review.set(&key, &[("s2", true), ("s1", true)]);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    assert_eq!(rig.writes(), 2);
+    assert_eq!(
+        file_marks(&rig)[0],
+        Some(mark(&["s1", "s2"], NOW + 5 * MINUTE)),
+        "the order of the overview is not part of the mark"
+    );
+    assert_eq!(recent_of(&rig)[0].to_review, Some(2));
+    assert!(rig.review.watched.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_session_active_after_the_mark_counts_until_the_next_overview() {
+    let rig = review_rig();
+    let key = lectern_key();
+    rig.review.set(&key, &[("s1", true)]);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    assert_eq!(recent_of(&rig)[0].to_review, Some(1));
+
+    // The agent works on in s2 after the overview was taken.
+    rig.claude.set(vec![
+        Sess::new("s1", LECTERN, located(&key, ""))
+            .at(NOW - 3 * MINUTE)
+            .build(),
+        Sess::new("s2", LECTERN, resolved(&key, ""))
+            .at(NOW + MINUTE)
+            .build(),
+    ]);
+    rig.emit(rig.claude.changed());
+    rig.settle();
+    assert_eq!(recent_of(&rig)[0].to_review, Some(2), "s1 and the later s2");
+}
+
+#[test]
+fn overview_gone_leaves_the_mark() {
+    let rig = review_rig();
+    let key = lectern_key();
+    rig.review.set(&key, &[("s1", true)]);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    let before = marked(&rig);
+    let writes = rig.writes();
+
+    rig.review.clear(&key);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    assert_eq!(marked(&rig), before);
+    assert_eq!(rig.writes(), writes);
+    assert_eq!(recent_of(&rig)[0].to_review, Some(1));
+}
+
+#[test]
+fn an_overview_of_another_project_marks_nothing() {
+    let rig = review_rig();
+    let other = git_key("/repos/other/.git");
+    rig.review.set(&other, &[("s1", true)]);
+    rig.emit(rig.review.event(&other));
+    rig.settle();
+    assert_eq!(marked(&rig), [None, None, None]);
+    assert_eq!(rig.writes(), 0);
+}
+
+#[test]
+fn opening_a_project_again_keeps_its_mark() {
+    let rig = review_rig();
+    let key = lectern_key();
+    rig.review.set(&key, &[("s1", true)]);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    let before = marked(&rig)[0].clone();
+    assert!(before.is_some());
+
+    rig.projects.add(snapshot(&key, "lectern", LECTERN, ""));
+    rig.emit_opened(&key);
+    rig.settle();
+    assert_eq!(rig.recent_paths()[0], Path::new(LECTERN));
+    assert_eq!(marked(&rig)[0], before);
+    assert_eq!(recent_of(&rig)[0].to_review, Some(1));
+}
+
+#[test]
+fn the_numbers_go_when_discovery_stops_and_the_marks_stay() {
+    let mut rig = review_rig();
+    let key = lectern_key();
+    rig.review.set(&key, &[("s1", true)]);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    assert_eq!(recent_of(&rig)[0].to_review, Some(1));
+
+    rig.stop_discovery();
+    assert_eq!(recent_of(&rig)[0].to_review, None);
+    assert!(recent_of(&rig)[0].review.is_some());
+
+    // A later overview still marks, with no number to show.
+    rig.review.set(&key, &[("s1", true), ("s2", true)]);
+    rig.emit(rig.review.event(&key));
+    rig.settle();
+    assert_eq!(
+        recent_of(&rig)[0].review.as_ref().unwrap().sessions.len(),
+        2
+    );
+    assert_eq!(recent_of(&rig)[0].to_review, None);
+}
+
+#[test]
+fn welcome_activates_without_review() {
+    let mut rig = Rig::new();
+    rig.seed(FIXTURE_V1);
+    rig.claude.set(vec![
+        Sess::new("s1", LECTERN, located(&lectern_key(), "")).build(),
+    ]);
+    rig.start_screen();
+    rig.start_discovery();
+    rig.settle();
+    let first = &recent_of(&rig)[0];
+    assert_eq!(
+        (first.sessions, first.to_review, first.review.clone()),
+        (1, None, None)
+    );
+    assert!(matches!(
+        rig.model.snapshot().discovered,
+        DiscoveredState::Ready(_)
+    ));
+    // An overview event with no review plugin listening changes nothing.
+    rig.emit(rig.review.event(&lectern_key()));
+    rig.settle();
+    assert_eq!(recent_of(&rig)[0].review, None);
+}

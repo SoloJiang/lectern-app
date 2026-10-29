@@ -812,7 +812,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `usage/backfill_large_session` | 每批最大值 < 300 ms、中位数 < 150 ms（同一夹具上一个 200 MB 的合成会话按 8 MiB 分批补读，每批一个样本；来源交出的字节合计超过日志的 1.2 倍时基准出错。定稿在 `usage` 第 4 步加入） | [usage](usage.md#性能) | `usage` 第 1 步 |
 | `usage/project_30d`、`usage/all_projects_30d` | 中位数 < 50 ms / < 80 ms（同一夹具：一个项目 / 所有项目的 30 天快照从事实行整体计算，即快照任务的工作） | [usage](usage.md#性能) | `usage` 第 1 步 |
 | `usage/snapshot_increment` | 中位数 < 2 ms（同一夹具上关注着第一个项目的 30 天快照，一批入库之后：事实行增量应用到快照的累加器、替换快照。这一批的入库本身由 `usage/ingest_append_4k` 计时；定稿在 `usage` 第 4 步加入） | [usage](usage.md#性能) | `usage` 第 1 步 |
-| `usage/archive_month` | 每段中位数 < 150 ms（同一夹具在时钟推后 400 天之后归档，每写一段（读热行、编码、压缩、解码核对、插入、删热行、提交）一个样本；段数、行数、压缩比和归档前的数据库大小写在备注里） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/archive_month` | 每段中位数 < 240 ms（[ADR 0055](../adr/0055.md) 从 150 ms 放宽；同一夹具在时钟推后 400 天之后归档，每写一段（读热行、编码、压缩、解码核对、插入、删热行、提交）一个样本；段数、行数、压缩比和归档前的数据库大小写在备注里） | [usage](usage.md#性能) | `usage` 第 1 步 |
 | `usage/cold_read_month` | 中位数 < 1 s（归档之后一个项目一个月的 `History` 按日明细：逐段解压这个月的 `fact` 段并按本地日求和） | [usage](usage.md#性能) | `usage` 第 1 步 |
 | `usage/disk_day_heavy` | 只记录（空数据库写入一个重度日之后数据库文件与 `-wal` 的增长；字节数，由 `time` 目标产出） | [usage](usage.md#性能) | `usage` 第 1 步 |
 | `usage/resident_bytes` | 存活字节中位数 ≤ 2 MB（插件在 `TestKernel` 下打开同一夹具，会话来源列出夹具的全部 1500 个会话、每个从保存的游标读一次、kernel 静止之后；与只依赖同样服务的空插件之差；SQLite 的内存（含页缓存）不经计数分配器，不计入；`Memory`） | [usage](usage.md#性能) | `usage` 第 1 步 |
