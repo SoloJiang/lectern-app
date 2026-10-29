@@ -512,7 +512,7 @@ target 为 `app`。
   - `HOME`：应用和 MCP 服务端用同一个目录：仓库根下的 `target/automation/home`（配方建好并设成 0700；`target/` 不入库）。应用不读用户真实的 `HOME`，也就不读用户真实的 agent 会话目录。
   - 端点目录不放在 `HOME` 下。gpui-mcp 在 macOS 上的端点是 Unix 套接字 `<端点目录>/mcp-<16 位十六进制>.sock`，默认的端点目录是 `$HOME/Library/Application Support/gpui-mcp`；macOS 的 `sun_path` 只有 104 字节，在 worktree 里这条路径有 163 字节，在主 checkout 里约 129 字节，监听会失败。所以两边显式指定一个短目录：`/tmp/lectern-mcp-<uid>`（解析后 `/private/tmp/lectern-mcp-501/mcp-<16 位>.sock` 是 54 字节）。应用经 `BridgeConfig::endpoint_dir`，服务端经 `--endpoint-dir`。这个目录只与用户有关，与 worktree 无关，几个 worktree 的应用共用它，服务端都能发现。
   - `/tmp` 是共享目录，配方先检查再用：不存在时以 0700 新建；存在但是符号链接、不属于当前用户或权限不是 0700 时，报错并以退出码 1 结束，不使用它。gpui-mcp 自己也会把它设成 0700 并核对所有者。
-  - 残留的端点：被杀掉的进程会留下 `mcp-*.sock` 和描述文件。`just automation` 启动前，当前用户没有正在运行的 `lectern-automation`（`pgrep -u <uid> -x lectern-automation`）时清空这个目录；有的时候不动它，服务端会跳过连不上的套接字。
+  - 残留的端点：被杀掉的进程会留下 `mcp-*.sock` 和描述文件。`just automation` 启动前，当前用户没有正在运行的 `lectern-automation`（`pgrep -u <uid> -f '/lectern-automation( |$)'`，按完整路径匹配，不受进程名截断的影响）时清空这个目录；有的时候不动它，服务端会跳过连不上的套接字。
 - **`justfile` 配方。** 固定的提交只写在 `tools/automation/Cargo.toml` 里，配方从 `tools/automation/Cargo.lock` 读出它，不另写一份。
   - `just automation`：`cargo build --locked --manifest-path tools/automation/Cargo.toml`；建好 `HOME`，检查并清理端点目录（上一条）；去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`LECTERN_LOG`，设 `LECTERN_MCP_ENDPOINTS=<端点目录>`，后台启动 `lectern-automation`，打印 pid。`HOME` 只对 `lectern-automation` 这一个进程改，`cargo build` 仍用用户真实的 `HOME` 和 `CARGO_HOME`。
   - `just automation-server-install`：`cargo install --locked --git https://github.com/themixednuts/gpui-mcp --rev <提交> gpui-mcp-server --root target/automation/server`。第一次要几分钟，所以与启动分开。
@@ -820,6 +820,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
   - `get_ui_tree` 里有 `welcome`、`welcome.open-folder`、`welcome.clone`、`welcome.language`、`welcome.recent.item[…]`。
   - 在临时 `HOME` 的 `recent.json` 里放一个合成的 git 仓库，`click_element` 点它的行：树变成 `project-home-screen`、`workspace-sidebar`（248 pt 宽）、`workspace-toolbar`（52 pt 高），与 `workspace` 的常量一致。
   - `screenshot` 截到窗口（这台机器已给终端屏幕录制权限）。截图里窗口是 1180 × 760 pt，GPUI 的布局和绘制仍是 820 × 521 pt，其余部分空白：打开项目时 AppKit 套用了已保存的 `"project"` frame，GPUI 没有收到改大小（另开 issue，不在本 PR）。
+  - 第一个实例在运行时再执行一次 `just automation`：端点目录没有被清空，两个 `mcp-*.sock` 都在，`list_apps` 列出两个 `lectern`（`count` 为 2）。
   - frame autosave 写在 AppKit 的 user defaults 域 `lectern-automation` 里（cfprefsd 不看 `HOME`），与发布构建的 `lectern` 域分开。
 
 ## 与设计的差异

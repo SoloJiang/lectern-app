@@ -15,7 +15,7 @@ fail() {
 [[ -e $dir ]] || mkdir -m 0700 "$dir"
 [[ -d $dir && -O $dir ]] || fail "is not a directory of this user"
 [[ $(stat -f %Lp "$dir") == 700 ]] || fail "does not have mode 0700"
-if [[ ${1:-} == --clean ]] && ! pgrep -u "$(id -u)" -x lectern-automation >/dev/null; then
+if [[ ${1:-} == --clean ]] && ! pgrep -u "$(id -u)" -f '/lectern-automation( |$)' >/dev/null; then
     find "$dir" -mindepth 1 -delete
 fi
 echo "$dir"
