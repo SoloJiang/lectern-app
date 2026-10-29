@@ -5,12 +5,12 @@ description: How to write GPUI and gpui-component code in Lectern's view crates,
 
 # GPUI 与 gpui-component
 
-Lectern 锁定 `gpui-pre =0.3.9` 与 `gpui-component =0.7.3`（[ADR 0016](../../../docs/adr/0016.md)）。gpui-component 仓库在 `v0.7.3` 标签下自带面向 agent 的指南。本技能只指向这个版本的原文。
+Lectern 锁定 `gpui-pre =0.3.7` 与 `gpui-component =0.7.0`（[ADR 0016](../../../docs/adr/0016.md)、[ADR 0056](../../../docs/adr/0056.md)）。gpui-component 仓库在 `v0.7.0` 标签下自带面向 agent 的指南。本技能只指向这个版本的原文。
 
 ## 取得指南
 
 ```sh
-git clone --depth 1 --branch v0.7.3 https://github.com/longbridge/gpui-component ../gpui-component-v0.7.3
+git clone --depth 1 --branch v0.7.0 https://github.com/longbridge/gpui-component ../gpui-component-v0.7.0
 ```
 
 要读的文件（路径相对于 `skills/gpui-kit/`）：
@@ -22,7 +22,7 @@ git clone --depth 1 --branch v0.7.3 https://github.com/longbridge/gpui-component
 | `references/conventions.md`、`references/usage.md` | 选用和组合 gpui-component 的控件 |
 | `references/recipes.md` | 需要一个完整、能编译的例子时 |
 
-只读与 `v0.7.3` 对应的文件。GPUI 快照之间的接口变化很大，不要用 `main` 分支或训练数据里的 API。
+只读与 `v0.7.0` 对应的文件。GPUI 快照之间的接口变化很大，不要用 `main` 分支或训练数据里的 API。
 
 ## 名字对照
 
