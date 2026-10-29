@@ -17,7 +17,7 @@
   - probe profile 的选择与探针的启动时机：在 `app`（见「对其他 crate 的要求」）。
   - 输入：P0 不注入点击、按键和 Action。理由见「输入」。
 - 本 issue 之外：
-  - 输入（P1）：`actions`（列出已注册的 Action 名）、`dispatch`（按名字触发 Action，GPUI 的 `App::build_action`）、`key`（`Window::dispatch_keystroke`）。只经 Action 和按键，不模拟坐标点击（本 crate 的 AGENTS.md「边界」）。
+  - 输入：不在本 crate 做。原计划 P1 的 `actions`、`dispatch`、`key` 改由单独的自动化工作区里的 gpui-mcp 提供（按元素 ID 点击、按键、输入、等待），见 [ADR 0056](../adr/0056.md)。
   - `locate`（P1）：节点到源码位置。`ui` 的语义包装元素用 `#[track_caller]` 记下调用位置，记录器一起记下；本 issue 先不输出。
   - CI 检查「可交互元素都带 ID」：等视图 crate 有内容后，随第一个视图的实现 PR 加入。
   - 多窗口：协议里的 `window` 参数已预留；P0 只有一个窗口。
@@ -239,7 +239,7 @@ lectern-probe … raw '<一行 JSON 请求>'
 
 ### 输入
 
-P0 只读。原因：issue #6 的范围是 `ui_tree` 与 `screenshot`，G1 关卡验证的是「agent 能否靠树和截图看懂界面」；视图层还没有内容，没有可触发的 Action。协议的方法名空间已为 P1 预留（`actions`、`dispatch`、`key`、`locate`）。`quit` 是生命周期操作，不算输入。
+P0 只读。原因：issue #6 的范围是 `ui_tree` 与 `screenshot`，G1 关卡验证的是「agent 能否靠树和截图看懂界面」；视图层还没有内容，没有可触发的 Action。`quit` 是生命周期操作，不算输入。原来为 P1 预留的输入方法（`actions`、`dispatch`、`key`）不再做：agent 的输入改由 gpui-mcp 提供（[ADR 0056](../adr/0056.md)）；`locate` 仍留在 P1。
 
 ## 数据结构
 

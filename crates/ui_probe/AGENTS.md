@@ -1,6 +1,6 @@
 # ui_probe（`lectern-ui-probe`）
 
-UI 探针：导出语义树（`ui_tree`）和带元素标注的截图（`screenshot`），让 agent 能读取和操作运行中的 Lectern（[技术调研「UI 结构探针」](../../docs/design/tech-research.md#6-ui-结构探针)）。
+UI 探针：导出语义树（`ui_tree`）和带元素标注的截图（`screenshot`），让 agent 能读取运行中的 Lectern（[技术调研「UI 结构探针」](../../docs/design/tech-research.md#6-ui-结构探针)）。
 
 - 层：tool 层，只用于调试与测试构建，可以依赖任何层。只有 `app` 可以依赖本 crate，本 crate 不进入发布构建。
 - 设计文档：[docs/design/ui_probe.md](../../docs/design/ui_probe.md)（已接受，实现中）。实现按它的「验收」分四步：第 3 步（本 crate）已实现；第 4 步（`app` 的 probe profile、`justfile` 的 `probe` 配方、端到端测试 `crates/app/tests/probe.rs`）已实现，`app` 通过可选依赖和 `ui-probe` feature 依赖本 crate。
@@ -9,7 +9,7 @@ UI 探针：导出语义树（`ui_tree`）和带元素标注的截图（`screens
 ## 边界
 
 - 只在调试和测试构建中编译，发布构建不包含。
-- 只通过 Action 操作界面，不模拟坐标点击。P0 只读：`hello`、`ui_tree`、`screenshot`、`quit`。
+- 只读：`hello`、`ui_tree`、`screenshot`、`quit`。不做输入：点击、按键和 Action 由单独的自动化工作区里的 gpui-mcp 提供（[ADR 0056](../../docs/adr/0056.md)）。
 - 语义节点的声明与记录在 `lectern-ui`（`semantic` 模块），本 crate 只读 `Recorder` 的记录；视图 crate 不依赖本 crate。
 - 日志只经 `lectern-logging` 的宏，target 为 `ui_probe`。不记请求和应答的 JSON、节点的标签文字、业务键、属性值、窗口标题和像素；`method` 记 `'static` 的固定表（未知方法记 `"unknown"`），路径只经 `Value::path`。库部分不用 `println!` / `eprintln!`，只有二进制 `lectern-probe` 打印。
 - 主线程上的工作只有取帧和 `render_to_image`；标注、PNG 编码、写文件、JSON 编码都在连接线程。
