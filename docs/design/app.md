@@ -485,8 +485,11 @@ target 为 `app`。
 - **`app` 的扩展点。** 库多一个入口，主工作区自己不用它：
 
   ```rust
-  /// 主线程。每个窗口在 `workspace` 接管之后调用一次：首帧之后的启动屏障末尾（`Started` 设好之后），
-  /// 以及点 Dock 重开的窗口（`window::reopen` 里 `attach` 之后）。test profile 没有窗口，不调用。
+  /// 主线程。每个窗口在 `workspace` 接管之后调用一次，只在两处：
+  /// - 启动屏障第一次成功放开时，`cx.set_global(Started { .. })` 之后，且 `window` 是 `Some`。
+  ///   正在退出或早期日志已被取走而提前返回的 `release_in` 不调用；test profile 传 `None`，不调用。
+  /// - 点 Dock 重开的窗口：`window::reopen` 里 `Started.shell` 是 `Some` 的分支，`attach` 之后。
+  ///   屏障放开之前重开的窗口由它自己的屏障调用一次，不会调用两次。
   pub type OnWindow = Rc<dyn Fn(AnyWindowHandle, &mut App)>;
 
   #[derive(Default)]
@@ -503,18 +506,22 @@ target 为 `app`。
 - **自动化工作区。** 目录 `tools/automation/`，有自己的 `Cargo.toml`（`[workspace]`）和 `Cargo.lock`，根 `Cargo.toml` 用 `exclude` 把它排除在主工作区之外。包 `lectern-automation`（`[package.metadata.lectern] layer = "tool"`），只有一个二进制 `lectern-automation`。目录里有 `AGENTS.md` 和指向它的 `CLAUDE.md`。
   - 依赖：`lectern-app`、`lectern-logging`（路径依赖）；`gpui = { package = "gpui-pre", version = "=0.3.7" }`；`gpui-mcp`（git，固定 `rev`，`default-features = false, features = ["gpui-pre"]`）。
   - `[patch.crates-io] gpui-pre = { git = "https://github.com/themixednuts/gpui-mcp", rev = … }`，与 `gpui-mcp` 的 `rev` 相同。主工作区的 crate 作为路径依赖编进来，它们的 `workspace = true` 仍从主工作区的根继承，版本不会分叉。
-  - `main`：`lectern_app::run_with(Hooks { on_window: Some(install) })`。`install` 在窗口里调用 `BridgeHandle::install(window, cx, BridgeConfig::new(AppId::new("lectern")?, "Lectern"))`，把句柄存进自己的全局（新窗口的句柄替换旧的，旧窗口已关闭）。失败时用 `lectern-logging` 记 warn `automation bridge failed`（只带错误的种类），应用照常运行。
+  - `main`：`lectern_app::run_with(Hooks { on_window: Some(install) })`。`install` 在窗口里调用 `BridgeHandle::install(window, cx, BridgeConfig::new(AppId::new("lectern")?, "Lectern"))`，配置里用 `.endpoint_dir(…)` 指定端点目录（见「`HOME` 与端点目录」，路径来自配方传入的环境变量 `LECTERN_MCP_ENDPOINTS`，没有这个变量时不装桥接并记 warn），把句柄存进自己的全局（新窗口的句柄替换旧的，旧窗口已关闭）。失败时用 `lectern-logging` 记 warn `automation bridge failed`（只带错误的种类），应用照常运行。
   - `tracing`：Lectern 不安装 `tracing` 的订阅者。实现时检查本工作区的 `cargo tree -e features -i tracing`：没有 `log` feature，gpui-mcp 的记录就被丢弃；有的话，在 `install` 之前把 gpui-mcp 的 target 加进日志过滤，不让它们进入 Lectern 的日志（ADR 0046）。
-- **`HOME`。** 应用和 MCP 服务端用同一个目录作 `HOME`：仓库根下的 `target/automation/home`（配方建好并设成 0700；`target/` 不入库）。gpui-mcp 在 `$HOME/Library/Application Support/gpui-mcp` 里放端点描述，两边看到的是同一个目录。应用不读用户真实的 `HOME`，也就不读用户真实的 agent 会话目录。
+- **`HOME` 与端点目录。**
+  - `HOME`：应用和 MCP 服务端用同一个目录：仓库根下的 `target/automation/home`（配方建好并设成 0700；`target/` 不入库）。应用不读用户真实的 `HOME`，也就不读用户真实的 agent 会话目录。
+  - 端点目录不放在 `HOME` 下。gpui-mcp 在 macOS 上的端点是 Unix 套接字 `<端点目录>/mcp-<16 位十六进制>.sock`，默认的端点目录是 `$HOME/Library/Application Support/gpui-mcp`；macOS 的 `sun_path` 只有 104 字节，在 worktree 里这条路径有 163 字节，在主 checkout 里约 129 字节，监听会失败。所以两边显式指定一个短目录：`/tmp/lectern-mcp-<uid>`（解析后 `/private/tmp/lectern-mcp-501/mcp-<16 位>.sock` 是 54 字节）。应用经 `BridgeConfig::endpoint_dir`，服务端经 `--endpoint-dir`。这个目录只与用户有关，与 worktree 无关，几个 worktree 的应用共用它，服务端都能发现。
+  - `/tmp` 是共享目录，配方先检查再用：不存在时以 0700 新建；存在但是符号链接、不属于当前用户或权限不是 0700 时，报错并以退出码 1 结束，不使用它。gpui-mcp 自己也会把它设成 0700 并核对所有者。
+  - 残留的端点：被杀掉的进程会留下 `mcp-*.sock` 和描述文件。`just automation` 启动前，当前用户没有正在运行的 `lectern-automation`（`pgrep -u <uid> -x lectern-automation`）时清空这个目录；有的时候不动它，服务端会跳过连不上的套接字。
 - **`justfile` 配方。** 固定的提交只写在 `tools/automation/Cargo.toml` 里，配方从 `tools/automation/Cargo.lock` 读出它，不另写一份。
-  - `just automation`：`cargo build --locked --manifest-path tools/automation/Cargo.toml`；建好 `HOME`；去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`LECTERN_LOG`，后台启动 `lectern-automation`，打印 pid。
+  - `just automation`：`cargo build --locked --manifest-path tools/automation/Cargo.toml`；建好 `HOME`，检查并清理端点目录（上一条）；去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`LECTERN_LOG`，设 `LECTERN_MCP_ENDPOINTS=<端点目录>`，后台启动 `lectern-automation`，打印 pid。`HOME` 只对 `lectern-automation` 这一个进程改，`cargo build` 仍用用户真实的 `HOME` 和 `CARGO_HOME`。
   - `just automation-server-install`：`cargo install --locked --git https://github.com/themixednuts/gpui-mcp --rev <提交> gpui-mcp-server --root target/automation/server`。第一次要几分钟，所以与启动分开。
-  - `just automation-server`：服务端没装时报错并提示上一条，退出码 1；装了就 `exec env HOME=<同一个目录> target/automation/server/bin/gpui-mcp`（stdio）。配方本身不向 stdout 打印任何东西，stdout 只留给 MCP。
+  - `just automation-server`：服务端没装时报错并提示上一条，退出码 1；装了就检查端点目录（同上），再 `exec env HOME=<同一个目录> target/automation/server/bin/gpui-mcp --endpoint-dir <端点目录>`（stdio）。配方里不 `export HOME`，`cargo install` 仍用用户真实的 `CARGO_HOME`。配方本身不向 stdout 打印任何东西，stdout 只留给 MCP。
 - **MCP 客户端配置。** 仓库根的 `.mcp.json` 登记一个服务端 `lectern-gpui`：`{ "command": "just", "args": ["automation-server"] }`。Claude Code 对项目里的 MCP 服务端要先征得用户同意才启动。
 - **范围之外。** CI 不构建自动化工作区，`just check`、`just test`、`just deny` 也不覆盖它（ADR 0056「已知限制」）。不做 Codex 的 MCP 配置。
 - **性能。** 主工作区的构建只多了 `run_with` 和一次 `Option` 判断，冷启动、空闲内存、安装包不变。自动化构建不是用户场景，不计入预算。
-- **日志。** `automation bridge failed`（target `automation`，warn，字段 `error` 只是种类）。桥接安装成功时记 info `automation bridge installed`，不带路径和令牌。
-- **测试。** `app` 的 `src/tests/`：`#[gpui::test]` 确认 `run_with` 的回调在屏障放开后对窗口调用一次、在 `reopen` 后再调用一次，test profile 不调用（用测试替身计数，不需要 gpui-mcp）。自动化工作区没有自动测试；它的验收是手动的（「验收」）。
+- **日志。** `automation bridge failed`（target `automation`，warn，字段 `error` 只是种类；没有 `LECTERN_MCP_ENDPOINTS` 时种类是 `no-endpoint-dir`）。桥接安装成功时记 info `automation bridge installed`，不带路径和令牌。
+- **测试。** `app` 的 `src/tests/`：`#[gpui::test]` 确认 `run_with` 的回调在屏障放开后对窗口调用一次、在 `reopen` 后再调用一次；屏障之前重开的窗口只调用一次；正在退出时提前返回的 `release_in` 不调用；test profile 不调用（用测试替身计数，不需要 gpui-mcp）。自动化工作区没有自动测试；它的验收是手动的（「验收」）。
 
 ## 测量构建的装配
 
@@ -733,10 +740,11 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 **自动化构建（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，`Closes #310`）。** 在 GPUI 降到 0.3.7 之后（ADR 0056）。
 
-- 「自动化构建的装配」「测试」里的测试通过：`just test -p lectern-app`。
+- 「自动化构建的装配」「测试」里的测试通过：`just test -p lectern-app`。测试覆盖：屏障放开后调用一次；`reopen` 后再调用一次；屏障之前重开的窗口只调用一次；正在退出时提前返回的 `release_in` 不调用；test profile 不调用。
+- 端点目录的检查：把 `/tmp/lectern-mcp-<uid>` 换成一个指向别处的符号链接，或把它的权限改成 0755，`just automation` 和 `just automation-server` 都以退出码 1 结束。
 - `cargo tree --locked -p lectern-app -e normal --target aarch64-apple-darwin` 里没有 `gpui-mcp`、`tokio`、`interprocess`；根 `Cargo.toml` 没有 `[patch]`；`cargo deny --locked check` 通过。
 - `cargo build --locked --manifest-path tools/automation/Cargo.toml` 成功。
-- 手动：`just automation-server-install`、`just automation` 之后，经 `just automation-server` 连上的 MCP 客户端里 `list_apps` 能看到 `lectern`；`get_ui_tree` 里有视图声明的语义 ID（如 `welcome.*`、`review.*`）；按元素打开一个会话，选中 diff 里的一行，按 Space，上下文面板出现，`get_element` 量到的宽度是 420 pt，离工具栏下沿、窗口右边和底边各 8 pt（[workspace 设计](workspace.md)）。截图写进「实际验证」。
+- 手动：`just automation-server-install`、`just automation` 之后，端点目录里有一个 `mcp-*.sock`，它的完整路径短于 104 字节；经 `just automation-server` 连上的 MCP 客户端里 `list_apps` 能看到 `lectern`；`get_ui_tree` 里有视图声明的语义 ID（如 `welcome.*`、`review.*`）；按元素打开一个会话，选中 diff 里的一行，按 Space，上下文面板出现，`get_element` 量到的宽度是 420 pt，离工具栏下沿、窗口右边和底边各 8 pt（[workspace 设计](workspace.md)）。截图写进「实际验证」。
 
 ## 实际验证
 
