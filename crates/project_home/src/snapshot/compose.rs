@@ -356,17 +356,12 @@ fn main_model(
             missing.push(entry.session.clone());
             continue;
         };
-        match entry.progress {
-            None => needs_review.push(card(summary, entry, inputs.now, listed, true)),
-            Some(p) if p.seen < p.total || p.changed_since_seen > 0 => {
-                needs_review.push(card(summary, entry, inputs.now, listed, true));
-            }
-            Some(p) if p.total > 0 => {
-                done.push(card(summary, entry, inputs.now, listed, false));
-            }
-            // No files at all: nothing to review and nothing done.
-            Some(_) => {}
+        if entry.needs_review() {
+            needs_review.push(card(summary, entry, inputs.now, listed, true));
+        } else if entry.progress.is_some_and(|p| p.total > 0) {
+            done.push(card(summary, entry, inputs.now, listed, false));
         }
+        // Otherwise no files at all: nothing to review and nothing done.
     }
     let outside = if folder {
         OutsideRow::Hidden
