@@ -328,7 +328,7 @@ agent 无法直接观察界面，验收结果需要能被程序自动判定。
 
 ### 6. UI 结构探针
 
-只给 agent 截图不够：agent 需要从像素推断每块区域是什么、对应哪段代码。网页开发有 DOM 和 Playwright，GPUI 没有对应工具。Zed 自带的 GPUI inspector 能给元素生成路径式 ID 并跳到源码，但只在调试构建里供人点选，没有层级视图，也没有对外接口；社区的 gpui-devtools 同样是应用内工具。所以 Lectern 需要一层自己的「UI 探针」，相当于为 GPUI 做一个精简版 Playwright。
+只给 agent 截图不够：agent 需要从像素推断每块区域是什么、对应哪段代码。网页开发有 DOM 和 Playwright，GPUI 没有对应工具。Zed 自带的 GPUI inspector 能给元素生成路径式 ID 并跳到源码，但只在调试构建里供人点选，没有层级视图，也没有对外接口；社区的 gpui-devtools 同样是应用内工具。之后出现的社区工具 gpui-mcp 提供进程外的 MCP 接口，但要给 GPUI 打补丁，Lectern 在一个单独的自动化工作区里接入它做输入，发布构建不带补丁（[ADR 0056](../adr/0056.md)）。所以 Lectern 需要一层自己的「UI 探针」，相当于为 GPUI 做一个精简版 Playwright。
 
 > 图：UI 探针 · agent 读取与操作运行中的 Lectern（交互图见原设计文档）
 
@@ -338,7 +338,7 @@ agent 无法直接观察界面，验收结果需要能被程序自动判定。
 - **稳定、可读的元素 ID**：按 `视图.区域.条目[业务键]` 命名，例如 `review.files.item[apps/nutrition/App.tsx]`，业务键用路径或会话 ID，不用列表下标。CI 检查可交互元素都带 ID。
 - **截图与树对齐**：截图上叠加元素边框和短编号，编号与语义树节点一一对应，多模态 agent 看图时能直接说出「第 12 号元素错位了」。
 - **从元素到源码**：视图构造函数用 `#[track_caller]` 记录调用位置，`locate` 返回文件与行号；只记录业务视图层，避免像 Zed inspector 那样都指向公共组件。
-- **只通过 Action 操作**：GPUI 的 Action 是带名字的结构体，探针可列出并触发它们；比模拟坐标点击更稳定，也顺带保证所有功能都能用快捷键完成。
+- **按元素操作**：不让 agent 给坐标，而是按元素 ID 点击、按键、触发 Action，比模拟坐标点击更稳定。这部分由单独的自动化工作区里的社区工具 gpui-mcp 提供，`ui_probe` 只负责读（[ADR 0056](../adr/0056.md)）。
 - **零性能成本**：`ui_probe` 是独立 crate，用 Cargo feature 开关，只在调试和测试构建中编译，发布构建不包含它。
 - **同一套接口服务三种场景**：agent 开发时连运行中的应用；`#[gpui::test]` 里直接调用同样的函数做断言；CI 里把语义树存成 insta 快照，布局变化会变成可读的文本 diff。
 - **后续可接系统无障碍树**：Zed 在 2026 年已带「实验性 accessibility」开关。若 GPUI 稳定支持 macOS 无障碍树，语义节点可以直接映射过去，既服务读屏用户，也让通用的 computer-use 工具能读取 Lectern 的界面结构。
