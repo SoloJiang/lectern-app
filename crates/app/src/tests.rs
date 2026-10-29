@@ -4,6 +4,7 @@
 mod args;
 #[cfg(feature = "bench-probe")]
 mod bench;
+mod hooks;
 mod leave;
 mod logs;
 #[cfg(feature = "ui-probe")]

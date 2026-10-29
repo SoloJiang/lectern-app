@@ -1,0 +1,44 @@
+# The automation build (ADR 0056, docs/design/app.md「自动化构建的装配」):
+# `lectern` with gpui-mcp's bridge, on gpui-mcp's patched GPUI. Its own
+# workspace, so the `[patch]` below never reaches the main workspace or a
+# release build. Not in CI, `just check`, `just test` or `just deny`.
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "lectern-automation"
+description = "The automation build: lectern with the gpui-mcp bridge on gpui-mcp's patched GPUI."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.lectern]
+layer = "tool"
+
+[[bin]]
+name = "lectern-automation"
+path = "src/main.rs"
+
+[dependencies]
+lectern-app = { path = "../../crates/app" }
+lectern-logging = { path = "../../crates/logging" }
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+# The rev is the only place the commit is written; the `just` recipes read it
+# back from Cargo.lock. Change it here and in `[patch]` together.
+gpui-mcp = { git = "https://github.com/themixednuts/gpui-mcp", rev = "eb248ccf43847797b9067c47eeef1dd188dc03a6", default-features = false, features = ["gpui-pre"] }
+
+# gpui-mcp's GPUI with its three patches (automation, font-fallback, grid).
+[patch.crates-io]
+gpui-pre = { git = "https://github.com/themixednuts/gpui-mcp", rev = "eb248ccf43847797b9067c47eeef1dd188dc03a6" }
+
+# As the main workspace's release profile, so the app under automation runs
+# the same optimised code.
+[profile.dev]
+debug = "limited"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 2

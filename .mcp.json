@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lectern-gpui": {
+      "command": "just",
+      "args": ["automation-server"]
+    }
+  }
+}

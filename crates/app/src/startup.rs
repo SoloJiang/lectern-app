@@ -179,6 +179,11 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
         #[cfg(feature = "ui-probe")]
         probe,
     });
+    // The automation build's callback, after the first frame and once
+    // `workspace` has the window. The test profile passes no window.
+    if let Some(window) = window {
+        crate::hooks::window_ready(window, cx);
+    }
 }
 
 /// What `assemble` made.

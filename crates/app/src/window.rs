@@ -124,6 +124,9 @@ pub fn reopen(cx: &mut App) {
     if let Some(shell) = shell {
         shell.window_state.window_changed(window, frame);
         shell.host.attach(window, cx);
+        // Before the barrier there is no shell: the new window's own
+        // barrier calls the hook.
+        crate::hooks::window_ready(window, cx);
     }
 }
 
