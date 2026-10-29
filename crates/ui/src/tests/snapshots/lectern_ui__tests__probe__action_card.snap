@@ -24,4 +24,26 @@ source: crates/ui/src/tests/probe.rs
         visible: true,
         parent: None,
     },
+    Node {
+        id: "snap.root.clone",
+        role: Button,
+        label: Some(
+            Label {
+                key: Some(
+                    "common-ok",
+                ),
+                text: "OK",
+            },
+        ),
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: true,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
 ]
