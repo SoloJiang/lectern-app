@@ -9,6 +9,7 @@ mod args;
 mod bench;
 #[cfg(debug_assertions)]
 mod debug_quit;
+mod hooks;
 #[cfg(feature = "ui-probe")]
 mod probe;
 mod profile;
@@ -26,8 +27,16 @@ use lectern_logging::EarlyConfig;
 use crate::profile::Profile;
 use crate::startup::Startup;
 
+pub use crate::hooks::{Hooks, OnWindow};
+
 /// The whole program; `main` only calls it.
 pub fn run() {
+    run_with(Hooks::default());
+}
+
+/// [`run`] with `hooks`, for the automation build (docs/design/app.md
+/// 「自动化构建的装配」). The main workspace does not use it.
+pub fn run_with(hooks: Hooks) {
     // Before the first frame: memory only, no thread, no file of ours
     // (docs/design/app.md「启动顺序」, ADR 0017).
     let args = args::parse(std::env::args_os());
@@ -68,6 +77,7 @@ pub fn run() {
         #[cfg(feature = "ui-probe")]
         let startup = probe::select(startup);
         cx.set_global(startup);
+        cx.set_global(hooks);
         quit::init(cx);
         #[cfg(debug_assertions)]
         debug_quit::init(cx, args.quit_after_start);

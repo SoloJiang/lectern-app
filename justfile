@@ -139,6 +139,45 @@ probe:
     echo "export LECTERN_UI_PROBE_DIR=$dir"
     echo "pid $!"
 
+# The automation build (ADR 0056, docs/design/app.md「自动化构建的装配」):
+# `lectern` with gpui-mcp's bridge, started in the background with a HOME
+# under target/automation. Not part of `check`, `test`, `deny` or CI.
+automation:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest=tools/automation/Cargo.toml
+    cargo build --locked --manifest-path "$manifest"
+    bin="$(cargo metadata --locked --no-deps --format-version 1 --manifest-path "$manifest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/lectern-automation"
+    endpoints="$(scripts/automation_endpoints.sh --clean)"
+    root="{{justfile_directory()}}/target/automation"
+    mkdir -p "$root/home"
+    chmod 0700 "$root/home"
+    HOME="$root/home" LECTERN_MCP_ENDPOINTS="$endpoints" \
+        nohup env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u LECTERN_LOG "$bin" \
+        >"$root/lectern.out" 2>&1 </dev/null &
+    echo "pid $!"
+
+# gpui-mcp's MCP server, at the commit tools/automation/Cargo.lock records,
+# into target/automation/server. Takes a few minutes the first time.
+automation-server-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev="$(sed -nE 's|^source = "git\+https://github.com/themixednuts/gpui-mcp\?rev=[0-9a-f]+#([0-9a-f]{40})"$|\1|p' tools/automation/Cargo.lock | head -1)"
+    [[ -n $rev ]] || { echo "error: no gpui-mcp commit in tools/automation/Cargo.lock" >&2; exit 1; }
+    cargo install --locked --git https://github.com/themixednuts/gpui-mcp --rev "$rev" gpui-mcp-server --root target/automation/server
+
+# The MCP server on stdio, for .mcp.json. Prints nothing else on stdout.
+automation-server:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{justfile_directory()}}/target/automation"
+    bin="$root/server/bin/gpui-mcp"
+    [[ -x $bin ]] || { echo "error: run just automation-server-install first" >&2; exit 1; }
+    endpoints="$(scripts/automation_endpoints.sh)"
+    mkdir -p "$root/home"
+    chmod 0700 "$root/home"
+    exec env HOME="$root/home" "$bin" --endpoint-dir "$endpoints"
+
 # Licenses, sources and advisories.
 deny:
     cargo deny --locked check

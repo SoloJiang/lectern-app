@@ -34,6 +34,9 @@ members = [
     "crates/ui_probe",
     "crates/doc_check",
 ]
+# The automation build has its own workspace and lock: its `[patch]` must not
+# reach this one (ADR 0056).
+exclude = ["tools/automation"]
 
 [workspace.package]
 version = "0.0.0"

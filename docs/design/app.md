@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已接受，尚未实现。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查等 `review-view-handoff` 装配后再做（「与设计的差异」）。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -744,7 +744,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 - 端点目录的检查：把 `/tmp/lectern-mcp-<uid>` 换成一个指向别处的符号链接，或把它的权限改成 0755，`just automation` 和 `just automation-server` 都以退出码 1 结束。
 - `cargo tree --locked -p lectern-app -e normal --target aarch64-apple-darwin` 里没有 `gpui-mcp`、`tokio`、`interprocess`；根 `Cargo.toml` 没有 `[patch]`；`cargo deny --locked check` 通过。
 - `cargo build --locked --manifest-path tools/automation/Cargo.toml` 成功。
-- 手动：`just automation-server-install`、`just automation` 之后，端点目录里有一个 `mcp-*.sock`，它的完整路径短于 104 字节；经 `just automation-server` 连上的 MCP 客户端里 `list_apps` 能看到 `lectern`；`get_ui_tree` 里有视图声明的语义 ID（如 `welcome.*`、`review.*`）；按元素打开一个会话，选中 diff 里的一行，按 Space，上下文面板出现，`get_element` 量到的宽度是 420 pt，离工具栏下沿、窗口右边和底边各 8 pt（[workspace 设计](workspace.md)）。截图写进「实际验证」。
+- 手动：`just automation-server-install`、`just automation` 之后，端点目录里有一个 `mcp-*.sock`，它的完整路径短于 104 字节；经 `just automation-server` 连上的 MCP 客户端里 `list_apps` 能看到 `lectern`；`get_ui_tree` 里有视图声明的语义 ID（如 `welcome.*`、`review.*`）；按元素点击最近项目的一行，窗口进入项目主页（`project-home-screen` 出现）；`screenshot` 能截到窗口。上下文面板（Space，420 pt 宽，离工具栏下沿、窗口右边和底边各 8 pt，[workspace 设计](workspace.md)）在 `review-view-handoff` 装配之后用同样的方法检查（「与设计的差异」）。结果写进「实际验证」。
 
 ## 实际验证
 
@@ -810,6 +810,18 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 - 无探针的启动，日志里有一条 gpui 的 error `RefCell already borrowed`（`gpui-pre` 的 `window.rs`，时间在 `first frame drawn` 之前）。在 c880521（本 PR 的基线，没有本 PR 的改动）上建发布版，临时 `HOME`、`LECTERN_LOG=debug` 启动两次，每次也有这一条，所以不是本 PR 引入的，本 PR 没有改。可能的原因（未验证）：`set_frame_autosave_name` 让 AppKit 在 `open_window` 的回调里同步改了窗口大小（已保存的高度是 521，请求的是 520），GPUI 的 `on_resize` 处理函数此时拿不到 `App`。有探针的一次完整会话（`LECTERN_BENCH_SOCKET` 指向一个监听的 socket，`LECTERN_LOG=debug`）里没有 error 记录。
 - 副作用：这些运行改了真实用户 defaults 域 `lectern` 里的 `NSWindow Frame welcome`（窗口位置），测完后已按测前读到的值写回。
 
+自动化构建（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，同一台机器：macOS 27.0.1，Apple M5 Pro，Rust 1.97.0）：
+
+- `just check` 通过；`just test -p lectern-app` 48 个测试通过，含 `src/tests/hooks.rs` 的 5 个（屏障放开后只调用一次，第二次放开不再调用；test profile 不调用、退出之后的屏障不调用、屏障之前的 Dock 重开不调用、有 workspace 时 Dock 重开对新窗口调用）。
+- `cargo clippy --locked --manifest-path tools/automation/Cargo.toml -- -D warnings` 通过；`Cargo.lock` 里 `gpui-pre` 的来源是 `git+https://github.com/themixednuts/gpui-mcp?rev=eb248cc…`，根 `Cargo.toml` 没有 `[patch]`。`cargo tree -e features -i tracing`（自动化工作区）里没有 `log` feature，gpui-mcp 的 `tracing` 记录被丢弃。
+- `scripts/automation_endpoints.sh`：端点目录权限改成 0755、换成指向 `/tmp` 的符号链接，各以退出码 1 结束并说明原因。
+- 手动（`just automation-server-install`、`just automation`，服务端经 `just automation-server` 用一个 stdio 上的 MCP 客户端调用）：
+  - 端点目录里有 `mcp-<16 位>.sock`，解析后的路径 54 字节；`list_apps` 列出 `lectern`（能力：`semantic_tree`、`input`、`screenshot` 等）。
+  - `get_ui_tree` 里有 `welcome`、`welcome.open-folder`、`welcome.clone`、`welcome.language`、`welcome.recent.item[…]`。
+  - 在临时 `HOME` 的 `recent.json` 里放一个合成的 git 仓库，`click_element` 点它的行：树变成 `project-home-screen`、`workspace-sidebar`（248 pt 宽）、`workspace-toolbar`（52 pt 高），与 `workspace` 的常量一致。
+  - `screenshot` 截到窗口（这台机器已给终端屏幕录制权限）。截图里窗口是 1180 × 760 pt，GPUI 的布局和绘制仍是 820 × 521 pt，其余部分空白：打开项目时 AppKit 套用了已保存的 `"project"` frame，GPUI 没有收到改大小（另开 issue，不在本 PR）。
+  - frame autosave 写在 AppKit 的 user defaults 域 `lectern-automation` 里（cfprefsd 不看 `HOME`），与发布构建的 `lectern` 域分开。
+
 ## 与设计的差异
 
 - **「项目」窗口第一次使用时 1180 × 760 pt 居中**（[#215](https://github.com/SoloJiang/lectern-app/issues/215)）：原来是「已知限制」里的一条（GPUI 不能移动窗口，`app` 做不到）。现在 `window_state::apply_name` 设 `"project"` 时调 `platform::window::set_frame_autosave_name_or_center(window, "project", (1180.0, 760.0))`，设 `"welcome"` 时仍调 `set_frame_autosave_name`；`window_state` 的改名和 `window::open_named`（Dock 重开）都经它。没有保存过 frame 时窗口先设尺寸、居中，再设名字，保存下来的就是居中后的 frame（[platform 设计「窗口 frame 的 autosave」](platform.md#窗口-frame-的-autosave)）。
@@ -818,6 +830,12 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 - **`--quit-after-start` 等日志文件出现。** 屏障放开后写盘线程异步建文件；立即退出时测试与建文件竞争。现在调试入口在后台任务里查到 `lectern-*.log` 之后才退出（「测试」已改）。
 - **测试名与超时。** `quit_before_release_quits_at_once` 改为 `quit_before_release_starts_nothing`：TestPlatform 的 `quit()` 不做任何事，测试只能检查没有启动任何东西。新增 `a_dropped_done_is_not_a_timeout`。启动测试的超时从 10 s 改为 30 s：调试构建在 CI 上第一次启动较慢，超时只防卡住（「测试」已改）。
 - **窗口不在前台时屏障更晚。** 原文按 60 Hz 估计屏障最多晚 33 ms；GPUI 对非前台窗口按 30 fps 请求帧，实测晚约 90–100 ms（「已知限制」已改）。只推迟后台初始化，不影响首帧。
+
+自动化构建：
+
+- **桥接延后一轮安装。** 屏障在窗口的帧回调里调用回调，这时窗口正在被更新，`AnyWindowHandle::update` 返回错误（实测记 `automation bridge failed`，种类 `window-closed`）。`lectern-automation` 的回调用 `cx.defer` 在这次更新结束后安装；`app` 的调用位置不变。
+- **上下文面板的检查推后。** Space 由 `review-view-handoff` 处理（`open_context` 要 `dyn CodeIntel`），它没有装配，所以真实窗口里还打不开上下文面板。手动验收改为点击最近项目进入项目主页；420 pt 面板在 `review-view-handoff` 装配后用 gpui-mcp 检查。
+- **端点目录的检查在 `scripts/automation_endpoints.sh`。** `just automation` 和 `just automation-server` 共用它，`--clean` 只给前者。
 
 第 2 步：
 
