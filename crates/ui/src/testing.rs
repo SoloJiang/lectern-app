@@ -1,7 +1,7 @@
 //! Test support (`test-support` feature): the hooks the design's
 //! `#[gpui::test]`s need. GPUI's test platform cannot change a window's
 //! appearance from outside GPUI (`TestAppContext::test_window` is
-//! crate-private in gpui-pre 0.3.9), so the handlers behind `attach`'s
+//! crate-private in gpui-pre 0.3.7), so the handlers behind `attach`'s
 //! observer and `init`'s watch callback are called directly here.
 
 use std::time::Instant;

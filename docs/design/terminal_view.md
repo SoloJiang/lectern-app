@@ -187,7 +187,7 @@ GPUI 帧：render ─▶ 自建元素 prepaint（grid_size、Resize、行缓存�
 
 ### 键盘
 
-GPUI 先匹配快捷键，再调用元素的 `on_key_down`（gpui-pre 0.3.9 `window.rs` 的 `dispatch_key_event`）；在 macOS 上，正在组字、输入法开着时的可打印键、以及没有 `key_char` 的键先交给输入法（`gpui-pre-macos` 的 `handle_key_event`）。本视图按这个顺序处理：
+GPUI 先匹配快捷键，再调用元素的 `on_key_down`（gpui-pre 0.3.7 `window.rs` 的 `dispatch_key_event`）；在 macOS 上，正在组字、输入法开着时的可打印键、以及没有 `key_char` 的键先交给输入法（`gpui-pre-macos` 的 `handle_key_event`）。本视图按这个顺序处理：
 
 1. 快捷键（`key_bindings()`，上下文 `terminal`，比所有祖先上下文深）：
    - ⌘C → `Copy`，⌘V → `Paste`，⌘A → `SelectAll`。

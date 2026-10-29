@@ -70,11 +70,12 @@ layer = "domain"
 ## 工具链与 GPUI 锁定
 
 - **Rust**：`rust-toolchain.toml` 锁定 `1.97.0`，带 rustfmt、clippy 和 `aarch64-apple-darwin` 目标。edition 2024。
-- **GPUI**：Zed 把 GPUI 快照发布到 crates.io 的 `gpui-pre`，gpui-component 0.7.3 用 `=0.3.9` 精确锁定它（Zed `93d7456`）。工作区跟随 gpui-component 的锁定，不再用 git 依赖锁 Zed commit：
-  - `gpui = { package = "gpui-pre", version = "=0.3.9" }`
-  - `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }`：macOS 上必须开启 `font-kit`，否则 `gpui_macos` 退回空文字系统，界面不显示任何文字
-  - `gpui-component = "=0.7.3"`
-  - 三者只能一起升级，并且必须是 gpui-component 发布时使用的同一个快照。`Cargo.lock` 提交到仓库。
+- **GPUI**：Zed 把 GPUI 快照发布到 crates.io 的 `gpui-pre`，gpui-component 0.7.0 用 `=0.3.7` 精确锁定它（Zed `1a28cff`）。工作区跟随 gpui-component 的锁定，不再用 git 依赖锁 Zed commit（[ADR 0016](../adr/0016.md)；版本按 [ADR 0056](../adr/0056.md) 从 0.3.9 / 0.7.3 降下来，因为 gpui-mcp 的补丁只到 0.3.7）：
+  - `gpui = { package = "gpui-pre", version = "=0.3.7" }`
+  - `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit"] }`：macOS 上必须开启 `font-kit`，否则 `gpui_macos` 退回空文字系统，界面不显示任何文字
+  - `gpui-component = "=0.7.0"`；`ui` 的 `gpui-kit-assets = "=0.7.0"`
+  - 四者只能一起升级，并且必须是 gpui-component 发布时使用的同一个快照；另外要等 gpui-mcp 有目标版本的补丁，或者自己移植（ADR 0056）。`Cargo.lock` 提交到仓库。
+  - 本工作区没有 `[patch]`：打过补丁的 GPUI 只在单独的自动化工作区里（ADR 0056）。
 - **libghostty-vt**：在 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 中加入，届时锁定版本与 vendored Ghostty 源码。
 
 依赖只在 `[workspace.dependencies]` 里写版本，crate 内用 `{ workspace = true }` 引用，版本只有一处。
@@ -88,9 +89,11 @@ layer = "domain"
 
 - `cargo metadata` 能列出全部 crate，每个 crate 都有 `layer`。
 - `cargo check` 能通过领域层与基础设施层的全部 crate。
-- `Cargo.lock` 里 `gpui-pre` 为 `0.3.9`、`gpui-component` 为 `0.7.3`。
+- `Cargo.lock` 里 `gpui-pre` 为 `0.3.7`、`gpui-component` 为 `0.7.0`，来源都是 crates.io；根 `Cargo.toml` 里没有 `[patch]`。
 
 ## 实际验证
+
+[ADR 0056](../adr/0056.md) 的降级（#310）：gpui-pre、gpui-pre-platform 降到 0.3.7，gpui-component、gpui-kit-assets 降到 0.7.0。本机 `just check` 通过，`just test` 3112 个测试通过（7 个打开真实窗口的测试按惯例跳过，由 CI 运行）；`cargo deny` 只多出 `bzip2-1.0.6` 许可证（`libbz2-rs-sys`，经 gpui-pre-http-client 0.3.7）。设计文档里按 0.3.9 / 0.7.3 源码写下的事实逐条对照了 0.3.7 / 0.7.0 的源码，都成立，版本号已改。两处小差异：0.3.7 的 `profiler` 不记帧信号的时刻（[ADR 0048](../adr/0048.md) 放弃的方案之一，结论不变）；0.3.7 的 `uniform_list` 用 f32 计算行的位置（[ADR 0034](../adr/0034.md) 的阈值相同，`file_reader` 按行号加像素偏移滚动，不受影响）。
 
 [#50](https://github.com/SoloJiang/lectern-app/pull/50) 新增 tool crate `doc_check`，并让每个 crate 继承工作区 lint：
 

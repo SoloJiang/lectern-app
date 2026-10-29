@@ -16,7 +16,7 @@ gpui-component.workspace = true
 # `icon_assets!`: `IconAssets` embeds only the sixteen Lucide SVGs of `Icon`
 # (docs/design/ui.md「依赖」; already in Cargo.lock through gpui-component,
 # same version, upgraded together, ADR 0016).
-gpui-kit-assets = "=0.7.3"
+gpui-kit-assets = "=0.7.0"
 # `Strings`, `Key`, `FmtKey`, `Args`, `Locale`: the construction of `Text` (ADR 0013).
 lectern-i18n = { path = "../i18n" }
 # `appearance::{system_colors, reduce_motion, watch}`: the system colours and
