@@ -33,7 +33,7 @@
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
 | `gpui`、`gpui-component` | 元素、窗口外观、文字系统、动画元素；gpui-component 的 `Button`、`Icon` 作为底层（`Skeleton`、`ProgressCircle` 自带不可关的动画，不用，见「与设计的差异」第 3 步） | 已锁定（[ADR 0016](../adr/0016.md)） |
-| `gpui-kit-assets`（`=0.7.3`，gpui-component 的依赖） | `icon_assets!` 宏生成 `Icon` 的 16 个图标的资源来源，`IconAssets` 包着它再加上应用图标的 SVG（只嵌入这 17 个文件） | 已在 Cargo.lock，与 gpui-component 同版本、一起升级；直接依赖只为用它的宏 |
+| `gpui-kit-assets`（`=0.7.0`，gpui-component 的依赖） | `icon_assets!` 宏生成 `Icon` 的 16 个图标的资源来源，`IconAssets` 包着它再加上应用图标的 SVG（只嵌入这 17 个文件） | 已在 Cargo.lock，与 gpui-component 同版本、一起升级；直接依赖只为用它的宏 |
 | `lectern-i18n` | `Strings`、`Key`、`FmtKey`、`Args`、`Locale`：`Text` 的构造 | 界面字符串不硬编码（[ADR 0013](../adr/0013.md)） |
 | `lectern-platform` | `appearance::{system_colors, reduce_motion, watch}`（前置条件 A） | macOS 专属能力只在 `platform`（架构规则 6）；视图层可以依赖基础设施层 |
 | `lectern-services` | `workspace::Payload`：`contrib` 类型的 `into_payload`；`WorkspaceCommand`（`SidebarItem::on_select`） | kernel 层，任何层都可以依赖 |
@@ -969,7 +969,7 @@ pub mod semantic {
 
 第 3 步（macOS，Apple 芯片，macOS 27.0.1）：
 
-- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`ui` 新增直接依赖 `gpui-kit-assets =0.7.3`，GPUI 系的 crate，已在 Cargo.lock）。
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`ui` 新增直接依赖 `gpui-kit-assets =0.7.0`，GPUI 系的 crate，已在 Cargo.lock）。
 - `just test -p lectern-ui`：54 个测试通过，其中本步新增 16 个：`loading_phase_follows_the_thresholds`、`circle_check_animates_only_a_change_to_checked`、`segmented_fades_only_a_changed_selection`、`hint_expires_after_its_duration_and_the_fade`、`hint_shown_again_counts_from_the_new_instant`、`hint_frames_arrive_hold_and_fade`、`icon_assets_hold_every_icon`、`circle_check_toggles_from_key_and_click`（`v` 键经视图的 Action 与点击 16pt 元素中心都触发 `on_change`，填色动画的元素 ID 只由 `NodeId` 决定）、`segmented_slider_continues_from_current_position`、`every_control_renders_after_ready`（每个控件各渲染一次并推进三帧）、`control_before_ready_panics`、`node_id_formats_view_area_and_key`、两个调试构建下 `NodeId` 的 `should_panic`、`semantic_builder_takes_label_state_and_attrs`、`semantic_label_of_a_key_names_the_message`；`reduced_motion_has_no_displacement` 按第 2 步的说明扩到 `Expander` 的高度与 `Segmented` 的滑块；`logs_hold_no_text` 多渲染一个带金丝雀的 `Button`、`GroupedList`、`Row`（文本与业务键），断言的事件列表不变。
 - `just doctest`：`lectern-ui` 的 4 个 `compile_fail` 通过（新增 `Button::new(id, "literal")`）。
 - 验收的三条 `rg`（时长、颜色、IO）与 `rg 'set_reduce_motion'` 都没有结果；`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果。
@@ -1013,7 +1013,7 @@ pub mod semantic {
 - `init` 不读系统色。[platform 设计「系统外观」](platform.md#系统外观)实测本进程第一次 `system_colors` 约 2 ms（AppKit 第一次解析自己的动态颜色），超出 `ui/init` 的 300 µs；已决定推迟到首帧之后：`init` 只读 `reduce_motion`、登记 `watch`，`Palette` 从内置表建；`ready` 对两个外观各读一次并换掉 `Palette`。「初始化」「数据流与线程」「性能」「日志与诊断」已照改：`ui initialised` 的 `accent` 总是 `builtin`，`ui ready` 多一个 `accent` 字段，验收的手动检查看 `ui ready`。
 - 内置表的值取自本机 `platform::appearance::system_colors` 在 macOS 27.0.1 上的读数（`builtin.rs` 文件头写明日期），不是 HIG「Color」页面的值：HIG 只发布 13 个系统色，没有 `labelColor` 等语义色的数值，而且它列的是较早 macOS 的值，与当前系统差几个单位；取同一来源，内置表与实时读数一致。
 - `Type`、`Attribute` 改用 `system(Pink)`：按「代码配色」的检查，`Indigo` 与 `Blue` 在深色下的绿色盲模拟里 ΔE 只有 2.7，浅色下与 `Purple` 在红色盲模拟里 11.1；13 个系统色里只有 `Pink` 让五种颜色在两个外观、三种模拟下两两 ΔE ≥ 12（最小的一对是浅色红色盲模拟下的 `Pink` 与 `secondary_label`，14.3）且对比度 ≥ 3:1。`Red` 与 `Pink` 的 ΔE 在 15 到 17 之间，刚过门槛，视觉验收时如果字符串与类型分不开，再考虑把 `Number` 的颜色让出来。
-- `init_fixed` 的 `appearance` 是固定外观：`colors(window, cx)` 用它而不是窗口的外观。gpui-pre 0.3.9 的测试平台不能从 GPUI 之外改窗口的外观（`TestAppContext::test_window` 是 `pub(crate)`），所以外观变化的测试经 `testing::simulate_appearance_change(appearance, cx)`（`test-support` feature）直接调 `attach` 的观察者所调的那个处理函数，它在固定模式下同时改固定外观；`testing::simulate_platform_change(change, cx)` 同样直接调 `watch` 回调所排的处理函数。`app` 的 `appearance_change_refreshes_the_skeleton_window` 和 `appearance_change_before_ready_does_not_touch_the_theme` 也要走这两个钩子。
+- `init_fixed` 的 `appearance` 是固定外观：`colors(window, cx)` 用它而不是窗口的外观。gpui-pre 0.3.7 的测试平台不能从 GPUI 之外改窗口的外观（`TestAppContext::test_window` 是 `pub(crate)`），所以外观变化的测试经 `testing::simulate_appearance_change(appearance, cx)`（`test-support` feature）直接调 `attach` 的观察者所调的那个处理函数，它在固定模式下同时改固定外观；`testing::simulate_platform_change(change, cx)` 同样直接调 `watch` 回调所排的处理函数。`app` 的 `appearance_change_refreshes_the_skeleton_window` 和 `appearance_change_before_ready_does_not_touch_the_theme` 也要走这两个钩子。
 - `MonoMetrics::line_height` 是 `ascent + descent` 向上取到 0.5pt，不含 `line_gap`：GPUI 的 `TextSystem` 不按 `FontId` 公开 `line_gap`（只在私有的 `FontMetrics` 上），SF Mono 的 `line_gap` 为 0。`descent` 字段取绝对值（GPUI 照字体给出负值）。
 - 「解析失败」的判断按原文（目标家族的 `FontId` 与 GPUI 内置后备的相同），后备的 `FontId` 用一个不存在的家族名探出；如果探针家族与 `UI_FAMILY` 的 `FontId` 也相同（GPUI 的测试文字系统给所有家族同一个 id），视为无法探测、按 `MONO_FAMILY` 解析成功，不记 warn。
 - `attach` 的「重复调用只登记一次」按 `AnyWindowHandle` 记在 `UiState` 里，每次 `attach` 先去掉已关闭的窗口；重复调用返回一个空的 `Subscription`。

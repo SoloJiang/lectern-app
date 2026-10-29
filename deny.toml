@@ -29,6 +29,8 @@ allow = [
     "OFL-1.1",
     "Ubuntu-font-1.0",
     "CDLA-Permissive-2.0",
+    # libbz2-rs-sys, through gpui-pre-http-client 0.3.7 (ADR 0056).
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.9
 

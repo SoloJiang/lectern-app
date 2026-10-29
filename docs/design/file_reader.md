@@ -64,7 +64,7 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gpui`、`gpui-component =0.7.3`（不开 `tree-sitter` feature） | 自绘元素、`uniform_list`、`InputState` | ADR 0016、0034 |
+| `gpui`、`gpui-component =0.7.0`（不开 `tree-sitter` feature） | 自绘元素、`uniform_list`、`InputState` | ADR 0016、0034 |
 | `lectern-ui` | 系统色、代码配色、等宽字体度量、按钮、分段控件、动效原语 | ADR 0015 |
 | `lectern-syntax` | 文档快照、区间、编辑会话 | 视图只读快照（架构规则 4） |
 | `lectern-kernel`、`lectern-services` | 插件、`dyn Projects`、`dyn CodeIntel`、`dyn Contributions`，提供 `dyn Reader` | 插件之间只经 `services`（架构规则 7） |
@@ -765,7 +765,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 保存（⌘S）：`replace_file(rel, bytes, expect)` 在同一目录里写临时文件、`fsync`、比较当前身份、`renameat` 替换（见「对其他 crate 的要求」）。身份不同（agent 在这期间写过）时不写，`SaveResult::Conflict`，视图显示「磁盘上的文件已改动」的一行和三个按钮（见「界面」）。
 - 磁盘上的文件变了：缓冲区没有改动时静默重新载入（光标按行号保留）；有改动时只标记 `dirty_on_disk`、显示同一行提示，不自动覆盖任何一方（[交互规范「状态与异常」](interaction.md#状态与异常)）。
 - 合并：`git::merge3(base, ours, theirs)`，基准是进入编辑（或上次保存、合并）时的内容。没有冲突时结果写回缓冲区，仍是未保存；有冲突时冲突段带标记写回（`<<<<<<< editor`、`=======`、`>>>>>>> disk`，它们是文件内容、不走 i18n），视图滚到第一个冲突，用户改完再保存。
-- 快捷键：编辑时焦点在 `InputState` 上，⌘[ / ⌘] 归 gpui-component 在 `Input` 上下文里的绑定（⌘[ 是 Outdent，⌘] 是 Indent，gpui-base 0.7.3 `src/input/base/state.rs`），后退 / 前进不可用（按钮置灰，`file_reader::Back` / `Forward` 只绑定在不编辑时的阅读视图上下文里）；Esc 先交给 `InputState`（关闭它的查找、取消选区），没有可关闭的才算「离开编辑」。
+- 快捷键：编辑时焦点在 `InputState` 上，⌘[ / ⌘] 归 gpui-component 在 `Input` 上下文里的绑定（⌘[ 是 Outdent，⌘] 是 Indent，gpui-base 0.7.0 `src/input/base/state.rs`），后退 / 前进不可用（按钮置灰，`file_reader::Back` / `Forward` 只绑定在不编辑时的阅读视图上下文里）；Esc 先交给 `InputState`（关闭它的查找、取消选区），没有可关闭的才算「离开编辑」。
 
 **离开守卫**
 
@@ -783,7 +783,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 守卫的结果：没有未保存的改动时立即通过。有时弹出系统的确认（`file-reader-unsaved-*`：保存 / 不保存 / 取消）：保存 → `EditSession::save`，`Saved` 才通过，`Conflict` 或 `Failed` 时不通过（显示提示行，留在编辑里）；不保存 → 通过，drop `EditSession`；取消 → 不通过。
 - 接口：`dyn Contributions` 提供 `register_leave_guard(guard: Arc<dyn LeaveGuard>, token: Option<ActivationToken>) -> 守卫`（`activate` 里传 `None` 并交给 `ctx.own_staged`，之后传 `Some(handle.token())`；[workspace 设计「服务接口」](workspace.md#服务接口lectern-services-的-workspace-模块)）。`LeaveGuard::ask(scope: LeaveScope, done: Box<dyn FnOnce(bool)>)` 在主线程上调用，不阻塞，结果经 `done` 交回；`LeaveScope` 是 `View`（关闭或离开阅读视图）、`Project(ProjectKey)`、`Worktree(ProjectKey)`、`Window`、`App`。`workspace` 对一个操作按登记顺序逐个问，都通过才执行；本 crate 只对与这个范围相交、而且有未保存改动的文档回答「问用户」。
 - 关闭窗口：`workspace` 在 GPUI 的窗口关闭回调里先返回「不关闭」、问守卫、通过后再关闭。
-- 退出：锁定的 gpui-pre-macos 0.3.9 的应用代理只实现了 `applicationWillTerminate:`，`on_quit` 的返回值被忽略，退出一旦开始就不能取消；改 GPUI 要人确认（[ADR 0016](../adr/0016.md)）。所以 `app` 自己定义 `Quit` Action（纯 GPUI 代码，不碰 AppKit），⌘Q 和应用菜单的 Quit 都绑定到它。退出只有这一个顺序：
+- 退出：锁定的 gpui-pre-macos 0.3.7 的应用代理只实现了 `applicationWillTerminate:`，`on_quit` 的返回值被忽略，退出一旦开始就不能取消；改 GPUI 要人确认（[ADR 0016](../adr/0016.md)）。所以 `app` 自己定义 `Quit` Action（纯 GPUI 代码，不碰 AppKit），⌘Q 和应用菜单的 Quit 都绑定到它。退出只有这一个顺序：
   1. 经 `workspace` 问 `LeaveScope::App` 的离开守卫；取消时什么都不做，到此为止。
   2. 通过后调用 `Kernel::shutdown(done)`，按依赖的相反顺序停用全部插件（[kernel 设计「内核」](kernel.md#内核)）。等待期间主线程照常运行，需要在主线程上 drop 的守卫不会死锁。
   3. `done` 被调用之后，在后台线程上做两件可选的收尾：`Executor::shutdown(剩余时间)`（调用 `on_shutdown` 登记的回调、取消未结束的任务，[code_intel 设计「调度、批次与取消」](code_intel.md#调度批次与取消)的看门狗靠它退出）；`Cache::close()`（写回访问时间、关闭连接，[cache 设计「接口」](cache.md#接口)，不调用也安全）。
