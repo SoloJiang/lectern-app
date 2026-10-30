@@ -834,7 +834,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - `applies`：审阅对象是 `ReviewTarget::Session`。
   - `deliver`：按本文「一处驱动」选一条路。有终端在驱动这个会话（`for_session` 有值且 `info(id).state` 是 `Starting` 或 `Running`）就不经 ACP：`Running` 时 `Terminals::input(id, Input::Paste(text))`（不追加回车，用户在终端里按 ↵ 提交），答复 `Delivered(SentVia::TerminalPaste)`；`Starting` 时答复 `NotNow(RouteBlock::Starting)`（进程运行之前 `terminal` 丢弃发给程序的输入，terminal 设计「接口」的 `input`）。没有终端在驱动时，`can_prompt` 为 `Ok` 就发 `Conversations::command(Prompt { text, origin: ReviewNotes { count, locations } })`（`locations` 是 `NoteDelivery::locations` 按 `root` 拼成的绝对路径，没有行号的不列），答复 `Delivered(SentVia::Acp)`；为 `Err` 时按原因答复 `NotNow(Busy)` 或 `NotNow(NoSession)`。
   - 送出之后由 `review_view` 切到 Conversation 页（`dispatch(SelectInspectorTab("conversation"))`）。Conversation 页按本 crate 记下的上一次所在的页打开：用户在 Terminal 页恢复过这个会话、之后没有切走时就是 Terminal 页，否则 Messages 页上有「显示终端」。
-  - P1 只有终端一条路时，插件只 requires `dyn Review`、`dyn Terminals`，没有终端驱动时答复 `NotNow(NoSession)`；ACP 一条随 P3 加上。在这个途径登记之前，`review` 只有剪贴板途径。
+  - 分阶段：P1 的出口关卡 G2 不做这个途径，`review` 只有内置的剪贴板途径，用户把 Copy as Prompt 复制的 prompt 粘贴进会话（产品负责人 2026-10-30 决定，[review 设计「未决问题」](review.md#未决问题)4）。G2 之后、`terminal` 实现时先加终端粘贴这一条：插件只 requires `dyn Review`、`dyn Terminals`，没有终端驱动时答复 `NotNow(NoSession)`。ACP 一条随 P3 加上，插件那时再 requires `dyn Conversations`。在这个途径登记之前，`review` 只有剪贴板途径。
 - **J. `app`**：`plugins()` 的三个插件和 `agents` 的 "conversations" 插件放进 `PluginSet`（`Profile::Desktop`；test profile 不装）。
 - **K. `bench`**：预算表加 `conversation/stream_apply`（「性能」）。
 

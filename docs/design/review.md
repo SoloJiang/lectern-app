@@ -138,7 +138,7 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
 
 以下三项是审阅意见（#22）的前置条件，写 `Refs #22`：
 
-- **H. `services`**：`review` 模块加「接口」里的审阅意见类型（`Note` 及其字段类型、`NotesState`、`TurnEntry::answers`、`ReviewCommand` 的五个新命令）和发送途径的扩展点（`NoteRoute`、`NoteDelivery`、`DeliveryReply`、`NoteRouteRegistration`、`Review::register_note_route`，「审阅意见的发送途径」）。`DeliveryReply`、`NoteRouteRegistration` 包着回调，不序列化，与 `BriefReply`、`BriefRulesRegistration` 相同；`NoteRoute` 不是 kernel 服务。`Note` 有了字段之后不再派生 `Default`（前置条件 A 里它是空结构）。测试：新类型的 JSON 往返；`NoteRouteRegistration` drop 时调用一次注销回调；`DeliveryReply` drop 而没有 `send` 时以 `DeliveryOutcome::Failed` 调用一次回调。`crates/services/AGENTS.md` 的模块列表和「不序列化」的清单随之更新（本 PR 已改）。
+- **H. `services`**：`review` 模块加「接口」里的审阅意见类型（`Note` 及其字段类型、`NotesState`、`TurnEntry::answers`、`ReviewCommand` 的六个新命令）和发送途径的扩展点（`NoteRoute`、`NoteDelivery`、`DeliveryReply`、`NoteRouteRegistration`、`Review::register_note_route`，「审阅意见的发送途径」）。`DeliveryReply`、`NoteRouteRegistration` 包着回调，不序列化，与 `BriefReply`、`BriefRulesRegistration` 相同；`NoteRoute` 不是 kernel 服务。`Note` 有了字段之后不再派生 `Default`（前置条件 A 里它是空结构）。测试：新类型的 JSON 往返；`NoteRouteRegistration` drop 时调用一次注销回调；`DeliveryReply` drop 而没有 `send` 时以 `DeliveryOutcome::Failed` 调用一次回调。`crates/services/AGENTS.md` 的模块列表和「不序列化」的清单随之更新（本 PR 已改）。
 - **I. `platform`**：剪贴板的写入（[platform 设计](platform.md)加一节「剪贴板」，接口与测试以这里为准）：
 
   ```rust
@@ -370,7 +370,7 @@ pub trait Review: Send + Sync {
     fn snapshot(&self, id: ReviewId) -> Option<Arc<ReviewSnapshot>>;
 
     /// 发一个命令。立即返回，任何线程可调用。改已看状态和审阅意见的命令在返回之前已换出新快照（只改内存），
-    /// 写标注日志在后台进行；其余命令的结果随事件送达（`SendNotes` 先在返回前把意见标为发送中，结果随事件送达）。
+    /// 写标注日志在后台进行；其余命令的结果随事件送达（`SendNotes` 先在返回前把意见标为发送中，结果随事件送达；`CopyBatch` 不改快照，结果随事件送达）。
     fn command(&self, id: ReviewId, command: ReviewCommand);
 
     /// 准备好的展示行。不阻塞；还没有准备时为 None，调用方先发 `ReviewCommand::Prepare`。
@@ -441,8 +441,11 @@ pub enum ReviewCommand {
     RemoveNote(NoteId),
     /// #22：删掉全部待发送的意见（视图先请用户确认）。
     DiscardNotes,
-    /// #22：把全部待发送的意见作为一批，经 `route`（`NotesState::routes` 里一项的 `id`）送出。
+    /// #22：把待发送的意见作为一批（至多 `limits::PENDING_NOTES` 条），经 `route`（`NotesState::routes` 里一项的 `id`）送出。
     SendNotes { route: Arc<str> },
+    /// #22：按一批已发出的意见重新拼出 prompt（同一个批次 ID），经剪贴板途径再写一次。
+    /// 不改意见的状态和 `batches`，不写日志，结果只放进 `NotesState::last`（「审阅意见」的「再次复制」）。
+    CopyBatch(BatchId),
 }
 
 pub enum Need { Rows(RowsKey), Text(TextKey) }
@@ -835,8 +838,10 @@ pub struct NotesState {
     pub routes: Arc<[RouteOffer]>,
     /// `notes` 里待发送的条数。
     pub pending: u32,
+    /// `notes` 里还没发出的条数：待发送加发送中。`AddNote` 按它与 `limits::PENDING_NOTES` 比较。
+    pub unsent: u32,
     pub sending: Option<BatchId>,
-    /// 上一次发送的结果；下一次 `SendNotes`、`AddNote`、`DiscardNotes` 时清除。
+    /// 上一次发送或再次复制的结果；下一次 `SendNotes`、`AddNote`、`DiscardNotes` 时清除，`CopyBatch` 的结果到达时替换。
     pub last: Option<SendOutcome>,
     /// 这个审阅对象 14 天内发出的批次，从旧到新。
     pub batches: Arc<[SentBatch]>,
@@ -848,6 +853,8 @@ pub enum RouteKind { Session, Clipboard }
 pub enum SendOutcome {
     Sent { batch: BatchId, via: SentVia, count: u32 },
     Failed { route: RouteKind, reason: SendFailure },
+    /// `CopyBatch` 的结果：`count` 是这次复制的条数；`failed` 为 None 时已写进剪贴板。意见的状态不随它变。
+    CopiedAgain { batch: BatchId, count: u32, failed: Option<SendFailure> },
 }
 pub enum SentVia { Clipboard, TerminalPaste, Acp }
 pub enum SendFailure {
@@ -871,14 +878,14 @@ pub struct SentBatch {
 pub mod limits {
     /// 一条意见的文字上限（字节）。
     pub const NOTE_BYTES: usize = 4096;
-    /// 一个审阅对象同时待发送的意见上限。
+    /// 一个审阅对象还没发出的意见（待发送加发送中，`NotesState::unsent`）的上限，也是一批的上限。
     pub const PENDING_NOTES: u32 = 40;
 }
 ```
 
 调用方：
 
-- `review_view`：进入审阅时 `open`，收到 `Changed` 后 `snapshot`；滚动时发 `Prepare`（可见的文件与轮次，加上前后各一屏），收到 `Prepared` 后读 `rows` / `text`；勾选、V、Looks good 发对应命令；C 的编辑框保存时发 `AddNote` / `EditNote`，意见上的删除发 `RemoveNote`，浮条的发送（⌘↩）发 `SendNotes`、放弃发 `DiscardNotes`（#22）；离开时 `close`。显示一个文件的 diff 时为 `FileRows` 两侧的 `SideText::Text` 各调一次 `Reader::share_object`（[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)），与这份 `FileRows` 一起放下。
+- `review_view`：进入审阅时 `open`，收到 `Changed` 后 `snapshot`；滚动时发 `Prepare`（可见的文件与轮次，加上前后各一屏），收到 `Prepared` 后读 `rows` / `text`；勾选、V、Looks good 发对应命令；C 的编辑框保存时发 `AddNote` / `EditNote`，意见上的删除发 `RemoveNote`，浮条的发送（⌘↩）发 `SendNotes`、放弃发 `DiscardNotes`、再次复制发 `CopyBatch`（#22）；离开时 `close`。显示一个文件的 diff 时为 `FileRows` 两侧的 `SideText::Text` 各调一次 `Reader::share_object`（[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)），与这份 `FileRows` 一起放下。
 - `project_home`（[#30](https://github.com/SoloJiang/lectern-app/issues/30)）：显示主页时持有 `watch_overview` 的返回值，收到 `Overview` 后读 `overview`。
 - `worktrees`：「相对 main」打开 `ReviewTarget::Range`。
 - `conversation`（#22 之后，前置条件 J）：实现 `NoteRoute`，requires `dyn Review` 并登记（「审阅意见的发送途径」）；不读审阅快照。
@@ -939,7 +946,7 @@ impl BriefRulesRegistration { pub fn new(release: impl FnOnce() + Send + Sync + 
 
 ### 审阅意见的发送途径（`NoteRoute`）
 
-#22 要把一批意见送进 agent 会话：P1 经驱动这个会话的终端粘贴，P3 经 ACP 发 prompt（[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求) I）。这两种方式要 `terminal`、`conversation` 的服务，本 crate 不依赖它们，所以与 `BriefRules` 一样反过来登记：提供者的插件 requires `dyn Review`，在 `started` 里调 `Review::register_note_route`，把返回的登记交给 `PluginHandle::own`；本 crate 每次调用途径之前 `token.enter()`。剪贴板途径由本 crate 内置，不经登记，`id` 是 `"clipboard"`，对每个审阅对象都适用。没有任何会话途径时（P1 的终端实现之前）只有剪贴板途径。
+#22 在 P1 的出口关卡 G2 只有剪贴板途径（「未决问题」4，已决定）：用户把 Copy as Prompt 复制的 prompt 粘贴进会话。G2 之后、`terminal` 实现时加经驱动这个会话的终端粘贴的途径，P3 加经 ACP 发 prompt 的途径（[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求) I）。这两种会话途径要 `terminal`、`conversation` 的服务，本 crate 不依赖它们，所以与 `BriefRules` 一样反过来登记：提供者的插件 requires `dyn Review`，在 `started` 里调 `Review::register_note_route`，把返回的登记交给 `PluginHandle::own`；本 crate 每次调用途径之前 `token.enter()`。剪贴板途径由本 crate 内置，不经登记，`id` 是 `"clipboard"`，对每个审阅对象都适用。没有任何会话途径时（G2 时就是这样）只有剪贴板途径。
 
 ```rust
 pub trait NoteRoute: Send + Sync {
@@ -1270,22 +1277,35 @@ pub(crate) enum TargetKey {
 
 | 命令 | 条件 | 效果 |
 |---|---|---|
-| `AddNote` | 文字去掉首尾空白后不为空、不超过 `limits::NOTE_BYTES`；这个审阅对象待发送的意见少于 `limits::PENDING_NOTES` 条；`anchor.file` 在快照里（`files` 里，或是叙事里一步的文件），或调用方给了 `excerpt` | 新的 `NoteId`，`Pending`，清除 `last`。`excerpt` 为 None 时，在调用线程上只取 `rows` 那份展示行在 `anchor.side` 一侧的文本的 `Arc`（那一侧的 OID 等于 `anchor.oid` 时），后台写日志之前从中取出摘录；取不到时摘录为 None |
+| `AddNote` | 文字去掉首尾空白后不为空、不超过 `limits::NOTE_BYTES`；这个审阅对象还没发出的意见（`unsent`：待发送加发送中）少于 `limits::PENDING_NOTES` 条；`anchor.file` 在快照里（`files` 里，或是叙事里一步的文件），或调用方给了 `excerpt` | 新的 `NoteId`，`Pending`，清除 `last`。`excerpt` 为 None 时，在调用线程上只取 `rows` 那份展示行在 `anchor.side` 一侧的文本的 `Arc`（那一侧的 OID 等于 `anchor.oid` 时），后台写日志之前从中取出摘录；取不到时摘录为 None |
 | `EditNote` | 意见是 `Pending`；文字的条件同上；文字与原来不同 | 换文字，`edited_at` 为现在 |
 | `RemoveNote` | 意见不是 `Sending` | 从 `notes` 去掉 |
 | `DiscardNotes` | 有待发送的意见 | 去掉全部 `Pending` 的意见（一条 `note_removed` 记录），清除 `last` |
 | `SendNotes` | 有待发送的意见；没有正在发送的一批；`route` 在 `routes` 里 | 见「发送」 |
+| `CopyBatch` | 批次在 `batches` 里；`notes` 里至少还有一条这一批的意见（`Sent(batch)`）；没有正在发送的一批 | 见「再次复制」；意见的状态、`batches` 不变，不写日志 |
 
 摘录：在那一侧的文本里，从锚点行的字节位置（`DiffRow` 的 `*_byte`；没有时按行号数行尾）向前、向后各找 2 个行尾，每个方向最多看 4 KiB；每行至多 160 字节，在 UTF-8 的字符边界截断，不是 UTF-8 的字节换成 U+FFFD。在 `Background` 任务里取出，不在调用线程上扫描文本。为什么要存摘录：工作区一侧的内容不在对象库里，文件被改过之后，没有摘录的意见就不知道当初指的是哪几行；这几行属于 ADR 0044 所说的「为了让标记保持有效而必须固定下来」的内容，不是派生数据。
 
 #### 发送
 
-1. `SendNotes { route }`（调用线程）：新的 `BatchId`；全部 `Pending` 的意见改为 `Sending(batch)`，`notes_state.sending = Some(batch)`，清除 `last`，换出快照，返回。之后加的意见是新的 `Pending`，不在这一批里。
+1. `SendNotes { route }`（调用线程）：新的 `BatchId`；按 `created_at` 最早的至多 `limits::PENDING_NOTES` 条 `Pending` 意见改为 `Sending(batch)`（正常情况下就是全部，见下面的「上限」），`notes_state.sending = Some(batch)`，清除 `last`，换出快照，返回。之后加的意见是新的 `Pending`，不在这一批里。
 2. `Background` 任务（持有 `BusyGuard`）：补齐还没取出的摘录；按 `files` 的顺序、同一文件按行号排好（`Elsewhere` 的按写下的时刻排在最后）；按「prompt 的模板」拼出文字；会话途径先 `token.enter()`，再调 `deliver`。
-3. 答复到达：`DeliveryReply` 的回调可以在任何线程上被调用，它只把结果交给一个 `Background` 任务（`own_with`，持有 `BusyGuard`），由这个任务应用：`Delivered(via)` 时这批意见改为 `Sent(batch)`，`batches` 加一项，`last = Sent`，`notes_sent` 记录进待写队列；`NotNow`、`Failed`、10 秒超时时改回 `Pending`，`last = Failed`，不写日志。两种情况都由这个任务换出快照、发 `Changed`（与其他 `ReviewEvent` 一样在 executor 线程上），之后才放下 `BusyGuard`。
+3. 答复到达：`DeliveryReply` 的回调可以在任何线程上被调用，它只把结果交给一个 `Background` 任务（`own_with`，持有 `BusyGuard`），由这个任务应用：`Delivered(via)` 时这批意见改为 `Sent(batch)`，`batches` 加一项，`last = Sent`，`notes_sent` 记录进待写队列；`NotNow`、`Failed`、10 秒超时时改回 `Pending`，`last = Failed`，不写日志（退回不会超过上限，见下面的「上限」）。两种情况都由这个任务换出快照、发 `Changed`（与其他 `ReviewEvent` 一样在 executor 线程上），之后才放下 `BusyGuard`。
 4. 上限保证 prompt 不超过 256 KiB（与 ACP 的 prompt 上限相同，[conversation 设计「接口」](conversation.md#接口)）：40 条 ×（4 KiB 文字 + 5 × 160 B 摘录 + 路径与固定文字约 1 KiB）约 236 KiB。仍然超过时（路径特别长）按 `Failed` 处理，不截断。
 
 `Sending` 只在内存里：进程在发送中退出，下次读出时这批意见仍是待发送。
+
+上限：`limits::PENDING_NOTES` 计的是还没发出的意见（`unsent`），发送中的也算在内。所以发送中只能再加 `PENDING_NOTES` 减去这一批的条数；这一批失败退回时，它们本来就在 `unsent` 里，退回之后待发送的条数不会超过上限，不需要另外处理，用户也不会因为退回而遇到 `too_many` 或超长的 prompt。重启之后发送中的意见读成待发送，条数同样不变。只有从日志读出的一个审阅对象已经超过上限时（别的版本写的、手工合并的文件）才会多于 40 条：这些意见一条也不丢；`AddNote` 被忽略（`too_many`），直到删掉或发出一部分；`SendNotes` 一批只取最早的 40 条，其余留在待发送，下一次再发。所以一批总在上限之内，prompt 不超过 256 KiB。
+
+#### 再次复制
+
+剪贴板途径写进剪贴板就算已发送：用户在粘贴之前又复制了别的文字，或粘贴到了别的窗口时，这批意见已是 `Sent`，不能改、不在下一次 `SendNotes` 里。`CopyBatch(batch)` 让用户再复制一次，不必重写：
+
+1. 调用线程：检查「命令」表里的条件，不改快照，返回。
+2. `Background` 任务（持有 `BusyGuard`）：取 `notes` 里还是 `Sent(batch)` 的意见（用户删掉的不在内），按「发送」第 2 步的顺序排好，按「prompt 的模板」拼出文字，第一行的标记用同一个批次 ID；位置（`Current`、`Base`、`Earlier`）按现在的快照算。经剪贴板途径写入，答复的处理、10 秒超时与「发送」第 3 步相同。
+3. 结果只放进 `last`：成功时 `CopiedAgain { batch, count, failed: None }`，失败时 `failed` 是 `Some(Failed)` 或 `Some(TimedOut)`；换出快照（只有 `notes_state.last` 变了）、发 `Changed`。意见的状态、`batches`、`answered_by` 不变，不写日志记录。
+
+标记用同一个批次 ID，所以用户粘贴再次复制的文字之后，「与回应的那一轮对应」的规则照样能对上：那一轮开始的时刻晚于这批发出的时刻。视图只给最近的一批提供这个按钮（[review_view 设计「审阅意见（#22）」](review_view.md#审阅意见22)的浮条），本 crate 接受 `batches` 里的任何一批。
 
 #### prompt 的模板
 
@@ -1340,14 +1360,15 @@ Please address each note.
 
 - 加一条意见和改文字都写一条完整的 `note` 记录，`id` 相同：`at` 是这次写的时刻，`created` 是第一次的时刻，`at` 晚于 `created` 时它就是 `edited_at`。记录完整，压缩时每条意见只需保留最近的一条。`line` 是 0 起的行号；`excerpt` 取不到时为 null。路径、OID、`target` 的写法与 `seen` 相同（「标注日志」）。`via` 是 `clipboard`、`terminal`、`acp` 之一。
 - 内存索引：每个审阅对象、每个 `id` 保留最近一条 `note`；`note_removed` 列出的 `id` 删掉；`notes_sent` 列出的意见是 `Sent(batch)`，批次的时刻和途径来自这条记录。
-- 保留：待发送的意见一直保留，不随时间丢弃（还没发出的用户内容）。已发送的意见和它们的 `notes_sent` 保留 14 天（按 `notes_sent` 的 `at`，与声明窗口相同，「改动步与声明」）：读取时超过 14 天的不进索引，压缩时随之丢掉；`note_removed` 不进索引，压缩后不再需要。只保留 14 天，是因为内存索引在项目打开期间常驻（概览也读日志），意见的文字比已看标记大得多，按一年保留会让本 crate 的常驻超过 1 MB（「性能」）。
+- 保留：待发送的意见一直保留，不随时间丢弃（还没发出的用户内容）。已发送的意见和它们的 `notes_sent` 保留 14 天（按 `notes_sent` 的 `at`，与声明窗口相同，「改动步与声明」）：读取时超过 14 天的不进索引，压缩时随之丢掉；`note_removed` 不进索引，压缩后不再需要。只保留 14 天，是因为内存索引在项目打开期间常驻（概览也读日志），意见的文字比已看标记大得多，按一年保留会让本 crate 的常驻超过 1 MB（「性能」）。常驻的上界：每个审阅对象还没发出的意见至多 40 条，每条至多约 5.3 KiB（4 KiB 文字、5 × 160 B 摘录、约 0.5 KiB 的锚点、路径与结构），即每个审阅对象约 210 KiB；已发送的意见只受 14 天的保留约束；审阅对象的个数不设上限（「已知限制」）。
 - 压缩的条件和前提不变（ADR 0045，「标注日志」的压缩）：新文件写文件头、索引里的 `seen` / `unseen` / `base`、每条保留的意见的最近一条 `note`、保留的 `notes_sent` 和认不出的记录。重放压缩后的文件得到同样的索引（`log_notes_compaction_keeps_the_index`）。
 - 文件夹项目不写日志（「未决问题」2）：意见只在这次打开的审阅里，审阅释放后丢失。
 
 #### 已知限制
 
-- 已经发出的意见不能改，只能删掉再写。
+- 已经发出的意见不能改，只能删掉再写。剪贴板途径复制即算已发出：没有粘贴成功时用「再次复制」重新复制同一批，不必重写。
 - Drifted 的意见不随代码移动：不猜位置。
+- 常驻的意见没有总条数的上限：每个审阅对象还没发出的至多 40 条（约 210 KiB），已发送的保留 14 天，但留着未发出意见的审阅对象可以有很多个。很多个审阅对象都留着写满的未发出意见时，本 crate 的常驻会超过 1 MB；正常使用里不会出现（`review/resident_notes_bytes` 的形状是 280 条）。要彻底去掉这个上界，需要只为打开的审阅对象把意见的文字读进内存，这会改变标注日志的读取与压缩（ADR 0044、0045），要先写 ADR；实现阶段的测量超出预算时再做。
 - 用户把剪贴板里的 prompt 粘贴到别的会话，或 agent 的日志没有原样记下粘贴的文字（只记下占位）时，找不到回应的那一轮：这批一直显示为已发送、没有回应。实现时用 Claude Code 和 Codex 的真实日志各确认一次粘贴的文字是否原样记下（「验收」第 7 步）。
 - 途径在 10 秒超时之后才答复「已送出」时，这批意见已经回到待发送，用户再发一次会重复。
 - 文件夹项目的意见不跨重启保存。
@@ -1367,6 +1388,7 @@ SessionsChanged ─▶ turns ─▶ 改动步变了的路径重算 ─▶ 新快
 command(MarkSeen) ─▶ [调用线程] 换出 seen 数组 ─▶ 事件 ─▶ [Background] 追加日志
 command(AddNote / EditNote / RemoveNote / DiscardNotes) ─▶ [调用线程] 换出 notes、notes_state ─▶ 事件 ─▶ [Background] 取摘录、追加日志
 command(SendNotes) ─▶ [调用线程] 标为发送中 ─▶ [Background] 摘录、prompt ─▶ route.deliver ─▶ 答复（任何线程）─▶ 已发送或回到待发送 ─▶ 事件 ─▶ [Background] notes_sent
+command(CopyBatch) ─▶ [Background] 同一批的 prompt ─▶ 剪贴板途径 ─▶ 答复（任何线程）─▶ 只换 last ─▶ 事件（不写日志）
 Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ Prepared
 ```
 
@@ -1424,6 +1446,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 简报规则的提供者 10 秒没有答复 `done`，按完成处理 | info | `brief provider timed out` | `id`、`request`（这个审阅的第几次请求）、`registration`（提供者的登记序号；插件 ID 是文本，不进日志） |
   | 一批审阅意见已送出（#22） | info | `review notes sent` | `id`、`batch`（批次 ID 的数值）、`via`（`clipboard`、`terminal`、`acp`）、`notes`（条数）、`prompt_bytes`、`took_us`（从 `SendNotes` 起） |
   | 一批审阅意见没有送出，回到待发送（#22） | warn | `review notes not sent` | `id`、`batch`、`route`（`clipboard`、`session`）、`reason`（`starting`、`busy`、`no_session`、`timed_out`、`failed`、`too_large`）、`error`（剪贴板的错误种类 `unsupported`、`rejected`；其余为 null）、`notes` |
+  | 一批已发出的意见又复制了一次（#22，`CopyBatch`） | info | `review notes copied again` | `id`、`batch`、`notes`（这次复制的条数）、`prompt_bytes`、`took_us`（从 `CopyBatch` 起） |
+  | 再次复制失败（#22，意见仍是已发送） | warn | `review notes not copied again` | `id`、`batch`、`reason`（`timed_out`、`failed`、`too_large`）、`error`（同上）、`notes` |
 
   - 会话标识（`from` 和作用域的 `session`）：会话 ID 是 UUID 时取它的 16 个字节，否则（Claude Code 子 agent 的 `<父会话>/agent-<id>`）取 128 位哈希，与 `usage` 的算法相同，两个 crate 对同一会话的记录可以对照。来源 ID 不写出。
   - `path` 都经 `Value::path`，主目录写成 `~`。默认级别里的路径只有标注日志的文件和目录（应用数据目录下本 crate 的文件）。
@@ -1450,14 +1474,14 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 追加之前截掉末尾不完整的一行 | `annotation log tail cut` | `path`、`bytes` |
   | 文件状态未知、不以换行结尾，追加之前补一个换行 | `annotation log of unknown state; newline added before the records` | `path` |
   | 审阅意见的命令生效（#22） | `note changed` | `id`、`op`（`add`、`edit`、`remove`、`discard`）、`pending`、`sent`（快照里的条数）、`place`（只对 `add`：`rows`、`drifted`、`elsewhere`） |
-  | 审阅意见的命令被忽略 | `note command ignored` | `id`、`op`（含 `send`）、`reason`（`empty`、`too_long`、`too_many`、`unknown_file`、`not_pending`、`sending`、`unchanged`、`no_route`、`nothing_pending`） |
+  | 审阅意见的命令被忽略 | `note command ignored` | `id`、`op`（含 `send`）、`reason`（`empty`、`too_long`、`too_many`、`unknown_file`、`not_pending`、`sending`、`unchanged`、`no_route`、`nothing_pending`、`unknown_batch`） |
   | 发送途径登记、注销 | `note route registered` / `note route released` | `registration`（登记序号；途径 ID 是文本，不进日志） |
   | 超时之后才到的答复被丢弃 | `late delivery reply dropped` | `id`、`batch`、`outcome`（`delivered`、`not_now`、`failed`） |
   | 一批意见对上了回应它的那一轮 | `notes answered` | `id`、`batch`、`ordinal`（那一轮的 `Turn::ordinal`） |
 
 - 关联 ID：本 crate 的每个 executor 任务（一轮的准备、后台补齐与归因、`Prepare`、标注日志的读取与追加）都在作用域里运行（`Engine::submit` 设置 `Ctx`）。`session` 是审阅对象会话的标识，从 `open` 起就有；`review` 是审阅对象的 64 位哈希，取 SHA-256（仓库的哈希 `h` 的 16 个字节、标注日志里 `target` 的编码）的前 8 字节，同一审阅对象跨运行相同，在一轮解析出仓库之后加上。标注日志按仓库共用，它的读取和追加任务带发起它的那个审阅的作用域。`task` 由 executor 填（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 5 项）。
 - 不记录：文件内容、diff 的行、改动步的正文（`load` 的结果）、prompt、agent 说明、命令文本、提交说明（reflog 的说明文字）、审阅意见的文字与摘录、拼好的审阅意见 prompt、`NoteDelivery` 的路径与位置、剪贴板的内容、标注日志的行（坏行、认不出的记录照原样留在文件里，不进日志）；来源 ID，以及不是 UUID 的会话 ID 的原文（只记哈希）；worktree 的名字、分支名、`Prepare` 的键（含路径和会话里的位置）；`ChangeError::Io`、`SessionError::Io`、`GitError::Corrupt` 的消息文字和 `io::Error` 的消息（只记种类和系统错误码）；凭据和 token。工作区里的路径只在详细级别的 `file attributed` 里出现。
-- 金丝雀测试（`src/engine/tests/logs.rs`，`testing::capture()` 在 trace 级别）：`logs_hold_no_contents` 把金丝雀放进基准和工作区的文件内容、提交说明、审阅对象会话的 prompt、agent 说明和改动内容、另一个会话的 prompt 和命令、标注日志的坏行、认不出的记录和末尾不完整的一行，以及注入的追加错误的消息里；打开审阅、`Prepare` 展示行和 prompt 正文、标记已看（截掉残行、压缩）、追加失败、再次标记（重试成功），再打开会话外的改动和比较范围，确认 `annotation log recovered`、`annotation log compacted`、追加失败与重试几条记录的字段，以及它们和 `review ready` 都带 `review`、`session`，任何记录都不含金丝雀。`logs_tree_changes_failure_is_a_warn`：reflog 里一条记录的新提交不在仓库里，`tree_changes` 在交互任务和后台各失败一次，各记一条 warn，带两个 OID 和 `object_missing`。`logs_unreadable_turns_are_a_warn`：认不出格式的会话记一条 warn，`error` 为 `unrecognized`。`logs_round_closed_before_it_ran_is_not_a_failure`：打开后一轮还没运行就 `close`，这一轮被取消，不记 `review failed`。`logs_session_tag_is_the_uuid_or_a_hash`：UUID 取原字节，子 agent 的 ID 取哈希。`logs_hold_no_note_contents`（#22）：金丝雀放进意见的文字、锚点所在文件的内容（进摘录）和路径里；加、改、删、经 `FakeClipboard` 送出（成功、`Rejected`）、经 `FakeRoute` 送出（`NotNow(Starting)`、超时、超时后才到的答复）、放弃，再压缩一次；任何记录都不含金丝雀，`review notes sent`、`review notes not sent` 的字段按上表。
+- 金丝雀测试（`src/engine/tests/logs.rs`，`testing::capture()` 在 trace 级别）：`logs_hold_no_contents` 把金丝雀放进基准和工作区的文件内容、提交说明、审阅对象会话的 prompt、agent 说明和改动内容、另一个会话的 prompt 和命令、标注日志的坏行、认不出的记录和末尾不完整的一行，以及注入的追加错误的消息里；打开审阅、`Prepare` 展示行和 prompt 正文、标记已看（截掉残行、压缩）、追加失败、再次标记（重试成功），再打开会话外的改动和比较范围，确认 `annotation log recovered`、`annotation log compacted`、追加失败与重试几条记录的字段，以及它们和 `review ready` 都带 `review`、`session`，任何记录都不含金丝雀。`logs_tree_changes_failure_is_a_warn`：reflog 里一条记录的新提交不在仓库里，`tree_changes` 在交互任务和后台各失败一次，各记一条 warn，带两个 OID 和 `object_missing`。`logs_unreadable_turns_are_a_warn`：认不出格式的会话记一条 warn，`error` 为 `unrecognized`。`logs_round_closed_before_it_ran_is_not_a_failure`：打开后一轮还没运行就 `close`，这一轮被取消，不记 `review failed`。`logs_session_tag_is_the_uuid_or_a_hash`：UUID 取原字节，子 agent 的 ID 取哈希。`logs_hold_no_note_contents`（#22）：金丝雀放进意见的文字、锚点所在文件的内容（进摘录）和路径里；加、改、删、经 `FakeClipboard` 送出（成功、`Rejected`）、经 `FakeRoute` 送出（`NotNow(Starting)`、超时、超时后才到的答复）、`CopyBatch`（成功、`Rejected`）、放弃，再压缩一次；任何记录都不含金丝雀，`review notes sent`、`review notes not sent`、`review notes copied again`、`review notes not copied again` 的字段按上表。
 
 ## 性能
 
@@ -1471,7 +1495,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 刷新 | agent 追加一轮、改一个文件后，从 `SessionsChanged` 和 fs_watch 的批次到新快照 < 20 ms |
 | 勾选 | `command(MarkSeen)` 到新快照替换 < 0.2 ms（5000 个文件） |
 | 审阅意见（#22） | `command(AddNote)`、`EditNote`、`RemoveNote`、`SendNotes` 到新快照替换 < 0.2 ms（40 条待发送、240 条已发送）；`Background` 上拼 40 条意见的 prompt < 5 ms；剪贴板在主线程上的写入是 `platform` 的一次 `NSPasteboard` 调用，不在本 crate 的份额里。每份快照重算 `place` 是 O(意见数) 的 OID 比较，不读文本 |
-| 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB（标注日志的索引含审阅意见：全部待发送的，加 14 天内发出的；280 条时 < 300 KB，`review/resident_notes_bytes`），从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
+| 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB（标注日志的索引含审阅意见：全部还没发出的，加 14 天内发出的；280 条的形状 < 300 KB，`review/resident_notes_bytes`；每个审阅对象还没发出的至多 40 条、约 210 KiB，审阅对象的个数没有上限，见「审阅意见」的「已知限制」），从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
 | 审阅打开时的内存（不在采样状态，按 ADR 0035「关键约束」各自设上限） | `ChangeList` 和它持有的 `ChangeSet`（git 的 32 MiB 保留上限）；中间版本 LRU 8 MiB；`FileRows` 只为 `Prepare` 的范围保留，合计 ≤ 8 MiB，超出时丢弃离可见范围最远的；正文 ≤ 2 MiB |
 | 磁盘 | 标注日志每个仓库 ≤ max(4 MiB, 一年内仍然有效的记录的两倍) 加一批记录，在压缩的前提成立时（「标注日志」的压缩，[ADR 0045](../adr/0045.md)）；只追加时（读取失败或只读了一部分、文件头坏了或 `v` 不是 1、别的写入者改过文件、压缩改名之后目录的 `fsync` 失败）文件一直增长，到下一次完整读取恢复压缩为止；`review.attribution` 在仓库分库的 512 MiB 预算里，按 LRU 淘汰 |
 
@@ -1534,6 +1558,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 审阅意见那一行之后被改过（#22） | `NotePlace::Drifted`，不猜位置；发出时按「较早的版本」写位置 | 意见画在文件卡片头部下面，带摘录和「这一行之后变了」 |
 | 意见所在的文件不在审阅里 | `NotePlace::Elsewhere` | 意见列在叙事末尾的一块里 |
 | 发送途径答复送不了、失败、超时，或剪贴板写不进 | 意见回到待发送，`last = Failed`，记 warn | 浮条一行原因，旁边是 Copy as Prompt（会话途径失败时） |
+| 复制之后没有粘贴成功（剪贴板被别的文字覆盖、粘贴到了别处） | `CopyBatch` 重新拼出同一批（同一个标记）写进剪贴板；意见的状态不变，不写日志 | 浮条的 Copy Again（最近一批还没有回应时） |
 | 归因缓存写不进 | 忽略，下次重算 | 照常 |
 | 路径不是 UTF-8 | 照常归因和标记（`ChangePath` 是字节）；不进 `focus_*` 和 `BriefRequest` | 显示时替换无效字节 |
 | 不满足路径不变量的路径 | 在 `totals.invalid_paths` 里，不进文件列表 | 列出并说明「路径无效，未读取」 |
@@ -1575,10 +1600,11 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `services` 的 `changes`、`review` 模块（前置条件 A）：类型的 JSON 往返；`dyn Review` 的 `ID == "review"`、`MULTIPLE == false`；`BriefRules` 没有实现 `Service`；`BriefRulesRegistration`、`OverviewInterest` drop 时各调用一次注销回调。
   - 审阅意见（#22）：
     - `services` 的 `review` 模块（前置条件 H）：审阅意见类型的 JSON 往返；`NoteRoute` 没有实现 `Service`；`NoteRouteRegistration` drop 时调用一次注销回调；`DeliveryReply` drop 而没有 `send` 时以 `Failed` 调用一次回调。
-    - `notes_cmd_*`（`src/engine/tests/notes.rs`，`Driven`）：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes` 返回之前快照已换出；被忽略的每一种（只有空白、4097 字节、第 41 条待发送、快照里没有的文件且没有摘录、改已发送或发送中的意见、删发送中的意见、文字不变）快照不变；命令在调用线程上不读文本、不做 IO（同 `plugin_commands_on_the_ui_thread_do_no_io` 的检查）。
+    - `notes_cmd_*`（`src/engine/tests/notes.rs`，`Driven`）：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes` 返回之前快照已换出；被忽略的每一种（只有空白、4097 字节、还没发出的已有 40 条时的第 41 条（含 30 条发送中、10 条待发送的情形）、快照里没有的文件且没有摘录、改已发送或发送中的意见、删发送中的意见、文字不变）快照不变；命令在调用线程上不读文本、不做 IO（同 `plugin_commands_on_the_ui_thread_do_no_io` 的检查）。
     - `notes_place_*`：锚在最终改动上为 `Rows([Final])`，锚在叙事的一步上为 `Rows([Step])`，最后一步的新一侧就是工作区时两处都有；agent 之后改了那一行为 `Drifted`；文件改名之后按路径对上；文件不再有改动为 `Elsewhere`；归因还是 `Pending` 时先 `Drifted`，算完后为 `Rows([Step])`。
     - `notes_excerpt_*`：前后各 2 行；文件开头和结尾；每行 160 字节、在字符边界截断；一行超过 4 KiB；不是 UTF-8 的字节；`rows` 那份展示行已被丢弃时摘录为 None；调用方给出的摘录原样保存。
-    - `notes_send_*`：经 `FakeClipboard` 成功时为 `Sent`、`batches` 多一项、写出 `notes_sent`；`Rejected` 时回到 `Pending`、`last` 为 `Failed`、不写日志；经 `FakeRoute` 答复 `NotNow(Starting)`；10 秒超时（`Driven::with_timers`）；超时之后才到的答复被丢弃；发送中加的意见不在这一批；途径在发送中注销时为 `Failed`；`routes` 的顺序（会话途径在前，剪贴板最后）、`applies` 为 false 的途径不列出、同一 `id` 再次登记时替换；`NoteDelivery` 的 `locations` 至多 8 条、只有 `Current` 带行号。
+    - `notes_send_*`：经 `FakeClipboard` 成功时为 `Sent`、`batches` 多一项、写出 `notes_sent`；`Rejected` 时回到 `Pending`、`last` 为 `Failed`、不写日志；经 `FakeRoute` 答复 `NotNow(Starting)`；10 秒超时（`Driven::with_timers`）；超时之后才到的答复被丢弃；发送中加的意见不在这一批；途径在发送中注销时为 `Failed`；发送 30 条时只能再加 10 条，这一批失败退回后待发送 40 条、`unsent` 为 40，再发一次全部在一批里；日志里一个审阅对象有 45 条待发送时一条不丢、`AddNote` 被忽略、`SendNotes` 一批取最早的 40 条、其余 5 条留在待发送；`routes` 的顺序（会话途径在前，剪贴板最后）、`applies` 为 false 的途径不列出、同一 `id` 再次登记时替换；`NoteDelivery` 的 `locations` 至多 8 条、只有 `Current` 带行号。
+    - `notes_copy_again_*`：`CopyBatch` 经 `FakeClipboard` 写出的文字第一行的标记与原来那一批相同，只含还在的意见（删掉一条之后少一条）；意见的状态、`batches`、`answered_by` 不变，标注日志文件的字节不变；`last` 是 `CopiedAgain { failed: None }`；`Rejected` 时 `failed` 是 `Some(Failed)`、意见仍是已发送；不在 `batches` 里的批次、意见都删掉了的批次、有一批在发送中时被忽略（`unknown_batch`、`sending`）；粘贴再次复制的文字之后，那一轮照样成为 `answered_by`。
     - `notes_link_*`：发出之后会话追加一轮，prompt 第一行带标记，这一轮成为 `answered_by`、`TurnEntry::answers` 是这批；标记出现在另一个会话里时不对上；早于发出时刻 1 秒以上的轮次不对上；重新读日志（模拟重启）之后再次对上。
     - `prompt_*`（`src/notes/tests.rs`，纯函数）：模板的 insta 快照（`Current`、`Base`、`Earlier`；没有摘录；摘录里有三个反引号时围栏变长；多行文字的缩进和空行；1 条时用 `note`）；标记在第一行的前 60 个字符；40 条各 4 KiB 文字的 prompt 不超过 256 KiB。
     - `log_notes_*`（`src/log/tests.rs`）：三种记录的往返，`log_format` 快照加三行；改文字后索引只留最近一条；`note_removed` 删掉；`notes_sent` 标为已发送；已发送超过 14 天的不进索引、压缩后不在文件里，待发送的意见一年后仍在；`log_notes_compaction_keeps_the_index`（压缩前后索引相同）。
@@ -1601,7 +1627,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
    - (b) 只认改动工具的改动，其余都算会话外的改动。
 
    默认按 (a) 实现。
-4. **出口关卡 G2（[路线图](../roadmap.md) P1：日常自用）之前，审阅意见只有剪贴板途径是否够用。** 已决定：选 (a)（产品负责人 2026-10-30）。现在只做剪贴板途径：浮条的按钮是 Copy as Prompt，写进剪贴板即标为已发送，用户把它粘贴到会话里；`terminal` 实现之后，经终端粘贴的会话途径按前置条件 J 接入，ACP 随 P3。不选：(b) 等终端粘贴实现之后再交付 #22；(c) Lectern 在后台恢复会话并发送（要另外启动 agent 命令行，需要先写 ADR）。
+4. **出口关卡 G2（[路线图](../roadmap.md) P1：日常自用）之前，审阅意见只有剪贴板途径是否够用。** 已决定：选 (a)（产品负责人 2026-10-30）。现在只做剪贴板途径：浮条的按钮是 Copy as Prompt，写进剪贴板即标为已发送，用户把它粘贴到会话里，没有粘贴成功时用 Copy Again 再复制同一批（「再次复制」）；`terminal` 实现之后，经终端粘贴的会话途径按前置条件 J 接入，ACP 随 P3。不选：(b) 等终端粘贴实现之后再交付 #22；(c) Lectern 在后台恢复会话并发送（要另外启动 agent 命令行，需要先写 ADR）。
 
 技术问题都已在上文决定。
 
@@ -1650,8 +1676,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
    - `notes_cmd_*`、`notes_place_*`、`notes_excerpt_*`、`log_notes_*` 测试通过；`log_format` 快照有三种新记录。
    - `review/note_add`、`review/resident_notes_bytes` 在预算内；`just bench --measure review/` 的其余条目与改动前相比不变慢。
    - `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 仍没有结果。
-7. **发送、prompt 与回应的那一轮**（前置 I）：`SendNotes`、剪贴板途径、`register_note_route`、`notes::prompt`、批次与轮次的对应、「日志与诊断」里 #22 的记录。
-   - `notes_send_*`、`notes_link_*`、`prompt_*`、`logs_hold_no_note_contents` 测试通过；`prompt_*` 的快照与「prompt 的模板」的例子格式一致。
+7. **发送、prompt 与回应的那一轮**（前置 I）：`SendNotes`、`CopyBatch`、剪贴板途径、`register_note_route`、`notes::prompt`、批次与轮次的对应、「日志与诊断」里 #22 的记录。
+   - `notes_send_*`、`notes_copy_again_*`、`notes_link_*`、`prompt_*`、`logs_hold_no_note_contents` 测试通过；`prompt_*` 的快照与「prompt 的模板」的例子格式一致。
    - `review/notes_prompt_40` 在预算内。
    - `rg -n 'clipboard::' crates/review/src --glob '!**/tests*' --glob '!**/testing*'` 只出现在剪贴板途径的模块里：本 crate 只在那里调用 `platform::clipboard`。
    - `rg -n 'lectern-terminal|lectern-conversation|lectern_terminal|lectern_conversation' crates/review` 没有结果：会话途径只经 `NoteRoute` 接入。
