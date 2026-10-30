@@ -3,7 +3,7 @@
 //! thread only; no IO: it reads `Review` snapshots (copying an `Arc`) and
 //! sends commands.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,8 +11,8 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use gpui::{
-    App, Context, Entity, Global, ListAlignment, ListOffset, ListState, Pixels, Task, WeakEntity,
-    px,
+    App, Context, Entity, FocusHandle, Global, ListAlignment, ListOffset, ListState, Pixels,
+    SharedString, Task, WeakEntity, px,
 };
 use lectern_logging::{debug, info, warn};
 use lectern_services::changes::ChangeTotals;
@@ -20,8 +20,9 @@ use lectern_services::code_intel::TextRef;
 use lectern_services::project::{BlobId, RelPath};
 use lectern_services::reader::ObjectShare;
 use lectern_services::review::{
-    AnalysisState, Brief, FileKey, FileRows, LoadState, Need, Progress, ReviewCommand, ReviewId,
-    ReviewSnapshot, ReviewTarget, RowsKey, SeenState, TextKey, TurnRef,
+    AnalysisState, BatchId, Brief, FileKey, FileRows, LoadState, Need, NoteAnchor, NoteId,
+    Progress, ReviewCommand, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, SeenState, TextKey,
+    TurnRef,
 };
 use lectern_services::usage::{UsageInterest, UsageQuery, UsageSnapshot};
 use lectern_services::workspace::WorkspaceCommand;
@@ -30,8 +31,9 @@ use lectern_ui::motion::{self, Transition};
 use crate::anchor;
 use crate::diag;
 use crate::highlight::{Half, SideSpans, SpansCache};
-use crate::items::{self, BuildOptions, DiffMode, DisplayRow, Item, ItemKey};
+use crate::items::{self, BuildOptions, DiffMode, DisplayRow, Item, ItemKey, NoteIndex};
 use crate::needs;
+use crate::notes::NoteEditor;
 use crate::plugin::{Job, JobReceiver, JobSender, Shared};
 
 /// The items assumed visible before the list has been laid out once.
@@ -175,6 +177,24 @@ pub struct ReviewModel {
     pub(crate) marked: u32,
     pub(crate) looks_good: bool,
     pub(crate) layer_open: bool,
+    /// #22: the open note editor, at most one.
+    pub(crate) editor: Option<NoteEditor>,
+    /// #22: what Esc closed of new notes' texts, by anchor, at most
+    /// `MAX_DRAFTS`; dropped with the screen.
+    pub(crate) drafts: VecDeque<(NoteAnchor, SharedString)>,
+    /// #22: the last batch the screen went to the Conversation page for.
+    pub(crate) switched_for: Option<BatchId>,
+    /// #22: C was pressed while the unsent notes are at their limit; the bar
+    /// says so until the next command about notes.
+    pub(crate) notes_full_hint: bool,
+    /// #22: `AddNote` commands sent since the screen opened (the log).
+    pub(crate) notes_added: u32,
+    /// #22: the notes of the snapshot arranged for the item builder.
+    pub(crate) note_index: NoteIndex,
+    /// #22: where each note is in `snapshot.notes`.
+    pub(crate) note_pos: HashMap<NoteId, u32>,
+    /// #22: the screen's focus, which the editor returns it to.
+    pub(crate) screen_focus: Option<FocusHandle>,
     /// Turns that came with a later snapshot than the first: they fade in.
     pub(crate) arriving: HashSet<TurnRef>,
     known_turns: HashSet<TurnRef>,
@@ -265,6 +285,14 @@ impl ReviewModel {
             marked: 0,
             looks_good: false,
             layer_open: false,
+            editor: None,
+            drafts: VecDeque::new(),
+            switched_for: None,
+            notes_full_hint: false,
+            notes_added: 0,
+            note_index: NoteIndex::default(),
+            note_pos: HashMap::new(),
+            screen_focus: None,
             arriving: HashSet::new(),
             known_turns: HashSet::new(),
             built: false,
@@ -346,6 +374,14 @@ impl ReviewModel {
             marked: 0,
             looks_good: false,
             layer_open: false,
+            editor: None,
+            drafts: VecDeque::new(),
+            switched_for: None,
+            notes_full_hint: false,
+            notes_added: 0,
+            note_index: NoteIndex::default(),
+            note_pos: HashMap::new(),
+            screen_focus: None,
             arriving: HashSet::new(),
             known_turns: HashSet::new(),
             built: false,
@@ -392,11 +428,22 @@ impl ReviewModel {
     // ----- commands -----------------------------------------------------
 
     /// Sends a command; `Review::command` returns at once.
-    pub(crate) fn command(&self, command: ReviewCommand) {
+    pub(crate) fn command(&mut self, command: ReviewCommand) {
         if !self.opened {
             return;
         }
         debug!("command"; id = self.id.0, kind = diag::command_kind(&command));
+        if matches!(
+            command,
+            ReviewCommand::AddNote { .. }
+                | ReviewCommand::EditNote { .. }
+                | ReviewCommand::RemoveNote(_)
+                | ReviewCommand::DiscardNotes
+                | ReviewCommand::SendNotes { .. }
+                | ReviewCommand::CopyBatch(_)
+        ) {
+            self.notes_full_hint = false;
+        }
         self.shared
             .with_review(|review| review.command(self.id, command));
     }
@@ -490,6 +537,7 @@ impl ReviewModel {
     ) {
         let started = Instant::now();
         let old = std::mem::replace(&mut self.snapshot, new.clone());
+        self.index_notes();
         self.applied = new.generation;
         if let ReviewTarget::Session(key) = &self.target {
             self.title = self.shared.session_title(key).or(self.title.take());
@@ -509,7 +557,7 @@ impl ReviewModel {
                 cx.notify();
                 return;
             }
-            LoadState::Ready => {}
+            LoadState::Ready => self.notes_snapshot_applied(),
         }
         if old.state == LoadState::Ready && same_structure(&old, &new) {
             if !Arc::ptr_eq(&old.brief, &new.brief) {
@@ -561,9 +609,28 @@ impl ReviewModel {
             noise_expanded: self.noise_expanded,
             context: &self.context,
             known_lines: &self.known_lines,
+            // `build_noted` takes the editor from the note index.
+            editor: None,
         };
-        let new_items =
-            items::build_with(&self.snapshot, &self.rows, &options, &self.collapsed_turns);
+        let note_index = NoteIndex::new(&self.snapshot, self.editor_at());
+        let new_items = items::build_noted(
+            &self.snapshot,
+            &self.rows,
+            &options,
+            &self.collapsed_turns,
+            &note_index,
+        );
+        self.note_index = note_index;
+        self.index_notes();
+        if self.editor.is_some()
+            && !new_items
+                .iter()
+                .any(|item| matches!(item, Item::NoteEditor { .. }))
+        {
+            // The place of the editor is not in the review any more.
+            self.editor = None;
+            debug!("note editor"; id = self.id.0, target = "new", how = "closed_by_change");
+        }
         let target = if old.is_empty() {
             ListOffset::default()
         } else {
@@ -722,13 +789,18 @@ impl ReviewModel {
             self.rows.remove(&key);
             self.drop_rows(&key);
             let lines = self.known_lines.get(&key).copied().unwrap_or(1);
-            self.replace_segment(
-                &key,
-                vec![Item::Placeholder {
+            let mut fresh = Vec::new();
+            match self.note_file(&key) {
+                Some(file) => {
+                    let notes = self.note_index.context(&key, &file);
+                    items::placeholder_items(&mut fresh, &key, lines, &notes);
+                }
+                None => fresh.push(Item::Placeholder {
                     rows: key.clone(),
                     lines,
-                }],
-            );
+                }),
+            }
+            self.replace_segment(&key, fresh);
         }
     }
 
@@ -816,9 +888,21 @@ impl ReviewModel {
         }
         let display: Arc<[DisplayRow]> = items::display_rows(&rows, self.mode).into();
         let mut fresh = Vec::new();
-        items::rows_items_of(&mut fresh, key, &rows, &display);
+        match self.note_file(key) {
+            Some(file) => {
+                let notes = self.note_index.context(key, &file);
+                items::rows_items_with(&mut fresh, key, &rows, &display, &notes);
+            }
+            None => items::rows_items_of(&mut fresh, key, &rows, &display),
+        }
+        // The height a placeholder takes after the rows are dropped again:
+        // the lines of the diff, not its notes.
+        let lines = fresh
+            .iter()
+            .filter(|item| !matches!(item, Item::Note { .. } | Item::NoteEditor { .. }))
+            .count();
         self.known_lines
-            .insert(key.clone(), diag::count(fresh.len()).max(1));
+            .insert(key.clone(), diag::count(lines).max(1));
         self.displays.insert(key.clone(), display);
         self.rows.insert(key.clone(), rows.clone());
         self.replace_segment(key, fresh);
@@ -1398,6 +1482,7 @@ impl Drop for ReviewModel {
             id = self.id.0,
             marked = self.marked,
             looks_good = self.looks_good,
+            notes_added = self.notes_added,
             took_us = self.opened_at.elapsed()
         );
     }
@@ -1443,6 +1528,7 @@ fn same_structure(a: &ReviewSnapshot, b: &ReviewSnapshot) -> bool {
         }
     }
     a.target == b.target
+        && Arc::ptr_eq(&a.notes, &b.notes)
         && a.base == b.base
         && a.degraded == b.degraded
         && a.unclaimed == b.unclaimed
