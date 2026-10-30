@@ -444,7 +444,6 @@ impl ActivateLimit {
     }
 }
 
-/// Durations in µs, in order, for a note.
 /// The number `field` of the last record `msg` in the program's log under
 /// `home` (`Library/Logs/Lectern/*.log`, one JSON object a line): the app's
 /// own time for a milestone, next to the runner's. None when there is none.
@@ -476,6 +475,7 @@ fn logged_values(values: &[Option<u64>]) -> String {
     each.join(", ")
 }
 
+/// Durations in µs, in order, for a note.
 fn microseconds(times: &[Duration]) -> String {
     let each: Vec<String> = times
         .iter()

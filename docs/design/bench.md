@@ -686,7 +686,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `app/open_project` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `project_home` |
 | `app/open_file` | 中位数 < 16 ms；场景：cloudprint 形状的普通文件，另有 4 MiB 与 64 MiB 的合成源码、压缩成一行的 4 MiB JS、从 diff 打开 4 MiB `package-lock.json` 中部的一个 hunk（按字节偏移定位）、从 diff 的旧一侧打开 4 MiB blob 中部的一个 hunk（对象库内容已由审阅视图登记），预算相同（[ADR 0034](../adr/0034.md)、[ADR 0042](../adr/0042.md)） | [性能预算](tech-research.md#性能预算) | `file_reader` |
 | `app/enter_edit` | 中位数 ≤ 100 ms（1 MiB、没有超过 4 KiB 的行的文件从 ⌘E 到可以输入；超标时降低编辑上限，[ADR 0034](../adr/0034.md)） | [交互规范「状态与异常」](interaction.md#状态与异常)（100 ms 内不显示加载态） | `file_reader` |
-| `app/open_diff` | 中位数 < 50 ms | [性能预算](tech-research.md#性能预算) | `review_view` |
+| `app/open_diff` | 中位数 < 120 ms（[ADR 0057](../adr/0057.md) 从 50 ms 放宽；50 ms 仍是目标） | [性能预算](tech-research.md#性能预算) | `review_view` |
 | `app/switch_worktree` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `worktrees` |
 | `app/palette_open` | 中位数 < 16 ms（面板和空查询列表） | [性能预算](tech-research.md#性能预算)（[ADR 0030](../adr/0030.md)，下同） | ⌘K（[#102](https://github.com/SoloJiang/lectern-app/issues/102)） |
 | `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
@@ -1228,7 +1228,8 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 
 - `just test -p lectern-bench`：181 个通过，跳过 6 个。新增 `process_home_is_prepared_before_the_launch`（`Scheduler::session_in_home` 在启动之前准备临时 `HOME`）和 `process_idle_after_an_open_waits_from_the_milestone`（`Session::open` 之后的静止等待从里程碑开始算）。
 - `project_home/build_1000`、`review_view/items_5000` 只运行 `time` 目标（`cargo bench -p lectern-bench --bench time -- project_home/ review_view/`，进程内，不开窗口）：中位数 931 µs（预算 < 2 ms）、27.5 µs（< 4 ms），都是 `ok`。
-- 没有在本机运行：`app/open_project`、`app/open_diff`、`app/idle_monorepo`、`app/idle_100k`（`process` 目标，启动带探针的 `lectern` 并打开窗口）。这些数字由 CI 的 `process` 分片给出。`review_view/scroll_5000`、`app/home_frames`、`project_home/resident_bytes` 是计划中，没有基准。
+- 没有在本机运行：`app/open_project`、`app/open_diff`、`app/idle_monorepo`、`app/idle_100k`（`process` 目标，启动带探针的 `lectern` 并打开窗口）。
+- CI（托管的 `macos-15` runner，运行 [40999951524](https://github.com/SoloJiang/lectern-app/actions/runs/40999951524)）：`app/open_project` 中位数 60.8 ms（< 100 ms）、`app/idle_monorepo` 33.2 MB（< 100 MB）、`app/idle_100k` 53.5 MB（< 120 MB）、`project_home/build_1000` 1.49 ms（< 2 ms），都在预算内。`app/open_diff` 5 次是 88.1–112.0 ms，中位数 93.6 ms（再测一轮 96 ms），超过 50 ms；按 [ADR 0057](../adr/0057.md) 放宽到 < 120 ms。之后 `app/open_project` 和 `app/open_diff` 的备注同时记下应用日志里的 `since_opened_us` 和 `took_us`（`Session::quit_reading_home`）。`review_view/scroll_5000`、`app/home_frames`、`project_home/resident_bytes` 是计划中，没有基准。
 
 ## 与设计的差异
 

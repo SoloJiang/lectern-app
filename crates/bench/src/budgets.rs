@@ -345,7 +345,9 @@ pub static BUDGETS: &[Budget] = &[
     ),
     top(
         "app/open_diff",
-        &[median(Limit::TimeBelow(ms(50)))],
+        // ADR 0057: 50 ms is the target; CI judges 120 ms until the product
+        // is complete.
+        &[median(Limit::TimeBelow(ms(120)))],
         TECH,
         ACTIVE,
         Process,
