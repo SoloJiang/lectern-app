@@ -9,7 +9,7 @@
 
 use std::io;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime};
 
@@ -274,6 +274,7 @@ fn app_open_project(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let repo = git_worktree::shaped(&Shape::cloudprint());
     let scheduler = scheduler(ctx);
     let mut times = Vec::new();
+    let mut inside = Vec::new();
     for _ in 0..ctx.scale(5, 1) {
         let mut session = scheduler.session(&program, None)?;
         settle(&mut session, "app/open_project")?;
@@ -282,9 +283,15 @@ fn app_open_project(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             Milestone::ProjectHome,
             OPEN_LIMIT,
         )?);
-        session.quit()?;
+        inside.push(session.quit_reading_home(|home| {
+            logged(home, "home milestone reported", "since_opened_us")
+        })?);
     }
-    let note = format!("cloudprint shape; times {}", microseconds(&times));
+    let note = format!(
+        "cloudprint shape; times {}; in the app (since_opened_us) {}",
+        microseconds(&times),
+        logged_values(&inside)
+    );
     Ok(vec![
         Measured::new("app/open_project", Value::Time(Samples(times))).with_note(Some(note)),
     ])
@@ -301,6 +308,7 @@ fn app_open_diff(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let fixture = review_session::ReviewSession::new(files, modules, turns, SystemTime::now());
     let scheduler = scheduler(ctx);
     let mut times = Vec::new();
+    let mut inside = Vec::new();
     for _ in 0..ctx.scale(5, 1) {
         let mut session = scheduler.session_in_home(&program, &|home| fixture.write_home(home))?;
         settle(&mut session, "app/open_diff")?;
@@ -317,11 +325,12 @@ fn app_open_diff(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             Milestone::DiffShown,
             OPEN_LIMIT,
         )?);
-        session.quit()?;
+        inside.push(session.quit_reading_home(|home| logged(home, "diff shown", "took_us"))?);
     }
     let note = format!(
-        "{files} files, {modules} rewritten in {turns} turns of one session; times {}",
-        microseconds(&times)
+        "{files} files, {modules} rewritten in {turns} turns of one session; times {}; in the app (took_us) {}",
+        microseconds(&times),
+        logged_values(&inside)
     );
     Ok(vec![
         Measured::new("app/open_diff", Value::Time(Samples(times))).with_note(Some(note)),
@@ -436,6 +445,37 @@ impl ActivateLimit {
 }
 
 /// Durations in µs, in order, for a note.
+/// The number `field` of the last record `msg` in the program's log under
+/// `home` (`Library/Logs/Lectern/*.log`, one JSON object a line): the app's
+/// own time for a milestone, next to the runner's. None when there is none.
+fn logged(home: &Path, msg: &str, field: &str) -> Option<u64> {
+    let dir = std::fs::read_dir(home.join("Library/Logs/Lectern")).ok()?;
+    let mut found = None;
+    for entry in dir.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if record["msg"] == msg {
+                found = record[field].as_u64().or(found);
+            }
+        }
+    }
+    found
+}
+
+/// [`logged`] values for a note, "-" where the log had none.
+fn logged_values(values: &[Option<u64>]) -> String {
+    let each: Vec<String> = values
+        .iter()
+        .map(|v| v.map_or_else(|| "-".to_owned(), |us| format!("{us} µs")))
+        .collect();
+    each.join(", ")
+}
+
 fn microseconds(times: &[Duration]) -> String {
     let each: Vec<String> = times
         .iter()

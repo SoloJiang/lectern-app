@@ -1028,6 +1028,17 @@ impl<'a> Session<'a> {
     /// `Quit`, then the exit within [`Limits::quit`]; an exit other than 0
     /// is an error. On an error the process group is ended.
     pub fn quit(mut self) -> Result<(), BenchError> {
+        self.wait_quit()
+    }
+
+    /// [`Session::quit`], then `read` on the temporary `HOME` before it is
+    /// removed: the program's files there (its log) are complete.
+    pub fn quit_reading_home<T>(mut self, read: impl FnOnce(&Path) -> T) -> Result<T, BenchError> {
+        self.wait_quit()?;
+        Ok(read(&self._dir.path().join("home")))
+    }
+
+    fn wait_quit(&mut self) -> Result<(), BenchError> {
         self.send(&Request::Quit)?;
         let deadline = Instant::now() + self.limits.quit;
         loop {

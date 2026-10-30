@@ -341,7 +341,12 @@ fn process_home_is_prepared_before_the_launch() {
     let home = PathBuf::from(launch.var("HOME").unwrap());
     assert!(home.join(".claude/projects/marker").is_file());
     assert_eq!(launch.var(PLUGINS_VAR), None, "the whole profile");
-    session.quit().unwrap();
+    // The `HOME` is still there after the exit, and removed after the read.
+    let read = session
+        .quit_reading_home(|home| std::fs::read(home.join(".claude/projects/marker")).unwrap())
+        .unwrap();
+    assert_eq!(read, b"x");
+    assert!(!home.exists());
     // A failing `prepare` launches nothing.
     let error =
         message(scheduler.session_in_home(&program(), &|_| Err(io::Error::other("full disk"))));
