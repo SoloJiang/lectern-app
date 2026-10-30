@@ -204,6 +204,7 @@ fn budgets_belong_to_the_documented_targets() {
             || budget.id.ends_with("_peak")
             || budget.id == "git/resident"
             || budget.id == "cache/memory"
+            || (budget.id.starts_with("terminal/") && budget.id.ends_with("_footprint"))
             || budget.id == "fs_watch/resident"
             || budget.id == "fs_watch/resident_100k"
             || budget.id.starts_with("plugin/code-intel/resident_")

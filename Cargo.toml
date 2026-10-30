@@ -174,6 +174,13 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 # `Window::render_to_image` returns (docs/design/ui_probe.md「依赖」). Already
 # in Cargo.lock with `png` on, through GPUI; default features off, `png` only.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# lectern-terminal's terminal state machine (ADR 0002, docs/design/terminal.md
+# 「libghostty-vt」). Both pinned: libghostty-vt-sys's version fixes the Ghostty
+# commit its build script clones and builds with Zig 0.15.2, so upgrading
+# libghostty means changing both numbers. Default features off: no
+# kitty-graphics, log, tracing or link-dynamic.
+libghostty-vt = { version = "=0.2.2", default-features = false }
+libghostty-vt-sys = "=0.2.2"
 # Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 # Test-only: temporary directories for lectern-platform's tests, and mkfifo in

@@ -53,6 +53,8 @@ mod review_view;
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
 mod syntax_engine;
+#[path = "time/terminal.rs"]
+mod terminal;
 #[cfg(target_os = "macos")]
 #[path = "time/ui.rs"]
 mod ui;
@@ -179,6 +181,10 @@ const BENCHES: &[Bench] = &[
     usage::ARCHIVE_MONTH,
     usage::COLD_READ_MONTH,
     usage::DISK_DAY_HEAVY,
+    terminal::PARSE_PLAIN,
+    terminal::PARSE_SGR,
+    terminal::FRAME_FULL,
+    terminal::FRAME_ECHO,
 ];
 
 fn main() -> ExitCode {

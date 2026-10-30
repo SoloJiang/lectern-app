@@ -38,6 +38,8 @@ mod review_repo;
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
 mod syntax_engine;
+#[path = "memory/terminal.rs"]
+mod terminal;
 #[path = "memory/usage.rs"]
 mod usage;
 
@@ -301,6 +303,8 @@ const BENCHES: &[Bench] = &[
     syntax::LRU_BYTES,
     syntax::EDIT_TREE_BYTES,
     usage::RESIDENT,
+    terminal::IDLE,
+    terminal::SCROLLBACK,
 ];
 
 fn main() -> ExitCode {
@@ -308,6 +312,11 @@ fn main() -> ExitCode {
     if let Some(root) = std::env::var_os(cache::CHILD) {
         let entries = cache::entries(std::env::args().nth(1));
         return cache::child(root.as_ref(), entries);
+    }
+    // The child process of `terminal/*_footprint`.
+    if let Some(scenario) = std::env::var_os(terminal::CHILD) {
+        let lines = std::env::args().nth(1).and_then(|a| a.parse().ok());
+        return terminal::child(&scenario.to_string_lossy(), lines.unwrap_or(0));
     }
     // SAFETY: first thing in the process, before any tree-sitter call: the
     // counting allocator then sees syntax trees (`code_intel/batch_peak`).
