@@ -627,8 +627,9 @@ impl ReviewModel {
                 .iter()
                 .any(|item| matches!(item, Item::NoteEditor { .. }))
         {
-            // The place of the editor is not in the review any more.
-            self.editor = None;
+            // The place of the editor is not in the review any more. The text
+            // of a new note stays as its anchor's draft.
+            self.park_editor(cx);
             debug!("note editor"; id = self.id.0, target = "new", how = "closed_by_change");
         }
         let target = if old.is_empty() {

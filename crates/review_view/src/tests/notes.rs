@@ -492,6 +492,66 @@ fn c_opens_the_editor_on_the_selected_row(cx: &mut TestAppContext) {
     );
 }
 
+/// A hunk that only deletes: its first removed line, not the context line
+/// that leads it (the review gives leading context the next hunk's index).
+#[gpui::test]
+fn c_opens_the_editor_on_the_first_removed_line_of_a_deleting_hunk(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    let mut rows = sample_rows(step_key());
+    rows.rows = rows
+        .rows
+        .iter()
+        .filter(|row| !matches!(row, lectern_services::review::DiffRow::Added { .. }))
+        .map(|row| match row {
+            lectern_services::review::DiffRow::Removed {
+                old,
+                old_byte,
+                hunk,
+                ..
+            } => lectern_services::review::DiffRow::Removed {
+                old: *old,
+                pair: None,
+                old_byte: *old_byte,
+                hunk: *hunk,
+            },
+            other => other.clone(),
+        })
+        .collect();
+    rows.inline = Arc::from(Vec::new());
+    rig.review.set_auto_prepare(true);
+    rig.review.set_rows(FIRST_ID, step_key(), rows);
+    rig.review
+        .set_rows(FIRST_ID, final_key(), sample_rows(final_key()));
+    let opened = rig.open(cx, session(), Some(noted_snapshot(Vec::new())));
+    opened.draw(cx);
+    rig.settle(cx);
+    opened.draw(cx);
+    let mut visual = opened.visual(cx);
+
+    select(
+        &opened,
+        cx,
+        ItemKey::Hunk {
+            rows: step_key(),
+            old: 0,
+            new: 0,
+        },
+    );
+    visual.simulate_keystrokes("c");
+    assert_eq!(
+        editor_target(&opened, cx),
+        Some(EditorTarget::New {
+            rows: step_key(),
+            anchor: NoteAnchor {
+                file: file_key(0),
+                side: DiffSide::Old,
+                line: 1,
+                oid: old_oid(),
+            },
+        })
+    );
+}
+
 #[gpui::test]
 fn c_opens_nothing_without_a_row_or_an_oid(cx: &mut TestAppContext) {
     let rig = Rig::new(cx);

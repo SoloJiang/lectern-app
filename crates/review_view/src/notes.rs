@@ -136,7 +136,12 @@ impl ReviewModel {
                         row.right
                             .is_some_and(|side| side.kind == items::RowKind::Added)
                     })
-                    .or_else(|| in_hunk().find(|row| row.left.is_some()))?
+                    .or_else(|| {
+                        in_hunk().find(|row| {
+                            row.left
+                                .is_some_and(|side| side.kind == items::RowKind::Removed)
+                        })
+                    })?
                     .clone();
                 (rows.clone(), row)
             }
@@ -215,7 +220,7 @@ impl ReviewModel {
 
     /// Takes an open editor down, keeping the text of a new note as the
     /// draft of its anchor. Does not rebuild the items.
-    fn park_editor(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn park_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
         };
