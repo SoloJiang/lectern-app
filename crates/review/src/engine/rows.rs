@@ -14,8 +14,8 @@ use lectern_services::review::{
 
 use super::Engine;
 use super::attribute::{self, FileResult, side};
-use super::round::{Work, ends, side_oid};
-use crate::chain::{self, ChainInput, MAX_VERSION_BYTES};
+use super::round::{StepWork, Work, ends, side_oid};
+use crate::chain::{self, Chain, ChainInput, MAX_VERSION_BYTES};
 
 /// The rows of `key`, None when the file or step is not in the review.
 /// Blocking.
@@ -70,6 +70,46 @@ fn side_of(text: SideText, oid: Option<BlobId>) -> RowsSide {
     RowsSide { oid, text }
 }
 
+/// Where a narrative step sits in its file's chain, and the versions of the
+/// file before and after it.
+pub(crate) struct StepSpan {
+    /// The step's group in the chain.
+    pub group: usize,
+    /// Its first and last change steps.
+    pub first: usize,
+    pub last: usize,
+    /// The base side's OID or the version after the previous change step;
+    /// the version after the last one.
+    pub before: Option<BlobId>,
+    pub after: Option<BlobId>,
+}
+
+/// The span of `step` in `chain`; None when the chain has no group for it.
+pub(crate) fn step_span(work: &Work, chain: &Chain, step: &StepWork) -> Option<StepSpan> {
+    let file = &work.files[step.file as usize];
+    let group = chain.groups.iter().position(|g| {
+        g.steps
+            .first()
+            .is_some_and(|&k| file.history[k as usize].group == step.group)
+    })?;
+    let steps = &chain.groups[group].steps;
+    let first = *steps.first()? as usize;
+    let last = *steps.last()? as usize;
+    let f = &work.list.files[file.list as usize];
+    let before = if first == 0 {
+        side_oid(f.old.as_ref())
+    } else {
+        chain.steps[first - 1].version
+    };
+    Some(StepSpan {
+        group,
+        first,
+        last,
+        before,
+        after: chain.steps[last].version,
+    })
+}
+
 fn step_rows(
     engine: &Engine,
     work: &Work,
@@ -82,14 +122,9 @@ fn step_rows(
     let n = step.file as usize;
     let file = &work.files[n];
     let chain = result(n).chain.clone()?;
-    let g = chain.groups.iter().position(|g| {
-        g.steps
-            .first()
-            .is_some_and(|&k| file.history[k as usize].group == step.group)
-    })?;
-    let group = &chain.groups[g];
-    let first = *group.steps.first()? as usize;
-    let last = *group.steps.last()? as usize;
+    let span = step_span(work, &chain, step)?;
+    let group = &chain.groups[span.group];
+    let (first, last) = (span.first, span.last);
     let f = &work.list.files[file.list as usize];
     let turn = TurnRef {
         session: step.session,
@@ -109,12 +144,7 @@ fn step_rows(
     };
     // The versions before and after the step: the base side or the version
     // after the previous step, and the version after its last step.
-    let before_oid = if first == 0 {
-        side_oid(f.old.as_ref())
-    } else {
-        chain.steps[first - 1].version
-    };
-    let after_oid = chain.steps[last].version;
+    let (before_oid, after_oid) = (span.before, span.after);
     let cached = |oid: Option<BlobId>| -> Option<Option<Arc<[u8]>>> {
         match oid {
             None => Some(None),

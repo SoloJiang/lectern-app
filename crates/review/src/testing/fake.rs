@@ -423,6 +423,21 @@ impl FakeSessions {
         }
     }
 
+    /// Places `session` in `project` without a worktree, as a folder
+    /// project's session is (after `locate`, which would undo it).
+    pub fn place_in_folder(&self, session: &str, project: &lectern_services::project::ProjectKey) {
+        for s in self.inner().sessions.iter_mut() {
+            if &*s.summary.key.id == session {
+                s.summary.place = Place::Located(lectern_services::project::Location {
+                    project: project.clone(),
+                    worktree: None,
+                    rel: lectern_services::project::RelPath::from(""),
+                    package: lectern_services::project::PackageMatch::None,
+                });
+            }
+        }
+    }
+
     /// Appends turns (a JSON turn, or an array of them) to `session` and
     /// records a `SessionsChanged` (`events`).
     pub fn append(&self, session: &str, script: &str) {

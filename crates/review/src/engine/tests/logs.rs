@@ -81,7 +81,7 @@ fn logs_hold_no_contents() {
     let mut out = OpenOptions::new().append(true).open(file.path()).unwrap();
     write!(
         out,
-        "{CANARY} not json\n{{\"t\":\"note\",\"at\":1,\"text\":\"{CANARY}\"}}\n{torn}"
+        "{CANARY} not json\n{{\"t\":\"pin\",\"at\":1,\"text\":\"{CANARY}\"}}\n{torn}"
     )
     .unwrap();
     drop(out);

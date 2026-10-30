@@ -297,6 +297,7 @@ const BENCHES: &[Bench] = &[
     project::DIRS_100K_BYTES,
     review::RESIDENT_CLOUDPRINT,
     review::RESIDENT_100K,
+    review::RESIDENT_NOTES,
     syntax::WINDOW_PEAK,
     syntax::LRU_BYTES,
     syntax::EDIT_TREE_BYTES,

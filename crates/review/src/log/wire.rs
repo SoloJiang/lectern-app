@@ -10,6 +10,9 @@
 //! {"t":"seen","at":…,"target":{"session":{"source":"…","id":"…"}},"key":{…}}
 //! {"t":"unseen","at":…,"target":…,"file":{"old":null,"new":"src/a.rs"}}
 //! {"t":"base","at":…,"session":{"source":"…","id":"…"},"commit":"…","entry_at":…}
+//! {"t":"note","at":…,"target":…,"id":"<16 hex>","anchor":{"file":{…},"side":"new","line":41,"oid":"…"},"excerpt":{"first":39,"lines":["…"]},"text":"…","created":…}
+//! {"t":"note_removed","at":…,"target":…,"ids":["<16 hex>"]}
+//! {"t":"notes_sent","at":…,"target":…,"batch":"<16 hex>","notes":["<16 hex>"],"via":"clipboard"}
 //! ```
 //!
 //! Reading borrows from the line where it can and shares the strings that
@@ -25,12 +28,12 @@ use lectern_services::changes::{
     BaseSpec, ChangePath, FileMode, RawIdentity, SideIdentity, UnavailableKind,
 };
 use lectern_services::project::BlobId;
-use lectern_services::review::FileKey;
+use lectern_services::review::{BatchId, DiffSide, Excerpt, FileKey, NoteAnchor, NoteId, SentVia};
 use lectern_services::session::Timestamp;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{BaseRecord, Record, SessionId};
+use super::{BaseRecord, NoteRecord, Record, SentRecord, SessionId};
 use crate::seen::{SeenKey, StatusKind, TargetKey};
 
 pub(super) const MAGIC: &str = "review-log";
@@ -232,6 +235,63 @@ struct File<'a> {
     new: Option<Bytes<'a>>,
 }
 
+/// A note or batch ID: 16 lowercase hex digits.
+#[derive(Clone, Copy)]
+struct Id(u64);
+
+impl Serialize for Id {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("{:016x}", self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Id, D::Error> {
+        let text = Cow::<str>::deserialize(d)?;
+        if text.len() == 16
+            && text.bytes().all(|b| b.is_ascii_hexdigit())
+            && let Ok(n) = u64::from_str_radix(&text, 16)
+        {
+            return Ok(Id(n));
+        }
+        Err(de::Error::invalid_value(
+            de::Unexpected::Str(&text),
+            &"16 hex digits",
+        ))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoteSide {
+    Old,
+    New,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Anchor<'a> {
+    #[serde(borrow)]
+    file: File<'a>,
+    side: NoteSide,
+    line: u32,
+    oid: BlobId,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExcerptLines<'a> {
+    first: u32,
+    #[serde(borrow)]
+    lines: Vec<Cow<'a, str>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Via {
+    Clipboard,
+    Terminal,
+    Acp,
+}
+
 /// A record line, for writing.
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -253,6 +313,28 @@ enum Out<'a> {
         commit: Option<BlobId>,
         entry_at: Option<i64>,
     },
+    Note {
+        at: i64,
+        target: Target<'a>,
+        id: Id,
+        anchor: Anchor<'a>,
+        /// None: it could not be taken.
+        excerpt: Option<ExcerptLines<'a>>,
+        text: &'a str,
+        created: i64,
+    },
+    NoteRemoved {
+        at: i64,
+        target: Target<'a>,
+        ids: Vec<Id>,
+    },
+    NotesSent {
+        at: i64,
+        target: Target<'a>,
+        batch: Id,
+        notes: Vec<Id>,
+        via: Via,
+    },
 }
 
 /// A record line read in one pass: the fields of every known type, all
@@ -273,6 +355,18 @@ struct Line<'a> {
     session: Option<Session<'a>>,
     commit: Option<BlobId>,
     entry_at: Option<i64>,
+    id: Option<Id>,
+    #[serde(borrow)]
+    anchor: Option<Anchor<'a>>,
+    #[serde(borrow)]
+    excerpt: Option<ExcerptLines<'a>>,
+    #[serde(borrow)]
+    text: Option<Cow<'a, str>>,
+    created: Option<i64>,
+    ids: Option<Vec<Id>>,
+    batch: Option<Id>,
+    notes: Option<Vec<Id>>,
+    via: Option<Via>,
 }
 
 /// What a record line holds.
@@ -290,12 +384,24 @@ pub(super) enum Decoded {
 #[derive(Default)]
 pub(super) struct Interner {
     strs: HashSet<Arc<str>>,
+    paths: HashSet<Arc<[u8]>>,
     recent: [Option<Arc<str>>; 4],
     /// The slot of `recent` the next miss replaces.
     next: usize,
 }
 
 impl Interner {
+    /// One copy of each anchor path: many notes sit on the same files.
+    fn path(&mut self, p: ChangePath) -> ChangePath {
+        match self.paths.get(&*p.0) {
+            Some(shared) => ChangePath(Arc::clone(shared)),
+            None => {
+                self.paths.insert(Arc::clone(&p.0));
+                p
+            }
+        }
+    }
+
     fn str(&mut self, s: &str) -> Arc<str> {
         if let Some(hit) = self.recent.iter().flatten().find(|r| ***r == *s) {
             return hit.clone();
@@ -355,6 +461,45 @@ pub(super) fn encode(record: &Record, out: &mut Vec<u8>) {
             },
             commit: b.commit,
             entry_at: b.entry_at,
+        },
+        Record::Note(n) => Out::Note {
+            at: n.at.0,
+            target: target(&n.target),
+            id: Id(n.id.0),
+            anchor: Anchor {
+                file: File {
+                    old: n.anchor.file.old.as_ref().map(bytes),
+                    new: n.anchor.file.new.as_ref().map(bytes),
+                },
+                side: match n.anchor.side {
+                    DiffSide::Old => NoteSide::Old,
+                    DiffSide::New => NoteSide::New,
+                },
+                line: n.anchor.line,
+                oid: n.anchor.oid,
+            },
+            excerpt: n.excerpt.as_ref().map(|e| ExcerptLines {
+                first: e.first,
+                lines: e.lines.iter().map(|l| Cow::Borrowed(&**l)).collect(),
+            }),
+            text: &n.text,
+            created: n.created.0,
+        },
+        Record::NoteRemoved { at, target: t, ids } => Out::NoteRemoved {
+            at: at.0,
+            target: target(t),
+            ids: ids.iter().map(|id| Id(id.0)).collect(),
+        },
+        Record::NotesSent(s) => Out::NotesSent {
+            at: s.at.0,
+            target: target(&s.target),
+            batch: Id(s.batch.0),
+            notes: s.notes.iter().map(|id| Id(id.0)).collect(),
+            via: match s.via {
+                SentVia::Clipboard => Via::Clipboard,
+                SentVia::TerminalPaste => Via::Terminal,
+                SentVia::Acp => Via::Acp,
+            },
         },
     };
     // Writing these types into a Vec cannot fail: every map key is a string.
@@ -519,13 +664,60 @@ fn known_record(l: Line<'_>, strs: &mut Interner) -> Option<Record> {
                 entry_at: l.entry_at,
             }))
         }
+        "note" => {
+            let a = l.anchor?;
+            let (old, new) = paths(a.file.old, a.file.new)?;
+            let excerpt = l.excerpt.map(|e| Excerpt {
+                first: e.first,
+                lines: e.lines.iter().map(|line| strs.str(line)).collect(),
+            });
+            Some(Record::Note(NoteRecord {
+                at,
+                target: target_key(l.target?, strs),
+                id: NoteId(l.id?.0),
+                anchor: NoteAnchor {
+                    file: FileKey {
+                        old: old.map(|p| strs.path(p)),
+                        new: new.map(|p| strs.path(p)),
+                    },
+                    side: match a.side {
+                        NoteSide::Old => DiffSide::Old,
+                        NoteSide::New => DiffSide::New,
+                    },
+                    line: a.line,
+                    oid: a.oid,
+                },
+                excerpt,
+                text: Arc::from(&*l.text?),
+                created: Timestamp(l.created?),
+            }))
+        }
+        "note_removed" => Some(Record::NoteRemoved {
+            at,
+            target: target_key(l.target?, strs),
+            ids: l.ids?.into_iter().map(|id| NoteId(id.0)).collect(),
+        }),
+        "notes_sent" => Some(Record::NotesSent(SentRecord {
+            at,
+            target: target_key(l.target?, strs),
+            batch: BatchId(l.batch?.0),
+            notes: l.notes?.into_iter().map(|id| NoteId(id.0)).collect(),
+            via: match l.via? {
+                Via::Clipboard => SentVia::Clipboard,
+                Via::Terminal => SentVia::TerminalPaste,
+                Via::Acp => SentVia::Acp,
+            },
+        })),
         _ => None,
     }
 }
 
 /// Whether `t` is a record type this version reads.
 fn known(t: &str) -> bool {
-    matches!(t, "seen" | "unseen" | "base")
+    matches!(
+        t,
+        "seen" | "unseen" | "base" | "note" | "note_removed" | "notes_sent"
+    )
 }
 
 type Paths = (Option<ChangePath>, Option<ChangePath>);

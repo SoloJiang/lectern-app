@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（本 PR），`review` 暂不处理意见命令、登记的途径不生效，由第 6、7 步实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（[#326](https://github.com/SoloJiang/lectern-app/pull/326)）；第 6 步（意见的存储、命令与位置：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`，`NotePlace`，摘录，标注日志的 `note`、`note_removed`、`notes_sent` 的读取、索引、保留与压缩，`review/note_add`、`review/resident_notes_bytes`）已实现（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）。`SendNotes`、`CopyBatch` 仍被忽略，`register_note_route` 登记的途径不生效，`notes_sent` 只读不写，由第 7 步实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的领域部分（意见的存储、锚点与 Drifted、攒批、拼成 prompt、经发送途径送出、与回应它的那一轮对应）。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
@@ -1841,6 +1841,35 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - 真实的 `ProjectEvent::Changed`（`parts.packages`）：测试直接调用 `Driven::project_changed`，插件里的订阅只有编译检查。
   - `project_home` 的使用（[#30](https://github.com/SoloJiang/lectern-app/issues/30)）。
 
+### 第 6 步（意见的存储、命令与位置）
+
+在 macOS（Darwin，本机，Rust 1.97.0）上运行，基于 main 的 98ec2a6 加前置条件 H 的提交；屏幕没有操作，没有运行应用，也没有运行打开窗口的测试或基准（基准只跑了 `time`、`memory` 两个进程内的目标，筛选 `review/`，不含 `process` 目标的 `plugin/review/activate`）。
+
+- `just check`（格式、架构规则、文档链接、clippy 警告即失败）、`just deny` 通过；`rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 没有结果。
+- `just test -p lectern-review`：220 个测试通过，新增 43 个：`log_notes_*` 10 个（三种记录的往返、最近一条 `note` 为准、`note_removed`、`notes_sent` 与先后无关、发出超过 14 天的批次不读入、压缩丢掉它们并保留一年前的待发送意见、`log_notes_compaction_keeps_the_index`、摘录补进队列里的记录、形状不对的记录是坏行、路径共用）；`src/engine/tests/notes.rs` 22 个（`notes_cmd_*`：每条命令返回前换出快照、摘录由任务取出并再换一份快照、记录写进日志且重启后读回、被忽略的每一种、日志里多于上限的意见、14 天、加载中、ID、文件夹项目、日志里的字段；`notes_place_*`：最终改动与一步、两处都有、Drifted、一步上的意见在工作区变化后仍在、Elsewhere、改名、归因 Pending 时先 Drifted、排序、`Arc` 沿用；`notes_excerpt_*`：按准备好的行、行被丢掉或内容不同时为 None、调用方给出的原样保存）；`src/notes/tests.rs` 10 个（`notes_excerpt_*` 的纯函数）；`plugin/tests.rs` 的 `notes_cmd_on_the_ui_thread_do_no_io`（缓存拒绝 UI 线程的任何调用，命令返回时快照已换出、摘录为 None、日志目录还不存在）。`log_format` 的快照多了 `note`（带摘录、不带摘录）、`note_removed`、`notes_sent` 四行，逐行看过；`log_unknown_records_survive_compaction` 的快照只改了两行里的类型名（`note`→`pin`、`notes_sent`→`star`）。`just test -p lectern-bench`：179 个通过，`just test -p lectern-services`：110 个通过。
+- 基准（`cargo bench -p lectern-bench --all-features --bench time -- review/` 与 `--bench memory -- review/`，采样模式；改动前在 98ec2a6 加 H 上先测了一遍）：
+
+  | 条目 | 预算 | 改动前 | 改动后 |
+  |---|---|---|---|
+  | `review/note_add` | 中位数 < 0.2 ms | — | 46.3、130 µs（两次运行，报告标为 noisy） |
+  | `review/resident_notes_bytes` | 中位数 < 300 KB | — | 228 KB |
+  | `review/mark_seen_5000` | < 200 µs | 16 µs | 16.1、15.9 µs |
+  | `review/rows_first` | < 3 ms | 217 µs | 226、223 µs |
+  | `review/open_session_50` / `_warm` | < 35 ms / < 20 ms | 15.3 / 5.42 ms | 15.6、16.5 / 5.78、5.75 ms |
+  | `review/refresh_one` | < 20 ms | 2.64 ms | 2.85、3.49 ms |
+  | `review/overview_round_warm` | < 20 ms | 6.96 ms | 7.85、6.86 ms |
+  | `review/brief_5000` | < 5 ms | 271 µs | 270、266 µs |
+  | `review/log_load_16k` | < 30 ms | 10.2 ms | 10.3、9.83 ms |
+  | `review/resident_cloudprint_bytes`、`review/resident_100k_bytes` | < 1 MB | 19.8 KB、3.47 KB | 19.8 KB、3.47 KB |
+
+  其余只记录的条目（`open_session_settled` 203→211、202 ms，`cutoffs_cold` 175→181、208 ms，`attribute_session_50` 16.3→16.2 ms，`overview_cloudprint` 40.7→41.5 ms）在两次运行之间的波动范围内。`review/note_add` 的两次相差较大，机器上同时有别的任务；预算内的余量约 35% 到 75%。
+- 没有验证的：
+  - 没有在 CI 的 macOS runner 上测量；`review/note_add` 的余量在抖动大时可能变窄（每次加意见重算 280 条意见的位置，约 0.5 µs 一条）。
+  - 真实的会话（Claude Code、Codex）里意见的位置：测试用合成的会话脚本和 `TestRepo`；改名用暂存的重命名。
+  - `SendNotes`、`CopyBatch`、`notes_sent` 的写入、`register_note_route` 的途径、批次与轮次的对应、「日志与诊断」里 #22 的发送记录：第 7 步。
+  - 「测试」里 `notes_cmd_*` 的「已有 40 条还没发出（含 30 条发送中、10 条待发送）时第 41 条被忽略」：第 6 步没有发送中的状态，只测了 40 条待发送时第 41 条被忽略（`notes_cmd_ignored_commands_leave_the_snapshot_alone`）和日志里 45 条待发送时一条不丢（`notes_cmd_more_than_the_limit_in_the_log_are_all_kept`）；发送中的情形随 `SendNotes` 在第 7 步测。
+  - 最后一次 `just check` 在文档的这一节写好之前通过；之后只改了本文档和它的链接，重跑了文档链接检查（`lectern-doc-check`），没有再跑全部的 `just check`。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -1975,3 +2004,20 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **子项目变化也触发一轮。** `ProjectEvent::Changed` 只带 `packages`（`ChangedParts::packages`，扫描完成）时，原来的 `project_changed` 只看 `active`，所以扫描完成后 `Overview::packages` 会一直是 None，直到下一次文件变化。改为：`active` 触发 `resolve`（同前），只有 `packages` 时触发复用计数改动集的一轮（`Trigger::default()`）；其余部分仍不触发。`Engine::project_changed` 的参数从 `bool` 改为 `ChangedParts`。
 - **测试用的设施。** `FakeProjects::set_packages`（运行中改变快照的 `active.packages`，`with_packages` 现在也让它为 `Ready`，原来只影响 `locate`）；`SessionFixture` 的 `FakeProjects` 给十个子项目，使 `review/overview_round_warm` 含这一项；`Driven::set_utc_offset`、`Driven::project_changed`。
 - **日志。** 多一条 warn `modification times unreadable`（原来 `unwrap_or_default` 静默吞掉了 `Worktree::mtimes` 的错误），`overview round` 多一个字段 `packages`。
+
+### 第 6 步（意见的存储、命令与位置）
+
+- **摘录靠改写队列里的记录，不是推迟记录。** 设计写「后台写日志之前从中取出摘录」。命令在调用线程上就把 `note` 记录放进待写队列（摘录为 None）：日志读完之前加的意见才不会在换入索引时丢掉（`load_log` 只重放待写队列）。后台任务取出摘录之后，把它写进内存里的意见和队列里这条意见的记录（`Index::attach_excerpt`），再触发追加；带摘录任务的 `AddNote` 不在调用线程上提交追加任务，所以通常文件里只有一条带摘录的记录。队列在这之前已被别的命令的追加取走时，才会再追加一条完整的记录（回放时以后一条为准，`log_notes_attach_excerpt_patches_the_queued_record`）。
+- **摘录取出之后换一份快照、发 `Changed`。** 设计没写；不换的话视图要等到下一次无关的变化才看到摘录（`notes_cmd_each_command_swaps_the_snapshot_before_it_returns`）。
+- **文件夹项目的意见放在 `Open::folder_notes`。** 设计只写「意见只在这次打开的审阅里」。文件夹项目的审阅没有 `Work` 和标注日志，意见放在审阅自己的一份只在内存里的 `Index` 里（不写日志，待写队列随即清空），审阅释放时丢掉；位置总是 `Elsewhere`，所以 `AddNote` 要有调用方给的摘录。测试用 `FakeSessions::place_in_folder` 把会话放进没有 worktree 的位置。
+- **还在加载或加载失败的审阅忽略意见命令。** 没有 `Work` 就没有文件、没有标注日志；原因记 `unknown_file`。
+- **不存在的意见：`EditNote`、`RemoveNote` 记 `not_pending`。** 「日志与诊断」的原因表里没有「没有这条意见」，用最接近的一项，不加新的原因。`SendNotes`、`CopyBatch` 在第 7 步实现之前不记 `note command ignored`（表里没有对应的原因）。
+- **改文字的记录 `at` 取 max(现在, `created` + 1)。** `edited_at` 由 `at` 晚于 `created` 推出；同一毫秒内改文字（或时钟倒退）时，直接取现在会让这次改动看起来没改过。
+- **新的 `NoteId` 不与日志里已有的重合。** 设计的构成（时刻乘 1024 加序号）在进程内不重复，但日志里可能有时钟超前时写下的 ID；重合会让 `AddNote` 悄悄替换那条意见（基准夹具里就出现过）。`AddNote` 遇到已有的 ID 取下一个（`notes_cmd_a_new_id_never_replaces_a_note`）。
+- **索引的形状。** 每个审阅对象一组按 ID 排序的向量（意见、批次、「意见→批次」的对应），不是哈希表：280 条意见的哈希表因为空桶超出 300 KB 的预算，向量在读完之后收紧（`shrink_to_fit`）。「哪条意见已发送」从批次的清单推出，不存在意见里，所以 `note`、`notes_sent` 在文件里的先后不影响结果（`log_notes_sent_marks_the_notes_whatever_the_order`）；批次保留记录里列出的全部 ID（含后来删掉的），`SentBatch::count` 因此不随删除变化。重放一条已有 ID 的 `note` 保留第一条的位置，压缩后它仍排在自己的批次之前。
+- **14 天的保留在读取时、压缩时和建快照时各做一次。** 读完文件就丢掉发出超过 14 天的批次和其中的意见（设计的「读取时」）；压缩时同样；建快照时再按现在的时刻过滤一次，进程开着跨过 14 天时不必等下一次读取。
+- **`notes_state.routes` 从第一份快照（`Loading`）起就有剪贴板。** 设计写「总有」；`loading()` 与所有 `ReviewSnapshot` 的构造都经 `notes::empty_state()` 或 `notes::build`。`notes` 与 `notes_state` 与上一份相等时沿用上一份的 `Arc`（别的命令重建快照时指针不变）。
+- **`Work` 多一项 `steps_of`，`rows` 多一个 `step_span`。** 前者是每个文件的叙事步骤 ID，后者是一步在改动链里的位置与前后两个版本的 OID；`Rows` 的生成和意见的位置判断共用它，两处不会不一致。
+- **模块 `notes` 目前不公开。** 设计的 `pub mod notes` 是 `prompt`；第 6 步只有摘录的纯函数（`notes::excerpt`、`hint`、`anchored_text`），第 7 步加 `prompt` 时改为公开。
+- **测试的位置。** `notes_cmd_on_the_ui_thread_do_no_io` 在 `src/plugin/tests.rs`（需要 `Rig` 的「缓存拒绝 UI 线程」设施），其余 `notes_cmd_*`、`notes_place_*`、`notes_excerpt_*` 在 `src/engine/tests/notes.rs`，摘录的纯函数测试在 `src/notes/tests.rs`（同名前缀 `notes_excerpt_*`）。`log_unknown_records_survive_compaction`、`log_lines_not_utf8_are_bad_or_kept` 和 `logs_hold_no_contents` 原来用 `note`、`notes_sent` 当「认不出的记录」，这两个类型现在认得了（形状不对的是坏行），改用 `pin`、`star`。
+- **基准的形状。** `review/note_add` 在 39 条待发送加 240 条已发送上测一次被接受的 `AddNote`（设计写 40 条待发送，第 40 条之后的命令会被忽略；每个样本之前的准备删掉上一个样本加的那条，不计时）。`review/resident_notes_bytes` 只测标注日志的索引（`LogFile::load` 前后的存活字节，夹具 `testing::write_notes_log`、`load_notes_log`），不经引擎；「300 KB」按 300 × 1024 字节。
