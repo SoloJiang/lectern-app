@@ -36,6 +36,9 @@ mod log;
 mod platform;
 #[path = "time/project.rs"]
 mod project;
+#[cfg(target_os = "macos")]
+#[path = "time/project_home.rs"]
+mod project_home;
 #[path = "fixtures/project_repo.rs"]
 mod project_repo;
 #[path = "time/review.rs"]
@@ -182,13 +185,14 @@ const BENCHES: &[Bench] = &[
 ];
 
 fn main() -> ExitCode {
-    // `ui/*` and `review_view/*` need GPUI, which only builds on macOS in
+    // `ui/*`, `review_view/*` and `project_home/*` need GPUI, which only builds on macOS in
     // this workspace.
     #[cfg(target_os = "macos")]
     let benches: Vec<Bench> = {
         let mut all = BENCHES.to_vec();
         all.extend_from_slice(ui::BENCHES);
         all.extend_from_slice(review_view::BENCHES);
+        all.extend_from_slice(project_home::BENCHES);
         all
     };
     #[cfg(not(target_os = "macos"))]

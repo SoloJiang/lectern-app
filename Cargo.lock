@@ -4619,6 +4619,7 @@ dependencies = [
  "lectern-logging",
  "lectern-platform",
  "lectern-project",
+ "lectern-project-home",
  "lectern-review",
  "lectern-review-view",
  "lectern-services",

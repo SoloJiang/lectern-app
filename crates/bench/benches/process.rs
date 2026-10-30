@@ -16,10 +16,17 @@ use std::time::{Duration, SystemTime};
 use lectern_bench::budgets::{BUDGETS, Limit, fmt_bytes, lookup};
 use lectern_bench::process::{
     ColdStart, Exit, Idle, Launch, Launched, Launcher, Limits, NEVER_QUIESCENT, PluginPair,
-    ProcessInfo, Scheduler, purge,
+    ProcessInfo, Scheduler, Session, purge,
 };
-use lectern_bench::wire::TimeSource;
+use lectern_bench::wire::{Milestone, OpenTarget, TimeSource};
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Target, Value};
+use lectern_project::testing::Shape;
+
+#[allow(dead_code, reason = "each target uses its own subset of the fixtures")]
+#[path = "fixtures/git_worktree.rs"]
+mod git_worktree;
+#[path = "fixtures/review_session.rs"]
+mod review_session;
 
 /// Benchmarks are matched with budgets by ID prefix, the longest prefix
 /// first: `plugin` produces `plugin/*/activate`, `plugin/*/resident` and
@@ -36,6 +43,22 @@ const BENCHES: &[Bench] = &[
     Bench {
         id: "app/idle_empty",
         run: app_idle_empty,
+    },
+    Bench {
+        id: "app/idle_monorepo",
+        run: app_idle_monorepo,
+    },
+    Bench {
+        id: "app/idle_100k",
+        run: app_idle_100k,
+    },
+    Bench {
+        id: "app/open_project",
+        run: app_open_project,
+    },
+    Bench {
+        id: "app/open_diff",
+        run: app_open_diff,
     },
     Bench {
         id: "app/unclassified_children",
@@ -141,6 +164,12 @@ fn app_cold_start_purged(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 fn app_idle_empty(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let program = app(ctx)?;
     let runs = scheduler(ctx).idle_footprints(&program, ctx.scale(3, 1))?;
+    Ok(vec![idle_measured("app/idle_empty", runs, None)])
+}
+
+/// An idle result: the footprints, or [`NEVER_QUIESCENT`] when a launch was
+/// not quiescent in time.
+fn idle_measured(id: &str, runs: Vec<Idle<u64>>, fixture: Option<&str>) -> Measured {
     let total = runs.len();
     let bytes: Vec<u64> = runs
         .into_iter()
@@ -153,7 +182,7 @@ fn app_idle_empty(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         (
             vec![NEVER_QUIESCENT],
             format!(
-                "{} of {total} launches were not quiescent 30 s after the first frame",
+                "{} of {total} launches were not quiescent 30 s after the first frame or the open",
                 total - bytes.len()
             ),
         )
@@ -161,8 +190,141 @@ fn app_idle_empty(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         let each: Vec<String> = bytes.iter().map(|&b| fmt_bytes(b)).collect();
         (bytes, format!("values {}", each.join(", ")))
     };
+    let note = match fixture {
+        Some(fixture) => format!("{fixture}; {note}"),
+        None => note,
+    };
+    Measured::new(id, Value::Bytes(value)).with_note(Some(note))
+}
+
+/// The wait for an `Open` milestone (「进程级基准」: 30 s or 1.5 times the
+/// budget, whichever is longer; every budget here is under 20 s).
+const OPEN_LIMIT: Duration = Duration::from_secs(30);
+
+/// Waits for an idle sample with nothing in it: the launch (or what it
+/// opened) has settled. Not quiescent in time is an error.
+fn settle(session: &mut Session<'_>, id: &str) -> Result<(), BenchError> {
+    match session.idle(|_| Ok(()))? {
+        Idle::Sample(()) => Ok(()),
+        Idle::NotQuiescent => Err(BenchError::new(format!(
+            "{id}：启动或打开之后 30 秒内没有静止"
+        ))),
+    }
+}
+
+/// `app/idle_monorepo` and `app/idle_100k`: 3 launches of the whole
+/// profile, one at a time; each opens `root` once the empty window has
+/// settled, then takes the main process's footprint at a valid idle
+/// sample. No pausable background work runs in the desktop profile yet
+/// (`code_intel`, #17, is not assembled), so nothing is paused (bench
+/// design「与设计的差异」).
+fn idle_after_open(
+    ctx: &Ctx,
+    id: &str,
+    root: &std::path::Path,
+) -> Result<Vec<Idle<u64>>, BenchError> {
+    let program = app(ctx)?;
+    let scheduler = scheduler(ctx);
+    let mut runs = Vec::new();
+    for _ in 0..ctx.scale(3, 1) {
+        let mut session = scheduler.session(&program, None)?;
+        settle(&mut session, id)?;
+        session.open(
+            OpenTarget::Project(root.to_owned()),
+            Milestone::ProjectHome,
+            OPEN_LIMIT,
+        )?;
+        runs.push(session.idle(|s| s.footprint())?);
+        session.quit()?;
+    }
+    Ok(runs)
+}
+
+/// `app/idle_monorepo`: the `cloudprint` shape (728 files, 11 worktrees,
+/// about 25 manifests) open.
+fn app_idle_monorepo(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let repo = git_worktree::shaped(&Shape::cloudprint());
+    let runs = idle_after_open(ctx, "app/idle_monorepo", repo.root())?;
+    Ok(vec![idle_measured(
+        "app/idle_monorepo",
+        runs,
+        Some("cloudprint shape"),
+    )])
+}
+
+/// `app/idle_100k`: the 100 000-file shape of the project design (2 000
+/// manifests) open; 2 000 files in a smoke run.
+fn app_idle_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
+    let repo = git_worktree::large(files, manifests);
+    let runs = idle_after_open(ctx, "app/idle_100k", repo.root())?;
+    Ok(vec![idle_measured(
+        "app/idle_100k",
+        runs,
+        Some(&format!("{files} files, {manifests} manifests")),
+    )])
+}
+
+/// `app/open_project`: 5 launches (「端到端」), one at a time. Each waits
+/// for the empty window to settle, then sends `Open(Project)` of the
+/// `cloudprint` shape: from the request to the `ProjectHome` milestone's
+/// frame.
+fn app_open_project(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let program = app(ctx)?;
+    let repo = git_worktree::shaped(&Shape::cloudprint());
+    let scheduler = scheduler(ctx);
+    let mut times = Vec::new();
+    for _ in 0..ctx.scale(5, 1) {
+        let mut session = scheduler.session(&program, None)?;
+        settle(&mut session, "app/open_project")?;
+        times.push(session.open(
+            OpenTarget::Project(repo.root().to_owned()),
+            Milestone::ProjectHome,
+            OPEN_LIMIT,
+        )?);
+        session.quit()?;
+    }
+    let note = format!("cloudprint shape; times {}", microseconds(&times));
     Ok(vec![
-        Measured::new("app/idle_empty", Value::Bytes(value)).with_note(Some(note)),
+        Measured::new("app/open_project", Value::Time(Samples(times))).with_note(Some(note)),
+    ])
+}
+
+/// `app/open_diff`: 5 launches, one at a time, each with a new `HOME` that
+/// holds the fixture's Claude Code session (empty caches). Each opens the
+/// project and lets it settle (the session is discovered and placed), then
+/// sends `Open(Diff)` of the session: from the request to the `DiffShown`
+/// milestone's frame, the first file's rows drawn.
+fn app_open_diff(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let program = app(ctx)?;
+    let (files, modules, turns) = ctx.scale((200, 50, 20), (20, 5, 2));
+    let fixture = review_session::ReviewSession::new(files, modules, turns, SystemTime::now());
+    let scheduler = scheduler(ctx);
+    let mut times = Vec::new();
+    for _ in 0..ctx.scale(5, 1) {
+        let mut session = scheduler.session_in_home(&program, &|home| fixture.write_home(home))?;
+        settle(&mut session, "app/open_diff")?;
+        session.open(
+            OpenTarget::Project(fixture.root().to_owned()),
+            Milestone::ProjectHome,
+            OPEN_LIMIT,
+        )?;
+        settle(&mut session, "app/open_diff")?;
+        times.push(session.open(
+            OpenTarget::Diff {
+                session: fixture.session(),
+            },
+            Milestone::DiffShown,
+            OPEN_LIMIT,
+        )?);
+        session.quit()?;
+    }
+    let note = format!(
+        "{files} files, {modules} rewritten in {turns} turns of one session; times {}",
+        microseconds(&times)
+    );
+    Ok(vec![
+        Measured::new("app/open_diff", Value::Time(Samples(times))).with_note(Some(note)),
     ])
 }
 

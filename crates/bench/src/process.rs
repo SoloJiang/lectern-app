@@ -214,7 +214,18 @@ impl<'a> Scheduler<'a> {
         program: &Path,
         plugins: Option<&str>,
     ) -> Result<Session<'a>, BenchError> {
-        Session::start(self, program, plugins)
+        Session::start(self, program, plugins, &|_| Ok(()))
+    }
+
+    /// [`session`](Scheduler::session) of the whole profile, with
+    /// `prepare` run on the new `HOME` before the launch (an agent's
+    /// session logs, for `app/open_diff`).
+    pub fn session_in_home(
+        &self,
+        program: &Path,
+        prepare: &dyn Fn(&Path) -> io::Result<()>,
+    ) -> Result<Session<'a>, BenchError> {
+        Session::start(self, program, None, prepare)
     }
 
     /// Cold start (「进程级基准」): `warmups` launches not counted, then
@@ -655,7 +666,8 @@ pub struct Session<'a> {
     pid: u32,
     presented: SystemTime,
     source: TimeSource,
-    /// When `FirstFrame` arrived: the first `Quiescent` is due
+    /// When `FirstFrame` arrived, or the milestone of the last
+    /// [`open`](Session::open): the first `Quiescent` is due
     /// [`Limits::first_quiescent`] after it.
     first_frame_at: Instant,
     writer: UnixStream,
@@ -675,6 +687,7 @@ impl<'a> Session<'a> {
         scheduler: &Scheduler<'a>,
         program: &Path,
         plugins: Option<&str>,
+        prepare: &dyn Fn(&Path) -> io::Result<()>,
     ) -> Result<Session<'a>, BenchError> {
         let limits = scheduler.limits;
         // Under the system temporary directory: the socket path must fit
@@ -686,6 +699,7 @@ impl<'a> Session<'a> {
         let socket = dir.path().join("s");
         let home = dir.path().join("home");
         std::fs::create_dir(&home).map_err(|e| BenchError::new(format!("建不了临时 HOME：{e}")))?;
+        prepare(&home).map_err(|e| BenchError::new(format!("准备不了临时 HOME：{e}")))?;
         let listener = UnixListener::bind(&socket)
             .and_then(|l| l.set_nonblocking(true).map(|()| l))
             .map_err(|e| BenchError::new(format!("建不了 socket {}：{e}", socket.display())))?;
@@ -970,7 +984,10 @@ impl<'a> Session<'a> {
     /// `Open(target)`, then its `milestone` within `limit` (30 s or 1.5
     /// times the budget, whichever is longer). The sample: from just
     /// before the request (the runner's clock) to the milestone's
-    /// `presented` (the same machine's clock).
+    /// `presented` (the same machine's clock). The next
+    /// [`idle`](Session::idle) waits [`Limits::first_quiescent`] from the
+    /// milestone's arrival, as from the first frame: what was opened has
+    /// its own start-up work.
     pub fn open(
         &mut self,
         target: OpenTarget,
@@ -987,6 +1004,7 @@ impl<'a> Session<'a> {
             } if *shown == milestone => Some(*presented),
             _ => None,
         })?;
+        self.first_frame_at = Instant::now();
         presented
             .duration_since(sent)
             .map_err(|_| BenchError::new(format!("{milestone:?} 的显示时刻早于请求")))

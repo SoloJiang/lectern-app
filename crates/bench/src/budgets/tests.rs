@@ -213,6 +213,8 @@ fn budgets_belong_to_the_documented_targets() {
         } else if ["app/", "plugin/", "lsp/", "baseline/"]
             .iter()
             .any(|p| budget.id.starts_with(p))
+            // A frame record of the measurement build.
+            || budget.id == "review_view/scroll_5000"
         {
             Target::Process
         } else {
