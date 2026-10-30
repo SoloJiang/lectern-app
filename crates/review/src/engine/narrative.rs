@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use lectern_services::review::{NarrativeItem, StepEntry, TextKey, TurnEntry, TurnRef};
+use lectern_services::review::{BatchId, NarrativeItem, StepEntry, TextKey, TurnEntry, TurnRef};
 use lectern_services::session::{
     SessionSummary, Timestamp, ToolCallId, ToolKind, TurnIndex, TurnItem,
 };
@@ -121,6 +121,8 @@ pub(crate) struct Inputs<'a> {
     pub command_files: &'a HashMap<(u16, ToolCallId), Vec<u32>>,
     /// The time of this target's last `seen` mark.
     pub last_seen: Option<Timestamp>,
+    /// The batch of review notes each turn answers (`TurnEntry::answers`).
+    pub answers: &'a HashMap<TurnRef, BatchId>,
 }
 
 /// The narrative. `step` gives the entry of a file's step in a turn.
@@ -202,11 +204,12 @@ pub(crate) fn build(
                 }
             }
         }
+        let at = TurnRef {
+            session: s,
+            ordinal: turn.ordinal,
+        };
         out.push(TurnEntry {
-            at: TurnRef {
-                session: s,
-                ordinal: turn.ordinal,
-            },
+            at,
             id: turn.id.clone(),
             started_at: turn.started_at,
             ended_at: turn.ended_at,
@@ -214,8 +217,7 @@ pub(crate) fn build(
             prompt_preview: turn.prompt_preview.clone(),
             items: items.into(),
             after_last_seen: inputs.last_seen.is_some_and(|seen| turn.started_at > seen),
-            // Linked to review note batches in #22's step 7.
-            answers: None,
+            answers: inputs.answers.get(&at).copied(),
         });
     }
     out.into()

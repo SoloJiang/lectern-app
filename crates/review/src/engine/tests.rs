@@ -28,6 +28,7 @@ mod brief;
 mod logs;
 mod notes;
 mod overview;
+mod send;
 
 pub(crate) const SOURCE: &str = "session-claude-code";
 /// Unix seconds around which the scenarios happen.

@@ -15,6 +15,9 @@ use crate::log::{BaseRecord, Limits, Op, READ_MAX, Record};
 const CANARY: &str = "canary-r3v13w-8b2e71";
 /// The target session: a UUID, so its `session` tag is the UUID itself.
 const SESSION: &str = "5e55e55e-1111-4111-8111-0000000000a1";
+/// The target session of the review notes test (the capture is shared by
+/// every test, so each has its own).
+const NOTES_SESSION: &str = "5e55e55e-6666-4666-8666-0000000000f6";
 
 /// The records with message `msg` that contain `needle` (this test's
 /// session or directory). `cargo test` runs every test in one process,
@@ -362,4 +365,201 @@ fn logs_session_tag_is_the_uuid_or_a_hash() {
         sub,
         crate::diag::session_tag("5e55e55e-1111-4111-8111-0000000000a1/agent-a0fa0001")
     );
+}
+
+/// Review notes (#22): the sent, not-sent and copied-again records hold
+/// kinds, counts and sizes, never the text of a note, its excerpt, the
+/// prompt or a path.
+#[test]
+fn logs_hold_no_note_contents() {
+    use crate::testing::{ClipMode, FakeRoute, RouteMode};
+    use lectern_services::review::{
+        DeliveryOutcome, DiffSide, NoteRoute, RouteBlock, SentVia, limits,
+    };
+
+    let log = testing::capture();
+    let fx = Fx::new();
+    // The file's content holds the canary (the excerpt of a note on it is
+    // canary text); the paths of the notes of the last step do too.
+    let name = "a.txt".to_owned();
+    let base = format!("one {CANARY}\n");
+    let worktree = format!("one {CANARY}\ntwo {CANARY}\n");
+    let c1 = fx.commit(&[(name.as_str(), &base)], None, T - 1000);
+    fx.head("refs/heads/main", c1, &[(name.as_str(), &base)]);
+    fx.reflog(&[(None, c1, T - 1000, "commit (initial): start")]);
+    fx.write(&name, &worktree);
+    let sessions = fx.sessions(vec![json!({
+        "id": NOTES_SESSION, "cwd": fx.root(), "started_at": ms(T),
+        "turns": [{
+            "id": "t1", "at": ms(T + 10), "prompt": "prompt",
+            "items": [edit("c1", ms(T + 20), vec![replace(&name, &base, &worktree)])],
+        }],
+    })]);
+    let d = Driven::with_timers(Arc::clone(&fx.projects), vec![sessions], fx.dir.path(), NOW);
+    // The annotation log compacts at the first append.
+    d.engine.set_log_test(
+        |_| Ok(()),
+        Limits {
+            read_max: READ_MAX,
+            compact_above: 64,
+        },
+    );
+    let (id, _) = open(&d, target(NOTES_SESSION));
+    let host = crate::testing::host();
+    let route = FakeRoute::new("terminal", RouteMode::NotNow(RouteBlock::Starting));
+    let _registration = d.register_note_route(
+        Arc::new(route.clone()) as Arc<dyn NoteRoute>,
+        host.handle.token(),
+    );
+    d.run();
+
+    let key = RowsKey::Final {
+        file: modified(&name),
+        context: 3,
+    };
+    d.command(
+        id,
+        ReviewCommand::Prepare(Arc::from(vec![Need::Rows(key.clone())])),
+    );
+    d.run();
+    let oid = d.rows(id, &key).unwrap().new.oid.unwrap();
+    let on_file = |line: u32| notes::anchor(modified(&name), DiffSide::New, line, oid);
+    let write = |text: &str, line: u32| {
+        d.command(id, notes::add(Some(key.clone()), on_file(line), text, None));
+        d.run();
+    };
+    let send = |route: &str| {
+        d.command(
+            id,
+            ReviewCommand::SendNotes {
+                route: route.into(),
+            },
+        );
+        d.run();
+    };
+
+    // Sent through the clipboard.
+    write(&format!("why {CANARY}?"), 1);
+    send("clipboard");
+    let sent = one(log, "review notes sent", NOTES_SESSION);
+    assert_eq!(field(&sent, "lv"), Some("\"info\""));
+    assert_eq!(field(&sent, "via"), Some("\"clipboard\""));
+    assert_eq!(field(&sent, "notes"), Some("1"));
+    assert!(
+        field(&sent, "prompt_bytes")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 100
+    );
+    assert!(field(&sent, "took_us").is_some());
+    let batch: u64 = field(&sent, "batch").unwrap().parse().unwrap();
+
+    // The clipboard refuses; the route is not ready; the route is silent
+    // and answers late.
+    write(&format!("and {CANARY}"), 0);
+    d.clipboard().set_mode(ClipMode::Reject);
+    send("clipboard");
+    d.clipboard().set_mode(ClipMode::Accept);
+    send("terminal");
+    route.set_mode(RouteMode::Hold);
+    send("terminal");
+    d.advance(std::time::Duration::from_secs(10));
+    d.run();
+    route.release(DeliveryOutcome::Delivered(SentVia::TerminalPaste));
+    d.run();
+    let not_sent = records(log, "review notes not sent", NOTES_SESSION);
+    assert_eq!(not_sent.len(), 3, "{not_sent:#?}");
+    let reasons: Vec<(&str, &str, &str)> = not_sent
+        .iter()
+        .map(|l| {
+            (
+                field(l, "route").unwrap(),
+                field(l, "reason").unwrap(),
+                field(l, "error").unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            ("\"clipboard\"", "\"failed\"", "\"rejected\""),
+            ("\"session\"", "\"starting\"", "null"),
+            ("\"session\"", "\"timed_out\"", "null"),
+        ]
+    );
+    assert!(not_sent.iter().all(|l| field(l, "lv") == Some("\"warn\"")));
+    assert!(not_sent.iter().all(|l| field(l, "notes") == Some("1")));
+    let late = one(log, "late delivery reply dropped", NOTES_SESSION);
+    assert_eq!(field(&late, "outcome"), Some("\"delivered\""));
+
+    // Edited and removed: the commands log kinds and counts, not the text.
+    let pending = d
+        .snapshot(id)
+        .unwrap()
+        .notes
+        .iter()
+        .find(|n| n.state == lectern_services::review::NoteState::Pending)
+        .map(|n| n.id)
+        .unwrap();
+    d.command(
+        id,
+        ReviewCommand::EditNote {
+            note: pending,
+            text: format!("edited {CANARY}").into(),
+        },
+    );
+    d.command(id, ReviewCommand::RemoveNote(pending));
+    d.run();
+
+    // Copied again; refused.
+    d.command(
+        id,
+        ReviewCommand::CopyBatch(lectern_services::review::BatchId(batch)),
+    );
+    d.run();
+    let copied = one(log, "review notes copied again", NOTES_SESSION);
+    assert_eq!(field(&copied, "lv"), Some("\"info\""));
+    assert_eq!(field(&copied, "notes"), Some("1"));
+    assert!(field(&copied, "prompt_bytes").is_some());
+    d.clipboard().set_mode(ClipMode::Reject);
+    d.command(
+        id,
+        ReviewCommand::CopyBatch(lectern_services::review::BatchId(batch)),
+    );
+    d.run();
+    let refused = one(log, "review notes not copied again", NOTES_SESSION);
+    assert_eq!(field(&refused, "lv"), Some("\"warn\""));
+    assert_eq!(field(&refused, "reason"), Some("\"failed\""));
+    assert_eq!(field(&refused, "error"), Some("\"rejected\""));
+    d.clipboard().set_mode(ClipMode::Accept);
+
+    // A prompt over the limit is not sent; the notes are discarded.
+    d.command(id, ReviewCommand::DiscardNotes);
+    for i in 0..limits::PENDING_NOTES {
+        let long = format!("{}{CANARY}{i}", "d/".repeat(1500));
+        let file = FileKey {
+            old: Some(path(&long)),
+            new: Some(path(&long)),
+        };
+        d.command(
+            id,
+            notes::add(
+                None,
+                notes::anchor(file, DiffSide::New, 0, oid),
+                &"x".repeat(limits::NOTE_BYTES),
+                Some(notes::excerpt(0, &[CANARY])),
+            ),
+        );
+    }
+    send("clipboard");
+    let big = records(log, "review notes not sent", NOTES_SESSION);
+    assert_eq!(big.len(), 4);
+    assert_eq!(field(&big[3], "reason"), Some("\"too_large\""));
+    assert_eq!(field(&big[3], "notes"), Some("40"));
+
+    d.command(id, ReviewCommand::DiscardNotes);
+    d.run();
+    // The log is compacted (the limit above) and still holds no canary.
+    log.assert_absent(CANARY);
 }

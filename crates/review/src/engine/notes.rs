@@ -12,11 +12,11 @@
 use std::sync::{Arc, OnceLock};
 
 use lectern_executor::Priority;
-use lectern_logging::{Value, debug};
+use lectern_logging::{Ctx, Value, debug};
 use lectern_services::review::{
-    DiffSide, Excerpt, FileKey, FileRows, Note, NoteAnchor, NoteId, NotePlace, NoteRows, NoteState,
-    NotesState, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RouteKind,
-    RouteOffer, SentBatch, limits,
+    BatchId, DiffSide, Excerpt, FileKey, FileRows, Note, NoteAnchor, NoteId, NotePlace, NoteRows,
+    NoteState, NotesState, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget,
+    RouteKind, RouteOffer, SendOutcome, SentBatch, limits,
 };
 use lectern_services::session::Timestamp;
 
@@ -31,9 +31,9 @@ use crate::seen::TargetKey;
 /// The id of the built-in clipboard route (`RouteOffer::id`).
 pub(crate) const CLIPBOARD: &str = "clipboard";
 
-/// The routes every review offers until a session route is registered
-/// (step 7): the clipboard.
-fn routes() -> Arc<[RouteOffer]> {
+/// The routes a review offers before its session routes are known (and
+/// the last of every list): the clipboard.
+pub(crate) fn clipboard_only() -> Arc<[RouteOffer]> {
     static ROUTES: OnceLock<Arc<[RouteOffer]>> = OnceLock::new();
     Arc::clone(ROUTES.get_or_init(|| {
         Arc::from(vec![RouteOffer {
@@ -46,54 +46,75 @@ fn routes() -> Arc<[RouteOffer]> {
 /// The `notes_state` of a review without notes.
 pub(crate) fn empty_state() -> Arc<NotesState> {
     Arc::new(NotesState {
-        routes: routes(),
+        routes: clipboard_only(),
         ..NotesState::default()
     })
 }
 
+/// The notes of a review in the index: its target there, the scope of its
+/// tasks, and the repository's log (None for a folder project).
+pub(super) struct Scope {
+    pub target: TargetKey,
+    pub ctx: Ctx,
+    pub log: Option<Arc<RepoLog>>,
+}
+
 /// The command a log record or message names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Op {
+pub(super) enum Op {
     Add,
     Edit,
     Remove,
     Discard,
+    Send,
+    Copy,
 }
 
 impl Op {
-    fn name(self) -> Value<'static> {
+    pub(super) fn name(self) -> Value<'static> {
         Value::text(match self {
             Op::Add => "add",
             Op::Edit => "edit",
             Op::Remove => "remove",
             Op::Discard => "discard",
+            Op::Send => "send",
+            Op::Copy => "copy",
         })
     }
 }
 
 /// Why a command was ignored.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Reason {
+pub(super) enum Reason {
     Empty,
     TooLong,
     TooMany,
     UnknownFile,
     /// The note is not there, or already sent.
     NotPending,
+    /// The note, or the whole review, is being sent.
+    Sending,
     Unchanged,
     NothingPending,
+    /// The route is not among the review's.
+    NoRoute,
+    /// The batch is not one of the review's, or none of its notes is left.
+    UnknownBatch,
 }
 
 impl Reason {
-    fn name(self) -> Value<'static> {
+    pub(super) fn name(self) -> Value<'static> {
         Value::text(match self {
             Reason::Empty => "empty",
             Reason::TooLong => "too_long",
             Reason::TooMany => "too_many",
             Reason::UnknownFile => "unknown_file",
             Reason::NotPending => "not_pending",
+            Reason::Sending => "sending",
             Reason::Unchanged => "unchanged",
             Reason::NothingPending => "nothing_pending",
+            Reason::NoRoute => "no_route",
+            Reason::UnknownBatch => "unknown_batch",
         })
     }
 }
@@ -109,8 +130,11 @@ enum Applied {
 }
 
 /// What `apply` needs besides the index.
-struct Env {
+struct Env<'a> {
     now: Timestamp,
+    /// The notes of the batch being sent: neither edited, removed nor
+    /// discarded until it is answered.
+    sending: &'a [NoteId],
     /// `AddNote`: the anchor's file is one of the snapshot's.
     in_files: bool,
     /// `AddNote`: the new note's ID.
@@ -118,7 +142,7 @@ struct Env {
 }
 
 /// The command on the index. Pure: no snapshot, no IO, no text scan.
-fn apply(index: &mut Index, target: &TargetKey, command: &ReviewCommand, env: &Env) -> Applied {
+fn apply(index: &mut Index, target: &TargetKey, command: &ReviewCommand, env: &Env<'_>) -> Applied {
     let notes = || index.target_notes(target);
     let text_ok = |text: &str| {
         if text.trim().is_empty() {
@@ -172,7 +196,10 @@ fn apply(index: &mut Index, target: &TargetKey, command: &ReviewCommand, env: &E
             let Some(tn) = notes() else {
                 return Applied::Ignored(Op::Edit, Reason::NotPending);
             };
-            let Some(n) = tn.note(*note).filter(|n| tn.sent_in(n.id).is_none()) else {
+            let Some(n) = tn
+                .note(*note)
+                .filter(|n| tn.sent_in(n.id).is_none() && !env.sending.contains(&n.id))
+            else {
                 return Applied::Ignored(Op::Edit, Reason::NotPending);
             };
             if let Err(reason) = text_ok(text) {
@@ -202,6 +229,9 @@ fn apply(index: &mut Index, target: &TargetKey, command: &ReviewCommand, env: &E
             if notes().and_then(|tn| tn.note(*note)).is_none() {
                 return Applied::Ignored(Op::Remove, Reason::NotPending);
             }
+            if env.sending.contains(note) {
+                return Applied::Ignored(Op::Remove, Reason::Sending);
+            }
             index.record(Record::NoteRemoved {
                 at: env.now,
                 target: target.clone(),
@@ -217,7 +247,7 @@ fn apply(index: &mut Index, target: &TargetKey, command: &ReviewCommand, env: &E
                 .map(|tn| {
                     tn.notes
                         .iter()
-                        .filter(|n| tn.sent_in(n.id).is_none())
+                        .filter(|n| tn.sent_in(n.id).is_none() && !env.sending.contains(&n.id))
                         .map(|n| n.id)
                         .collect()
                 })
@@ -347,29 +377,67 @@ fn place(
     }
 }
 
-/// The `notes` and `notes_state` of `target` from the index. `placing` is
-/// the review's work and the attribution computed so far; without it (a
-/// folder project) every note is `Elsewhere`. The sent notes of batches
-/// over 14 days old are left out whether or not the index was pruned yet.
-/// A result equal to the previous snapshot's is that snapshot's `Arc`.
+/// What a snapshot's `NotesState::last` becomes.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Last {
+    /// The previous snapshot's.
+    Keep,
+    /// A new `AddNote`, `DiscardNotes` or `SendNotes`.
+    Clear,
+    /// The result of a send or a `CopyBatch`.
+    Set(SendOutcome),
+}
+
+/// What `build` takes besides the index.
+pub(super) struct View<'a> {
+    /// The review's work and the attribution computed so far; without it (a
+    /// folder project) every note is `Elsewhere`.
+    pub placing: Option<(&'a Work, &'a [Option<Arc<FileResult>>])>,
+    pub prev: (&'a Arc<[Note]>, &'a Arc<NotesState>),
+    /// The batch being sent and its notes: in memory only (「发送」).
+    pub sending: Option<(BatchId, &'a [NoteId])>,
+    /// The session routes that apply to the target, then the clipboard.
+    pub routes: &'a Arc<[RouteOffer]>,
+    pub last: Last,
+    pub now: Timestamp,
+}
+
+/// The `notes` and `notes_state` of `target` from the index. The sent
+/// notes of batches over 14 days old are left out whether or not the index
+/// was pruned yet. A result equal to the previous snapshot's is that
+/// snapshot's `Arc`. A batch keeps the turn that answered it (`answered_by`
+/// of the previous snapshot): finding it is the engine's, per snapshot.
 pub(super) fn build(
     index: &Index,
     target: &TargetKey,
-    placing: Option<(&Work, &[Option<Arc<FileResult>>])>,
-    prev: (&Arc<[Note]>, &Arc<NotesState>),
-    clear_last: bool,
-    now: Timestamp,
+    view: View<'_>,
 ) -> (Arc<[Note]>, Arc<NotesState>) {
+    let View {
+        placing,
+        prev,
+        sending,
+        routes,
+        last,
+        now,
+    } = view;
+    let in_flight: &[NoteId] = sending.map_or(&[], |(_, ids)| ids);
     let cutoff = now.0.saturating_sub(NOTES_RETAIN_MS);
     let mut keyed: Vec<((usize, u32, i64, u64), Note)> = Vec::new();
     let mut batches: Vec<SentBatch> = Vec::new();
     let mut pending = 0u32;
+    let mut unsent = 0u32;
     if let Some(tn) = index.target_notes(target) {
         for e in &tn.notes {
             let state = match tn.sent_in(e.id) {
                 None => {
-                    pending += 1;
-                    NoteState::Pending
+                    unsent += 1;
+                    match sending {
+                        Some((batch, _)) if in_flight.contains(&e.id) => NoteState::Sending(batch),
+                        _ => {
+                            pending += 1;
+                            NoteState::Pending
+                        }
+                    }
                 }
                 Some(batch) => {
                     if tn.batch(batch).is_some_and(|b| b.at.0 < cutoff) {
@@ -408,7 +476,12 @@ pub(super) fn build(
                 at: b.at,
                 via: b.via,
                 count: b.notes.len() as u32,
-                answered_by: None,
+                answered_by: prev
+                    .1
+                    .batches
+                    .iter()
+                    .find(|p| p.id == b.id)
+                    .and_then(|p| p.answered_by),
             })
             .collect();
         batches.sort_by_key(|b| (b.at, b.id));
@@ -417,11 +490,15 @@ pub(super) fn build(
     let list: Vec<Note> = keyed.into_iter().map(|(_, n)| n).collect();
     let (prev_notes, prev_state) = prev;
     let state = NotesState {
-        routes: routes(),
+        routes: Arc::clone(routes),
         pending,
-        unsent: pending,
-        sending: prev_state.sending,
-        last: if clear_last { None } else { prev_state.last },
+        unsent,
+        sending: sending.map(|(batch, _)| batch),
+        last: match last {
+            Last::Keep => prev_state.last,
+            Last::Clear => None,
+            Last::Set(outcome) => Some(outcome),
+        },
         batches: batches.into(),
     };
     let notes = if **prev_notes == *list {
@@ -439,10 +516,9 @@ pub(super) fn build(
 
 /// The text of the excerpt of a new note, to be taken on a `Background`
 /// task.
-struct ExcerptJob {
+pub(super) struct ExcerptJob {
     rows: Arc<FileRows>,
     anchor: NoteAnchor,
-    note: NoteId,
 }
 
 /// The log's target of a review without a work: a folder project's
@@ -460,10 +536,62 @@ pub(super) fn folder_target(target: &ReviewTarget) -> Option<TargetKey> {
 impl Engine {
     /// A new note ID: the time in Unix milliseconds times 1024 plus a
     /// counter, never one that was given before in this process.
-    fn next_note_id(&self, now: Timestamp) -> NoteId {
+    pub(super) fn next_note_id(&self, now: Timestamp) -> NoteId {
         let mut last = lock(&self.note_ids);
         *last = (*last + 1).max((now.0.max(0) as u64) << 10);
         NoteId(*last)
+    }
+
+    /// Where the notes of review `id` live. None while it is loading or
+    /// failed: no files, no log.
+    pub(super) fn scope(&self, state: &mut State, id: ReviewId) -> Option<Scope> {
+        let open = state.reviews.get(&id)?;
+        let work = open.work.clone();
+        let folder = work.is_none()
+            && open.snapshot.degraded == Some(lectern_services::review::Degraded::FolderProject);
+        match (&work, folder.then(|| folder_target(&open.target)).flatten()) {
+            (Some(w), _) => {
+                let log = self.log_for(state, w.git.common_dir(), w.ctx);
+                Some(Scope {
+                    target: w.target_key.clone(),
+                    ctx: w.ctx,
+                    log: Some(log),
+                })
+            }
+            (None, Some(target)) => Some(Scope {
+                target,
+                ctx: open.ctx,
+                log: None,
+            }),
+            (None, None) => None,
+        }
+    }
+
+    /// Runs `f` on review `id` and the index of its notes: the repository's
+    /// (its lock held, taken after the state's) or, for a folder project,
+    /// the review's own, whose queued records are dropped.
+    pub(super) fn with_index<R>(
+        &self,
+        state: &mut State,
+        id: ReviewId,
+        sc: &Scope,
+        f: impl FnOnce(&mut Open, &mut Index) -> R,
+    ) -> Option<R> {
+        match &sc.log {
+            Some(log) => {
+                let mut mem = lock(&log.mem);
+                let open = state.reviews.get_mut(&id)?;
+                Some(f(open, &mut mem.index))
+            }
+            None => {
+                let open = state.reviews.get_mut(&id)?;
+                let mut index = open.folder_notes.take().unwrap_or_default();
+                let result = f(open, &mut index);
+                index.take_pending();
+                open.folder_notes = Some(index);
+                Some(result)
+            }
+        }
     }
 
     /// `AddNote`, `EditNote`, `RemoveNote` and `DiscardNotes` (the calling
@@ -495,8 +623,15 @@ impl Engine {
             .as_ref()
             .map(|w| self.log_for(state, w.git.common_dir(), w.ctx));
         let now = (self.cfg.clock)();
+        let sending: Vec<NoteId> = state
+            .reviews
+            .get(&id)
+            .and_then(|o| o.sending.as_ref())
+            .map(|f| f.ids.clone())
+            .unwrap_or_default();
         let env = Env {
             now,
+            sending: &sending,
             in_files: match &command {
                 ReviewCommand::AddNote { anchor, .. } => {
                     work.as_ref().is_some_and(|w| in_files(w, &anchor.file))
@@ -548,21 +683,36 @@ impl Engine {
                 .rows
                 .get(key)
                 .filter(|r| notes::anchored_text(r, anchor).is_some())
-                .map(|rows| ExcerptJob {
-                    rows: Arc::clone(rows),
-                    anchor: anchor.clone(),
-                    note,
+                .map(|rows| {
+                    (
+                        note,
+                        ExcerptJob {
+                            rows: Arc::clone(rows),
+                            anchor: anchor.clone(),
+                        },
+                    )
                 }),
             _ => None,
         };
-        let clear_last = matches!(op, Op::Add | Op::Discard);
+        // The job is kept with the review: the task below takes it, or the
+        // send of a batch that has the note (`complete_excerpts`) does,
+        // whichever comes first.
+        let job = job.map(|(note, job)| {
+            open.excerpts.insert(note, job);
+            note
+        });
+        let last = if matches!(op, Op::Add | Op::Discard) {
+            Last::Clear
+        } else {
+            Last::Keep
+        };
         let event = match guard.as_mut() {
-            Some(g) => self.swap_notes(open, &g.index, &target, clear_last, now),
+            Some(g) => self.swap_notes(open, &g.index, &target, last, now),
             None => {
                 let Some(index) = local.as_mut() else { return };
                 // Nothing is written for a folder project.
                 index.take_pending();
-                let event = self.swap_notes(open, index, &target, clear_last, now);
+                let event = self.swap_notes(open, index, &target, last, now);
                 open.folder_notes = local.take();
                 event
             }
@@ -597,9 +747,9 @@ impl Engine {
         let Some(log) = log else {
             return;
         };
-        if let Some(job) = job {
+        if let Some(note) = job {
             self.submit(Priority::Background, ctx, move |engine| {
-                engine.take_excerpt(id, &log, target, job)
+                engine.complete_excerpts(id, &log, &target, &[note])
             });
         } else if flush {
             self.submit(Priority::Background, ctx, move |engine| engine.flush(&log));
@@ -613,7 +763,7 @@ impl Engine {
         open: &mut Open,
         index: &Index,
         target: &TargetKey,
-        clear_last: bool,
+        last: Last,
         now: Timestamp,
     ) -> ReviewEvent {
         let work = open.work.clone();
@@ -622,13 +772,18 @@ impl Engine {
             .as_ref()
             .zip(results.as_ref())
             .map(|(w, r)| (&**w, r.as_slice()));
+        let sending = open.sending.as_ref().map(|f| (f.batch, &f.ids[..]));
         let (notes, notes_state) = build(
             index,
             target,
-            placing,
-            (&open.snapshot.notes, &open.snapshot.notes_state),
-            clear_last,
-            now,
+            View {
+                placing,
+                prev: (&open.snapshot.notes, &open.snapshot.notes_state),
+                sending,
+                routes: &open.routes,
+                last,
+                now,
+            },
         );
         drop(results);
         let snapshot = ReviewSnapshot {
@@ -639,23 +794,49 @@ impl Engine {
         changed(open, snapshot)
     }
 
-    /// Takes the excerpt of a new note from the text it was written on
-    /// (`Background`), puts it in the note and in its queued record, then
-    /// appends the queue.
-    fn take_excerpt(&self, id: ReviewId, log: &Arc<RepoLog>, target: TargetKey, job: ExcerptJob) {
-        let found: Option<Excerpt> =
-            notes::anchored_text(&job.rows, &job.anchor).and_then(|text| {
-                let hint = notes::hint(&job.rows, job.anchor.side, job.anchor.line);
-                notes::excerpt(text, job.anchor.line, hint)
-            });
+    /// Takes the excerpts of the notes `notes` that are still to be taken
+    /// from the text they were written on (`Background`), puts them in the
+    /// notes and in their queued records, then appends the queue. A note
+    /// whose job is gone (taken by the other caller) is skipped.
+    pub(super) fn complete_excerpts(
+        &self,
+        id: ReviewId,
+        log: &Arc<RepoLog>,
+        target: &TargetKey,
+        notes: &[NoteId],
+    ) {
+        let jobs: Vec<(NoteId, ExcerptJob)> = {
+            let mut state = lock(&self.state);
+            let Some(open) = state.reviews.get_mut(&id) else {
+                return;
+            };
+            notes
+                .iter()
+                .filter_map(|n| open.excerpts.remove(n).map(|job| (*n, job)))
+                .collect()
+        };
+        // The scan of the text is outside every lock.
+        let found: Vec<(NoteId, Option<Excerpt>)> = jobs
+            .into_iter()
+            .map(|(note, job)| {
+                let excerpt = notes::anchored_text(&job.rows, &job.anchor).and_then(|text| {
+                    let hint = notes::hint(&job.rows, job.anchor.side, job.anchor.line);
+                    notes::excerpt(text, job.anchor.line, hint)
+                });
+                (note, excerpt)
+            })
+            .collect();
         let mut events = Vec::new();
         let flush = {
             let mut state = lock(&self.state);
             let mut mem = lock(&log.mem);
-            let attached = found.is_some_and(|e| mem.index.attach_excerpt(&target, job.note, e));
+            let mut attached = false;
+            for (note, excerpt) in found {
+                attached |= excerpt.is_some_and(|e| mem.index.attach_excerpt(target, note, e));
+            }
             if attached && let Some(open) = state.reviews.get_mut(&id) {
                 let now = (self.cfg.clock)();
-                events.push(self.swap_notes(open, &mem.index, &target, false, now));
+                events.push(self.swap_notes(open, &mem.index, target, Last::Keep, now));
             }
             !std::mem::replace(&mut mem.flushing, true)
         };
@@ -675,6 +856,6 @@ fn op_of(command: &ReviewCommand) -> Op {
     }
 }
 
-fn ignored(id: ReviewId, op: Op, reason: Reason) {
+pub(super) fn ignored(id: ReviewId, op: Op, reason: Reason) {
     debug!("note command ignored"; id = id.0, op = op.name(), reason = reason.name());
 }

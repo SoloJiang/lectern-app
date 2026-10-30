@@ -1,0 +1,18 @@
+---
+source: crates/review/src/notes/prompt/tests.rs
+expression: text
+---
+Review notes from Lectern [lectern-notes 0190f3a2c4b60401]: 2 notes on your changes.
+Please address each note.
+
+1. a.rs:1
+   Note:
+   First line.
+
+     Indented after a blank line.
+   CRLF line.
+
+2. b.rs:1
+   Note:
+   1. Not a list item of the prompt
+   - nor this
