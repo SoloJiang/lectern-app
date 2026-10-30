@@ -1,6 +1,6 @@
 # project_home 设计
 
-状态：实现中。前置条件 B（`project-home.ftl`，[#237](https://github.com/SoloJiang/lectern-app/pull/237)）与「验收」第 1 步（不开窗口的部分：`snapshot::build`、两个插件、`UsageSlot`，[#241](https://github.com/SoloJiang/lectern-app/pull/241)）、第 2 步（视图与贡献登记：`HomeScreen`、`HomeSidebar`、Action 与快捷键、语义节点）已实现（[#248](https://github.com/SoloJiang/lectern-app/pull/248)）；`app` 的装配（前置条件 D 的装配部分，[#247](https://github.com/SoloJiang/lectern-app/pull/247)）已实现，见「实际验证」「与设计的差异」；第 3 步（`app` 装配、里程碑的基准与 `Overview.packages` 的接入）尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，主区、侧栏、工具栏副标题和快照的数据结构已跟着改（`Refs #283`），见「实际验证」「与设计的差异」；搜索框、New session、`Waiting` / `Ended` 状态、Outside 卡片的文件名、侧栏的数量和 Recently Done 的结果还没有数据来源，没有画。
+状态：已实现（第 3 步有三项基准等前置条件：`app/home_frames` 等 `workspace` 记录帧，`project_home/resident_bytes` 等视图状态的内存测量，`app/idle_monorepo`、`app/idle_100k` 暂时不暂停后台工作，见「与设计的差异」第 3 步）。前置条件 B（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、A（`Overview.packages`，[#239](https://github.com/SoloJiang/lectern-app/pull/239)）与「验收」第 1 步（[#241](https://github.com/SoloJiang/lectern-app/pull/241)）、第 2 步（[#248](https://github.com/SoloJiang/lectern-app/pull/248)）、`app` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)）、第 3 步（里程碑经探针报告 [#320](https://github.com/SoloJiang/lectern-app/pull/320)，基准夹具 [#321](https://github.com/SoloJiang/lectern-app/pull/321)，基准 [#322](https://github.com/SoloJiang/lectern-app/pull/322)，手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，见「实际验证」「与设计的差异」；搜索框、New session、`Waiting` / `Ended` 状态、Outside 卡片的文件名、侧栏的数量和 Recently Done 的结果还没有数据来源，没有画。
 
 对应 issue [#30](https://github.com/SoloJiang/lectern-app/issues/30)。`project_home` 是打开项目后首先看到的屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 02 画板，[ADR 0012](../adr/0012.md)）：项目侧栏（Overview、最近的 Sessions、带今天改动数的 Packages、其他 crate 贡献的 Worktrees / Files / MR 入口、底部的 Usage 卡片）和主区（Needs Review 的会话卡片、Outside Any Session、Recently Done）。它只显示领域层算好的快照（`project`、`agents`、`review`、`usage`），自己不做归位、比较和统计；它由 [workspace 设计](workspace.md)的根视图承载，作为 `Screen(PROJECT_HOME)` 和 `SidebarPanel("project")` 贡献进去。
 
@@ -549,6 +549,8 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 2. **Packages 的「今天改动数」的含义。** 默认（「对其他 crate 的要求」A）：相对 HEAD 未提交、且最后修改在今天的文件数，按子项目归类。另一个选项：不看日期，显示相对 HEAD 的全部改动文件数（名字改成「changed」）；它更稳定（不随午夜变化），但与交互设计画布上的「今天」不一致。
 3. **侧栏 Sessions 的时间范围。** 默认：最近 14 天（与概览的声明窗口相同），更早的会话以后经 ⌘K 搜索。另一个选项：全部列出（1000 个会话时侧栏很长，虚拟列表能画，但找不到东西）。
 
+三条都按默认实现，产品决定之前不改。
+
 ## 验收
 
 分三步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-project-home`、`just deny` 通过。前置条件的顺序：B（`project-home.ftl`）和 workspace 设计的前置条件 A（`services::workspace`）在第 1 步之前；workspace 设计的前置条件 B（`ui::contrib` 的载荷类型、侧栏图标）、`ui` 设计的第 3、4 步（控件、探针节点）和 workspace 的第 2 步（根视图）在第 2 步之前；本文的 A（`Overview.packages`）、D、E 随第 3 步（A 可以更早）。
@@ -634,6 +636,22 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - 验收的 `rg`（第 2 步的三条加第 1 步的三条）都没有结果；`rg 'NodeId::new\("project-home"'` 有结果。
 - 没有验证：真实窗口里的观感（行高、间距、绿点、状态词的颜色、橙色额度条、进度环加「2/6」和 ›、Large Title 与说明的层级、分隔线与文字起点对齐）；中文标题与长标题的截断；Outside 卡片的文件名行（`OutsideRow::Files::names` 现在总是空，只有 `present::outside_names` 的单元测试）；`project_home/build_1000`、`project_home/resident_bytes` 基准（`bench` 里还没有这两个基准，预算表里是 `Planned`，随第 3 步）。`snapshot::build` 多了一次对会话行的排序（至多 1000 个）和一次对 `in_project` 的计数，没有测量。
 
+### 第 3 步
+
+里程碑经探针报告（[#320](https://github.com/SoloJiang/lectern-app/pull/320)）、`project_home/build_1000` 的夹具（[#321](https://github.com/SoloJiang/lectern-app/pull/321)）、`bench` 的基准（[#322](https://github.com/SoloJiang/lectern-app/pull/322)），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。
+
+- `just test -p lectern-project-home`：`build_fixture_has_the_bench_shape` 通过（#321）。`every_profile_graph_validates` 里 desktop 的插件数在 [#247](https://github.com/SoloJiang/lectern-app/pull/247) 已加二。
+- `project_home/build_1000`：中位数 931 µs（预算 < 2 ms），进程内运行，不开窗口。
+- CI（托管的 `macos-15` runner，运行 [40999951524](https://github.com/SoloJiang/lectern-app/actions/runs/40999951524)）：`app/open_project` 中位数 60.8 ms（预算 < 100 ms）、`app/idle_monorepo` 33.2 MB（< 100 MB）、`app/idle_100k` 53.5 MB（< 120 MB）、`project_home/build_1000` 1.49 ms（< 2 ms），都在预算内；`app/idle_empty` 31.6 MB（< 60 MB）。本机没有运行这些进程级基准（它们打开真实窗口）。
+- 手动检查，用自动化构建（`just automation`，[ADR 0056](../adr/0056.md)），不是发布构建：debug 构建加 gpui-mcp 的桥接。临时 `HOME` 是 `target/automation/home`；仓库和 Claude Code 会话是合成的（`cargo run -p lectern-bench --example review_fixture`：200 个文件，5 个带 `package.json` 的子项目，一个会话改了其中 50 个文件），Welcome 的最近项目列表也写在这个 `HOME` 里。用一个 stdio 的 MCP 客户端调用 `just automation-server` 的 `get_ui_tree`、`click_element`、`keyboard`、`screenshot`。结果：
+  - Welcome 列出夹具项目（「1 session」），点它打开项目主页。
+  - 侧栏：Overview、Sessions 下一个会话（橙点）、Packages 下 p00–p04，每个的今天改动数是 10。
+  - 主区：大标题「1 session needs review」，Needs Review 一张卡片（`Claude Code · main · 32 min ago`，进度环 0/50）；工具栏副标题「main · 1 worktree」。
+  - ↓ ↵ 进入审阅，⌘[ 返回，卡片的进度变成 1/50。
+  - 日志：`home milestone reported` 的 `since_opened_us` 是 7 245 和 14 823（两次启动，debug 构建，预算 < 100 000）；日志里没有 WARN 或 ERROR，也没有夹具的路径、标题和子项目名。
+- 自动化构建只在窗口没有被遮住时画帧：窗口在其他应用之后时，等待帧的调用超时，元素树停在最后画出的一帧。每一批操作之前把窗口放到最前面就可以。
+- 没有验证：发布构建本身；侧栏「N more」的折叠、Outside Any Session、Recently Done（夹具只有一个会话，它没有看完，也没有会话外的改动）；`app/home_frames`、`project_home/resident_bytes`（计划中）；`app/idle_empty` 与改动前的逐项比较（只有 CI 的一次运行，31.6 MB）。
+
 ## 与设计的差异
 
 ### 第 1 步
@@ -717,3 +735,9 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - **`present`**：`activity` 去掉，换成 `relative`（相对时间，运行中也显示）和 `meta`（第一行加状态词的位置）；新增 `lede`、`subtitle`、`outside_names`、`limit`。
 - **`OutsideRow` 不再是 `Copy`**（`names` 是 `Arc<[RelPath]>`）：`HomeScreen` 里按引用传。
 - **Usage 卡片的悬停**：背景从 `fill` 淡入到 `fill_strong`（`HOVER_IN` / `HOVER_OUT`，两者是同一个颜色的不同不透明度，按悬停强度插值，只有一层背景），与 [ui 设计「第二批控件」](ui.md#第二批控件283)里 `ActionCard` 的悬停相同；没有直接用 `ActionCard`，因为它的形态（左边图标、标题加说明、右边快捷键提示）与这张卡片（标签加数字、额度条、额度行）不同。淡入淡出的 `Transition` 是视图里的 `clickable`。
+
+### 第 3 步
+
+- **`app/home_frames` 和 `project_home/resident_bytes` 仍是计划中。** `app/home_frames` 是测量构建的帧记录，`workspace` 还不记录帧；`project_home/resident_bytes` 要在窗口里建两个视图的状态才能测量。预算表里都是 `Planned`（[bench 设计「与设计的差异」](bench.md#与设计的差异)第 7 步）。`Driver` 的 `home` 场景随 `app/home_frames`。
+- **`app/idle_monorepo`、`app/idle_100k` 采样时不暂停后台工作。** desktop 的插件集合里还没有可以暂停的后台工作（`code_intel` 没有装配，[#17](https://github.com/SoloJiang/lectern-app/issues/17)），所以打开项目、到 `ProjectHome` 里程碑、静止之后就采样。
+- **手动检查用自动化构建，不用发布构建。** 自动化构建（ADR 0056）能按元素点击和截图；功能与发布构建相同，数字比发布构建大。

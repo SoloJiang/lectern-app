@@ -6,7 +6,7 @@
 - 设计文档：[docs/design/project_home.md](../../docs/design/project_home.md)
 - issue：[#30](https://github.com/SoloJiang/lectern-app/issues/30)
 - ADR：[0012](../../docs/adr/0012.md)、[0022](../../docs/adr/0022.md)、[0025](../../docs/adr/0025.md)、[0046](../../docs/adr/0046.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`snapshot`（`HomeSnapshot` 与纯函数 `snapshot::build`）、`Home`（插件状态与合成任务）、`ProjectHomePlugin`、`ProjectHomeUsagePlugin`、`UsageSlot`。第 2 步已实现，依赖 GPUI：`HomeScreen`（主区）、`HomeSidebar`（侧栏面板）、`actions`（Action 与快捷键）、`contribute`（`activate` 里登记的四项贡献）、`nodes`（探针 ID）、`present`（行里的文字）。`app` 已装配两个插件（[#247](https://github.com/SoloJiang/lectern-app/pull/247)）。第 3 步（里程碑的基准、`Overview.packages` 的接入）尚未实现。
+- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`snapshot`（`HomeSnapshot` 与纯函数 `snapshot::build`）、`Home`（插件状态与合成任务）、`ProjectHomePlugin`、`ProjectHomeUsagePlugin`、`UsageSlot`。第 2 步已实现，依赖 GPUI：`HomeScreen`（主区）、`HomeSidebar`（侧栏面板）、`actions`（Action 与快捷键）、`contribute`（`activate` 里登记的四项贡献）、`nodes`（探针 ID）、`present`（行里的文字）。`app` 已装配两个插件（[#247](https://github.com/SoloJiang/lectern-app/pull/247)）。第 3 步已实现：`Overview.packages` 已接入（[#239](https://github.com/SoloJiang/lectern-app/pull/239)），`app/open_project`、`app/idle_monorepo`、`app/idle_100k`、`project_home/build_1000` 是生效的基准；`app/home_frames`、`project_home/resident_bytes` 仍是计划中（设计文档「与设计的差异」第 3 步）。
 
 ## 模块
 
