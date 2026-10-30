@@ -1710,7 +1710,7 @@ pub(crate) fn cached(cell: &OnceLock<Result<Arc<LoginEnv>, LoginEnvError>>, f: i
 ### 已知限制
 
 - 配置文件在每次 Lectern 运行里被执行一次，其中的副作用（打印、启动后台程序、写历史文件）也发生一次。
-- 不接受 `-l -i -c` 的 shell（nushell、elvish 一类，或 `$SHELL` 指向不是 shell 的程序）得到 `Spawn`、`Unparsable` 或 `Timeout`，调用方退回 Lectern 自己的环境。
+- 不接受 `-l -i -c` 的 shell（tcsh、csh、nushell、elvish 一类，或 `$SHELL` 指向不是 shell 的程序）得到 `Spawn`、`Unparsable` 或 `Timeout`，调用方退回 Lectern 自己的环境。
 - 交互配置里等待输入（`read`）、或在没有终端时仍 `exec` 进 tmux 一类程序的，读 stdin 立刻得到 EOF 或卡住，结果是 `Unparsable` 或 `Timeout`。
 - 配置文件启动的后台程序在打印环境期间向 stdout 写入，内容落在两个标记之间时结果为 `Unparsable`（项里没有 `=`）或多出几项。
 - direnv 一类按目录改环境的工具只在提示符出现时运行，`-c` 不触发；这份环境是主目录下的登录环境，不是项目目录下的。
@@ -1721,10 +1721,10 @@ pub(crate) fn cached(cell: &OnceLock<Result<Arc<LoginEnv>, LoginEnvError>>, f: i
 
 - `login_env_replays_the_fixture`：假 shell 先打印欢迎语，再用 `/usr/bin/env -i <夹具里的项> /bin/sh -c "$4"` 运行收到的命令，最后再打印一行；结果的 `vars` 与夹具相同（含一个值里带换行、一个值里带 `=`、一个非 UTF-8 的值），没有 `_`、`SHLVL`、`PWD`、`OLDPWD`；`get` 取得各值。
 - `login_env_passes_login_interactive_flags`：记录文件里参数是 `-l`、`-i`、`-c` 和一条含两个 `__lectern_env_` 标记与 `/usr/bin/env -0` 的命令；stdin 不是终端；工作目录是传入的 `cwd`。
-- `login_env_without_markers_is_unparsable`：假 shell 只打印杂项就退出；`only_the_start_marker_is_unparsable`；`an_entry_without_equals_is_unparsable`；`output_over_1_mib_is_unparsable`（假 shell 不停地输出，结果在期限之前返回）。
-- `login_env_missing_shell_is_spawn`：shell 路径不存在；`a_non_executable_shell_is_spawn`。
+- `login_env_without_markers_is_unparsable`：假 shell 只打印杂项就退出；`login_env_only_the_start_marker_is_unparsable`；`login_env_an_entry_without_equals_is_unparsable`；`login_env_output_over_1_mib_is_unparsable`（假 shell 不停地输出，结果在期限之前返回）。
+- `login_env_missing_shell_is_spawn`：shell 路径不存在；`login_env_non_executable_shell_is_spawn`。
 - `login_env_times_out_and_kills_the_group`：假 shell 在后台启动一个 `sleep 30` 的子进程并把它的 pid 写进记录文件，自己也 `sleep 30`；以 300 ms 的期限调用，结果为 `Timeout`，耗时小于 2 秒，之后两个 pid 都已不存在（`kill(pid, 0)` 为 `ESRCH`）。
-- `login_env_waits_for_a_slow_exit`：假 shell 输出环境后 `sleep 0.2` 再退出，结果成功；`a_hanging_exit_still_succeeds`：输出环境后 `sleep 30`，以 300 ms 的期限调用，结果成功，shell 已被结束。
+- `login_env_waits_for_a_slow_exit`：假 shell 输出环境后 `sleep 0.2` 再退出，结果成功；`login_env_hanging_exit_still_succeeds`：输出环境后 `sleep 30`，以 300 ms 的期限调用，结果成功，shell 已被结束。
 - `login_env_caches_once`：`cached` 用一个本地的 `OnceLock`，8 个线程同时调用，给出的闭包只运行一次，各线程得到同一个 `Arc`；失败的结果也只运行一次。
 - `pick_shell_*`：`$SHELL` 合格时用它；为空、相对路径、不存在、是目录、不可执行时看用户数据库的值，再看回退值；三者都不合格时 None。
 - `find_program_*`：返回第一个合格的目录里的路径；跳过不可执行的文件、同名目录、空项和相对路径；跟随指向可执行文件的符号链接；`name` 为空、含 `/`、为 `.` 或 `..` 时 None。
@@ -1864,7 +1864,7 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
 - `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「登录 shell 的环境」「测试」列出的 `login_env_*`、`pick_shell_*`、`find_program_*`，macOS 上另有 `login_env_failure_logs_the_kind_only`、`login_env_success_logs_counts_only`；原有的测试结果不变。
 - `git diff origin/main -- Cargo.lock` 为空（调用都来自已有的 `libc` 和标准库）。
 - `rg -n 'getpwuid_r|setsid|killpg|fn login_env|-l", "-i' crates --glob '!crates/platform/**' -t rust` 没有结果：取登录环境只在本 crate。
-- `rg -n 'thread::spawn|Builder::new\(\)' crates/platform/src/login_env*` 没有结果（不另开线程）。
+- `rg -n 'thread::spawn|Builder::new\(\)' crates/platform/src/login_env.rs` 没有结果（实现不另开线程；测试里的并发调用不受这条限制）。
 - `just check`、`just deny` 通过。
 - `just test -p lectern-platform -- --ignored login_env_reads_this_users_shell` 在本机运行一次，变量个数和耗时写进「实际验证」。
 - 本文的状态行、「实际验证」写明 `login_env` 已实现；`crates/platform/AGENTS.md` 的「边界」「测试」加上 `login_env`，`lib.rs` 的模块文档和 `Cargo.toml` 的 `description` 提到它。
