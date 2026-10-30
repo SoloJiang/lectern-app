@@ -2,7 +2,7 @@
 
 审阅的领域逻辑：会话改动归因、片段对齐、已看状态、Drifted 判断、审阅意见攒批与回传。
 
-- 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "review"（`plugin`），提供 `dyn Review`，requires `dyn Projects`、`dyn SessionSource`。只依赖 kernel 层（`kernel`、`services`、`logging`）和非插件的库 crate（`executor`、`fs_watch`、`cache`、`git`、`platform`，对 `platform` 只用 `time::utc_offset`）；`project`、`agents`、`usage` 是插件，只经 `services` 的接口往来，测试用本 crate `testing` 里的假服务。不得直接或间接依赖 GPUI（架构规则 2）。
+- 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "review"（`plugin`），提供 `dyn Review`，requires `dyn Projects`、`dyn SessionSource`。只依赖 kernel 层（`kernel`、`services`、`logging`）和非插件的库 crate（`executor`、`fs_watch`、`cache`、`git`、`platform`，对 `platform` 只用 `time::utc_offset` 和审阅意见剪贴板途径的 `clipboard::write_text`）；`project`、`agents`、`usage` 是插件，只经 `services` 的接口往来，测试用本 crate `testing` 里的假服务。不得直接或间接依赖 GPUI（架构规则 2）。
 - 设计文档：[docs/design/review.md](../../docs/design/review.md)。
 - issue：[#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#22](https://github.com/SoloJiang/lectern-app/issues/22)
 - ADR：[0012](../../docs/adr/0012.md)、[0019](../../docs/adr/0019.md)、[0035](../../docs/adr/0035.md)、[0044](../../docs/adr/0044.md)、[0045](../../docs/adr/0045.md)、[0046](../../docs/adr/0046.md)
@@ -11,6 +11,7 @@
 
 - 归因结果的缓存键是文件内容的 blob OID 加上会话轮次历史的摘要（架构规则 5）：两个会话的最终内容相同时，改动叙事仍然不同，不能只按 OID 命中。
 - 已看状态和审阅意见可以从 git 对象、会话 JSONL 和用户标注日志重建。
+- 审阅意见（#22，设计文档「审阅意见」）：锚点是（文件，一侧，行号，这一侧的 OID），位置只按 OID 判断，不猜；prompt 由本 crate 按固定模板拼出，经发送途径送出：剪贴板途径内置（只经 `platform::clipboard`），终端粘贴与 ACP 的途径由其他插件经 `register_note_route` 登记，本 crate 不依赖 `terminal`、`conversation`。意见的文字、摘录和拼好的 prompt 不进日志。
 - 项目主页「会话外的改动」的计数比较用 `retained_bytes = 0`、`total_patch_bytes = 0` 的 `Limits`，改动路径超过 4000 个时只保留计数、不保留改动集（[ADR 0035](../../docs/adr/0035.md)）。
 - 已看标记的键包含审阅对象（会话或比较范围）、路径、改动前后两个 blob OID、改动前后的文件模式和改动状态；重命名按（旧路径，新路径）成对匹配，旧路径之后被一个无关的新文件占用时，不当作同一个改动。同一审阅对象和路径的这些值任一变化时，标为「审过之后又被改过」，作为第三种状态交给视图。设计依据见 [pulls.review 调研](../../docs/research/pulls-review.md#对-lectern-的建议)。
 - 生成文件、lockfile、快照用同一份模式列表识别，同时决定默认折叠、规则分组和模型输入里的占位。

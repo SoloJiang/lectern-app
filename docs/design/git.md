@@ -21,7 +21,7 @@
   - 文件监听、worktree 修订号、reflog 新增行的时刻：`fs_watch`。分支的「一次使用」与用量归属：`usage`。
   - 安全的文件读取（`O_NOFOLLOW_ANY`）：`platform`（架构规则 6），本 crate 只调用它的平台无关接口。
   - 缓存的存储与淘汰：`cache`。代码高亮：`code_intel` / `review_view`。
-  - 任何写操作：提交、暂存、切换分支、写 index 或对象库。见「未决问题」1。
+  - 任何写操作：提交、暂存、切换分支、写 index 或对象库。P1 不做提交界面，见「未决问题」1（已决定）。
 - 本 issue 之外：
   - 结构化 diff（[#21](https://github.com/SoloJiang/lectern-app/issues/21)），扩展点见「结构化 diff 的扩展点」。
   - MR 的 diff：`forge`（[#25](https://github.com/SoloJiang/lectern-app/issues/25)）。
@@ -1057,11 +1057,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 
 ## 未决问题
 
-1. **P1 是否在 Lectern 里提交。** 交互规范的核心闭环第 4 步是 Looks good 之后「进入提交或开 MR」。选项：
-   - (a) P1 不做提交界面（倾向）：Looks good 只标记已看，提交在 Conversation 的终端里由用户执行，或发回会话让 agent 提交。本 crate 保持只读。
-   - (b) P1 做提交界面：要执行用户的 pre-commit 等钩子（外部程序），需要另写设计，并决定由 `git` 命令行还是 gix 完成。
-
-   由产品负责人决定。默认按 (a) 实现；改成 (b) 时另开 issue，不改本文的只读约束。
+1. **P1 是否在 Lectern 里提交。** 已决定：选 (a)（产品负责人 2026-10-30）。P1 不做提交界面：Looks good 只标记已看，用户在终端里自己提交，或要求 agent 提交。本 crate 保持只读。交互规范的核心闭环第 4 步「进入提交或开 MR」在 P1 由终端或 agent 完成。不选：(b) P1 做提交界面（要执行用户的 pre-commit 等钩子，需要另写设计，并决定由 `git` 命令行还是 gix 完成）；以后要做时另开 issue，不改本文的只读约束。
 
 技术问题都已在上文决定，没有其他未决项。
 
