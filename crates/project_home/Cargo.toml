@@ -36,6 +36,11 @@ lectern-services = { path = "../services" }
 # library crate of the view layer, not a plugin.
 lectern-ui = { path = "../ui" }
 
+[features]
+# `fixture`: the inputs of the `project_home/build_1000` bench
+# (docs/design/project_home.md「性能」), for `lectern-bench`.
+test-support = []
+
 [dev-dependencies]
 # `TestAppContext`, `VisualTestContext`, `#[gpui::test]`.
 gpui = { workspace = true, features = ["test-support"] }
