@@ -92,7 +92,7 @@ pub fn open_named(cx: &mut App, frame: &'static str) -> Option<AnyWindowHandle> 
             // The one preference read before the first frame: AppKit's
             // in-memory user defaults, no file of ours (ADR 0017). `platform`
             // logs a failure; the window keeps the frame it was opened with.
-            apply_name(&*window, name);
+            apply_name(window, cx, name);
         }
         cx.new(|_| Skeleton {
             armed: false,

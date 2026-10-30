@@ -3,18 +3,23 @@
 //! that debounces and writes runs in a `#[gpui::test]` with the test
 //! scheduler's clock and a manual executor.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, Context, IntoElement, Render, TestAppContext, Window, div};
+use gpui::{
+    AnyWindowHandle, AppContext as _, Context, IntoElement, Render, TestAppContext, Window, div,
+};
 use lectern_executor::Executor;
 use lectern_i18n::{Locale, Strings};
 use lectern_ui::Appearance;
 use lectern_workspace::{WindowState, WorkspaceDeps, WorkspaceHost, install};
 
 use crate::window_state::{
-    PROJECT, Read, Unreadable, WELCOME, WindowStateLink, dir, frame_name, read, restore, write,
+    PROJECT, Read, Unreadable, WELCOME, WindowStateLink, apply_name, dir, frame_name, read,
+    restore, write,
 };
 
 fn state(project: Option<&str>, inspector: bool) -> WindowState {
@@ -106,6 +111,32 @@ fn settle(executor: &Executor, cx: &mut TestAppContext) {
     cx.run_until_parked();
     executor.run_until_idle();
     cx.run_until_parked();
+}
+
+/// Watches a window's bounds from outside its root view.
+struct Watcher;
+
+/// AppKit resizes the window inside `apply_name`, where GPUI's resize
+/// callback cannot reach the window (#315), so `apply_name` reads the
+/// bounds again itself. The test platform has no frame autosave name; the
+/// read is seen as the bounds observers running.
+#[gpui::test]
+fn applying_a_name_reads_the_bounds_again(cx: &mut TestAppContext) {
+    let window = cx.add_window(|_, _| Placeholder);
+    for name in [WELCOME, PROJECT] {
+        let fired = Rc::new(Cell::new(0));
+        window
+            .update(cx, |_, window, cx| {
+                let watcher = cx.new(|_| Watcher);
+                let seen = fired.clone();
+                let _subscription = watcher.update(cx, |_, cx| {
+                    cx.observe_window_bounds(window, move |_, _, _| seen.set(seen.get() + 1))
+                });
+                apply_name(window, cx, name);
+            })
+            .unwrap();
+        assert_eq!(fired.get(), 1, "{name}");
+    }
 }
 
 #[gpui::test]

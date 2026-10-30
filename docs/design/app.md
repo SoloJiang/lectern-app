@@ -340,6 +340,7 @@ Logging::shutdown(500 ms)
 `src/window_state.rs`。`workspace` 在主线程上、没有 `cx` 的回调里报告 `WindowState` 的变化，所以回调只往一个通道发消息，由 `WindowStateLink::start` 在主线程上开的前台任务处理：
 
 - frame autosave 名：`open_window` 的回调里（首帧之前）对 desktop 的骨架窗口设 `"welcome"`（`platform::window::set_frame_autosave_name`，AppKit 内存里的 user defaults，不读 Lectern 的文件，ADR 0017 允许的首帧前唯一的偏好读取；失败时 `platform` 记 warn，窗口沿用打开时的 frame）。任务收到 `WindowState` 后，`project` 有值而当前名是 `"welcome"` 时改设 `"project"`，反过来亦然；窗口已经关闭时什么也不做。test profile 不设名（GPUI 的测试窗口没有 `NSWindow`）。
+- 设名之后重读窗口尺寸（[#315](https://github.com/SoloJiang/lectern-app/issues/315)）：AppKit 在设名时同步改窗口的 frame，GPUI 的 `on_resize` 处理函数随即经 `AsyncApp` 更新窗口。两处设名都在 GPUI 的窗口回调里（`open_window` 的回调，窗口还没放进 `App`；`window.update`，`App` 已被借用），这次更新失败，GPUI 只记一条 error（`RefCell already borrowed`），`viewport_size` 仍是旧尺寸，窗口的其余部分空白。所以 `window_state::apply_name` 设名之后在同一个回调里调 `Window::bounds_changed(cx)`，从平台窗口重读尺寸并通知观察者。
 - 写：任务在收到最后一次变化 500 ms 之后，把状态序列化成 JSON，在 executor 的 `Background` 任务里写 `app_data()/workspace/window.json`（只建 `workspace/` 这一级目录，写同目录的 `window.json.tmp` 再 `rename`）。两次写不重叠（任务等上一次完成）。写失败只记 warn（`step`、`io` 的种类，不记路径）。退出前 500 ms 内的最后一次变化不会写出（「已知限制」）。
 - 读：屏障放开、`Kernel::start` 之后，executor 的 `Background` 任务读同一个文件，解析成 `WindowState`，`version` 认得时调 `host.restore(state)`（任何线程）。没有文件：什么也不做。读不出或不是 JSON、`version` 不认得：记 warn 后忽略，下一次变化覆盖它。
 - Dock 重开：`window::reopen` 按 `Shell` 里最后一次报告的状态选名字（有项目 `"project"`，否则 `"welcome"`）开骨架窗口，通知任务换窗口，再 `host.attach(window, cx)`。屏障放开之前重开：没有 `Shell`，与第一个窗口一样等屏障。
@@ -807,7 +808,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 - `cargo build --release --locked -p lectern-app --features bench-probe` 成功。`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin | grep -E 'lectern-bench|bench-hooks|test-support'` 没有输出；加 `--features bench-probe` 之后有 `lectern-bench` 和 `"bench-hooks"`。
 - 手动：测量构建的发布版，临时 `HOME`，不设 `LECTERN_BENCH_SOCKET`，去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`LECTERN_LOG`：日志是 `first frame drawn`、`plugins assembled`（`plugins` 为 11）、`startup barrier released` 和 11 条 `plugin activated`，没有 `bench probe attached`，与发布构建相同。
 - **`set_frame_autosave_name` 在首帧之前的耗时**（「数据目录」要求的实测）：在 `window::open_named` 里临时插入 `Instant` 计时和 `eprintln!`（补丁已还原，不在提交里），发布构建（不带 `bench-probe`，与用户的启动相同），每次启动一个新的临时 `HOME`，等 2.5 s 后结束进程；frame autosave 在 AppKit 的 user defaults 里，cfprefsd 不看 `HOME`，所以每次都读了真实用户的已保存窗口位置（`NSWindow Frame welcome`）。第一组 10 次（微秒）：4540、4856、5316、5935、6190、7324、7542、7688、8092、11847，**中位数 6.8 ms**；紧接着第二组 10 次：7044、8502、11309、11588、11749、11929、13460、14099、16132、19638，中位数 11.8 ms；20 次合计中位数 8.3 ms，最小 4.5 ms。**都远大于 1 ms**；这个耗时包含 AppKit 套用已保存窗口位置（每次启动都有一次同步的改窗口大小，见下一条），不只是 cfprefsd 的读取，所以让基准也设名会带来一次随用户已保存位置而变的改大小。这相当于 ADR 0017 的 20 ms 冷启动预算的三分之一到六成，按「数据目录」告诉产品负责人：基准不设名（本设计的选择）时 `app/cold_start` 比用户的启动少这一段，是否让基准也设名（那样基准会读写用户真实的窗口位置）由产品负责人决定。这个耗时本身（发布构建每次启动都有）是否要移出首帧之前，也由产品负责人和 workspace 设计决定，本 PR 没有改。
-- 无探针的启动，日志里有一条 gpui 的 error `RefCell already borrowed`（`gpui-pre` 的 `window.rs`，时间在 `first frame drawn` 之前）。在 c880521（本 PR 的基线，没有本 PR 的改动）上建发布版，临时 `HOME`、`LECTERN_LOG=debug` 启动两次，每次也有这一条，所以不是本 PR 引入的，本 PR 没有改。可能的原因（未验证）：`set_frame_autosave_name` 让 AppKit 在 `open_window` 的回调里同步改了窗口大小（已保存的高度是 521，请求的是 520），GPUI 的 `on_resize` 处理函数此时拿不到 `App`。有探针的一次完整会话（`LECTERN_BENCH_SOCKET` 指向一个监听的 socket，`LECTERN_LOG=debug`）里没有 error 记录。
+- 无探针的启动，日志里有一条 gpui 的 error `RefCell already borrowed`（`gpui-pre` 的 `window.rs`，时间在 `first frame drawn` 之前）。在 c880521（本 PR 的基线，没有本 PR 的改动）上建发布版，临时 `HOME`、`LECTERN_LOG=debug` 启动两次，每次也有这一条，所以不是本 PR 引入的，本 PR 没有改。可能的原因（未验证）：`set_frame_autosave_name` 让 AppKit 在 `open_window` 的回调里同步改了窗口大小（已保存的高度是 521，请求的是 520），GPUI 的 `on_resize` 处理函数此时拿不到 `App`（[#315](https://github.com/SoloJiang/lectern-app/issues/315) 已证实，见「窗口状态与 frame autosave 名」的「设名之后重读窗口尺寸」）。有探针的一次完整会话（`LECTERN_BENCH_SOCKET` 指向一个监听的 socket，`LECTERN_LOG=debug`）里没有 error 记录。
 - 副作用：这些运行改了真实用户 defaults 域 `lectern` 里的 `NSWindow Frame welcome`（窗口位置），测完后已按测前读到的值写回。
 
 自动化构建（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，同一台机器：macOS 27.0.1，Apple M5 Pro，Rust 1.97.0）：
@@ -822,6 +823,11 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
   - `screenshot` 截到窗口（这台机器已给终端屏幕录制权限）。截图里窗口是 1180 × 760 pt，GPUI 的布局和绘制仍是 820 × 521 pt，其余部分空白：打开项目时 AppKit 套用了已保存的 `"project"` frame，GPUI 没有收到改大小（另开 issue，不在本 PR）。
   - 第一个实例在运行时再执行一次 `just automation`：端点目录没有被清空，两个 `mcp-*.sock` 都在，`list_apps` 列出两个 `lectern`（`count` 为 2）。
   - frame autosave 写在 AppKit 的 user defaults 域 `lectern-automation` 里（cfprefsd 不看 `HOME`），与发布构建的 `lectern` 域分开。
+
+设名之后重读窗口尺寸（[#315](https://github.com/SoloJiang/lectern-app/issues/315)）：
+
+- `just check` 通过；`just test -p lectern-app -E 'test(window_state)'` 10 个测试通过，含新增的 `applying_a_name_reads_the_bounds_again`（`welcome`、`project` 各一次，窗口的 bounds 观察者各运行一次）。去掉 `apply_name` 里的 `bounds_changed` 后这个测试失败。
+- 手动（`just automation`，临时 `HOME` 的 `recent.json` 里放一个合成的 git 仓库；user defaults 域 `lectern-automation` 里 `NSWindow Frame welcome`、`NSWindow Frame project` 都是 1180 × 760）：Welcome 的 `welcome` 和 `workspace` 都是 1180 × 760（修复前启动时是 820 × 521）。`click_element` 点仓库的行之后，`get_element_bounds` 的 `workspace` 是 1180 × 760，`workspace-sidebar` 248 × 760，`workspace-toolbar` 932 × 52；`screenshot` 是 1180 × 760，整个窗口都画了，没有空白。日志里 gpui 的 `RefCell already borrowed` 仍在（GPUI 自己的 `on_resize` 仍然失败，只是之后由 `bounds_changed` 补上）。
 
 ## 与设计的差异
 

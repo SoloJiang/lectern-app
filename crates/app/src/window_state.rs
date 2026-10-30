@@ -61,13 +61,22 @@ const PROJECT_SIZE: (f64, f64) = (1180.0, 760.0);
 /// first time also sets the project size and centres the window
 /// (`platform::window::set_frame_autosave_name_or_center`). Main thread.
 /// `platform` logs a failure; the window keeps its frame.
-pub fn apply_name(window: &gpui::Window, name: &'static str) {
+///
+/// AppKit resizes the window at once, and GPUI's resize callback cannot
+/// reach the window while it is being updated or built, which is where
+/// every caller is: the new size is lost and GPUI keeps drawing at the old
+/// one (#315). So the window reads its bounds again afterwards.
+pub fn apply_name(window: &mut gpui::Window, cx: &mut App, name: &'static str) {
     if name == PROJECT {
-        let _ =
-            lectern_platform::window::set_frame_autosave_name_or_center(window, name, PROJECT_SIZE);
+        let _ = lectern_platform::window::set_frame_autosave_name_or_center(
+            &*window,
+            name,
+            PROJECT_SIZE,
+        );
     } else {
-        let _ = lectern_platform::window::set_frame_autosave_name(window, name);
+        let _ = lectern_platform::window::set_frame_autosave_name(&*window, name);
     }
+    window.bounds_changed(cx);
 }
 
 /// The frame autosave name for a state.
@@ -204,7 +213,7 @@ fn rename(
     };
     cx.update(|cx| {
         // A window that is gone has nothing to name.
-        let _ = window.update(cx, |_, window, _| apply_name(&*window, name));
+        let _ = window.update(cx, |_, window, cx| apply_name(window, cx, name));
     });
 }
 
