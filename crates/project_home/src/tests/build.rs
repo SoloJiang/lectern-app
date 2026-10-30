@@ -778,3 +778,20 @@ fn build_gives_the_limit_window_when_it_is_known() {
     let tightest = built.snapshot.usage.unwrap().tightest.unwrap();
     assert_eq!(tightest.window_minutes, None);
 }
+
+#[test]
+fn build_fixture_has_the_bench_shape() {
+    use crate::fixture::{BuildFixture, OVERVIEW, PACKAGES, SESSIONS, WORKTREES};
+    let fx = BuildFixture::new();
+    let built = build(&fx.inputs());
+    let snapshot = &built.snapshot;
+    assert!(built.missing.is_empty(), "{:?}", built.missing);
+    assert_eq!(snapshot.sidebar.packages.len(), PACKAGES + 1);
+    assert_eq!(snapshot.sidebar.session_rows as usize, SESSIONS);
+    assert_eq!(snapshot.sidebar.groups.len(), WORKTREES);
+    let cards = snapshot.main.needs_review.len() + snapshot.main.done.len();
+    assert_eq!(
+        cards, OVERVIEW,
+        "every overview entry is a card or a done row"
+    );
+}
