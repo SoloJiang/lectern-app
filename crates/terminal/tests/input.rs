@@ -298,3 +298,30 @@ fn no_echo_of_program_text_in_replies() {
     );
     assert!(text.contains("\x1b[8;5;20t"), "size report: {text:?}");
 }
+
+#[test]
+fn input_button_released_while_not_tracking_is_not_stuck() {
+    let mut e = engine();
+    e.feed(b"\x1b[?1000h\x1b[?1006h");
+    sent(&mut e, mouse(MouseKind::Down, 2, 1, false));
+    // Tracking ends before the release: the release goes to selection.
+    e.feed(b"\x1b[?1000l");
+    sent(&mut e, mouse(MouseKind::Up, 2, 1, false));
+    // Any-motion tracking: a move with no button held is 35, not a drag (32).
+    e.feed(b"\x1b[?1003h");
+    let mut moved = mouse(MouseKind::Move, 3, 1, false);
+    if let Input::Mouse(m) = &mut moved {
+        m.button = None;
+    }
+    assert_eq!(sent(&mut e, moved), b"\x1b[<35;4;2M");
+}
+
+#[test]
+fn input_drag_after_resize_starts_no_selection() {
+    let mut e = engine();
+    e.feed(b"some text\r\n");
+    e.input(mouse(MouseKind::Down, 0, 0, false));
+    e.input(Input::Resize(testing::size(10, 3)));
+    e.input(mouse(MouseKind::Drag, 3, 0, false));
+    assert_eq!(e.copy_selection(), None);
+}

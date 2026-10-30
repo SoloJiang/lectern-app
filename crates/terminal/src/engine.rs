@@ -185,7 +185,7 @@ impl Engine {
         let mut changed = false;
         match input {
             Input::Key(key) if running => self.key(&key)?,
-            Input::Text(text) if running => self.to_pty(text.as_bytes()),
+            Input::Text(text) if running => self.write_pty(text.as_bytes()),
             Input::Paste(text) if running => self.paste(&text)?,
             Input::Focus(gained) if running => {
                 if self.mode(Mode::FOCUS_EVENT) {
@@ -196,11 +196,19 @@ impl Engine {
                         focus::Event::Lost
                     };
                     let n = event.encode(&mut buf)?;
-                    self.to_pty(&buf[..n]);
+                    self.write_pty(&buf[..n]);
                 }
             }
             Input::Key(_) | Input::Text(_) | Input::Paste(_) | Input::Focus(_) => {}
             Input::Mouse(mouse) => {
+                // Whoever gets the event, the buttons held stay right, so a
+                // program that starts tracking later sees no stuck drag.
+                let bit = button_bit(mouse.button);
+                match mouse.kind {
+                    MouseKind::Down => self.buttons_down |= bit,
+                    MouseKind::Up => self.buttons_down &= !bit,
+                    MouseKind::Drag | MouseKind::Move => {}
+                }
                 if self.tracks_mouse(mouse.mods.shift) {
                     if running {
                         self.mouse(&mouse)?;
@@ -230,6 +238,8 @@ impl Engine {
                         u32::from(size.cell_height),
                     )?;
                     self.size.set(size);
+                    // The text reflows: a drag starts again.
+                    self.anchor = None;
                     self.full = true;
                     changed = true;
                 }
@@ -237,6 +247,7 @@ impl Engine {
             Input::SelectAll => {
                 let all = self.terminal.select_all()?;
                 self.terminal.set_selection(all.as_ref())?;
+                self.anchor = None;
                 changed = true;
             }
             Input::ClearSelection => {
@@ -247,6 +258,7 @@ impl Engine {
             Input::ClearScrollback => {
                 // ED 3: erase the scrollback, leave the screen as it is.
                 self.terminal.vt_write(b"\x1b[3J");
+                self.anchor = None;
                 changed = true;
             }
             Input::SetTheme(theme) => {
@@ -255,7 +267,7 @@ impl Engine {
                 if scheme_changed && running && self.mode(Mode::COLOR_SCHEME_REPORT) {
                     let mut buf = [0u8; 16];
                     let n = vt_scheme(theme.scheme).encode_report(&mut buf)?;
-                    self.to_pty(&buf[..n]);
+                    self.write_pty(&buf[..n]);
                 }
                 changed = true;
             }
@@ -348,7 +360,6 @@ impl Engine {
             row.set_dirty(false)?;
             rows.push(built);
         }
-        drop(iteration);
         let cursor = if snapshot.cursor_visible()? {
             snapshot.cursor_viewport()?.map(|at| {
                 let (col, wide) = if at.at_wide_tail {
@@ -416,7 +427,7 @@ impl Engine {
         self.terminal.mode(mode).unwrap_or(false)
     }
 
-    fn to_pty(&mut self, bytes: &[u8]) {
+    fn write_pty(&mut self, bytes: &[u8]) {
         self.effects.borrow_mut().pty.extend_from_slice(bytes);
     }
 
@@ -446,7 +457,7 @@ impl Engine {
         self.key_encoder
             .set_options_from_terminal(&self.terminal)
             .encode_to_vec(&event, &mut out)?;
-        self.to_pty(&out);
+        self.write_pty(&out);
         Ok(())
     }
 
@@ -468,7 +479,7 @@ impl Engine {
             }
             other => other?,
         };
-        self.to_pty(&buf[..n]);
+        self.write_pty(&buf[..n]);
         Ok(())
     }
 
@@ -482,21 +493,9 @@ impl Engine {
             MouseButton::Middle => mouse::Button::Middle,
             MouseButton::Right => mouse::Button::Right,
         });
-        let bit = |b: Option<MouseButton>| match b {
-            Some(MouseButton::Left) => 1,
-            Some(MouseButton::Middle) => 2,
-            Some(MouseButton::Right) => 4,
-            None => 0,
-        };
         let action = match input.kind {
-            MouseKind::Down => {
-                self.buttons_down |= bit(input.button);
-                mouse::Action::Press
-            }
-            MouseKind::Up => {
-                self.buttons_down &= !bit(input.button);
-                mouse::Action::Release
-            }
+            MouseKind::Down => mouse::Action::Press,
+            MouseKind::Up => mouse::Action::Release,
             MouseKind::Drag | MouseKind::Move => mouse::Action::Motion,
         };
         let mut event = mouse::Event::new()?;
@@ -528,7 +527,7 @@ impl Engine {
             })
             .set_any_button_pressed(self.buttons_down != 0)
             .encode_to_vec(event, &mut out)?;
-        self.to_pty(&out);
+        self.write_pty(&out);
         Ok(())
     }
 
@@ -567,8 +566,15 @@ impl Engine {
                 let Some(anchor) = self.anchor else {
                     return Ok(false);
                 };
-                let start = self.terminal.grid_ref(Point::Screen(anchor))?;
-                let end = self.terminal.grid_ref(at)?;
+                // The anchor's row can leave the scrollback (the oldest rows
+                // are dropped): the drag then does nothing.
+                let (Ok(start), Ok(end)) = (
+                    self.terminal.grid_ref(Point::Screen(anchor)),
+                    self.terminal.grid_ref(at),
+                ) else {
+                    self.anchor = None;
+                    return Ok(false);
+                };
                 let selection = Selection::new(start, end, false);
                 self.terminal.set_selection(Some(&selection))?;
                 Ok(true)
@@ -629,6 +635,16 @@ impl Engine {
         self.terminal
             .scroll_viewport(ScrollViewport::Delta(input.lines as isize));
         Ok(true)
+    }
+}
+
+/// The bit of `button` in `Engine::buttons_down`.
+fn button_bit(button: Option<MouseButton>) -> u8 {
+    match button {
+        Some(MouseButton::Left) => 1,
+        Some(MouseButton::Middle) => 2,
+        Some(MouseButton::Right) => 4,
+        None => 0,
     }
 }
 
