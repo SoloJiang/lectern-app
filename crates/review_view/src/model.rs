@@ -1480,6 +1480,7 @@ pub(crate) fn blank(id: ReviewId, target: ReviewTarget, state: LoadState) -> Rev
         totals: ChangeTotals::default(),
         degraded: None,
         notes: Arc::from(Vec::new()),
+        notes_state: Arc::default(),
     }
 }
 

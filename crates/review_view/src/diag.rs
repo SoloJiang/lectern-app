@@ -50,5 +50,11 @@ pub(crate) fn command_kind(command: &ReviewCommand) -> &'static str {
         ReviewCommand::Refresh => "refresh",
         ReviewCommand::Analyze => "analyze",
         ReviewCommand::CancelAnalyze => "cancel_analyze",
+        ReviewCommand::AddNote { .. } => "add_note",
+        ReviewCommand::EditNote { .. } => "edit_note",
+        ReviewCommand::RemoveNote(_) => "remove_note",
+        ReviewCommand::DiscardNotes => "discard_notes",
+        ReviewCommand::SendNotes { .. } => "send_notes",
+        ReviewCommand::CopyBatch(_) => "copy_batch",
     }
 }

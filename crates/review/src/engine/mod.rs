@@ -278,6 +278,7 @@ fn loading(id: ReviewId, target: ReviewTarget) -> ReviewSnapshot {
         totals: Default::default(),
         degraded: None,
         notes: Arc::from(Vec::new()),
+        notes_state: Arc::default(),
     }
 }
 
@@ -552,6 +553,13 @@ impl Engine {
                     }
                 }
                 ReviewCommand::Prepare(needs) => self.prepare(&mut state, id, needs),
+                // Review notes come with #22's steps 6 and 7 (review.md「验收」).
+                ReviewCommand::AddNote { .. }
+                | ReviewCommand::EditNote { .. }
+                | ReviewCommand::RemoveNote(_)
+                | ReviewCommand::DiscardNotes
+                | ReviewCommand::SendNotes { .. }
+                | ReviewCommand::CopyBatch(_) => {}
                 ReviewCommand::Refresh => self.start_round(
                     &mut state,
                     id,
@@ -920,6 +928,7 @@ impl Engine {
             totals: work.list.totals.clone(),
             degraded: work.degraded,
             notes: Arc::from(Vec::new()),
+            notes_state: Arc::default(),
         }
     }
 

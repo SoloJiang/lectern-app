@@ -214,6 +214,8 @@ pub(crate) fn build(
             prompt_preview: turn.prompt_preview.clone(),
             items: items.into(),
             after_last_seen: inputs.last_seen.is_some_and(|seen| turn.started_at > seen),
+            // Linked to review note batches in #22's step 7.
+            answers: None,
         });
     }
     out.into()

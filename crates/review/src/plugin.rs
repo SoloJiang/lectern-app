@@ -16,8 +16,9 @@ use lectern_kernel::{
 };
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
 use lectern_services::review::{
-    BriefRules, BriefRulesRegistration, FileRows, Overview, OverviewInterest, Review,
-    ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
+    BriefRules, BriefRulesRegistration, FileRows, NoteRoute, NoteRouteRegistration, Overview,
+    OverviewInterest, Review, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget,
+    RowsKey, TextKey,
 };
 use lectern_services::session::{SessionSource, SessionsChanged, Timestamp};
 
@@ -248,6 +249,16 @@ impl Review for Service {
         token: ActivationToken,
     ) -> BriefRulesRegistration {
         self.engine.register_brief_rules(provider, token)
+    }
+
+    fn register_note_route(
+        &self,
+        _route: Arc<dyn NoteRoute>,
+        _token: ActivationToken,
+    ) -> NoteRouteRegistration {
+        // Session routes are offered from #22's step 7 on; until then only the
+        // built-in clipboard route exists and a registration does nothing.
+        NoteRouteRegistration::new(|| {})
     }
 }
 
