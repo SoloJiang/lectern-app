@@ -1,7 +1,8 @@
 //! The shared controls (docs/design/ui.md「控件」): the few the first
 //! screens need that gpui-component lacks or draws unlike macOS (step 5 adds
 //! the second batch: `ActionCard`, `PopUpButton`, `SidebarRow`, `Capsule`,
-//! `Disclosure`, and the decorative `AppIcon`). Each is a
+//! `Disclosure`, and the decorative `AppIcon`; `TextArea` is the multi-line
+//! text box of conversation and the review notes). Each is a
 //! `RenderOnce` element that takes `Text` (never `&str`), draws with the
 //! `Palette`, animates with `motion` and declares its semantic node through
 //! `semantic::declare`, so a view gives only the `NodeId`.
@@ -26,6 +27,7 @@ mod menu;
 mod progress;
 mod segmented;
 mod sidebar_row;
+mod text_area;
 
 pub use action_card::ActionCard;
 pub use agent_dot::{Agent, AgentDot};
@@ -46,6 +48,9 @@ pub use segmented::Segmented;
 #[cfg(test)]
 pub(crate) use segmented::Selection;
 pub use sidebar_row::SidebarRow;
+#[cfg(test)]
+pub(crate) use text_area::engine;
+pub use text_area::{TextArea, TextAreaState};
 
 use gpui::App;
 
