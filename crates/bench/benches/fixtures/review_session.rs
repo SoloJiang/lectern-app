@@ -81,14 +81,17 @@ impl ReviewSession {
             .enumerate()
         {
             log.prompt(&format!("Step {t}: change the next modules."));
-            log.text(&format!("Turn {t}: rewriting {} modules.", chunk.len()));
+            log.text(
+                &format!("Turn {t}: rewriting {} modules.", chunk.len()),
+                None,
+            );
             for &n in chunk {
                 let path = format!("{root}/{}", module_path(n));
                 let old = String::from_utf8(module(n, 0, false)).expect("UTF-8");
                 let new = String::from_utf8(module(n, 0, true)).expect("UTF-8");
                 log.write(&path, &old, &new);
             }
-            log.text("Done.");
+            log.text("Done.", Some("end_turn"));
         }
         ReviewSession {
             repo,
@@ -106,9 +109,15 @@ impl ReviewSession {
     }
 
     /// Writes the session log under `home` as Claude Code does:
-    /// `.claude/projects/<the root with '/' as '-'>/<sessionId>.jsonl`.
+    /// `.claude/projects/<the root, each character other than an ASCII letter
+    /// or digit as '-'>/<sessionId>.jsonl`.
     pub fn write_home(&self, home: &Path) -> io::Result<()> {
-        let encoded = self.root().to_string_lossy().replace('/', "-");
+        let encoded: String = self
+            .root()
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
         let dir = home.join(".claude/projects").join(encoded);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(format!("{SESSION_ID}.jsonl")), &self.log)
@@ -164,14 +173,15 @@ impl<'a> Log<'a> {
         self.record("user", json!({ "role": "user", "content": text }), None);
     }
 
-    fn text(&mut self, text: &str) {
+    /// An assistant text; the last one of a turn ends it with `end_turn`.
+    fn text(&mut self, text: &str, stop_reason: Option<&str>) {
         let id = format!("msg_fixture_{:06}", self.n);
         self.record(
             "assistant",
             json!({
                 "id": id, "type": "message", "role": "assistant", "model": "fixture-model",
                 "content": [{ "type": "text", "text": text }],
-                "stop_reason": null, "stop_sequence": null,
+                "stop_reason": stop_reason, "stop_sequence": null,
                 "usage": { "input_tokens": 10, "output_tokens": 20 },
             }),
             None,
