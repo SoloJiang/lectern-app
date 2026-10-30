@@ -1794,6 +1794,14 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // (step 6) `command(AddNote)` with 39 notes not sent and 240 sent.
+    share(
+        "review/note_add",
+        &[median(Limit::TimeBelow(us(200)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
     // (step 5) The rule brief of 5000 files.
     share(
         "review/brief_5000",
@@ -1833,6 +1841,16 @@ pub static BUDGETS: &[Budget] = &[
     share(
         "review/resident_100k_bytes",
         &[median(Limit::BytesBelow(MB))],
+        REVIEW,
+        ACTIVE,
+        Memory,
+    ),
+    // (step 6) The annotation log's index with 280 review notes (40 not
+    // sent, 240 sent; 200 bytes of text and five excerpt lines each):
+    // 300 KB (2^10 bytes).
+    share(
+        "review/resident_notes_bytes",
+        &[median(Limit::BytesBelow(300 << 10))],
         REVIEW,
         ACTIVE,
         Memory,

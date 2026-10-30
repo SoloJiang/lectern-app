@@ -374,6 +374,29 @@ impl MarkSeenFixture {
         }
     }
 
+    /// Writes the annotation log of the main worktree's changes outside any
+    /// session (what [`Driven::outside`] reviews) with `pending` notes not
+    /// sent and `sent` sent in batches of 40, on the fixture's files, for an
+    /// engine on `dir` (`review/note_add`).
+    pub fn seed_notes(&self, dir: &Path, pending: usize, sent: usize) -> std::io::Result<()> {
+        let target = crate::seen::TargetKey::Outside {
+            worktree: Arc::from(""),
+        };
+        let files = self.files.max(1);
+        let path = |i: usize| {
+            let n = i % files;
+            ChangePath(Arc::from(
+                format!("gen/d{:03}/f{n}.txt", n % 100).as_bytes(),
+            ))
+        };
+        let mut file = crate::log::LogFile::new(&dir.join("review"), self.repo.common_dir());
+        let (_, report) = file.load(Timestamp(0));
+        if let Some(error) = report.error {
+            return Err(error);
+        }
+        file.append(&super::note_records(&target, pending, sent, path))
+    }
+
     pub fn driven(&self, dir: &Path) -> Driven {
         let sessions = Arc::new(FakeSessions::from_script(SOURCE, r#"{"sessions": []}"#));
         Driven::new(

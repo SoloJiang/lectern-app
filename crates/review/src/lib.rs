@@ -23,6 +23,7 @@ mod group;
 mod log;
 mod lru;
 pub mod noise;
+mod notes;
 mod plugin;
 mod seen;
 

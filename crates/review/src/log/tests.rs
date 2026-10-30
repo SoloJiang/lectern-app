@@ -10,10 +10,15 @@ use lectern_services::changes::{
     SideIdentity, UnavailableKind,
 };
 use lectern_services::project::BlobId;
-use lectern_services::review::{FileKey, SeenState};
+use lectern_services::review::{
+    BatchId, DiffSide, Excerpt, FileKey, NoteAnchor, NoteId, SeenState, SentVia,
+};
 use lectern_services::session::Timestamp;
 
-use super::{BaseRecord, Index, Limits, LogFile, Op, Record, SessionId, file_name, flush};
+use super::{
+    BaseRecord, Index, Limits, LogFile, NoteRecord, Op, Record, SentRecord, SessionId, file_name,
+    flush,
+};
 use crate::seen::{SeenKey, TargetKey, mark_seen, mark_unseen, state};
 
 const REPO: &str = "/work/repo/.git";
@@ -159,6 +164,81 @@ fn state_of(index: &Index, target: &TargetKey, p: &[u8], new: u8) -> SeenState {
     state(index, &SeenKey::new(target.clone(), &modified(p, new)))
 }
 
+const SESSION_A: &str = "8f2c1a64-5b7e-4d3a-9c10-000000000001";
+const N1: u64 = 0x0190_f3a2_c4b6_0400;
+const N2: u64 = 0x0190_f3a2_c4b6_0402;
+const N3: u64 = 0x0190_f3a2_c4b6_0403;
+const B1: u64 = 0x0190_f3a2_c4b6_0401;
+
+fn anchor(p: &[u8], side: DiffSide, line: u32, oid: u8) -> NoteAnchor {
+    NoteAnchor {
+        file: FileKey {
+            old: Some(path(p)),
+            new: Some(path(p)),
+        },
+        side,
+        line,
+        oid: BlobId::Sha1([oid; 20]),
+    }
+}
+
+fn excerpt(first: u32, lines: &[&str]) -> Excerpt {
+    Excerpt {
+        first,
+        lines: lines.iter().map(|l| Arc::<str>::from(*l)).collect(),
+    }
+}
+
+/// A note of `target` written at `at`, first written at `created`.
+fn note_at(target: &TargetKey, id: u64, text: &str, created: Timestamp, at: Timestamp) -> Record {
+    Record::Note(NoteRecord {
+        at,
+        target: target.clone(),
+        id: NoteId(id),
+        anchor: anchor(b"src/lib.rs", DiffSide::New, 41, 3),
+        excerpt: Some(excerpt(39, &["fn a() {", "    b();"])),
+        text: Arc::from(text),
+        created,
+    })
+}
+
+fn note(target: &TargetKey, id: u64, text: &str) -> Record {
+    note_at(target, id, text, NOW, NOW)
+}
+
+fn removed(target: &TargetKey, ids: &[u64], at: Timestamp) -> Record {
+    Record::NoteRemoved {
+        at,
+        target: target.clone(),
+        ids: ids.iter().map(|n| NoteId(*n)).collect(),
+    }
+}
+
+fn sent(target: &TargetKey, batch: u64, ids: &[u64], at: Timestamp) -> Record {
+    Record::NotesSent(SentRecord {
+        at,
+        target: target.clone(),
+        batch: BatchId(batch),
+        notes: ids.iter().map(|n| NoteId(*n)).collect(),
+        via: SentVia::Clipboard,
+    })
+}
+
+/// The notes of `target`: (id, text, excerpt, the batch it was sent in).
+#[allow(clippy::type_complexity, reason = "a test's comparable form")]
+fn notes_of(index: &Index, target: &TargetKey) -> Vec<(u64, String, Option<Excerpt>, Option<u64>)> {
+    let Some(tn) = index.target_notes(target) else {
+        return Vec::new();
+    };
+    tn.notes
+        .iter()
+        .map(|n| {
+            let batch = tn.sent_in(n.id).map(|b| b.0);
+            (n.id.0, n.text.to_string(), n.excerpt.clone(), batch)
+        })
+        .collect()
+}
+
 /// One record of every kind and shape, in a fixed order.
 fn sample_records() -> Vec<Record> {
     let s = session("8f2c1a64-5b7e-4d3a-9c10-000000000001");
@@ -216,6 +296,18 @@ fn sample_records() -> Vec<Record> {
         seen_at(&outside, &gone, at(4)),
         mark_unseen(s.clone(), lib, at(5)),
         base("unborn", None, at(6)),
+        note_at(&s, N1, "Why \"this\"?\nLine two é 🙂", at(7), at(7)),
+        Record::Note(NoteRecord {
+            at: at(8),
+            target: s.clone(),
+            id: NoteId(N2),
+            anchor: anchor(b"data/\xff\xfe.bin", DiffSide::Old, 0, 4),
+            excerpt: None,
+            text: Arc::from("dropped"),
+            created: at(8),
+        }),
+        removed(&s, &[N2], at(9)),
+        sent(&s, B1, &[N1], at(10)),
     ]
 }
 
@@ -241,6 +333,17 @@ fn records_of(index: &Index) -> Vec<String> {
         .chain(index.bases.values())
         .map(|e| format!("{:?}", e.record))
         .collect();
+    for (target, tn) in &index.notes {
+        for n in &tn.notes {
+            let sent = tn.sent_in(n.id);
+            let n = (n.at, n.id, &n.anchor, &n.excerpt, &n.text, n.created);
+            out.push(format!("note {target:?} {n:?} {sent:?}"));
+        }
+        for b in &tn.batches {
+            let b = (b.id, b.at, b.via, &b.notes);
+            out.push(format!("batch {target:?} {b:?}"));
+        }
+    }
     for (_, line) in &index.unknown {
         out.push(String::from_utf8_lossy(line).into_owned());
     }
@@ -271,8 +374,14 @@ fn log_roundtrip() {
     let found = (report.bad_lines, report.unknown, report.torn);
     assert_eq!(found, (0, 0, false));
     assert_eq!(records_of(&read), records_of(&written));
-    // The unseen replaced the seen of src/lib.rs: 5 marks and 2 bases.
-    assert_eq!(read.len(), 7);
+    // The unseen replaced the seen of src/lib.rs: 5 marks and 2 bases; the
+    // removal took one of the two notes, the batch is the other record.
+    assert_eq!(read.len(), 9);
+    let first = notes_of(&read, &session(SESSION_A));
+    assert_eq!(
+        first[0].1, "Why \"this\"?\nLine two é 🙂",
+        "text as written"
+    );
     let s = session("8f2c1a64-5b7e-4d3a-9c10-000000000001");
     let lib = state_of(&read, &s, b"src/lib.rs", 2);
     assert_eq!(lib, SeenState::Unseen);
@@ -385,7 +494,7 @@ fn log_lines_not_utf8_are_bad_or_kept() {
         b"{\"t\":\"unseen\",\"at\":1,\"target\":{\"outside\":{\"worktree\":\"\"}},\
           \"file\":{\"old\":null,\"new\":\"b\xff.rs\"}}\n",
     );
-    let unknown: &[u8] = b"{\"t\":\"note\",\"at\":1,\"text\":\"caf\xe9\"}\n";
+    let unknown: &[u8] = b"{\"t\":\"pin\",\"at\":1,\"text\":\"caf\xe9\"}\n";
     fx.append_raw(unknown);
     fx.write(vec![mark(&s, b"b.rs", 2)]);
 
@@ -406,9 +515,9 @@ fn log_lines_not_utf8_are_bad_or_kept() {
     assert_eq!(records_of(&read), records_of(&index));
 }
 
-const NOTE: &[u8] = b"{\"t\":\"note\",\"at\":1760000000000,\
+const NOTE: &[u8] = b"{\"t\":\"pin\",\"at\":1760000000000,\
     \"anchor\":{\"side\":\"new\",\"line\":3},\"text\":\"why \\u00e9?\"}\n";
-const NOTES_SENT: &[u8] = b"{\"t\":\"notes_sent\",\"at\":1760000000001,\"to\":[1,2]}\n";
+const NOTES_SENT: &[u8] = b"{\"t\":\"star\",\"at\":1760000000001,\"to\":[1,2]}\n";
 
 #[test]
 fn log_unknown_records_survive_compaction() {
@@ -873,4 +982,281 @@ fn log_bench_fixture_reads_back_whole() {
     assert_eq!(load.bad_lines, 0);
     assert!(load.complete);
     assert_eq!(load.records, 16_000);
+}
+
+// ---- log_notes_* ------------------------------------------------------------
+
+fn target_a() -> TargetKey {
+    session(SESSION_A)
+}
+
+#[test]
+fn log_notes_roundtrip() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let range = TargetKey::Range {
+        worktree: Arc::from("worktrees/feature"),
+        base: BaseSpec::Head,
+    };
+    let written = fx.write(vec![
+        note(&s, N1, "first"),
+        Record::Note(NoteRecord {
+            at: NOW,
+            target: range.clone(),
+            id: NoteId(N3),
+            anchor: anchor(b"a.rs", DiffSide::Old, 0, 9),
+            excerpt: None,
+            text: Arc::from("no excerpt"),
+            created: NOW,
+        }),
+        note(&s, N2, "second"),
+        sent(&s, B1, &[N1], NOW),
+    ]);
+    let text = fx.text();
+    // The IDs are 16 hex digits; an excerpt that could not be taken is null.
+    assert!(text.contains("\"id\":\"0190f3a2c4b60400\""), "{text}");
+    assert!(text.contains("\"batch\":\"0190f3a2c4b60401\""), "{text}");
+    assert!(text.contains("\"excerpt\":null"), "{text}");
+    let (read, report) = fx.reload();
+    assert!(report.complete);
+    assert_eq!((report.bad_lines, report.unknown), (0, 0));
+    assert_eq!(records_of(&read), records_of(&written));
+    let found = notes_of(&read, &s);
+    assert_eq!(found.len(), 2);
+    assert_eq!((found[0].0, found[0].3), (N1, Some(B1)));
+    assert_eq!((found[1].0, found[1].3), (N2, None));
+    assert_eq!(notes_of(&read, &range)[0].2, None);
+    let batch = read.target_notes(&s).unwrap().batch(BatchId(B1)).unwrap();
+    assert_eq!(
+        (batch.at, batch.via, batch.notes.len()),
+        (NOW, SentVia::Clipboard, 1)
+    );
+}
+
+#[test]
+fn log_notes_the_latest_record_of_a_note_wins() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let later = Timestamp(NOW.0 + 5000);
+    fx.write(vec![
+        note(&s, N1, "before"),
+        note_at(&s, N1, "after", NOW, later),
+    ]);
+    let (read, _) = fx.reload();
+    let tn = read.target_notes(&s).unwrap();
+    assert_eq!(tn.notes.len(), 1);
+    let n = tn.note(NoteId(N1)).unwrap();
+    assert_eq!((&*n.text, n.created, n.at), ("after", NOW, later));
+    assert_eq!(read.len(), 1);
+}
+
+#[test]
+fn log_notes_removed_are_gone() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let other = session("other");
+    fx.write(vec![
+        note(&s, N1, "a"),
+        note(&s, N2, "b"),
+        note(&other, N3, "c"),
+        // An ID that is not there, and another target's: nothing to remove.
+        removed(&s, &[N1, 99, N3], NOW),
+    ]);
+    let (read, report) = fx.reload();
+    assert_eq!((report.bad_lines, report.unknown), (0, 0));
+    let ids: Vec<u64> = notes_of(&read, &s).iter().map(|n| n.0).collect();
+    assert_eq!(ids, [N2]);
+    assert_eq!(notes_of(&read, &other).len(), 1);
+}
+
+#[test]
+fn log_notes_sent_marks_the_notes_whatever_the_order() {
+    let fx = Fixture::new();
+    let s = target_a();
+    // The batch comes first, as a merged file may have it.
+    fx.write(vec![
+        sent(&s, B1, &[N1, N2], NOW),
+        note(&s, N1, "a"),
+        note(&s, N2, "b"),
+        note(&s, N3, "c"),
+    ]);
+    let (read, _) = fx.reload();
+    let batches: Vec<Option<u64>> = notes_of(&read, &s).iter().map(|n| n.3).collect();
+    assert_eq!(batches, [Some(B1), Some(B1), None]);
+    assert_eq!(read.target_notes(&s).unwrap().unsent(), 1);
+}
+
+#[test]
+fn log_notes_old_batches_are_not_read() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let old = Timestamp(NOW.0 - 15 * DAY_MS);
+    let recent = Timestamp(NOW.0 - 13 * DAY_MS);
+    let year = Timestamp(NOW.0 - 400 * DAY_MS);
+    fx.write(vec![
+        note_at(&s, N1, "sent long ago", old, old),
+        sent(&s, B1, &[N1], old),
+        note_at(&s, N2, "sent lately", recent, recent),
+        sent(&s, B1 + 8, &[N2], recent),
+        // Pending notes are kept however old.
+        note_at(&s, N3, "pending for a year", year, year),
+    ]);
+    let (read, _) = fx.reload();
+    let found: Vec<(u64, Option<u64>)> = notes_of(&read, &s).iter().map(|n| (n.0, n.3)).collect();
+    assert_eq!(found, [(N2, Some(B1 + 8)), (N3, None)]);
+    let batches = &read.target_notes(&s).unwrap().batches;
+    assert_eq!(batches.len(), 1);
+    // The file still has the old records until a compaction.
+    assert!(fx.text().contains("sent long ago"));
+}
+
+#[test]
+fn log_notes_compaction_drops_old_batches_and_keeps_pending_notes() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let old = Timestamp(NOW.0 - 15 * DAY_MS);
+    let year = Timestamp(NOW.0 - 400 * DAY_MS);
+    let mut f = fx.small(1);
+    let (mut index, _) = f.load(NOW);
+    index.record(note_at(&s, N1, "sent long ago", old, old));
+    index.record(sent(&s, B1, &[N1], old));
+    index.record(note_at(&s, N3, "pending for a year", year, year));
+    index.record(removed(&s, &[N2], NOW));
+    assert!(compacted(&mut f, &mut index));
+    let text = fx.text();
+    assert!(!text.contains("sent long ago") && !text.contains("note_removed"));
+    assert!(text.contains("pending for a year"));
+    assert!(!text.contains("notes_sent"));
+    let (read, _) = fx.reload();
+    assert_eq!(records_of(&read), records_of(&index));
+    assert_eq!(notes_of(&read, &s).len(), 1);
+    assert_eq!(read.len(), 1);
+}
+
+#[test]
+fn log_notes_compaction_keeps_the_index() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let other = session("other");
+    let range = TargetKey::Outside {
+        worktree: Arc::from(""),
+    };
+    let at = |n: i64| Timestamp(NOW.0 + n);
+    let mut f = fx.file();
+    let (mut index, _) = f.load(NOW);
+    index.record(mark(&s, b"a.rs", 2));
+    index.record(base("a", Some(1), NOW));
+    for n in 0..12u64 {
+        let t = at(n as i64);
+        index.record(note_at(&s, N1 + n * 4, &format!("note {n}"), t, t));
+    }
+    // Edited, removed, sent.
+    index.record(note_at(&s, N1, "note 0 edited", NOW, at(100)));
+    index.record(removed(&s, &[N1 + 4, N1 + 8], at(101)));
+    index.record(sent(&s, B1, &[N1 + 12, N1 + 16], at(102)));
+    index.record(sent(&s, B1 + 8, &[N1 + 20, N1 + 4], at(103)));
+    index.record(note(&other, N2, "elsewhere"));
+    index.record(note(&range, N3, "in the main worktree"));
+    index.record(Record::Note(NoteRecord {
+        at: at(104),
+        target: s.clone(),
+        id: NoteId(N1 + 40),
+        anchor: anchor(b"late.rs", DiffSide::New, 7, 8),
+        excerpt: None,
+        text: Arc::from("late"),
+        created: at(104),
+    }));
+    index.record(sent(&s, B1 + 16, &[N1 + 40], at(105)));
+    flush(&mut f, &mut index, at(106)).unwrap();
+    // The excerpt of that note arrives after it was sent and appended: a
+    // record of its own, behind the batch's.
+    assert!(index.attach_excerpt(&s, NoteId(N1 + 40), excerpt(5, &["x", "y", "z"])));
+    flush(&mut f, &mut index, at(106)).unwrap();
+    let (replayed, report) = fx.reload();
+    assert_eq!((report.bad_lines, report.unknown), (0, 0));
+    assert_eq!(records_of(&replayed), records_of(&index));
+
+    // Compacted: the file is the index again.
+    let mut f = fx.small(1);
+    let (mut index, report) = f.load(NOW);
+    assert!(report.complete);
+    index.record(note(&s, N1 + 48, "one more"));
+    let before = records_of(&index);
+    assert!(compacted(&mut f, &mut index));
+    assert_eq!(records_of(&index), before);
+    let (read, report) = fx.reload();
+    assert_eq!((report.bad_lines, report.unknown), (0, 0));
+    assert_eq!(records_of(&read), before, "replay of the compacted file");
+    // The late excerpt and its batch survived.
+    let found = notes_of(&read, &s);
+    let late = found.iter().find(|n| n.0 == N1 + 40).unwrap();
+    let want = (Some(excerpt(5, &["x", "y", "z"])), Some(B1 + 16));
+    assert_eq!((late.2.clone(), late.3), want);
+    // A removed note that a batch lists stays out; the batch keeps its size.
+    assert!(found.iter().all(|n| n.0 != N1 + 4));
+    let batch = read
+        .target_notes(&s)
+        .unwrap()
+        .batch(BatchId(B1 + 8))
+        .unwrap();
+    assert_eq!(batch.notes.len(), 2);
+}
+
+#[test]
+fn log_notes_attach_excerpt_patches_the_queued_record() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let mut f = fx.file();
+    let (mut index, _) = f.load(NOW);
+    index.record(Record::Note(NoteRecord {
+        at: NOW,
+        target: s.clone(),
+        id: NoteId(N1),
+        anchor: anchor(b"a.rs", DiffSide::New, 3, 1),
+        excerpt: None,
+        text: Arc::from("t"),
+        created: NOW,
+    }));
+    assert!(index.attach_excerpt(&s, NoteId(N1), excerpt(1, &["a", "b", "c", "d"])));
+    // Once: the queued record carries it, nothing else is queued.
+    assert_eq!(index.pending().len(), 1);
+    assert!(matches!(&index.pending()[0], Record::Note(n) if n.excerpt.is_some()));
+    // A note that has one, and one that is gone, take nothing.
+    assert!(!index.attach_excerpt(&s, NoteId(N1), excerpt(0, &["z"])));
+    assert!(!index.attach_excerpt(&s, NoteId(N2), excerpt(0, &["z"])));
+    flush(&mut f, &mut index, NOW).unwrap();
+    let (read, _) = fx.reload();
+    assert_eq!(
+        notes_of(&read, &s)[0].2,
+        Some(excerpt(1, &["a", "b", "c", "d"]))
+    );
+    assert_eq!(fx.text().matches("\"t\":\"note\"").count(), 1);
+}
+
+#[test]
+fn log_notes_malformed_records_are_bad_lines_not_unknown_ones() {
+    let fx = Fixture::new();
+    let s = target_a();
+    fx.write(vec![note(&s, N1, "fine")]);
+    fx.append_raw(b"{\"t\":\"note\",\"at\":1760000000000}\n");
+    fx.append_raw(b"{\"t\":\"note_removed\",\"at\":1,\"target\":{\"outside\":{\"worktree\":\"\"}},\"ids\":[\"zz\"]}\n");
+    fx.append_raw(b"{\"t\":\"notes_sent\",\"at\":1}\n");
+    let (read, report) = fx.reload();
+    assert_eq!((report.bad_lines, report.unknown), (3, 0));
+    assert_eq!(notes_of(&read, &s).len(), 1);
+}
+
+#[test]
+fn log_notes_shares_the_paths_of_a_read() {
+    let fx = Fixture::new();
+    let s = target_a();
+    fx.write(vec![
+        note(&s, N1, "a"),
+        note(&s, N2, "b"),
+        note(&s, N3, "c"),
+    ]);
+    let (read, _) = fx.reload();
+    let tn = read.target_notes(&s).unwrap();
+    let new = |i: usize| tn.notes[i].anchor.file.new.clone().unwrap();
+    assert!(Arc::ptr_eq(&new(0).0, &new(1).0) && Arc::ptr_eq(&new(1).0, &new(2).0));
 }

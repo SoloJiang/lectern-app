@@ -558,6 +558,74 @@ fn plugin_commands_on_the_ui_thread_do_no_io() {
 }
 
 #[test]
+fn notes_cmd_on_the_ui_thread_do_no_io() {
+    use lectern_services::review::{DiffSide, NoteAnchor, NotePlace};
+
+    let (fx, sessions) = fixture("s");
+    // As `plugin_commands_on_the_ui_thread_do_no_io`: the cache refuses any
+    // call from this thread, which stands for the UI thread.
+    let rig = Rig::build(fx, sessions, Some(std::thread::current().id()), "s");
+    let off_thread = |rig: &Rig| {
+        let driver = &rig.driver;
+        std::thread::scope(|s| {
+            s.spawn(|| driver.run_until_idle()).join().unwrap();
+        });
+    };
+    let id = rig.review.open(rig.target());
+    off_thread(&rig);
+    let snapshot = rig.review.snapshot(id).unwrap();
+    assert_eq!(snapshot.state, LoadState::Ready);
+    let file = snapshot.files[0].key.clone();
+    let rows = RowsKey::Final {
+        file: file.clone(),
+        context: 3,
+    };
+    rig.review.command(
+        id,
+        ReviewCommand::Prepare(vec![Need::Rows(rows.clone())].into()),
+    );
+    off_thread(&rig);
+    let shown = rig.review.rows(id, &rows).unwrap();
+    let anchor = NoteAnchor {
+        file,
+        side: DiffSide::New,
+        line: 0,
+        oid: shown.new.oid.unwrap(),
+    };
+
+    rig.review.command(
+        id,
+        ReviewCommand::AddNote {
+            rows: Some(rows),
+            anchor,
+            text: "why?".into(),
+            excerpt: None,
+        },
+    );
+    // Swapped before the call returned; the text not scanned, nothing
+    // written.
+    let added = rig.review.snapshot(id).unwrap();
+    assert!(added.generation > snapshot.generation);
+    assert_eq!(added.notes.len(), 1);
+    assert_eq!(added.notes[0].excerpt, None);
+    assert!(matches!(added.notes[0].place, NotePlace::Rows(_)));
+    let note = added.notes[0].id;
+    rig.review.command(
+        id,
+        ReviewCommand::EditNote {
+            note,
+            text: "why not?".into(),
+        },
+    );
+    rig.review.command(id, ReviewCommand::DiscardNotes);
+    assert!(rig.review.snapshot(id).unwrap().notes.is_empty());
+    assert!(!rig.data_dir.exists(), "the records are written by a task");
+
+    off_thread(&rig);
+    assert!(rig.data_dir.exists());
+}
+
+#[test]
 fn plugin_deactivation_drops_the_reviews_and_their_watches() {
     let rig = Rig::new();
     let (_, _) = rig.open_settled();

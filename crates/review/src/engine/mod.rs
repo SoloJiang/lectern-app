@@ -29,6 +29,7 @@
 pub(crate) mod attribute;
 mod brief;
 mod narrative;
+mod notes;
 pub(crate) mod overview;
 pub(crate) mod round;
 mod rows;
@@ -70,6 +71,7 @@ use crate::seen;
 
 use self::attribute::FileResult;
 use self::narrative::Own;
+use self::notes::folder_target;
 use self::round::{Git, Kind, StepIds, Work};
 use self::watch::Watching;
 use self::watch::merge_hints;
@@ -167,6 +169,8 @@ pub(crate) struct Engine {
     providers: Mutex<brief::Providers>,
     /// The project overviews with an interest (「概览」). A leaf lock.
     overviews: Mutex<overview::Overviews>,
+    /// The last review note ID given (`next_note_id`). A leaf lock.
+    note_ids: Mutex<u64>,
     /// IO faults and size limits for the logs opened from now on.
     #[cfg(test)]
     log_test: Mutex<LogTest>,
@@ -236,6 +240,9 @@ struct Open {
     texts: HashMap<TextKey, Arc<str>>,
     /// The providers' request for the current work and their replies.
     brief: brief::BriefState,
+    /// A folder project's review notes: it has no annotation log, so they
+    /// stay here until the review is released (「审阅意见」).
+    folder_notes: Option<Index>,
 }
 
 impl Open {
@@ -278,7 +285,7 @@ fn loading(id: ReviewId, target: ReviewTarget) -> ReviewSnapshot {
         totals: Default::default(),
         degraded: None,
         notes: Arc::from(Vec::new()),
-        notes_state: Arc::default(),
+        notes_state: notes::empty_state(),
     }
 }
 
@@ -297,6 +304,7 @@ impl Engine {
             ancestry: Mutex::new(HashMap::new()),
             providers: Mutex::new(brief::Providers::default()),
             overviews: Mutex::new(overview::Overviews::default()),
+            note_ids: Mutex::new(0),
             #[cfg(test)]
             log_test: Mutex::new(LogTest::default()),
         })
@@ -395,6 +403,7 @@ impl Engine {
                 rows: HashMap::new(),
                 texts: HashMap::new(),
                 brief: brief::BriefState::default(),
+                folder_notes: None,
             },
         );
         self.start_round(&mut state, id, Kind::Fetch, Priority::Interactive);
@@ -553,13 +562,14 @@ impl Engine {
                     }
                 }
                 ReviewCommand::Prepare(needs) => self.prepare(&mut state, id, needs),
-                // Review notes come with #22's steps 6 and 7 (review.md「验收」).
                 ReviewCommand::AddNote { .. }
                 | ReviewCommand::EditNote { .. }
                 | ReviewCommand::RemoveNote(_)
-                | ReviewCommand::DiscardNotes
-                | ReviewCommand::SendNotes { .. }
-                | ReviewCommand::CopyBatch(_) => {}
+                | ReviewCommand::DiscardNotes => {
+                    self.note_command(&mut state, id, command, &mut events);
+                }
+                // Sending comes with #22's step 7 (review.md「验收」).
+                ReviewCommand::SendNotes { .. } | ReviewCommand::CopyBatch(_) => {}
                 ReviewCommand::Refresh => self.start_round(
                     &mut state,
                     id,
@@ -858,7 +868,23 @@ impl Engine {
             let Some(open) = current(&mut state, id, seq) else {
                 return;
             };
+            let (notes, notes_state) = match (&open.folder_notes, folder_target(&open.target)) {
+                (Some(index), Some(key)) => notes::build(
+                    index,
+                    &key,
+                    None,
+                    (&open.snapshot.notes, &open.snapshot.notes_state),
+                    false,
+                    (self.cfg.clock)(),
+                ),
+                _ => (
+                    open.snapshot.notes.clone(),
+                    open.snapshot.notes_state.clone(),
+                ),
+            };
             let snapshot = ReviewSnapshot {
+                notes,
+                notes_state,
                 state: LoadState::Ready,
                 sessions: vec![lectern_services::review::SessionRef {
                     key: own[0].summary.key.clone(),
@@ -907,6 +933,20 @@ impl Engine {
             .map(|f| index.map_or(SeenState::Unseen, |i| seen::state(i, &f.seen)))
             .collect();
         let last_seen = index.and_then(|i| i.last_seen(&work.target_key));
+        let (notes, notes_state) = match index {
+            Some(i) => notes::build(
+                i,
+                &work.target_key,
+                Some((work, &results)),
+                (&open.snapshot.notes, &open.snapshot.notes_state),
+                false,
+                (self.cfg.clock)(),
+            ),
+            None => (
+                Arc::clone(&open.snapshot.notes),
+                Arc::clone(&open.snapshot.notes_state),
+            ),
+        };
         let turns = self.turns(work, &results, last_seen);
         let brief = self.brief(open, work, &results, &seen);
         ReviewSnapshot {
@@ -927,8 +967,8 @@ impl Engine {
             focus_touched: Arc::clone(&work.focus_touched),
             totals: work.list.totals.clone(),
             degraded: work.degraded,
-            notes: Arc::from(Vec::new()),
-            notes_state: Arc::default(),
+            notes,
+            notes_state,
         }
     }
 
