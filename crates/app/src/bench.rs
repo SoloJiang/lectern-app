@@ -6,15 +6,20 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::App;
 use lectern_bench::probe::{Driver, Probe};
-use lectern_bench::wire::OpenTarget;
-use lectern_kernel::Kernel;
+use lectern_bench::wire::{self, OpenTarget};
+use lectern_kernel::{Kernel, Name};
 use lectern_logging::info;
-use lectern_services::workspace::{Contributions, WorkspaceCommand};
+use lectern_services::review::ReviewTarget;
+use lectern_services::session::{SessionKey, SourceId};
+use lectern_services::workspace::{
+    Contributions, Milestone, Route, Target, WorkspaceCommand, screens,
+};
 
 use crate::quit;
 use crate::startup::Started;
@@ -27,6 +32,23 @@ pub fn from_env() -> Option<Arc<Probe>> {
     let probe = Probe::from_env()?;
     probe.watch_first_frame();
     Some(Arc::new(probe))
+}
+
+/// `WorkspaceDeps::on_milestone` of the measurement build: each milestone
+/// `workspace` saw drawn goes to the runner with the time of the next frame
+/// callback (docs/design/app.md「里程碑与帧」). Any thread.
+pub fn on_milestone(probe: Arc<Probe>) -> Arc<dyn Fn(Milestone, SystemTime) + Send + Sync> {
+    Arc::new(move |milestone, presented| probe.milestone(wire_milestone(milestone), presented))
+}
+
+/// The bench milestone of the same name.
+pub(crate) fn wire_milestone(milestone: Milestone) -> wire::Milestone {
+    match milestone {
+        Milestone::ProjectHome => wire::Milestone::ProjectHome,
+        Milestone::FileHighlighted => wire::Milestone::FileHighlighted,
+        Milestone::DiffShown => wire::Milestone::DiffShown,
+        Milestone::WorktreeSwitched => wire::Milestone::WorktreeSwitched,
+    }
 }
 
 /// Where the probe's errors go. The probe sends them to the runner's
@@ -46,6 +68,8 @@ impl Reporter for Probe {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum BenchRequest {
     Open(PathBuf),
+    /// The review of one session, as ↵ on its row on the project home.
+    OpenDiff(SessionKey),
     Quit,
 }
 
@@ -66,14 +90,22 @@ impl BenchDriver {
 }
 
 impl Driver for BenchDriver {
-    /// A project is opened as the Open Folder dialog's choice is. The other
-    /// kinds are added by the benchmarks that use them.
+    /// A project is opened as the Open Folder dialog's choice is; a diff is
+    /// the review of the session `<source>:<id>`, opened as the project
+    /// home opens it. The other kinds are added by the benchmarks that use
+    /// them.
     fn open(&self, target: OpenTarget) {
         match target {
             OpenTarget::Project(path) => {
                 // The receiving task ends only with the app.
                 let _ = self.requests.unbounded_send(BenchRequest::Open(path));
             }
+            OpenTarget::Diff { session } => match session_key(&session) {
+                Some(key) => {
+                    let _ = self.requests.unbounded_send(BenchRequest::OpenDiff(key));
+                }
+                None => self.reporter.error("open diff without a source"),
+            },
             other => self
                 .reporter
                 .error(&format!("open {} unsupported", kind(&other))),
@@ -83,6 +115,17 @@ impl Driver for BenchDriver {
     fn quit(&self) {
         let _ = self.requests.unbounded_send(BenchRequest::Quit);
     }
+}
+
+/// The key of `<source>:<id>`: the source is the session source's plugin
+/// ID (`session-claude-code`), the ID the one inside that source. None
+/// without a `:` or with an empty part.
+pub(crate) fn session_key(session: &str) -> Option<SessionKey> {
+    let (source, id) = session.split_once(':')?;
+    (!source.is_empty() && !id.is_empty()).then(|| SessionKey {
+        source: SourceId(source.into()),
+        id: id.into(),
+    })
 }
 
 /// The `target` the wire names the kind with.
@@ -125,8 +168,9 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App) {
 
 /// One request, on the main thread. `Open` goes into `workspace`'s queue as
 /// `OpenProject`, the command the Open Folder dialog's choice makes
-/// (`workspace`'s `view.rs`); without a workspace it is an error. `Quit` is
-/// the path of ⌘Q.
+/// (`workspace`'s `view.rs`); `OpenDiff` as the `Push` of the review route
+/// that ↵ on a session row makes (`project_home`'s `present.rs`). Without a
+/// workspace either is an error. `Quit` is the path of ⌘Q.
 pub(crate) fn handle(
     request: BenchRequest,
     workspace: Option<&dyn Contributions>,
@@ -137,6 +181,13 @@ pub(crate) fn handle(
         BenchRequest::Open(path) => match workspace {
             Some(workspace) => workspace.dispatch(WorkspaceCommand::OpenProject(path)),
             None => errors.error("open project without a workspace"),
+        },
+        BenchRequest::OpenDiff(key) => match workspace {
+            Some(workspace) => workspace.dispatch(WorkspaceCommand::Push(Route {
+                screen: Name::Borrowed(screens::REVIEW),
+                target: Target::Review(ReviewTarget::Session(key)),
+            })),
+            None => errors.error("open diff without a workspace"),
         },
         BenchRequest::Quit => quit::quit(cx),
     }

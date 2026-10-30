@@ -10,15 +10,20 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::unbounded;
 use gpui::TestAppContext;
 use lectern_bench::probe::Driver;
-use lectern_bench::wire::OpenTarget;
+use lectern_bench::wire::{self, OpenTarget};
 use lectern_i18n::{Locale, Strings};
+use lectern_kernel::Name;
 use lectern_logging::EarlyConfig;
-use lectern_services::workspace::{ContributionKind, Payload, SharedPayload, WorkspaceCommand};
+use lectern_services::review::ReviewTarget;
+use lectern_services::session::{SessionKey, SourceId};
+use lectern_services::workspace::{
+    ContributionKind, Milestone, Payload, Route, SharedPayload, Target, WorkspaceCommand, screens,
+};
 use lectern_ui::Appearance;
 use lectern_workspace::registry::Payloads;
 use lectern_workspace::{Hub, Item, Queued};
 
-use crate::bench::{BenchDriver, BenchRequest, Reporter, handle};
+use crate::bench::{BenchDriver, BenchRequest, Reporter, handle, wire_milestone};
 use crate::profile::Profile;
 use crate::quit;
 use crate::startup::Startup;
@@ -90,9 +95,6 @@ fn open_is_reported_as_unsupported() {
     let driver = BenchDriver::new(requests, recorder.clone());
     for target in [
         OpenTarget::File(PathBuf::from("/f")),
-        OpenTarget::Diff {
-            session: "s".to_owned(),
-        },
         OpenTarget::Worktree(PathBuf::from("/w")),
         OpenTarget::Scroll,
         OpenTarget::Animate,
@@ -107,7 +109,6 @@ fn open_is_reported_as_unsupported() {
         recorder.errors(),
         [
             "open file unsupported",
-            "open diff unsupported",
             "open worktree unsupported",
             "open scroll unsupported",
             "open animate unsupported",
@@ -117,6 +118,84 @@ fn open_is_reported_as_unsupported() {
     // None of them reaches the main thread, and the path of an unsupported
     // kind is not in the message.
     assert!(incoming.try_recv().is_err());
+}
+
+#[test]
+fn a_diff_is_forwarded_with_its_session_key() {
+    let (requests, mut incoming) = unbounded();
+    let recorder = Arc::new(Recorder::default());
+    let driver = BenchDriver::new(requests, recorder.clone());
+    driver.open(OpenTarget::Diff {
+        session: "session-claude-code:1111/agent-a".to_owned(),
+    });
+    assert_eq!(
+        incoming.try_recv().unwrap(),
+        BenchRequest::OpenDiff(SessionKey {
+            source: SourceId("session-claude-code".into()),
+            id: "1111/agent-a".into(),
+        })
+    );
+    // Without a source, or with an empty part, nothing is opened.
+    for session in ["1111", ":1111", "session-claude-code:"] {
+        driver.open(OpenTarget::Diff {
+            session: session.to_owned(),
+        });
+    }
+    assert!(incoming.try_recv().is_err());
+    assert_eq!(recorder.errors(), ["open diff without a source"; 3]);
+}
+
+#[test]
+fn milestones_keep_their_names() {
+    for (milestone, wire) in [
+        (Milestone::ProjectHome, wire::Milestone::ProjectHome),
+        (Milestone::FileHighlighted, wire::Milestone::FileHighlighted),
+        (Milestone::DiffShown, wire::Milestone::DiffShown),
+        (
+            Milestone::WorktreeSwitched,
+            wire::Milestone::WorktreeSwitched,
+        ),
+    ] {
+        assert_eq!(wire_milestone(milestone), wire);
+    }
+}
+
+#[gpui::test]
+fn open_diff_takes_the_session_row_path(cx: &mut TestAppContext) {
+    let queued = Arc::new(Mutex::new(Vec::<Queued>::new()));
+    let sink = queued.clone();
+    let hub = Hub::new(
+        Box::new(NoPayloads),
+        Arc::new(move |item| sink.lock().unwrap().push(item)),
+    );
+    let recorder = Recorder::default();
+    let key = SessionKey {
+        source: SourceId("session-claude-code".into()),
+        id: "s00".into(),
+    };
+    cx.update(|cx| {
+        handle(
+            BenchRequest::OpenDiff(key.clone()),
+            Some(&*hub),
+            &recorder,
+            cx,
+        );
+        handle(BenchRequest::OpenDiff(key.clone()), None, &recorder, cx);
+    });
+    // The command ↵ on the session's row makes.
+    let queued = queued.lock().unwrap();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    match &queued[0].item {
+        Item::Command(command) => assert_eq!(
+            *command,
+            WorkspaceCommand::Push(Route {
+                screen: Name::Borrowed(screens::REVIEW),
+                target: Target::Review(ReviewTarget::Session(key)),
+            })
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(recorder.errors(), ["open diff without a workspace"]);
 }
 
 #[gpui::test]
