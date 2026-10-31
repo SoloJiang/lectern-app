@@ -589,7 +589,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
   7. 测试与基准（review 的设计展开）：用测试里生成的合成仓库，覆盖未提交与已提交的计数、当前 worktree 复用概览的改动集、两个 worktree 的重叠、`Capped` 没有重叠、节流、没有关注者时不比较、放下关注后保留到项目关闭、没有主干。基准：`review/worktrees_cloudprint`（11 个 worktree，冷，从关注到最后一个计数，只记录）；`review/resident_100k_bytes` 的夹具加上一轮关注再放下之后保留的数据，预算不变（< 1 MB）。
   8. 兼容：新方法带默认实现，已有的实现和假实现不必修改；`ReviewEvent` 加变体时，匹配它的 crate（`project_home`、`review_view`）在同一个 PR 里补上分支或已用 `_`。
 
-- **B. `workspace` 与 `ui::contrib`：只在一个屏幕显示的检查器页；重复压栈。**（已实现，PR 号待定）
+- **B. `workspace` 与 `ui::contrib`：只在一个屏幕显示的检查器页；重复压栈。**（已实现，#336）
   1. `ui::contrib::InspectorTab` 加一个字段 `pub screen: Option<Name>`。`None` 是现在的行为：页在每个 `layout.inspector` 为 true 的屏幕上显示。`Some(s)`：页只在当前屏幕是 `s` 时显示。当前屏幕有自己的页（`screen == Some(当前屏幕)`）时检查器只显示这些页，不显示 `None` 的页；没有时只显示 `None` 的页。`nav.inspector_tab` 不在可见的页里时显示第一个可见的页，`nav.inspector_tab` 本身不变。原因：Worktree 页要显示在 Worktrees 屏幕上，Files（review_view 的 Progress 列表）和 Conversation 在这里没有内容；Worktree 页也不能出现在审阅屏幕上。已有的页取 `None`，行为不变。测试 `inspector_tab_scoped_to_its_screen`。
   2. `Push(r)` 在栈顶已经是同一个 `Route` 时忽略，记 debug：Worktrees 屏幕显示侧栏，再点侧栏的 Worktrees 条目不会压入第二个同样的屏幕（Usage 条目同理）。测试 `push_of_the_top_route_is_ignored`。
 - **C. `i18n`：`locales/{en,zh-CN}/worktrees.ftl`**，内容是「界面」的键表。
@@ -637,7 +637,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 ### 前置条件 B（`workspace` 与 `ui::contrib`）
 
-PR 号待定，`Refs #16`，在 macOS（arm64）上运行：
+#336，`Refs #16`，在 macOS（arm64）上运行：
 
 - `just test -p lectern-workspace` 通过，含 `push_of_the_top_route_is_ignored`（`nav.rs`）和 `inspector_tab_scoped_to_its_screen`（`view.rs`，`#[gpui::test]`，不开真实窗口）。
 - 与设计的差异：B.2 的「栈顶」按当前屏幕比较（栈空时是基底屏幕）；`InspectorTab::screen` 的类型写成 `Option<Cow<'static, str>>`（与 `Name` 同一类型，`ui` 不依赖 `kernel`）。原因见 [workspace 设计「与设计的差异」](workspace.md#与设计的差异)。

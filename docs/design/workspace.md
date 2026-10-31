@@ -645,7 +645,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ### 检查器页的范围与重复压栈（worktrees 前置条件 B）
 
-`ui::contrib::InspectorTab` 加 `screen`，根视图按它过滤检查器的页，状态机忽略与当前屏幕相同的 `Push`（[worktrees 设计「对其他 crate 的要求」B](worktrees.md#对其他-crate-的要求)，`Refs #16`，PR 号待定）。在 macOS（arm64）上运行：
+`ui::contrib::InspectorTab` 加 `screen`，根视图按它过滤检查器的页，状态机忽略与当前屏幕相同的 `Push`（[worktrees 设计「对其他 crate 的要求」B](worktrees.md#对其他-crate-的要求)，`Refs #16`，#336）。在 macOS（arm64）上运行：
 
 - `just test -p lectern-workspace` 通过，新增 `push_of_the_top_route_is_ignored`（`nav.rs`）和 `inspector_tab_scoped_to_its_screen`（`view.rs`，`#[gpui::test]`，不开真实窗口）。
 - 没有验证：真实窗口里页切换时分段控件的外观；还没有贡献方带 `Some(屏幕)` 的页（Worktree 页随 worktrees 的第 2 步）。
