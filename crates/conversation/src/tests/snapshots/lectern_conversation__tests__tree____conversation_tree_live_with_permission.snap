@@ -8,10 +8,8 @@ conversation.page Group page=messages
     conversation.pages.item[terminal] Tab label=[conversation-page-terminal]
   conversation.status Text label=[conversation-status-waiting] link=working context=none agent=claude-code
   conversation.list List entries=2 earlier=0
-    conversation.list.item[h:0:0] ListItem kind=prompt streaming=false truncated=false
-    conversation.list.item[l:1:0] ListItem kind=tools streaming=false truncated=false
   conversation.permission.item[7] Dialog label=[conversation-permission-execute] kind=execute detail=command
-    conversation.permission.item[7].command Text label="cargo test -p router\ncargo clippy"
+    conversation.permission.item[7].command Text label="cargo test -p router"
     conversation.permission.item[7].workdir Text label=[conversation-permission-workdir] path=crates/router
     conversation.permission.item[7].option.item[allow-once] Button label=[conversation-permission-allow-once]
     conversation.permission.item[7].option.item[allow-always] Button label=[conversation-permission-allow-always]
@@ -19,12 +17,12 @@ conversation.page Group page=messages
   conversation.permission.more Button label=[conversation-permission-more] expanded=true
   conversation.permission.rest Group expanded=true
     conversation.permission.item[8] Dialog label=[conversation-permission-edit] kind=edit detail=edits
-      conversation.permission.item[8].edit.item[/work/app/src/router.rs] Group label="src/router.rs" added=1 removed=1 new=false rows=2 omitted=0 hidden
-        conversation.permission.item[8].edit.item[/work/app/src/router.rs].row.item[0] DiffLine label="    redirect(old)" kind=removed hidden
-        conversation.permission.item[8].edit.item[/work/app/src/router.rs].row.item[1] DiffLine label="    redirect(new)" kind=added hidden
-      conversation.permission.item[8].option.item[allow-once] Button label=[conversation-permission-allow-once] hidden
-      conversation.permission.item[8].option.item[allow-always] Button label=[conversation-permission-allow-always] hidden
-      conversation.permission.item[8].option.item[reject-once] Button label=[conversation-permission-reject-once] hidden
+      conversation.permission.item[8].edit.item[/work/app/src/router.rs] Group label="src/router.rs" added=1 removed=1 new=false rows=2 omitted=0
+        conversation.permission.item[8].edit.item[/work/app/src/router.rs].row.item[0] DiffLine label="    redirect(old)" kind=removed
+        conversation.permission.item[8].edit.item[/work/app/src/router.rs].row.item[1] DiffLine label="    redirect(new)" kind=added
+      conversation.permission.item[8].option.item[allow-once] Button label=[conversation-permission-allow-once]
+      conversation.permission.item[8].option.item[allow-always] Button label=[conversation-permission-allow-always]
+      conversation.permission.item[8].option.item[reject-once] Button label=[conversation-permission-reject-once]
   conversation.composer Group
     conversation.composer.field TextField
     conversation.composer.stop Button label=[conversation-stop]

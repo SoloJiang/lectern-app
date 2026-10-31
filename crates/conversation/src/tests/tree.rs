@@ -96,7 +96,8 @@ fn conversation_tree_history(cx: &mut TestAppContext) {
 /// request under it, and the Stop button in the place of Send.
 #[gpui::test]
 fn conversation_tree_live_with_permission(cx: &mut TestAppContext) {
-    let rig = rig(cx);
+    // Reduced motion, so that the second request is open in the first frame.
+    let rig = rig_with(cx, true);
     let key = session(1);
     let options = |name: &str| {
         [
@@ -125,7 +126,7 @@ fn conversation_tree_live_with_permission(cx: &mut TestAppContext) {
             kind: CallKind::Execute,
             title: Arc::from("Run cargo test"),
             detail: PermissionDetail::Command {
-                text: Arc::from("cargo test -p router\ncargo clippy"),
+                text: Arc::from("cargo test -p router"),
                 workdir: Some(Arc::from(std::path::Path::new("/work/app/crates/router"))),
             },
             options: Arc::from(options("first")),
