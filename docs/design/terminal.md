@@ -1,6 +1,6 @@
 # terminal 设计
 
-状态：已接受；「验收」第 1 步（`services::terminal`，[#318](https://github.com/SoloJiang/lectern-app/pull/318)）、第 2 步（libghostty-vt 接入与网格快照）和第 3 步（PTY、启动、插件与服务，PR 号待定）已实现，第 4 步（`app` 装配）尚未实现。
+状态：已接受；「验收」第 1 步（`services::terminal`，[#318](https://github.com/SoloJiang/lectern-app/pull/318)）、第 2 步（libghostty-vt 接入与网格快照）和第 3 步（PTY、启动、插件与服务，#338）已实现，第 4 步（`app` 装配）尚未实现。
 
 对应 issue [#12](https://github.com/SoloJiang/lectern-app/issues/12)（终端：portable-pty + libghostty-vt，会话 resume）与 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 的内核部分（libghostty-vt 接入）。`terminal` 启动 PTY 和其中的程序（`claude --resume`、`codex resume`、新会话、登录 shell），把输出交给 libghostty-vt 解析，生成视口的网格快照交给视图；视图发来的按键、粘贴、鼠标和尺寸变化经 libghostty-vt 编码后写回 PTY（[技术调研「终端：接入 libghostty-vt 内核」](tech-research.md#终端接入-libghostty-vt-内核)、[ADR 0002](../adr/0002.md)）。终端在界面的「收起」一层，是 Conversation 的 Terminal 页（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）；网格的绘制在 `terminal_view`，页面在 `conversation`。
 
