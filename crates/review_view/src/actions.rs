@@ -5,7 +5,9 @@
 //! of the Progress page `review-progress`; the predicates name the region
 //! above them (`Content`, `Inspector`).
 //!
-//! C (a review comment) and ⌘↩ (send) come with #22.
+//! C (a review note) and ⌘↩ (send) are #22's; ⌘↩ and Esc inside the note
+//! editor are the text box's (`ui::TextArea`), which dispatches `SaveNote`
+//! and `CancelNote`.
 
 use gpui::{Action, actions};
 
@@ -52,6 +54,26 @@ actions!(
         JumpToSelected,
         /// The failed state's button.
         Back,
+        /// C, or the + at the end of a row: write a review note on the
+        /// selected row or hunk.
+        AddNote,
+        /// ⌘↩: send the pending review notes the first way there is.
+        SendNotes,
+        /// Send the pending review notes through the clipboard (the bar's
+        /// fallback after a failed send into the session).
+        CopyNotesAsPrompt,
+        /// Throw the pending review notes away, after asking.
+        DiscardNotes,
+        /// Copy the batch sent last again.
+        CopyNotesAgain,
+        /// ⌘↩ in the editor: save the note.
+        SaveNote,
+        /// Esc in the editor: close it (a new note's text is kept as a draft).
+        CancelNote,
+        /// Change the selected note.
+        EditNote,
+        /// Delete the selected note.
+        DeleteNote,
     ]
 );
 
@@ -61,9 +83,12 @@ pub const REVIEW: &str = "review";
 pub const PROGRESS: &str = "review-progress";
 
 /// The predicates of the bindings: the region of `workspace` above the
-/// screen's own context. `A > B` wants `B` on the deepest context of the
-/// dispatch path, which the screen's root is as long as it holds the focus.
-const IN_REVIEW: &str = "Content > review";
+/// screen's own context. gpui tries a binding at every depth of the focused
+/// element's context path, so `A > B` matches while the focus is below the
+/// screen's root as well; the screen's keys are letters (J, K, V, C) and
+/// Space, which the note editor's text box types, so its `Input` context is
+/// left out (`!Input`; the parentheses matter, `>` binds weaker than `&&`).
+const IN_REVIEW: &str = "(Content > review) && !Input";
 const IN_PROGRESS: &str = "Inspector > review-progress";
 
 /// The ID of the contribution.
@@ -82,6 +107,8 @@ pub fn key_bindings() -> Vec<(&'static str, Box<dyn Action>, Option<&'static str
         ("space", Box::new(OpenContext), Some(IN_REVIEW)),
         ("enter", Box::new(ExpandFold), Some(IN_REVIEW)),
         ("escape", Box::new(Escape), Some(IN_REVIEW)),
+        ("c", Box::new(AddNote), Some(IN_REVIEW)),
+        ("cmd-enter", Box::new(SendNotes), Some(IN_REVIEW)),
         ("down", Box::new(SelectNext), Some(IN_PROGRESS)),
         ("up", Box::new(SelectPrevious), Some(IN_PROGRESS)),
         ("enter", Box::new(JumpToSelected), Some(IN_PROGRESS)),

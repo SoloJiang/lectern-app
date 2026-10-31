@@ -1,0 +1,47 @@
+---
+source: crates/review_view/src/tests/tree.rs
+expression: text
+---
+review.narrative List items=19 visible=0..19 mode=unified
+  review.header Group <review-title-untitled> "Untitled session" files=1 added=0 removed=0 turns=1
+  review.brief Group items=1 omitted=0 pending=0 analysis=unavailable
+    review.brief.analyze Button <review-analyze-with> "Analyze with \u{2068}Claude Code\u{2069}" [disabled]
+    review.brief.item[sensitive-ci:src/file_000.rs] ListItem <review-brief-sensitive-ci> "\u{2068}src/file_000.rs\u{2069} runs in CI" critical=true
+  review.turn.item[0:1] Group <review-turn> "Turn 1" [expanded=true] after_last_seen=true running=false
+  review.turn.item[0:1].prompt Text "Make the change."
+  review.turn.item[0:1].text.item[0] Text "Done."
+  review.step.item[0] Group "src/file_000.rs" added=2 removed=1 alignment=aligned survival=all seen=unseen
+    review.step.item[0].check Toggle [checked=false]
+    review.step.item[0].open Button <review-open-file> "Open File" [disabled]
+  review.diff.item[step:0] Diff rows=5 context=3 prepared=true highlighted=old=plain,new=plain
+  review.note.item[0000000000000003] Comment "text 3" state=pending place=drifted side=new line=1
+    review.note.item[0000000000000003].edit Button <review-note-edit> "Edit"
+    review.note.item[0000000000000003].delete Button <review-note-delete> "Delete"
+  review.diff.item[step:0].hunk.item[0:0] DiffHunk turns=0 others=0 drifted=0
+  review.diff.item[step:0].row.item[0:0] DiffLine kind=context drifted=false
+  review.diff.item[step:0].row.item[1:-] DiffLine kind=removed drifted=false notes=1
+  review.note.item[0000000000000002] Comment "text 2" state=sent place=rows side=old line=1
+    review.note.item[0000000000000002].delete Button <review-note-delete> "Delete"
+  review.diff.item[step:0].row.item[-:1] DiffLine kind=added drifted=false notes=1
+  review.note.item[0000000000000001] Comment "text 1" state=pending place=rows side=new line=1
+    review.note.item[0000000000000001].edit Button <review-note-edit> "Edit"
+    review.note.item[0000000000000001].delete Button <review-note-delete> "Delete"
+  review.diff.item[step:0].row.item[2:2] DiffLine [selected] kind=context drifted=false
+    review.diff.item[step:0].row.item[2:2].add-note Button <review-note-add-here> "Add Note"
+  review.note-editor Group target=new side=new line=2 too_long=false
+    review.note-editor.text TextField [focused]
+    review.note-editor.cancel Button <review-cancel> "Cancel"
+    review.note-editor.save Button "Add Note ⌘↩" [disabled]
+  review.diff.item[step:0].row.item[3:3] DiffLine kind=context drifted=false
+  review.call.item[tool-0] Text <review-tool> "\u{2068}Read\u{2069}" kind=tool status=completed
+  review.notes-elsewhere Group <review-notes-elsewhere> "Notes on files no longer in this review" count=1
+  review.note.item[0000000000000004] Comment "text 4" state=pending place=elsewhere side=new line=7
+    review.note.item[0000000000000004].edit Button <review-note-edit> "Edit"
+    review.note.item[0000000000000004].delete Button <review-note-delete> "Delete"
+review.bar Group
+  review.bar.comments Text <review-notes-not-sent> "Not sent: \u{2068}no answer in 10 seconds\u{2069}" pending=3 sending=false
+  review.bar.copy-again Button <review-notes-copy-again> "Copy Again" batch=0000000000000001
+  review.bar.discard Button <review-notes-discard> "Discard"
+  review.bar.looks-good Button <review-looks-good> "Looks Good"
+  review.bar.copy Button <review-copy-prompt> "Copy as Prompt"
+  review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" route=session
