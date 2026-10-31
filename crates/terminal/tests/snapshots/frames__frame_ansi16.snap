@@ -1,0 +1,17 @@
+---
+source: crates/terminal/tests/frames.rs
+expression: "frame_of(\"ansi16\", 30, 3)"
+---
+size 30x3  colors fg #e5e5e5 bg #101010 cursor #ffffff
+cursor 0,2 Block
+scroll 0/3  modes Modes { bracketed_paste: false, mouse_tracking: false, alt_screen: false, focus_events: false }
+ 0: "red green-on-blue"
+      0..3   fg #cd0000
+      3..4   fg #e5e5e5
+      4..17  fg #00cd00 bg #0000ee
+     17..30  fg #e5e5e5
+ 1: "bright default"
+      0..6   fg #ff0000
+      6..30  fg #e5e5e5
+ 2: ""
+      0..30  fg #e5e5e5

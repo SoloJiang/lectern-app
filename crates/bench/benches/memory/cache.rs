@@ -42,8 +42,8 @@ fn key(i: u64) -> Key {
     Key::new().str("memory").u64(i)
 }
 
-/// The resident size of this process.
-fn resident() -> Result<u64, String> {
+/// The resident size of this process (also `terminal/*_footprint`).
+pub fn resident() -> Result<u64, String> {
     #[cfg(target_os = "linux")]
     {
         let status = std::fs::read_to_string("/proc/self/status").map_err(|e| e.to_string())?;
