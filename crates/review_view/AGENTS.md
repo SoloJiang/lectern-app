@@ -3,7 +3,7 @@
 审阅视图：会话简报、按轮次的改动叙事、文件已看进度、Drifted 提示、行内审阅意见与底部发送栏。
 
 - 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：两个插件，都是 `AfterFirstFrame`："review-view" 依赖 `dyn Contributions`、`dyn Review`、`dyn SessionSource`；"review-view-handoff" 依赖 `dyn Reader`、`dyn CodeIntel`、`dyn Usage`（交接：⇧⌘O、焦点、`share_object`、用量；不在时屏幕照常，只少交接）。`plugins(executor)` 一次建出两个，共用一个 `Shared`。可以依赖视图、领域、基础设施和 kernel 层的非插件 crate；不得依赖其他插件 crate（`lectern-review`、`lectern-file-reader`、`lectern-workspace` 等，dev-dependency 也不行）和 `app`、tool 层；只有 `app` 和 tool 层依赖本 crate。
-- 设计文档：[docs/design/review_view.md](../../docs/design/review_view.md)（已接受）。实现按它的「验收」分三步：第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；屏幕已按设计画布重画（[#283](https://github.com/SoloJiang/lectern-app/issues/283)：标题区、文件卡片、轮次折叠、Files 页、胶囊浮条、工具栏只有 Mark Reviewed；统一 / 双栏与 Refresh 在 `app` 的 View 菜单里，[#294](https://github.com/SoloJiang/lectern-app/pull/294)）。第 3 步已实现：`app` 只装了 "review-view"（"review-view-handoff" 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装），`app/open_diff` 是生效的基准；`review_view/scroll_5000` 等 `workspace` 记录帧，仍是计划中。
+- 设计文档：[docs/design/review_view.md](../../docs/design/review_view.md)（已接受）。实现按它的「验收」分四步：第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；屏幕已按设计画布重画（[#283](https://github.com/SoloJiang/lectern-app/issues/283)：标题区、文件卡片、轮次折叠、Files 页、胶囊浮条、工具栏只有 Mark Reviewed；统一 / 双栏与 Refresh 在 `app` 的 View 菜单里，[#294](https://github.com/SoloJiang/lectern-app/pull/294)）。第 3 步已实现：`app` 只装了 "review-view"（"review-view-handoff" 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装），`app/open_diff` 是生效的基准；`review_view/scroll_5000` 等 `workspace` 记录帧，仍是计划中。第 4 步（审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22)：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩）已实现；意见的位置、存储和 prompt 在 `review`，本 crate 只读 `snapshot.notes`、`snapshot.notes_state` 并发命令。
 - issue：[#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#22](https://github.com/SoloJiang/lectern-app/issues/22)
 - ADR：[0012](../../docs/adr/0012.md)、[0019](../../docs/adr/0019.md)
 
@@ -21,7 +21,8 @@
 |---|---|
 | `plugin.rs` | 插件 "review-view" 与 "review-view-handoff"、`plugins(executor)`、`Shared`（服务引用、交接的三个服务、执行器、各屏幕的事件通道、所选的模式）、三项贡献的登记 |
 | `model.rs` | `ReviewModel`：快照、项、展示行与正文、选中、`Prepare`、V / J / K / Esc 的状态变化、屏幕 drop 时的收尾 |
-| `items.rs` | 叙事列表的项与 `build`：快照加已准备的行的纯函数，`review_view/items_5000` 基准直接调它 |
+| `items.rs` | 叙事列表的项与 `build`：快照加已准备的行的纯函数，`review_view/items_5000` 基准直接调它；意见的 `NoteIndex`（按快照建一次，O(意见数)）与编辑框的位置 `EditorAt` |
+| `notes.rs`、`render_notes.rs` | #22：编辑框（`NoteEditor`、草稿、保存 / 取消）、对意见的命令、浮条的状态（`Status`）、发送后切到 Conversation 页；意见块、编辑框与「不在本次审阅里」块的元素 |
 | `anchor.rs`、`needs.rs` | 刷新后找回滚动位置；可见范围到 `Prepare` 请求的键 |
 | `brief.rs` | 简报每条规则的 Fluent 键与参数；用量行（`usage_lines`）与轮次 token |
 | `highlight.rs` | 两侧文本的高亮：窗口的计划（`plan_windows`）、按 OID 键的区间缓存（≤ 2 MiB LRU）、executor 任务里的 `highlight::window`（只此一处调用）、屏幕读的区间 |
@@ -30,7 +31,7 @@
 | `handoff.rs` | 交接：⇧⌘O / ⌘E 打开文件、`CodeIntel::set_focus`、Space、用量的关注 |
 | `screen.rs`、`render.rs`、`render_diff.rs`、`progress_tab.rs` | `ReviewScreen`（加载 / 失败 / 内容、胶囊浮条、工具栏的 Mark Reviewed 与副标题）、各项的元素（标题区、简报、轮次、文件卡片按列表项切开画：`Slice`）、diff 行（统一与双栏）与折叠、检查器的 Files 页（已看数、进度条、紧凑行） |
 | `actions.rs`、`nodes.rs`、`diag.rs` | Action 与 `KeyBindings`、探针的节点 ID、日志字段 |
-| `testing.rs` | `test-support`：`FakeReview`、`snapshot_fixture`；GPUI 的测试台在 `src/tests/support.rs`，交接三个服务的假实现在 `src/tests/fakes.rs` |
+| `testing.rs` | `test-support`：`FakeReview`（意见的命令在返回前换出快照，`finish_send` 等替 `review` 交回发送结果）、`snapshot_fixture`、`add_notes`；GPUI 的测试台在 `src/tests/support.rs`，交接三个服务的假实现在 `src/tests/fakes.rs`，意见的测试在 `src/tests/notes.rs` |
 
 ## 测试
 

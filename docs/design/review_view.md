@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：「验收」第 1 到第 3 步已实现（第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）的界面已设计（「审阅意见（#22）」，「验收」第 4 步），尚未实现。
+状态：「验收」第 1 到第 4 步已实现（第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -567,7 +567,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
   | `review.loading` | `Group` | `attrs`：`phase` |
 
   `<rows-key>` 写成 `final:<path>` 或 `step:<id>`；`<path>` 是 `FileKey` 的新路径（删除时旧路径）；`review.note[<id>]` 的 `<id>` 是 `NoteId` 的 16 位十六进制。`NodeId` 随 `Item` 建一次放在项里，每帧只克隆。
-- Action 与快捷键（KeyContext：屏幕根元素 `review`，Progress 页 `review-progress`；`KeyBindings` 贡献的谓词写 `Content > review` 与 `Inspector > review-progress`）：
+- Action 与快捷键（KeyContext：屏幕根元素 `review`，Progress 页 `review-progress`；`KeyBindings` 贡献的谓词写 `(Content > review) && !Input` 与 `Inspector > review-progress`；`!Input` 的原因见「与设计的差异」的「第 4 步」）：
 
   | Action | 键 | 上下文 | 处理 |
   |---|---|---|---|
@@ -877,7 +877,36 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 自动化构建只在窗口没有被遮住时画帧：窗口在其他应用之后时，等待帧的调用（`screenshot`、`click_element`、`hover_element`）超时（`frame wait timed out`），元素树停在最后画出的一帧。每一批操作之前把窗口放到最前面就可以。
 - 没有验证：发布构建本身；`review_view/scroll_5000`（计划中）；交接（⇧⌘O 打开完整文件）；`app/cold_start`、`app/idle_empty` 与改动前的比较由 CI 的 `process` 分片给出。
 
+### 第 4 步
+
+审阅意见（#22，`Closes #22`）：编辑框、行内的意见、浮条、C / ⌘↩、草稿、再次复制、发送后切到 Conversation 页。叠在 `impl/review-notes-send`（`review` 第 6、7 步和 `platform` 的剪贴板）、`impl/ui-text-area`（前置条件 J）和 `impl/i18n-review-notes`（前置条件 K）上，在 macOS（arm64，Rust 1.97.0）上运行。屏幕锁定，没有运行应用，也没有打开真实窗口：下面全部是无窗口的 `#[gpui::test]`、纯函数测试和 `just` 入口。
+
+- 「验收」的五条 `rg` 检查都没有结果；`rg -i 'pasteboard|platform::clipboard|write_text|ClipboardItem|write_to_clipboard' crates/review_view/src` 和 `rg 'lectern_terminal|lectern_conversation|lectern-terminal|lectern-conversation' crates/review_view` 也没有结果（Copy as Prompt 与 Copy Again 只发命令）。
+- `just fmt`、`just check`（含 clippy `-D warnings`、文档链接和架构检查）、`just deny` 通过；`cargo metadata --format-version 1 --locked --all-features` 通过，`Cargo.lock` 没有变。
+- `just test -p lectern-review-view`：154 个测试通过（原 129 个，新增 25 个：纯函数 6 个、`#[gpui::test]` 17 个、`review_tree_notes`、`logs_hold_no_note_contents`；一个测试一个进程）。`just test -p lectern-review-view -p lectern-ui -p lectern-bench`：428 个通过（`ui` 的 `Button::attr` 与 `bench` 的预算表一致性检查在内）。
+- `just bench review_view/`（进程内，不开窗口）：`review_view/items_5000` 中位数 59.5 µs（夹具加了 40 条意见，预算 < 4 ms；加之前 27 µs）。
+- 测试（`src/tests/notes.rs`、`tree.rs`、`logs.rs`）：`items_notes_*`（6 个：意见跟在行后、规则分组视图用 `Final`、折叠段、Drifted、`NotesElsewhere`、编辑框的位置）、`c_opens_*`（2 个）、`cmd_return_*`（2 个）、`escape_in_the_editor_*`（3 个，含草稿至多 20 条）、`notes_are_drawn_under_their_rows`、`the_bar_follows_the_notes_state`、`discard_asks_first`、`a_full_batch_blocks_c`、`copy_again_follows_the_latest_batch`、`a_session_route_switches_to_the_conversation_once`、`edit_and_delete_act_on_the_note`、`the_editor_follows_its_line_across_a_refresh`、`the_turn_title_shows_the_answered_notes`、`the_keys_of_the_screen_are_letters_in_the_editor`（保护 `!Input`）、`logs_hold_no_note_contents`、语义树 `review_tree_notes`。`review_tree_session`、`review_tree_groups` 只多了浮条的 `pending`、`sending`、`route` 三个属性，其余快照不变。
+- 真实窗口（`just automation`，临时 HOME，调试构建，合成的仓库与会话，2026-10-30）：在增加的行和删除的行上各按 C、输入、⌘↩，两条意见画在各自的行下，行号栏有圆点，浮条显示条数和 Discard；删除的行上 Esc 后再按 C，文字带回；Copy as Prompt 写进系统剪贴板，`pbpaste` 读出的文字与 `review` 的模板一致（`src/lib.rs:6` 和「line 6 of the version before your changes」两种位置），这同时走过了 `platform::clipboard` 排到主线程的写入；用别的文字覆盖剪贴板后按 Copy Again，读出相同的 `[lectern-notes …]` 标记和 23 行文字。行尾的 + 没有被裁。
+- 没有验证：粘贴进真实的 agent 会话、agent 回应后那一轮标题有 `review-turn-answers`（`notes_link_*` 只用合成的轮次）；放弃的系统确认框；真实输入法组字时 Esc 与 ⌘↩；深色外观；编辑框开着时点另一行的 + 换锚点。
+
 ## 与设计的差异
+
+### 第 4 步（审阅意见，#22）
+
+- **意见块和编辑框是卡片里的项，带所在 diff 的 `RowsKey`。** `Item::Note { id, rows: Option<RowsKey> }`、`Item::NoteEditor { rows: Option<RowsKey> }`（设计是 `Note(NoteId)`、`NoteEditor`）：卡片的上下缘、`replace_segment` 的范围、`slice_of` 都按 `Item::rows_key()` 判断，意见项要有它才在卡片里、才随它的行一起被换掉。`NotesElsewhere` 块里的意见 `rows` 为 None，在卡片外。
+- **`Item::Row` 带 `notes: RowNotes { count, unsent }`**，行号栏的圆点和探针的 `notes` 属性读它（`notes` 只在大于 0 时写，所以旧快照不变）。`DisplayRow` 加了 `fold_new`（折叠段的新侧行号），意见的行在折叠段里时用它找。
+- **每条意见只画一处。** `NotePlace::Rows` 列出的行集里取这个视图显示的第一种（会话审阅是第一个 `NoteRows::Step`，规则分组视图是 `Final`）。没有这种、或那份行里找不到这一行（也不在折叠段里）时，画在这个文件的 diff 开头、标题之下，与 Drifted 的意见同处，但不加 `review-note-drifted`。行还没准备好时，意见全部跟在 `Placeholder` 之后。
+- **公开项比设计多。** `items::NoteIndex`（每份快照建一次，O(意见数)）、`EditorAt`、`NoteRef`、`NotesCtx`、`build_noted`、`rows_items_with`、`placeholder_items`、`BuildOptions::editor`（设计只列了 `build` / `build_with`；`bench` 的 `BuildOptions` 字面量随之加了 `editor: None`）。
+- **编辑框的打开和关闭整表重建（`rebuild_in_place`，O(项数)），不用 `ListState::splice`。** `Prepared` 和行离开范围时，`note_file` 为 Some（有意见或编辑框）的 diff 用 `rows_items_with` / `placeholder_items` 带上意见再 `replace_segment`；没有意见时路径不变。`known_lines` 不数意见项。
+- **键绑定的谓词是 `(Content > review) && !Input`，不是 `Content > review`。** gpui 在焦点路径的每个深度上都试绑定，所以焦点在编辑框里时 `Content > review` 仍然匹配，J、K、V、C、空格会被屏幕拿走，意见里打不出这几个字符（写测试时发现）。`>` 比 `&&` 弱，括号不能省。`tests/plugin.rs` 里的断言随之改了。副作用：编辑框开着时在编辑框里按 C 是打字，设计里「已经有一个编辑框开着时按 C：存草稿、换到新锚点」键盘上到不了，改成 Esc 之后再 C，或点另一行再点它的 +（`escape_in_the_editor_keeps_a_draft` 里换锚点那一步由测试把焦点设回屏幕）。
+- **行尾的 + 只在行被选中时出现，悬停不出现**（设计是选中或悬停）：`Button` 没有悬停时才出现的接口。选中 hunk 时第一行画选中样式，没有 +。+ 是 `ButtonSize::Small` 的图标按钮。
+- **没有悬停说明。** `review-note-add-here.tooltip`、`review-notes-copy-again.tooltip`、`review-copy-prompt.tooltip` 已在 .ftl 里，没有调用方（`ui::Button` 没有悬停说明的接口）。
+- **`ui::Button::attr`（新，`docs/design/ui.md` 已补）：** 探针节点要带属性（`review.bar.send` 的 `route`、`review.bar.copy-again` 的 `batch`）。
+- **探针：** 节点 ID 与其他节点同一写法：`review.note.item[<16 位十六进制>]`、`….edit`、`….delete`（设计表写 `review.note[<id>]`）；加了 `review.note-editor.too-long`（超过上限时的 `review-note-too-long`）；`review.bar.comments` 的 `sending` 是 bool。
+- **浮条：** `routes` 为空时发送按钮置灰且没有 `route` 属性，标签按 agent 名 / `review-send`；`FolderProject` 时浮条仍只有意见数（Looks Good 和发送本来就不出现）。快照夹具带两条途径（`terminal` 会话途径、`clipboard`），所以 `review_tree_session`、`review_tree_groups` 的发送按钮多了 `route=session`。
+- **`review-notes-full`：** 先看选中项能不能锚定，再看是否已满（没有选中项时 C 什么也不做，也没有提示）；提示在对意见的命令（`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`、`SendNotes`、`CopyBatch`）发出时清除，`Prepare` 不清除。
+- **改已有的意见时，编辑框在这条意见之后**（`EditorAt::AfterNote`），意见本身仍显示；设计只说插在锚点行的意见之后。`turn.answers` 的条数取 `batches` 里那一批的 `count`，批次已不在（14 天之前）时不显示。
+- **测试支持：** `FakeReview` 在返回前应用 `AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`、`SendNotes`；`finish_send`、`fail_send`、`finish_copy`、`answer_batch` 替 `review` 交回发送结果；`testing::add_notes`（`items_5000` 的夹具加 40 条意见）。
 
 ### 为 #283 实现「界面」
 

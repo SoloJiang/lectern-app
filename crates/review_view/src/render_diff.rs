@@ -13,10 +13,12 @@ use gpui::{
 use lectern_i18n::{Args, Strings, keys};
 use lectern_services::review::{FileRows, RowsKey};
 use lectern_ui::semantic::{Role, Semantic, State, semantic, semantic_interactive};
-use lectern_ui::{Palette, SystemColor, Text, TextRole, TextRoleExt, mono_metrics};
+use lectern_ui::{
+    Button, ButtonSize, Icon, Palette, SystemColor, Text, TextRole, TextRoleExt, mono_metrics,
+};
 
 use crate::highlight::{Half, SideSpans};
-use crate::items::{self, DiffMode, DisplayRow, ItemKey, RowKind, Side};
+use crate::items::{self, DiffMode, DisplayRow, ItemKey, RowKind, RowNotes, Side};
 use crate::lines::{self, DisplayLine};
 use crate::model::ReviewModel;
 use crate::nodes;
@@ -29,6 +31,9 @@ const NUMBER_CELLS: f32 = 6.0;
 
 /// The bar at a row's left edge, where a selected row shows the accent.
 const BAR: Pixels = px(2.0);
+
+/// The dot that marks a row with a review note.
+const DOT: Pixels = px(6.0);
 
 /// A line that has nothing to scroll to keeps this many cells in view when
 /// the diff is scrolled sideways to its end.
@@ -43,11 +48,17 @@ impl ReviewModel {
         BAR + cell * (2.0 * NUMBER_CELLS + 1.0)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "an item renderer: the pieces are the item's and the frame's"
+    )]
     pub(crate) fn render_row(
         &mut self,
         rows_key: RowsKey,
         ix: u32,
+        notes: RowNotes,
         palette: &Palette,
+        strings: &Strings,
         window: &mut Window,
         cx: &mut Context<ReviewModel>,
     ) -> AnyElement {
@@ -103,13 +114,16 @@ impl ReviewModel {
         let node = nodes::keyed("diff", &nodes::rows_key_text(&rows_key))
             .child("row")
             .item(&nodes::lines_key(old, new));
-        let spec = Semantic::new(node.clone(), Role::DiffLine)
+        let mut spec = Semantic::new(node.clone(), Role::DiffLine)
             .state(State {
                 selected: chosen,
                 ..State::default()
             })
             .attr("kind", kind)
             .attr("drifted", drifted.to_string());
+        if notes.count > 0 {
+            spec = spec.attr("notes", notes.count.to_string());
+        }
         let spans = self.highlighted.get(&rows_key).cloned().unwrap_or_default();
         let offset = self.hscroll.get(&rows_key).copied().unwrap_or(Pixels::ZERO);
         let mono = mono_metrics(window, cx);
@@ -153,6 +167,7 @@ impl ReviewModel {
         };
         let mut line = div()
             .id(&node)
+            .relative()
             .w_full()
             .h(self.line_height)
             .flex()
@@ -170,6 +185,55 @@ impl ReviewModel {
                     .bg(palette.accent.alpha(if selected { 1.0 } else { 0.0 })),
             )
             .child(content);
+        if notes.count > 0 {
+            // A dot in the line-number column: the accent while a note is
+            // not sent, the tertiary label once all are.
+            line = line.child(
+                div()
+                    .absolute()
+                    .left(BAR + px(3.0))
+                    .top((self.line_height - DOT) / 2.0)
+                    .size(DOT)
+                    .rounded_full()
+                    .bg(if notes.unsent {
+                        palette.accent
+                    } else {
+                        palette.tertiary_label
+                    }),
+            );
+        }
+        if chosen {
+            // The + at the end of the row writes a note on it, as C does.
+            let weak = cx.weak_entity();
+            let add_key = ItemKey::Row {
+                rows: rows_key.clone(),
+                old,
+                new,
+            };
+            line = line.child(
+                div()
+                    .absolute()
+                    .right(px(8.0))
+                    .top_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(
+                        Button::icon_only(
+                            node.child("add-note"),
+                            Icon::Plus,
+                            Text::key(strings, keys::review::NOTE_ADD_HERE),
+                        )
+                        .size(ButtonSize::Small)
+                        .on_click(move |window, cx| {
+                            let _ = weak.update(cx, |model, cx| {
+                                model.select(Some(add_key.clone()), cx);
+                                model.add_note_at_selection(window, cx);
+                            });
+                        }),
+                    ),
+            );
+        }
         let click_key = key;
         let scroll_key = rows_key.clone();
         let line_height = self.line_height;

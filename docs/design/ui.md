@@ -414,6 +414,8 @@ impl Button {
     pub fn active(self, active: bool) -> Button;
     pub fn disabled(self, disabled: bool) -> Button;
     pub fn on_click(self, f: impl Fn(&mut Window, &mut App) + 'static) -> Button;
+    /// 探针节点的一个属性（`Semantic::attr`）：屏幕要让探针在标签和状态之外看到的东西（`review_view` 浮条上再次复制按钮的批次）。至多 8 个，与节点相同。
+    pub fn attr(self, key: &'static str, value: impl Into<SharedString>) -> Button;
 }
 
 /// 第一批屏幕用到的图标，来自 gpui-component 自带的 Lucide 集合（见「未决问题」1）。只列需要的，不暴露整个 `IconName`。
