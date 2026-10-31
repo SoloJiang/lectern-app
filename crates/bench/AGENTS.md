@@ -22,6 +22,7 @@
 just test -p lectern-bench   # 运行器、预算表、分片（shards_*、runner_shard_*、report_merge_shards_*）、报告协议（wire_*）、探针（probe_*）、进程调度（process_*）、purge
 just bench                   # macOS（Apple 芯片）上判定预算；其他平台是冒烟运行
 just bench agents/           # 只运行 ID 含 agents/ 的基准
+just bench worktrees/        # macOS：worktrees/build_1000、worktrees/resident_bytes（进程内，不开窗口）；app/switch_worktree 要窗口，用 just bench app/switch_worktree
 just bench --shard rest agents/   # macOS：只运行一个分片（code-intel、process、git、rest）里的预算，不合并；CI 的合并任务合并各分片的报告
 just bench --measure git/    # Linux 上也按规则采样，只报告、不判定
 LECTERN_BENCH_JUDGE=1 just bench baseline/   # 只在判定机器上：首帧要真正显示的条目也判定（ADR 0052）

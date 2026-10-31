@@ -295,6 +295,8 @@ impl Queue {
 #[derive(Default)]
 pub struct FakeProjects {
     pub calls: Mutex<Vec<ProjectCall>>,
+    /// The open projects' snapshots, in the order they were opened.
+    pub open: Mutex<Vec<Arc<ProjectSnapshot>>>,
 }
 
 impl FakeProjects {
@@ -327,12 +329,14 @@ impl Projects for FakeProjects {
             ));
     }
 
-    fn snapshot(&self, _: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
-        None
+    fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
+        let open = self.open.lock().unwrap();
+        open.iter().find(|s| s.key == *project).cloned()
     }
 
     fn open_projects(&self) -> Vec<ProjectKey> {
-        Vec::new()
+        let open = self.open.lock().unwrap();
+        open.iter().map(|s| s.key.clone()).collect()
     }
 
     fn locate(&self, _: &Path) -> Option<Location> {

@@ -53,6 +53,9 @@ lectern-review = { path = "../review" }
 # The "review-view" plugin (docs/design/review_view.md「对其他 crate 的要求」C).
 # Its "review-view-handoff" is not assembled: no plugin provides `dyn Reader`.
 lectern-review-view = { path = "../review_view" }
+# The "worktrees" and "worktrees-usage" plugins and their shared `UsageLink`
+# (docs/design/worktrees.md「对其他 crate 的要求」D).
+lectern-worktrees = { path = "../worktrees" }
 # The "welcome" and "welcome-discovery" plugins and `WelcomeDeps`
 # (docs/design/welcome.md「对其他 crate 的要求」C).
 lectern-welcome = { path = "../welcome" }

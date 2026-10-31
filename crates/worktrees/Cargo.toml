@@ -36,6 +36,11 @@ lectern-services = { path = "../services" }
 # from step 1 (docs/design/worktrees.md「与设计的差异」).
 lectern-ui = { path = "../ui" }
 
+[features]
+# `fixture`: the inputs of the `worktrees/*` benchmarks (docs/design/worktrees.md
+# 「性能」), for `lectern-bench`.
+test-support = []
+
 [dev-dependencies]
 # `TestAppContext`, `VisualTestContext`, `#[gpui::test]`.
 gpui = { workspace = true, features = ["test-support"] }

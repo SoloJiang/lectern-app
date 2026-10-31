@@ -2,24 +2,25 @@
 
 并行总览：按 Active / Idle 分组列出每个 worktree 的分支、会话和改动量；检查器对比所选 worktree 与 main，并提示与其他 worktree 的文件重叠。
 
-- 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "worktrees"（依赖 `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions`）和 "worktrees-usage"（依赖 `dyn Usage`），都是 `AfterFirstFrame`。只依赖 kernel 层和非插件的库 crate（`ui`、`i18n`、`executor`、`logging`），不依赖 `project`、`agents`、`review`、`usage`、`workspace`、`project_home` 这些插件 crate，也不依赖 `lectern-git`（dev-dependency 也不行，架构检查第 6 条）；只有 `app` 依赖本 crate。
+- 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "worktrees"（依赖 `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions`）和 "worktrees-usage"（依赖 `dyn Usage`），都是 `AfterFirstFrame`。只依赖 kernel 层和非插件的库 crate（`ui`、`i18n`、`executor`、`logging`），不依赖 `project`、`agents`、`review`、`usage`、`workspace`、`project_home` 这些插件 crate，也不依赖 `lectern-git`（dev-dependency 也不行，架构检查第 6 条）；只有 `app` 和 tool 层的 `bench` 依赖本 crate（`bench` 只在 macOS 的 dev-dependencies 里，打开 `test-support` 特性取 `fixture`）。
 - 设计文档：[docs/design/worktrees.md](../../docs/design/worktrees.md)
 - issue：[#16](https://github.com/SoloJiang/lectern-app/issues/16)
 - ADR：[0006](../../docs/adr/0006.md)、[0022](../../docs/adr/0022.md)、[0025](../../docs/adr/0025.md)、[0046](../../docs/adr/0046.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不开窗口：`snapshot`（`WorktreesSnapshot` 与纯函数 `snapshot::build`）、`Hub`（插件状态与合成任务）、`WorktreesPlugin`、`WorktreesUsagePlugin`、`UsageLink`（#339）。第 2 步已实现，不开真实窗口：`actions`（Action 与快捷键）、`model`（`WorktreesModel`：选中、展开、里程碑、定时）、`screen`（`WorktreesScreen` 与工具栏）、`detail`（`DetailTab`，检查器页）、`present`（文字与命令）、`contribute`（屏幕、检查器页、快捷键的登记）（#340）。第 3 步（`app` 装配、里程碑接到探针、基准）尚未实现。
+- 进度（设计文档「验收」）：第 1 步已实现，不开窗口：`snapshot`（`WorktreesSnapshot` 与纯函数 `snapshot::build`）、`Hub`（插件状态与合成任务）、`WorktreesPlugin`、`WorktreesUsagePlugin`、`UsageLink`（#339）。第 2 步已实现，不开真实窗口：`actions`（Action 与快捷键）、`model`（`WorktreesModel`：选中、展开、里程碑、定时）、`screen`（`WorktreesScreen` 与工具栏）、`detail`（`DetailTab`，检查器页）、`present`（文字与命令）、`contribute`（屏幕、检查器页、快捷键的登记）（#340）。第 3 步的代码已实现，不开真实窗口：`app` 装配两个插件（desktop 与 probe profile，共 14 个插件），测量构建的 `Driver::open(Worktree)`，`fixture` 模块（`test-support` 特性），`bench` 的 `worktrees/build_1000`、`worktrees/resident_bytes`（只计快照）和 `app/switch_worktree`；里程碑的计数起点改为屏幕成为当前屏幕的时刻（`Hub::switches_when_shown`）。第 3 步在真实窗口里的检查（发布构建的手动运行、`app/switch_worktree`、`app/idle_empty`）还没有做，issue #16 仍开着。
 
 ## 模块
 
 | 文件 | 内容 |
 |---|---|
+| `fixture.rs`（测试与 `test-support`） | 服务快照的构造函数（`ProjectFx`、`sess`、`overview_of`、`branch_usage` 等）和 `worktrees/build_1000` 的夹具 `fixture_1000`；`testing` 重新导出，`bench` 直接用 |
 | `snapshot.rs`、`snapshot/` | `WorktreesSnapshot` 与 `build`（纯函数，不读服务也不读时钟）；`NodeId` 随快照建一次；`render.rs`（测试）把快照渲染成文本做 insta 快照 |
-| `hub.rs` | `Hub`：插件状态、合成任务、侧栏条目的登记、关注的持有、视图的唤醒通道（`attach_view`）、`switches` |
+| `hub.rs` | `Hub`：插件状态、合成任务、侧栏条目的登记、关注的持有、视图的唤醒通道（`attach_view`）、`switches` 与屏幕成为当前屏幕时的 `switches_when_shown`（里程碑的起点） |
 | `plugin.rs`、`usage_link.rs` | 两个插件与共用的 `UsageLink`（一组 `UsageQuery` 的关注，对账） |
 | `nodes.rs`、`diag.rs` | 探针 ID（业务键先过 `nodes::safe`）；日志字段的辅助（只有计数） |
 | `actions.rs`、`contribute.rs` | Action 与按键（谓词 `Content > worktrees`）；`activate` 里经 `ctx.own_staged` 登记 `Screen(WORKTREES)`、`InspectorTab("worktree")`（`screen: Some(WORKTREES)`）、`KeyBindings` |
 | `model.rs` | `WorktreesModel`（屏幕与检查器页共用的 `Entity`）和 GPUI 全局 `Current`；所有命令都经它发出；快照来自 `Hub::attach_view` 的通道 |
 | `screen.rs`、`detail.rs`、`present.rs` | `WorktreesScreen`（两个 `GroupedList`、工具栏）、`DetailTab`（用量、对比、重叠、会话）、把快照变成文字与命令的纯函数 |
-| `testing.rs`（测试） | `services` trait 的假实现、夹具和 `Rig` |
+| `testing.rs`（测试） | `services` trait 的假实现和 `Rig`；夹具来自 `fixture` |
 
 ## 边界
 

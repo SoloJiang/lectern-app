@@ -687,7 +687,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `app/open_file` | 中位数 < 16 ms；场景：cloudprint 形状的普通文件，另有 4 MiB 与 64 MiB 的合成源码、压缩成一行的 4 MiB JS、从 diff 打开 4 MiB `package-lock.json` 中部的一个 hunk（按字节偏移定位）、从 diff 的旧一侧打开 4 MiB blob 中部的一个 hunk（对象库内容已由审阅视图登记），预算相同（[ADR 0034](../adr/0034.md)、[ADR 0042](../adr/0042.md)） | [性能预算](tech-research.md#性能预算) | `file_reader` |
 | `app/enter_edit` | 中位数 ≤ 100 ms（1 MiB、没有超过 4 KiB 的行的文件从 ⌘E 到可以输入；超标时降低编辑上限，[ADR 0034](../adr/0034.md)） | [交互规范「状态与异常」](interaction.md#状态与异常)（100 ms 内不显示加载态） | `file_reader` |
 | `app/open_diff` | 中位数 < 120 ms（[ADR 0057](../adr/0057.md) 从 50 ms 放宽；50 ms 仍是目标） | [性能预算](tech-research.md#性能预算) | `review_view` |
-| `app/switch_worktree` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `worktrees` |
+| `app/switch_worktree` | 中位数 < 100 ms（cloudprint 形状、11 个 worktree 的夹具 `git_worktree::shaped_linked`，打开项目并静止之后发 `Open(Worktree(<第一个 linked worktree 的规范根路径>))`，终点 `Milestone::WorktreeSwitched`；5 次启动） | [性能预算](tech-research.md#性能预算) | `worktrees` 第 3 步 |
 | `app/palette_open` | 中位数 < 16 ms（面板和空查询列表） | [性能预算](tech-research.md#性能预算)（[ADR 0030](../adr/0030.md)，下同） | ⌘K（[#102](https://github.com/SoloJiang/lectern-app/issues/102)） |
 | `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
 | `app/files_open`、`app/files_expand` | 中位数 < 16 ms（目录表已建好；展开 2,000 个子项以内的目录） | [性能预算](tech-research.md#性能预算) | Files（[#10](https://github.com/SoloJiang/lectern-app/issues/10)） |
@@ -808,6 +808,8 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `review_view/scroll_5000` | p95 ≤ 8.3 ms（每帧工作时间：滚过 5000 行的 diff；`Process`，`WorkspaceHost::record_frames` 的记录）。计划中：`workspace` 还不记录帧，`on_frames` 的记录总是空的 | [review_view](review_view.md#性能) | `workspace` 的帧记录 |
 | `project_home/build_1000` | 中位数 < 3 ms（[ADR 0055](../adr/0055.md)；`snapshot::build` 对 `lectern_project_home::fixture::BuildFixture`：1000 个会话、50 个概览条目、17 个 worktree、2000 个子项目；进程内，不开窗口，只在 macOS 编译） | [project_home](project_home.md#性能) | `project_home` 第 3 步 |
 | `project_home/resident_bytes` | 存活字节 < 1 MB（同一夹具的 `HomeSnapshot` 与两个视图的状态；`Memory`）。计划中：视图的状态要在窗口里建 | [project_home](project_home.md#性能) | 视图的内存测量 |
+| `worktrees/build_1000` | 中位数 < 2 ms（`snapshot::build` 对 `lectern_worktrees::fixture::fixture_1000`：17 个 worktree、1000 个会话、每个 worktree 8 个重叠项和一份分支用量；进程内，不开窗口，只在 macOS 编译） | [worktrees](worktrees.md#性能) | `worktrees` 第 3 步 |
+| `worktrees/resident_bytes` | 存活字节 < 256 KiB（同一夹具合成出的 `WorktreesSnapshot`：行、会话、重叠项和每个 `NodeId`；夹具输入在计数之前建好并保持存活；`Memory`，只在 macOS 编译）。视图的状态要在窗口里建，不在计数里（[worktrees 设计「与设计的差异」](worktrees.md#与设计的差异)第 3 步） | [worktrees](worktrees.md#性能) | `worktrees` 第 3 步 |
 | `app/home_frames` | 每帧工作时间最大值 ≤ 8.3 ms、相邻帧间隔 ≤ 1.5 个刷新周期（项目主页的概览到达与侧栏滚动；`Process`）。计划中：同 `review_view/scroll_5000` | [project_home](project_home.md#性能) | `workspace` 的帧记录 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/note_add` | 中位数 < 0.2 ms（`testing::MarkSeenFixture::seed_notes` 写好 39 条待发送、240 条已发送的会话外改动审阅上 `command(AddNote)` 到快照替换；每个样本之前删掉上一个样本加的那条，不计时） | [review](review.md#性能) | `review` 第 6 步 |
@@ -1240,6 +1242,12 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - 没有在本机运行：`app/open_project`、`app/open_diff`、`app/idle_monorepo`、`app/idle_100k`（`process` 目标，启动带探针的 `lectern` 并打开窗口）。
 - CI（托管的 `macos-15` runner，运行 [40999951524](https://github.com/SoloJiang/lectern-app/actions/runs/40999951524)）：`app/open_project` 中位数 60.8 ms（< 100 ms）、`app/idle_monorepo` 33.2 MB（< 100 MB）、`app/idle_100k` 53.5 MB（< 120 MB）、`project_home/build_1000` 1.49 ms（< 2 ms），都在预算内。`app/open_diff` 5 次是 88.1–112.0 ms，中位数 93.6 ms（再测一轮 96 ms），超过 50 ms；按 [ADR 0057](../adr/0057.md) 放宽到 < 120 ms。之后 `app/open_project` 和 `app/open_diff` 的备注同时记下应用日志里的 `since_opened_us` 和 `took_us`（`Session::quit_reading_home`）。`review_view/scroll_5000`、`app/home_frames`、`project_home/resident_bytes` 是计划中，没有基准。
 
+`worktrees` 的基准（[worktrees 设计](worktrees.md#性能)的前置条件 E，`Refs #16`，同一台机器，没有打开真实窗口）：
+
+- `just test -p lectern-bench`：181 个通过，跳过 6 个。预算表加了 `worktrees/build_1000`、`worktrees/resident_bytes`（`macos_only`），`app/switch_worktree` 从计划中改为生效。
+- `cargo bench --locked -p lectern-bench --all-features --bench time --bench memory -- worktrees/`：`worktrees/build_1000` 中位数 358 µs（< 2 ms）；`worktrees/resident_bytes` 中位数 43.8 KB（< 256 KiB）。`-- review/resident`：`review/resident_100k_bytes` 8.86 KB、`review/resident_cloudprint_bytes` 84.8 KB，都 < 1 MB。
+- 没有在本机运行：`app/switch_worktree`（`process` 目标，启动带探针的 `lectern` 并打开窗口，已写好）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1322,3 +1330,9 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - **`Session::open` 之后的静止等待从里程碑开始算**：原来从首帧开始算，打开项目之后马上发 `Epoch` 时，等待可能已经过了。`app/open_diff` 先打开项目再打开 Diff，两次都要等静止。
 - **`review_view/scroll_5000` 是 `Process` 目标**：测试 `budgets_belong_to_the_documented_targets` 按前缀把 `review_view/` 归到 `time` 目标，但这一条是测量构建的帧记录，测试加了这个例外。
 - **帧的预算仍是计划中**：`workspace` 的 `on_frames` 记录总是空的，`review_view/scroll_5000` 和 `app/home_frames` 等 `workspace` 记录帧之后再生效。`project_home/resident_bytes` 要在窗口里建两个视图的状态才能测量，也是计划中。
+`worktrees` 的基准：
+
+- **`worktrees/resident_bytes` 只量快照。** 视图的状态要在窗口里建，`memory` 目标没有窗口（与 `project_home/resident_bytes` 同一原因），预算条目是 `Active`，说明里写明范围（[worktrees 设计「与设计的差异」](worktrees.md#与设计的差异)第 3 步）。
+- **`app/switch_worktree` 的夹具是 `git_worktree::shaped_linked`。** cloudprint 形状加 10 个 linked worktree（共 11 个，干净），运行器发第一个 linked worktree 的规范根路径；`Session::open` 要里程碑，所以这一次 `Open(Worktree)` 同时推入 Worktrees 屏幕和切换，Worktrees 屏幕的构建计入样本（终点是切换之后第一帧画出已稳定的快照）。
+- **`worktrees/` 的预算在 `rest` 分片。** 分片表不用改。
+

@@ -332,6 +332,13 @@ impl WorkspaceHost {
     pub fn ask_leave(&self, scope: LeaveScope, done: Box<dyn FnOnce(bool) + Send>);
 }
 
+impl Hub {
+    /// `WorkspaceHost::hub()` 的 `Hub`。已打开项目的快照，按打开的顺序；`WorkspacePlugin::started` 之前、`dyn Projects` 消失之后为空。
+    /// 只在锁里复制 `Arc`（`Projects::open_projects`、`Projects::snapshot`），不做 IO，主线程可用。`app` 的测量构建用它按根路径找 worktree
+    /// （worktrees 设计「对其他 crate 的要求」D）；视图和插件不用它，它们经 `dyn Projects` 取快照。
+    pub fn open_snapshots(&self) -> Vec<Arc<ProjectSnapshot>>;
+}
+
 /// `app` 装配时构造，放进 `PluginSet`（id "workspace"）。
 pub struct WorkspacePlugin { /* host */ }
 impl WorkspacePlugin {
@@ -643,6 +650,10 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ## 实际验证
 
+### `Hub::open_snapshots`（worktrees 第 3 步）
+
+`Refs #16`，在 macOS（arm64）上运行：`just test -p lectern-workspace` 80 个通过，含新增的 `open_snapshots_follow_the_projects_service`（`WorkspacePlugin::started` 之前为空，之后跟随 `dyn Projects` 的已打开项目，按打开的顺序）。`FakeProjects` 多了 `open`（已打开项目的快照）。没有验证：真实 `project` 插件之上的结果（由 `app` 的 `Driver::open(Worktree)` 用，见 [app 设计「worktrees 的装配」](app.md#worktrees-的装配)）。
+
 ### 检查器页的范围与重复压栈（worktrees 前置条件 B）
 
 `ui::contrib::InspectorTab` 加 `screen`，根视图按它过滤检查器的页，状态机忽略与当前屏幕相同的 `Push`（[worktrees 设计「对其他 crate 的要求」B](worktrees.md#对其他-crate-的要求)，`Refs #16`，#336）。在 macOS（arm64）上运行：
@@ -744,6 +755,10 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 - **「相同」按当前屏幕比较**：worktrees 设计写「栈顶已经是同一个 `Route`」。栈为空时当前屏幕是基底，所以实现比较 `Nav::current()`：栈空时再压入基底屏幕的同一个 `Route`（如在项目主页上点侧栏的条目）也被忽略。原因：基底与栈顶对用户是同一个屏幕，压入第二个同样的屏幕没有意义。
 - **`InspectorTab::screen` 的类型**：设计写 `Option<Name>`。`ui` 不依赖 `kernel`，所以字段写成 `Option<Cow<'static, str>>`，与 `Name`（`Cow<'static, str>`）是同一个类型。
+
+### `Hub::open_snapshots`（worktrees 第 3 步）
+
+- **本 crate 多出一个公开方法。** worktrees 设计的 D 要 `app` 的测量构建按根路径找 worktree，而 `app` 拿不到 `dyn Projects`（服务只在插件的 `Context` 里取，kernel 没有公开的查找，bench 的 `bench-probe` 插件也不要求服务，[ADR 0051](../adr/0051.md)）。`WorkspacePlugin::started` 本来就拿着 `ServiceRef<dyn Projects>` 交给主线程队列，现在先在 `Hub` 里留一份，`open_snapshots` 用它读已打开项目的快照。方法只读，视图与插件不用。
 
 ### `SetReadingColumn`（review_view 前置条件 A）
 

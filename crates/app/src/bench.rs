@@ -4,7 +4,7 @@
 //! behind the barrier the probe starts the kernel and takes the runner's
 //! requests, which come to the main thread through one channel.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -15,11 +15,13 @@ use lectern_bench::probe::{Driver, Probe};
 use lectern_bench::wire::{self, OpenTarget};
 use lectern_kernel::{Kernel, Name};
 use lectern_logging::info;
+use lectern_services::project::{ProjectSnapshot, WorktreeKey};
 use lectern_services::review::ReviewTarget;
 use lectern_services::session::{SessionKey, SourceId};
 use lectern_services::workspace::{
     Contributions, Milestone, Route, Target, WorkspaceCommand, screens,
 };
+use lectern_workspace::Hub;
 
 use crate::quit;
 use crate::startup::Started;
@@ -70,6 +72,9 @@ pub(crate) enum BenchRequest {
     Open(PathBuf),
     /// The review of one session, as ↵ on its row on the project home.
     OpenDiff(SessionKey),
+    /// The worktree with this root becomes the current one, with the
+    /// Worktrees screen shown.
+    OpenWorktree(PathBuf),
     Quit,
 }
 
@@ -92,7 +97,8 @@ impl BenchDriver {
 impl Driver for BenchDriver {
     /// A project is opened as the Open Folder dialog's choice is; a diff is
     /// the review of the session `<source>:<id>`, opened as the project
-    /// home opens it. The other kinds are added by the benchmarks that use
+    /// home opens it; a worktree is switched to as the Worktrees screen's
+    /// button does. The other kinds are added by the benchmarks that use
     /// them.
     fn open(&self, target: OpenTarget) {
         match target {
@@ -106,6 +112,11 @@ impl Driver for BenchDriver {
                 }
                 None => self.reporter.error("open diff without a source"),
             },
+            OpenTarget::Worktree(root) => {
+                let _ = self
+                    .requests
+                    .unbounded_send(BenchRequest::OpenWorktree(root));
+            }
             other => self
                 .reporter
                 .error(&format!("open {} unsupported", kind(&other))),
@@ -157,7 +168,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App) {
                     .try_global::<Started>()
                     .and_then(|started| started.shell.as_ref())
                     .map(|shell| shell.host.hub().clone());
-                handle(request, hub.as_deref().map(|hub| hub as _), &*errors, cx);
+                handle(request, hub.as_deref(), &*errors, cx);
             });
         }
     })
@@ -169,11 +180,12 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App) {
 /// One request, on the main thread. `Open` goes into `workspace`'s queue as
 /// `OpenProject`, the command the Open Folder dialog's choice makes
 /// (`workspace`'s `view.rs`); `OpenDiff` as the `Push` of the review route
-/// that ↵ on a session row makes (`project_home`'s `present.rs`). Without a
-/// workspace either is an error. `Quit` is the path of ⌘Q.
+/// that ↵ on a session row makes (`project_home`'s `present.rs`);
+/// `OpenWorktree` as [`switch_worktree`] says. Without a workspace each is an
+/// error. `Quit` is the path of ⌘Q.
 pub(crate) fn handle(
     request: BenchRequest,
-    workspace: Option<&dyn Contributions>,
+    workspace: Option<&Hub>,
     errors: &dyn Reporter,
     cx: &mut App,
 ) {
@@ -189,6 +201,55 @@ pub(crate) fn handle(
             })),
             None => errors.error("open diff without a workspace"),
         },
+        BenchRequest::OpenWorktree(root) => match workspace {
+            Some(hub) => switch_worktree(hub, &hub.open_snapshots(), &root, errors),
+            None => errors.error("open worktree without a workspace"),
+        },
         BenchRequest::Quit => quit::quit(cx),
     }
+}
+
+/// What the Worktrees screen's "switch to this worktree" button makes:
+/// pushes the Worktrees screen (ignored when it is the current one, which
+/// `workspace` does for any route on top) and makes the worktree with the
+/// root `root` the current one. `worktrees` reports the milestone
+/// `WorktreeSwitched` from the screen. An error when no open project has a
+/// worktree with that root that is not prunable, or when it is the current
+/// one already (no switch would follow, and the runner would wait for the
+/// milestone in vain). The path is not in the message. Main thread, no IO.
+pub(crate) fn switch_worktree(
+    workspace: &dyn Contributions,
+    open: &[Arc<ProjectSnapshot>],
+    root: &Path,
+    errors: &dyn Reporter,
+) {
+    match find_worktree(open, root) {
+        Some((key, false)) => {
+            workspace.dispatch(WorkspaceCommand::Push(Route {
+                screen: Name::Borrowed(screens::WORKTREES),
+                target: Target::None,
+            }));
+            workspace.dispatch(WorkspaceCommand::SetActiveWorktree(key));
+        }
+        Some((_, true)) => errors.error("open worktree is the current one"),
+        None => errors.error("open worktree not found"),
+    }
+}
+
+/// The key of the worktree with the root `root` (compared as paths, as
+/// `project` canonicalises the roots) in the first open project that has one
+/// that is not prunable, and whether it is that project's current worktree.
+fn find_worktree(open: &[Arc<ProjectSnapshot>], root: &Path) -> Option<(WorktreeKey, bool)> {
+    open.iter().find_map(|project| {
+        let worktree = project
+            .worktrees
+            .iter()
+            .find(|worktree| !worktree.prunable && *worktree.root == *root)?;
+        let current = project
+            .active
+            .as_ref()
+            .and_then(|active| active.worktree.as_ref())
+            == Some(&worktree.key);
+        Some((worktree.key.clone(), current))
+    })
 }

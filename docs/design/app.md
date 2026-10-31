@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查等 `review-view-handoff` 装配后再做（「与设计的差异」）。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。`worktrees` 的两个插件已装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，见「worktrees 的装配」），`Driver::open(Worktree)` 与 `app/switch_worktree` 随之生效。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查等 `review-view-handoff` 装配后再做（「与设计的差异」）。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -479,6 +479,22 @@ target 为 `app`。
 - 日志：`plugins assembled` 的 `plugins` 为 11。其余记录由 `review_view` 写（target `review_view`）。
 - 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 11；`tests/startup.rs` 的 `plugins` 为 11，并检查 `first frame drawn` 之前没有 target 为 `review_view` 的记录。
 
+## worktrees 的装配
+
+[#16](https://github.com/SoloJiang/lectern-app/issues/16)，[worktrees 设计「对其他 crate 的要求」](worktrees.md#对其他-crate-的要求)的 D。desktop 与 probe profile 多两个插件，共 14 个；test profile 不变。
+
+| 插件 ID | 构造 | 提供 | 依赖 |
+|---|---|---|---|
+| `worktrees` | `WorktreesPlugin::new(WorktreesDeps { executor, usage: link.clone() })` | 无 | `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions` |
+| `worktrees-usage` | `WorktreesUsagePlugin::new(executor, link)` | 无 | `dyn Usage` |
+
+- `link` 是 `profile::desktop` 里建的一个 `UsageLink`（与 `project_home` 的 `UsageSlot` 同样的做法）：`dyn Usage` 可能不存在，对 worktree 用量的关注在这个共享的格子里对账。
+- 两个插件放在 `PluginSet` 的最后，在 `review-view` 之后。`WorktreesPlugin::new` 与 `WorktreesUsagePlugin::new` 只建空状态，不做 IO，在 `release` 里、屏障放开之后运行；`activate` 在首帧之后，只取服务、订阅事件、登记屏幕、检查器页和快捷键，不读服务、不提交任务（worktrees 设计「性能」）。
+- 测量构建：`Driver::open(OpenTarget::Worktree(root))` 发 `BenchRequest::OpenWorktree(root)`。主线程上 `bench::handle` 经 `workspace::Hub::open_snapshots`（`dyn Projects` 里每个已打开项目的快照，取锁复制 `Arc`，不做 IO）在第一个有这个根、且不是 prunable 的项目里找 worktree，然后发 `Push(Route { screen: WORKTREES, target: Target::None })` 和 `SetActiveWorktree(key)`，与 Worktrees 屏幕的「切换到这个 worktree」按钮同一条路径；终点 `Milestone::WorktreeSwitched` 经 `workspace` 的 `on_milestone` 转给探针（「里程碑与帧」）。根按路径比较（`project` 的 `Worktree::root` 是规范路径，运行器发规范路径）。找不到根、或它已经是当前 worktree（之后不会有切换，运行器会白等里程碑）时发 `Error`，消息是 `open worktree not found`、`open worktree is the current one`，不带路径；没有 workspace 时是 `open worktree without a workspace`。
+- 冷启动：首帧之前没有 `worktrees` 的代码运行（`tests/startup.rs` 检查 `first frame drawn` 之前没有 target 为 `worktrees` 的记录）。
+- 日志：`plugins assembled` 的 `plugins` 为 14。其余记录由 `worktrees` 写（target `worktrees`）。
+- 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 14；`tests/startup.rs` 的 `plugins` 为 14，`tests/bench_probe.rs` 的 `Plugins` 应答为 14 个（都需要图形会话）。`src/tests/bench.rs`：`a_worktree_is_forwarded_with_its_root`、`a_worktree_switch_pushes_the_screen_and_sets_the_worktree`、`a_worktree_switch_that_cannot_happen_is_an_error_without_the_path`、`a_worktree_request_without_a_workspace_or_a_project_is_an_error`。
+
 ## 自动化构建的装配
 
 [#310](https://github.com/SoloJiang/lectern-app/issues/310)，[ADR 0056](../adr/0056.md)。agent 经 [gpui-mcp](https://github.com/themixednuts/gpui-mcp) 读元素树、按元素点击和输入。gpui-mcp 要用打过补丁的 GPUI，补丁只在一个单独的 Cargo 工作区里生效，主工作区和发布构建不受影响。
@@ -562,7 +578,7 @@ impl Driver for BenchDriver {
     /// 与用户在 Open Folder 对话框里选了文件夹之后同一条路径（`workspace` 的 `view.rs`）。`plugin/project/resident_*`（第 5 步）要它。
     /// 没有 `Shell`（没有装配插件）时发 `probe.error("open project without a workspace")`。
     /// 其余种类发 `probe.error("open <种类> unsupported")`，运行器把这个基准记为 `error`；
-    /// 端到端基准（`app/open_project` 的里程碑、`File`、`Diff`、`Worktree`、`Scroll`、`Animate`、`Input`）随自己的 PR 在这里加上。
+    /// 端到端基准（`File`、`Scroll`、`Animate`、`Input`）随自己的 PR 在这里加上；`Diff` 随 `app/open_diff`，`Worktree` 随 `app/switch_worktree`（「worktrees 的装配」）。
     fn open(&self, target: OpenTarget);
     /// 发 `BenchRequest::Quit`；主线程的前台任务收到后调用 `quit::quit(cx)`，与 ⌘Q 同一条退出路径。
     fn quit(&self);
@@ -584,7 +600,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 ### 里程碑与帧
 
-里程碑随第一个用它的基准（`app/open_project`、`app/open_diff`，[#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#30](https://github.com/SoloJiang/lectern-app/issues/30)）转交：有探针时 `startup::release_in` 用 `bench::on_milestone(probe)` 作 `WorkspaceDeps::on_milestone`，它把 `services::workspace::Milestone` 按同名变体映射成 `wire::Milestone`（`bench::wire_milestone`），连同 `workspace` 在下一帧回调里取的时刻交给 `probe.milestone`；没有探针时仍是空函数。报告协议的 `Milestone` 不加时刻的来源：端到端基准的里程碑取下一帧回调的时刻（[ADR 0052](../adr/0052.md) 决策 3，[workspace 设计「已知限制」](workspace.md#已知限制)）。`Driver::open` 加上 `Diff { session }`：`session` 写成 `<来源>:<ID>`（如 `session-claude-code:<sessionId>`），`BenchDriver` 把它拆成 `SessionKey` 发到主线程，`handle` 发出与项目主页会话行上 ↵ 相同的命令 `Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) })`；没有 `:` 或有一边为空时发 `Error`「open diff without a source」，没有 workspace 时发「open diff without a workspace」。`on_frames` 仍是空函数，`Driver::open` 的 `Scroll`、`Animate`、`Input` 仍不支持：`workspace` 还不记录帧（`FrameRecord::frames` 总是空，workspace 设计「已知限制」），没有帧时间预算生效。以后转交时，`app` 把 `FrameRecord` 里的 `FrameRecording`（`problems.is_clean()` 时）转成 `FrameStats` 交给 `probe.frames`，否则交 `probe.error`（消息格式见 bench 设计「探针」）。
+里程碑随第一个用它的基准（`app/open_project`、`app/open_diff`、`app/switch_worktree`，[#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#30](https://github.com/SoloJiang/lectern-app/issues/30)）转交：有探针时 `startup::release_in` 用 `bench::on_milestone(probe)` 作 `WorkspaceDeps::on_milestone`，它把 `services::workspace::Milestone` 按同名变体映射成 `wire::Milestone`（`bench::wire_milestone`），连同 `workspace` 在下一帧回调里取的时刻交给 `probe.milestone`；没有探针时仍是空函数。报告协议的 `Milestone` 不加时刻的来源：端到端基准的里程碑取下一帧回调的时刻（[ADR 0052](../adr/0052.md) 决策 3，[workspace 设计「已知限制」](workspace.md#已知限制)）。`Driver::open` 加上 `Diff { session }`：`session` 写成 `<来源>:<ID>`（如 `session-claude-code:<sessionId>`），`BenchDriver` 把它拆成 `SessionKey` 发到主线程，`handle` 发出与项目主页会话行上 ↵ 相同的命令 `Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) })`；没有 `:` 或有一边为空时发 `Error`「open diff without a source」，没有 workspace 时发「open diff without a workspace」。`Worktree(root)` 见「worktrees 的装配」。`on_frames` 仍是空函数，`Driver::open` 的 `Scroll`、`Animate`、`Input` 仍不支持：`workspace` 还不记录帧（`FrameRecord::frames` 总是空，workspace 设计「已知限制」），没有帧时间预算生效。以后转交时，`app` 把 `FrameRecord` 里的 `FrameRecording`（`problems.is_clean()` 时）转成 `FrameStats` 交给 `probe.frames`，否则交 `probe.error`（消息格式见 bench 设计「探针」）。
 
 ### 性能
 
@@ -600,7 +616,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 ### 测试
 
-- `src/tests/bench.rs`（`bench-probe`）：`no_frame_autosave_name_with_the_bench_probe`（选名字的纯函数：有探针时骨架窗口和 `window_state` 都得到 None，没有时与 desktop 相同）；`#[gpui::test]` `a_quit_request_takes_the_quit_path`（`BenchDriver::quit` 之后主线程调用 `quit::quit`：用假的 `QuitSteps` 看到 kernel、executor、日志的顺序）；`open_project_takes_the_open_folder_path`（`Open(Project(path))` 之后 `workspace` 的 hub 收到 `OpenProject(path)`）；`open_diff_takes_the_session_row_path`（`OpenDiff(key)` 之后 hub 收到审阅路由的 `Push`；没有 workspace 时是错误）；`open_is_reported_as_unsupported`（`Open(Scroll)` 等发出 `Error`，消息以 `open ` 开头）；`open_project_without_a_workspace_is_an_error`。另有 `only_a_project_is_forwarded_and_the_rest_is_an_error`（`BenchDriver` 转发 `Project` 和 `Quit`）、`a_diff_is_forwarded_with_its_session_key`（`<来源>:<ID>` 拆成 `SessionKey`，缺一边是错误）、`milestones_keep_their_names`（四个里程碑按同名映射）。`first_frame_plugins_and_quit` 还发 `Open(Scroll)`，应答是 `Error { message: "open scroll unsupported" }`。
+- `src/tests/bench.rs`（`bench-probe`）：`no_frame_autosave_name_with_the_bench_probe`（选名字的纯函数：有探针时骨架窗口和 `window_state` 都得到 None，没有时与 desktop 相同）；`#[gpui::test]` `a_quit_request_takes_the_quit_path`（`BenchDriver::quit` 之后主线程调用 `quit::quit`：用假的 `QuitSteps` 看到 kernel、executor、日志的顺序）；`open_project_takes_the_open_folder_path`（`Open(Project(path))` 之后 `workspace` 的 hub 收到 `OpenProject(path)`）；`open_diff_takes_the_session_row_path`（`OpenDiff(key)` 之后 hub 收到审阅路由的 `Push`；没有 workspace 时是错误）；`open_is_reported_as_unsupported`（`Open(File)`、`Open(Scroll)` 等发出 `Error`，消息以 `open ` 开头）；`open_project_without_a_workspace_is_an_error`。另有 `only_a_project_is_forwarded_and_the_rest_is_an_error`（`BenchDriver` 转发 `Project` 和 `Quit`）、`a_diff_is_forwarded_with_its_session_key`（`<来源>:<ID>` 拆成 `SessionKey`，缺一边是错误）、`milestones_keep_their_names`（四个里程碑按同名映射）、`a_worktree_is_forwarded_with_its_root`、`a_worktree_switch_pushes_the_screen_and_sets_the_worktree`、`a_worktree_switch_that_cannot_happen_is_an_error_without_the_path`、`a_worktree_request_without_a_workspace_or_a_project_is_an_error`（「worktrees 的装配」）。`first_frame_plugins_and_quit` 还发 `Open(Scroll)`，应答是 `Error { message: "open scroll unsupported" }`。
 - `tests/bench_probe.rs`（`#![cfg(feature = "bench-probe")]`；真实进程，需要图形会话，与 `tests/startup.rs` 相同；测试自己扮演运行器：在临时目录里 bind 一个 Unix 域 socket，临时 `HOME`，带 `LECTERN_BENCH_SOCKET` 启动 `--features bench-probe` 的调试构建）：
   - `first_frame_plugins_and_quit`：收到 `FirstFrame`，`pid` 是启动的进程，`source` 是 `presented` 或 `handler`；发 `Plugins`，应答是 desktop 的插件（不含 `bench-probe`），以 `PluginsEnd` 结束；发 `Epoch`，应答 `Epoch(..)`；发 `Quit`，进程 10 s 内以 0 退出。
   - `a_trimmed_set_becomes_ready`：`LECTERN_BENCH_PLUGINS=closure+self:project`，收到 `Ready`。
@@ -801,6 +817,12 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 - `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup) and not binary(probe)'` 通过：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 11，图校验通过，临时目录之后仍是空的。
 - `tests/startup.rs` 和 `tests/probe.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」），结果以 macOS CI 为准。发布构建的手动运行（从项目主页打开一个会话的 Diff）没有做。
 
+`worktrees` 的装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，`Refs #16`，同一台机器，没有打开真实窗口）：
+
+- `just check`、`just deny` 通过。`just test -p lectern-app`：56 个测试通过，`every_profile_graph_validates` 的 desktop 与 probe 插件数为 14，图校验通过，临时目录之后仍是空的；`src/tests/bench.rs` 新增 4 个（`a_worktree_is_forwarded_with_its_root`、`a_worktree_switch_pushes_the_screen_and_sets_the_worktree`、`a_worktree_switch_that_cannot_happen_is_an_error_without_the_path`、`a_worktree_request_without_a_workspace_or_a_project_is_an_error`），`open_is_reported_as_unsupported` 不再含 `Worktree`。
+- 发布构建的 `lectern` 多 664 736 字节（41 639 104 对 40 974 368，1.6%），细节见 [worktrees 设计「实际验证」](worktrees.md#实际验证)第 3 步。
+- 没有做：`tests/startup.rs`（`plugins` 改为 14，另检查首帧之前没有 target 为 `worktrees` 的记录）、`tests/bench_probe.rs`（`Plugins` 应答改为 14 个）、`tests/probe.rs` 都要图形会话，没有在本机运行，结果以 macOS CI 和主会话为准；发布构建的手动运行、冷启动、`app/idle_empty` 的比较、`app/switch_worktree`。
+
 测量构建（5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，`Refs #7`，同一台机器：macOS 27.0.1，Apple M5 Pro，Rust 1.97.0，图形会话没有锁屏）：
 
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（32 个 crate）；`rg 'eprintln!|println!|log::' crates/app/src` 没有结果。`cargo metadata --format-version 1 --locked --all-features`（和 `--filter-platform x86_64-unknown-linux-gnu`）通过，`Cargo.lock` 已提交。
@@ -877,10 +899,16 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 - **只装 `review-view`。** review_view 设计的 C 要求两个插件都放进 `PluginSet`；`dyn Reader`、`dyn CodeIntel` 还没有提供者，`review-view-handoff` 放进去图校验就失败，所以先丢掉它（「review_view 的装配」）。
 
+`worktrees` 的装配：
+
+- **`Driver::open(Worktree)` 经 `workspace::Hub::open_snapshots` 找 worktree。** 设计的 D 写「在主线程上取当前项目的 `Projects::snapshot`」，但 `app` 拿不到 `dyn Projects`；见「worktrees 的装配」和 [worktrees 设计「与设计的差异」](worktrees.md#与设计的差异)第 3 步。
+- **「已经是当前 worktree」是 `Error`。** 否则运行器会等到上限才失败。
+- **两个插件放在最后。** 设计只要求放进 `PluginSet`；顺序不影响图校验，放在 `review-view` 之后与前几个装配一致。
+
 测量构建（5a）：
 
 - **`BenchDriver` 持有 `Arc<dyn Reporter>`，不是 `Arc<Probe>`。** 探针线程只在真正的首帧回调里启动，`app` 的单元测试看不到它发出的 `Error`，所以 `Reporter`（只有 `error`）由 `Probe` 实现，测试用记录的假实现。`attach` 的签名不变。
-- **主线程的处理函数取 `Option<&dyn Contributions>`。** `bench::handle(request, workspace, errors, cx)` 不自己查 `Started`；`attach` 的前台任务在每个请求到达时从 `Started::shell` 取出 hub 再调用它（`Started` 在 `attach` 之后、同一次 `release_in` 里设置，任务在之后的轮次才运行）。测试因此可以用真实的 `Hub`（假的 `Payloads`）观察到 `OpenProject`，不需要装配整个 workspace。
+- **主线程的处理函数取 `Option<&Hub>`（`lectern_workspace::Hub`）。** 起初取 `Option<&dyn Contributions>`；`OpenWorktree` 要读已打开项目的快照（`Hub::open_snapshots`），所以改成具体的 `Hub`（见「worktrees 的装配」，以及 [workspace 设计](workspace.md)）。`bench::handle(request, workspace, errors, cx)` 不自己查 `Started`；`attach` 的前台任务在每个请求到达时从 `Started::shell` 取出 hub 再调用它（`Started` 在 `attach` 之后、同一次 `release_in` 里设置，任务在之后的轮次才运行）。测试因此可以用真实的 `Hub`（假的 `Payloads`）观察到 `OpenProject`，不需要装配整个 workspace。
 - **`a_quit_request_takes_the_quit_path` 不用假的 `QuitSteps`。** `quit::quit` 固定用 `Started` 作为步骤，退出顺序已由 `quit.rs` 的假步骤测试覆盖。这个测试用 test profile 的 `Started` 和临时日志目录：`Quit` 请求之后 `is_quitting` 为真，日志里依次是 `quit requested`（`path` 为 `action`）和 `run end`，即 ⌘Q 的路径。
 - **frame autosave 名的选择在 `window_state::autosave_name`。** 骨架窗口（`window::open_named`）和 `window_state` 的改名共用这个纯函数；`Startup::bench_probe()` 在没有 `bench-probe` feature 时恒为 false。
 - **`tests/bench_probe.rs` 在发 `Plugins` 之前等 `Quiescent`。** kernel 的状态由 kernel 线程填写，`attach` 后立刻问会得到空列表；运行器本来就在静止之后问（bench 设计「进程级基准」）。

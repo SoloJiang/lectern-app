@@ -141,12 +141,15 @@ fn startup_writes_a_header_and_an_end_record() {
     assert_eq!(records[ready]["accent"], "system", "{records:#?}");
     // project, two session sources, review, usage, workspace, welcome,
     // welcome-discovery, welcome-review, project-home, project-home-usage,
-    // review-view.
-    assert_eq!(records[assembled]["plugins"], 12);
+    // review-view, worktrees, worktrees-usage.
+    assert_eq!(records[assembled]["plugins"], 14);
     // Nothing of the review screen runs before the first frame
-    // (docs/design/review_view.md「验收」第 3 步).
+    // (docs/design/review_view.md「验收」第 3 步), nor of the worktrees
+    // overview (docs/design/worktrees.md「性能」).
     assert!(
-        records[..drawn].iter().all(|r| r["tg"] != "review_view"),
+        records[..drawn]
+            .iter()
+            .all(|r| r["tg"] != "review_view" && r["tg"] != "worktrees"),
         "{records:#?}"
     );
     assert_eq!(records[released]["profile"], "desktop");

@@ -82,6 +82,10 @@ lectern-review-view = { path = "../review_view", features = ["test-support"] }
 # `project_home/build_1000` (docs/design/project_home.md「性能」): the
 # composing is pure, but the crate depends on GPUI. A plugin crate, as above.
 lectern-project-home = { path = "../project_home", features = ["test-support"] }
+# `worktrees/build_1000` and `worktrees/resident_bytes`
+# (docs/design/worktrees.md「性能」): the composing is pure, but the crate
+# depends on GPUI. A plugin crate, as above.
+lectern-worktrees = { path = "../worktrees", features = ["test-support"] }
 # The `empty_window` example: the GPUI platform.
 gpui_platform.workspace = true
 

@@ -20,6 +20,10 @@ use lectern_review_view::PLUGIN_ID as REVIEW_VIEW_ID;
 use lectern_usage::{LocalZone, UsageDeps};
 use lectern_welcome::WelcomeDeps;
 use lectern_workspace::{WorkspaceHost, WorkspacePlugin};
+use lectern_worktrees::{
+    PLUGIN_ID as WORKTREES_ID, USAGE_PLUGIN_ID as WORKTREES_USAGE_ID, UsageLink, WorktreesDeps,
+    WorktreesPlugin, WorktreesUsagePlugin,
+};
 
 /// The package version cut to "major.minor", for Welcome's subtitle
 /// (docs/design/welcome.md「对其他 crate 的要求」E).
@@ -83,8 +87,8 @@ impl Profile {
 
     /// Desktop: `project`, the two session sources, `review`, `usage`,
     /// `workspace`, `welcome`, `welcome-discovery`, `welcome-review`,
-    /// `project-home`, `project-home-usage` and `review-view`
-    /// (docs/design/app.md「插件与资源」). Test: none. With the number of
+    /// `project-home`, `project-home-usage`, `review-view`, `worktrees` and
+    /// `worktrees-usage` (docs/design/app.md「插件与资源」). Test: none. With the number of
     /// plugins, for the log (`PluginSet` does not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
         match self {
@@ -167,7 +171,23 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
     // buttons stay disabled (docs/design/app.md「review_view 的装配」).
     let (review_view, _handoff) = lectern_review_view::plugins(r.executor.clone());
     let set = set.with(REVIEW_VIEW_ID, review_view);
-    (set, count + 6)
+    // The parallel overview. `dyn Usage` may be absent, so the interest in
+    // the worktrees' usage is reconciled in one cell, as for `project-home`
+    // (docs/design/app.md「worktrees 的装配」).
+    let link = UsageLink::default();
+    let set = set
+        .with(
+            WORKTREES_ID,
+            WorktreesPlugin::new(WorktreesDeps {
+                executor: r.executor.clone(),
+                usage: link.clone(),
+            }),
+        )
+        .with(
+            WORKTREES_USAGE_ID,
+            WorktreesUsagePlugin::new(r.executor.clone(), link),
+        );
+    (set, count + 8)
 }
 
 /// `usage`'s local time zone: `platform::time::utc_offset`

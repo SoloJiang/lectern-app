@@ -63,6 +63,9 @@ mod terminal;
 mod ui;
 #[path = "time/usage.rs"]
 mod usage;
+#[cfg(target_os = "macos")]
+#[path = "time/worktrees.rs"]
+mod worktrees;
 
 use std::process::ExitCode;
 
@@ -197,14 +200,15 @@ const BENCHES: &[Bench] = &[
 ];
 
 fn main() -> ExitCode {
-    // `ui/*`, `review_view/*` and `project_home/*` need GPUI, which only builds on macOS in
-    // this workspace.
+    // `ui/*`, `review_view/*`, `project_home/*` and `worktrees/*` need GPUI, which only builds
+    // on macOS in this workspace.
     #[cfg(target_os = "macos")]
     let benches: Vec<Bench> = {
         let mut all = BENCHES.to_vec();
         all.extend_from_slice(ui::BENCHES);
         all.extend_from_slice(review_view::BENCHES);
         all.extend_from_slice(project_home::BENCHES);
+        all.extend_from_slice(worktrees::BENCHES);
         all
     };
     #[cfg(not(target_os = "macos"))]

@@ -14,9 +14,9 @@ use crate::snapshot::{
     Built, HeadLabel, Inputs, MrItem, Overlaps, RowUsage, UsageInputs, WorktreeRow, build,
 };
 use crate::testing::{
-    DAY, MINUTE, NOW, ProjectFx, branch, branch_usage, changes_of, counted, folder_key, list,
-    mr_label, mr_ref, mr_snapshot, overlap, overview_of, sess, tokens, worktree_query,
-    worktree_snapshot, wt_key,
+    DAY, MINUTE, NOW, ProjectFx, branch, branch_usage, changes_of, counted, fixture_1000,
+    folder_key, list, mr_label, mr_ref, mr_snapshot, overlap, overview_of, sess, tokens,
+    worktree_query, worktree_snapshot, wt_key,
 };
 
 /// Composes with the test clock.
@@ -801,88 +801,6 @@ fn build_files_settled_and_generations() {
         [(SourceId(Arc::from("a")), 4)]
     );
     assert_eq!(snapshot.built_at, Timestamp(NOW + 5));
-}
-
-/// The inputs of the `worktrees/build_1000` bench: 17 worktrees, 1000
-/// sessions, 8 overlaps for each worktree and a branch usage for each.
-pub(crate) struct Fixture1000 {
-    pub project: ProjectSnapshot,
-    pub lists: Vec<(SourceId, Arc<SessionList>)>,
-    pub changes: WorktreesOverview,
-    pub usage: UsageInputs,
-}
-
-pub(crate) fn fixture_1000() -> Fixture1000 {
-    let mut fx = ProjectFx::git("big");
-    for i in 1..17 {
-        fx = if i % 5 == 0 {
-            fx.linked(
-                &format!("w{i}"),
-                Head::Detached(Arc::from("0123456789abcdef0123")),
-            )
-        } else {
-            fx.linked(&format!("w{i}"), branch(&format!("feature/w{i}")))
-        };
-    }
-    let key = fx.key();
-    let project = fx.snapshot();
-    let names: Vec<String> = std::iter::once("main".to_owned())
-        .chain((1..17).map(|i| format!("w{i}")))
-        .collect();
-    let sessions: Vec<SessionSummary> = (0..1000)
-        .map(|i| {
-            let worktree = fx.wt(&names[i % 17]);
-            let session = sess("a", &format!("session-{i}"), &key, Some(&worktree))
-                .ago(((i % 5000) as i64 + 1) * MINUTE);
-            if i % 40 == 0 {
-                session.open_turn().ago(MINUTE).build()
-            } else {
-                session.build()
-            }
-        })
-        .collect();
-    let changes = overview_of(
-        &key,
-        Some("refs/remotes/origin/main"),
-        names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let overlaps = (1..=8)
-                    .map(|d| {
-                        overlap(
-                            &fx.wt(&names[(i + d) % 17]),
-                            d as u32,
-                            &["src/lib.rs", "src/main.rs", "Cargo.toml"],
-                        )
-                    })
-                    .collect();
-                counted(&fx.wt(name), 3, 5, 7, overlaps)
-            })
-            .collect(),
-    );
-    let usage = UsageInputs {
-        worktrees: names
-            .iter()
-            .map(|name| {
-                (
-                    fx.wt(name),
-                    Arc::new(worktree_snapshot(branch_usage(
-                        UsageState::Ready,
-                        Some(tokens(1_000, 400)),
-                        vec![],
-                    ))),
-                )
-            })
-            .collect(),
-        mrs: Default::default(),
-    };
-    Fixture1000 {
-        project,
-        lists: vec![(SourceId(Arc::from("a")), list(1, sessions))],
-        changes,
-        usage,
-    }
 }
 
 #[test]

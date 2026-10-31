@@ -100,7 +100,7 @@ impl WorktreesModel {
             }
         });
         let mut model = WorktreesModel {
-            reported_switches: hub.switches(),
+            reported_switches: hub.switches_when_shown(),
             snapshot: None,
             hub,
             selected: None,
