@@ -17,6 +17,7 @@ use lectern_project_home::{
 };
 use lectern_review::ReviewDeps;
 use lectern_review_view::PLUGIN_ID as REVIEW_VIEW_ID;
+use lectern_terminal::{PLUGIN_ID as TERMINAL_ID, TerminalDeps, TerminalPlugin};
 use lectern_usage::{LocalZone, UsageDeps};
 use lectern_welcome::WelcomeDeps;
 use lectern_workspace::{WorkspaceHost, WorkspacePlugin};
@@ -87,9 +88,10 @@ impl Profile {
 
     /// Desktop: `project`, the two session sources, `review`, `usage`,
     /// `workspace`, `welcome`, `welcome-discovery`, `welcome-review`,
-    /// `project-home`, `project-home-usage`, `review-view`, `worktrees` and
-    /// `worktrees-usage` (docs/design/app.md「插件与资源」). Test: none. With the number of
-    /// plugins, for the log (`PluginSet` does not expose it). No IO.
+    /// `project-home`, `project-home-usage`, `review-view`, `worktrees`,
+    /// `worktrees-usage` and `terminal` (docs/design/app.md「插件与资源」).
+    /// Test: none. With the number of plugins, for the log (`PluginSet` does
+    /// not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
         match self {
             Profile::Desktop => desktop(resources),
@@ -187,7 +189,16 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
             WORKTREES_USAGE_ID,
             WorktreesUsagePlugin::new(r.executor.clone(), link),
         );
-    (set, count + 8)
+    // The terminals. `new` keeps the executor and nothing else: no thread,
+    // no PTY, no login environment until a terminal opens, and it activates
+    // after the first frame (docs/design/app.md「terminal 的装配」).
+    let set = set.with(
+        TERMINAL_ID,
+        TerminalPlugin::new(TerminalDeps {
+            executor: r.executor.clone(),
+        }),
+    );
+    (set, count + 9)
 }
 
 /// `usage`'s local time zone: `platform::time::utc_offset`

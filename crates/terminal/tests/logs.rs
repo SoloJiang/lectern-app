@@ -105,13 +105,20 @@ fn logs_hold_no_terminal_content() {
     harness.terminals.close(failed);
     harness.kernel.deactivate();
 
-    // Each terminal thread writes its close line after `close` returns.
+    // Each terminal thread writes its close line after `close` returns; the
+    // three closed terminals (a shell, a resumed agent, a failed start) write
+    // three, and the scan for the canary waits for all of them.
+    let closed = || {
+        log.lines()
+            .iter()
+            .filter(|l| l.contains("terminal closed"))
+            .count()
+    };
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !log.lines().iter().any(|l| l.contains("terminal closed"))
-        && std::time::Instant::now() < deadline
-    {
+    while closed() < 3 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(closed() >= 3, "a close line for each closed terminal");
     let lines = log.lines();
     log.assert_absent(CANARY);
     // What is logged: the start, with the kind and the program name.

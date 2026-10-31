@@ -1,6 +1,6 @@
 # terminal 设计
 
-状态：已接受；「验收」第 1 步（`services::terminal`，[#318](https://github.com/SoloJiang/lectern-app/pull/318)）、第 2 步（libghostty-vt 接入与网格快照）和第 3 步（PTY、启动、插件与服务，#338）已实现，第 4 步（`app` 装配）尚未实现。
+状态：已接受；「验收」第 1 步（`services::terminal`，[#318](https://github.com/SoloJiang/lectern-app/pull/318)）、第 2 步（libghostty-vt 接入与网格快照）和第 3 步（PTY、启动、插件与服务，#338）和第 4 步（`app` 装配，`Refs #12`）已实现。`terminal_view`、`conversation` 的 Terminal 页和 `app/input_frames` 还没有实现，所以 issue #12 仍开着。
 
 对应 issue [#12](https://github.com/SoloJiang/lectern-app/issues/12)（终端：portable-pty + libghostty-vt，会话 resume）与 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 的内核部分（libghostty-vt 接入）。`terminal` 启动 PTY 和其中的程序（`claude --resume`、`codex resume`、新会话、登录 shell），把输出交给 libghostty-vt 解析，生成视口的网格快照交给视图；视图发来的按键、粘贴、鼠标和尺寸变化经 libghostty-vt 编码后写回 PTY（[技术调研「终端：接入 libghostty-vt 内核」](tech-research.md#终端接入-libghostty-vt-内核)、[ADR 0002](../adr/0002.md)）。终端在界面的「收起」一层，是 Conversation 的 Terminal 页（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）；网格的绘制在 `terminal_view`，页面在 `conversation`。
 
@@ -855,6 +855,14 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 - `plugin/terminal/activate`：进程级基准要等第 4 步。`TestKernel` 里 kernel 记下的四段耗时（`manifest`、`activate`、提交、`started`）之和，30 次激活的中位数 3.7 µs，最大 47 µs，≪ 1 ms。
 - 没有验证的：`plugin/terminal/resident`、`app/bundle_size` 的增量、「启动后没有 `terminal-` 线程」（`ps -M`）都要等第 4 步；CI 的 Linux 任务没有在本机跑（`portable-pty`、`rustix` 的 `event` / `process` 和假程序都不含 macOS 专属调用，但没有验证）；`terminal/echo_latency` 在 Linux 上只做冒烟；`input_overflow_*` 里 PTY 输入队列的大小因系统而异，测试只断言「发出的输入多于 4 MiB 缓冲时有输入被丢弃」。
 
+
+第 4 步（`app` 装配，`Refs #12`），同一台机器，没有打开真实窗口：
+
+- 装配：`profile::desktop` 的最后（`worktrees-usage` 之后）放进 `TerminalPlugin::new(TerminalDeps { executor })`，desktop 与 probe profile 共 15 个插件（[app 设计「terminal 的装配」](app.md#terminal-的装配)）。`cargo tree --locked -p lectern-app -e features --target aarch64-apple-darwin` 里 `lectern-terminal` 只有 `default`，没有 `test-support`。
+- 检查与测试：`just check`（退出码 0）、`just deny`（`advisories ok, bans ok, licenses ok, sources ok`）、`python3 scripts/check_architecture.py`（32 个 crate）、`cargo metadata --format-version 1 --locked --all-features` 通过。`just test -p lectern-terminal -p lectern-bench`：292 个测试通过（6 个因本机默认跳过）；`just test -p lectern-app`：56 个测试通过，`every_profile_graph_validates` 的 desktop 与 probe 插件数为 15，图校验通过。`logs_hold_no_terminal_content` 改为等到三条 `terminal closed` 之后才扫描金丝雀，连续 10 次都通过。
+- 安装包：`cargo build --release -p lectern-app --bin lectern` 的 `lectern` 是 43 364 544 字节；在同一棵树里临时去掉 `terminal` 的装配（已还原）是 41 619 216 字节，所以多 1 745 328 字节（1.66 MiB，4.2%）。静态库 `libghostty-vt.a`、`portable-pty`、`rustix` 的 `event` / `process` 和本 crate 都在里面，库在链接时只留下被引用的目标文件。整个 `.app` 没有测（`app/bundle_size` 由安装包的任务判定，#38），ADR 0018 的 80 MB 预算远未触及。发布构建的 `lectern` 没有 `lectern-terminal-fake`（它在 `test-support` 下）。
+- 没有验证的：`plugin/terminal/activate`、`plugin/terminal/resident`（新增的预算条目，< 1 MB）、`app/idle_empty`、`app/cold_start` 都要启动真实窗口的测量构建，本机不运行，以 macOS CI 为准；启动后 `ps -M <pid>` 里没有 `terminal-` 线程只有 `no_threads_until_open`（本 crate 的测试）和 `tests/startup.rs` 的「首帧之前没有 target 为 `terminal` 的记录」（需要图形会话，没有在本机运行）间接保证，没有对着真实进程查过；`tests/startup.rs`、`tests/bench_probe.rs`（`Plugins` 应答改为 15 个）、`tests/probe.rs` 没有运行。
+
 ## 与设计的差异
 
 第 2 步：
@@ -880,3 +888,8 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 10. 终端表和唤醒 socket 的细节：`Slot` 是命令队列加唤醒 socket 的一对，只在队列由空变非空时写唤醒字节（`woken` 标志），所以连续的 `input` 只写一次。
 11. `terminal/input` 的预算由中位数 ≤ 2 µs 改为只记录，目标 ≤ 6 µs（[ADR 0058](../adr/0058.md)）：本机实测 3.6–3.9 µs，CI 上 9.67、8.29 µs，原因是唤醒一个睡在 `poll` 上的线程的系统调用本身要 3 µs 以上，对照数字见「实际验证」。保持 `poll` 循环；`kqueue` 只到约 1.9 µs，且要改「数据流与线程」。终端代码相同的两个提交在 CI 上分别是 9.67、8.29 µs 和 21.2、18 µs，托管 runner 不能判定这个数。
 12. 所有启动经一把进程内的锁（`src/pty.rs` 的 `SPAWN`），同一时刻只有一个线程 `fork`，设计没有写：原因见「已知限制」第 8 条。
+
+第 4 步：
+
+1. 预算表里 `plugin/terminal/resident` 单列一条（中位数 < 1 MB，`Process`）：设计的「性能」表有它，但 bench 的预算表只有记录用的 `plugin/*/resident`；具体 ID 比通配符优先，运行器展开时用它判定。`plugin/terminal/activate` 用默认的 `plugin/*/activate`，没有单列。
+2. `crates/terminal/src/plugin.rs` 里 `ActivationToken` 的导入改为只在测试和 `test-support` 下编译：`app` 不带 `test-support` 地依赖本 crate 时，它是未使用的导入（警告）。行为不变。

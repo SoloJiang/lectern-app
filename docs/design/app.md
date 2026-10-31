@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。`worktrees` 的两个插件已装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，见「worktrees 的装配」），`Driver::open(Worktree)` 与 `app/switch_worktree` 随之生效。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查等 `review-view-handoff` 装配后再做（「与设计的差异」）。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。`worktrees` 的两个插件已装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，见「worktrees 的装配」），`Driver::open(Worktree)` 与 `app/switch_worktree` 随之生效。`terminal` 插件已装配（[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「terminal 的装配」）。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查等 `review-view-handoff` 装配后再做（「与设计的差异」）。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -495,6 +495,22 @@ target 为 `app`。
 - 日志：`plugins assembled` 的 `plugins` 为 14。其余记录由 `worktrees` 写（target `worktrees`）。
 - 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 14；`tests/startup.rs` 的 `plugins` 为 14，`tests/bench_probe.rs` 的 `Plugins` 应答为 14 个（都需要图形会话）。`src/tests/bench.rs`：`a_worktree_is_forwarded_with_its_root`、`a_worktree_switch_pushes_the_screen_and_sets_the_worktree`、`a_worktree_switch_that_cannot_happen_is_an_error_without_the_path`、`a_worktree_request_without_a_workspace_or_a_project_is_an_error`。
 
+## terminal 的装配
+
+[#12](https://github.com/SoloJiang/lectern-app/issues/12)，[terminal 设计「对其他 crate 的要求」](terminal.md#对其他-crate-的要求)的 6。desktop 与 probe profile 多一个插件，共 15 个；test profile 不变。
+
+| 插件 ID | 构造 | 提供 | 依赖 |
+|---|---|---|---|
+| `terminal` | `TerminalPlugin::new(TerminalDeps { executor })` | `dyn Terminals` | `dyn Projects`、`dyn SessionSource` |
+
+- 放在 `PluginSet` 的最后，在 `worktrees-usage` 之后；它依赖的 `project` 与 `agents` 的两个会话来源排在最前面。顺序不影响图校验，kernel 按依赖决定激活顺序。
+- `TerminalPlugin::new` 只拿着 `executor`，不做 IO、不建线程，在 `release` 里、屏障放开之后运行；`activate` 在首帧之后，只建空的终端表、取服务引用，不取登录环境、不开 PTY（terminal 设计「性能」）。第一个 `open` 才启动 `terminal-<id>` 线程，所以没有打开终端时 `ps -M <pid>` 里没有 `terminal-` 开头的线程。
+- `app` 的 `Cargo.toml` 只依赖 `lectern-terminal` 本身，不打开它的 `test-support`（假程序 `lectern-terminal-fake`、`with_shell`、`with_login_env` 只给测试和基准）。测量构建里 `lectern-bench` 依赖会打开它，发布构建没有（`cargo tree -p lectern-app -e features` 核对）。
+- 不装配 `terminal_view`、`conversation` 的 Terminal 页：它们还没有实现，所以现在没有消费方；`dyn Terminals` 只有提供者。
+- 冷启动：首帧之前没有 `terminal` 的代码运行（`tests/startup.rs` 检查 `first frame drawn` 之前没有 target 为 `terminal` 的记录）。静态库 `libghostty-vt.a` 只增加二进制的代码段，没有启动时的初始化。
+- 日志：`plugins assembled` 的 `plugins` 为 15。其余记录由 `terminal` 写（target `terminal`）。
+- 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 15；`tests/startup.rs` 的 `plugins` 为 15，`tests/bench_probe.rs` 的 `Plugins` 应答为 15 个（都需要图形会话）。
+
 ## 自动化构建的装配
 
 [#310](https://github.com/SoloJiang/lectern-app/issues/310)，[ADR 0056](../adr/0056.md)。agent 经 [gpui-mcp](https://github.com/themixednuts/gpui-mcp) 读元素树、按元素点击和输入。gpui-mcp 要用打过补丁的 GPUI，补丁只在一个单独的 Cargo 工作区里生效，主工作区和发布构建不受影响。
@@ -822,6 +838,12 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 - `just check`、`just deny` 通过。`just test -p lectern-app`：56 个测试通过，`every_profile_graph_validates` 的 desktop 与 probe 插件数为 14，图校验通过，临时目录之后仍是空的；`src/tests/bench.rs` 新增 4 个（`a_worktree_is_forwarded_with_its_root`、`a_worktree_switch_pushes_the_screen_and_sets_the_worktree`、`a_worktree_switch_that_cannot_happen_is_an_error_without_the_path`、`a_worktree_request_without_a_workspace_or_a_project_is_an_error`），`open_is_reported_as_unsupported` 不再含 `Worktree`。
 - 发布构建的 `lectern` 多 664 736 字节（41 639 104 对 40 974 368，1.6%），细节见 [worktrees 设计「实际验证」](worktrees.md#实际验证)第 3 步。
 - 没有做：`tests/startup.rs`（`plugins` 改为 14，另检查首帧之前没有 target 为 `worktrees` 的记录）、`tests/bench_probe.rs`（`Plugins` 应答改为 14 个）、`tests/probe.rs` 都要图形会话，没有在本机运行，结果以 macOS CI 和主会话为准；发布构建的手动运行、冷启动、`app/idle_empty` 的比较、`app/switch_worktree`。
+
+`terminal` 的装配（[#12](https://github.com/SoloJiang/lectern-app/issues/12)，`Refs #12`，同一台机器，没有打开真实窗口）：
+
+- `just check`、`just deny` 通过。`just test -p lectern-app`：56 个测试通过，`every_profile_graph_validates` 的 desktop 与 probe 插件数为 15，图校验通过。
+- 发布构建的 `lectern` 多 1 745 328 字节（43 364 544 对 41 619 216，4.2%），细节见 [terminal 设计「实际验证」](terminal.md#实际验证)第 4 步。
+- 没有做：`tests/startup.rs`（`plugins` 改为 15，另检查首帧之前没有 target 为 `terminal` 的记录）、`tests/bench_probe.rs`（`Plugins` 应答改为 15 个）、`tests/probe.rs` 都要图形会话，没有在本机运行，结果以 macOS CI 为准；发布构建的手动运行、冷启动、`app/idle_empty` 的比较、`plugin/terminal/activate`、`plugin/terminal/resident`、启动后 `ps -M` 里没有 `terminal-` 线程的检查。
 
 测量构建（5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，`Refs #7`，同一台机器：macOS 27.0.1，Apple M5 Pro，Rust 1.97.0，图形会话没有锁屏）：
 
