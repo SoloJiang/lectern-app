@@ -356,7 +356,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 | 预算 | 本 crate 的份额 |
 |---|---|
-| 打开一个会话的 Diff < 50 ms（产品能力完成之前 CI 按 < 120 ms 判定，[ADR 0057](../adr/0057.md)；`app/open_diff`：项目主页 ↵ 到第一个文件的 diff 行画出，终点 `Milestone::DiffShown`） | review 的份额 < 35 ms（冷）加第一个文件的行 < 3 ms（review 设计「性能」）。本 crate ≤ 11 ms：工厂建模型与 `open` < 1 ms；`Changed` 投递到主线程 < 1 ms；`snapshot()` 加 `items::build`（50 个文件、20 轮、第一个文件 300 行）< 2 ms；`Prepare` 的发出在同一次更新里；`Prepared` 到达后 `rows()` 与 `splice` < 0.5 ms；画出第一屏（约 60 行等宽文本，纯文本）≤ 6 ms。高亮不在这条路径上：行先按纯文本画出并报告里程碑，区间之后到达 |
+| 打开一个会话的 Diff < 50 ms（产品能力完成之前 CI 按 < 260 ms 判定，[ADR 0059](../adr/0059.md)；`app/open_diff`：项目主页 ↵ 到第一个文件的 diff 行画出，终点 `Milestone::DiffShown`） | review 的份额 < 35 ms（冷）加第一个文件的行 < 3 ms（review 设计「性能」）。本 crate ≤ 11 ms：工厂建模型与 `open` < 1 ms；`Changed` 投递到主线程 < 1 ms；`snapshot()` 加 `items::build`（50 个文件、20 轮、第一个文件 300 行）< 2 ms；`Prepare` 的发出在同一次更新里；`Prepared` 到达后 `rows()` 与 `splice` < 0.5 ms；画出第一屏（约 60 行等宽文本，纯文本）≤ 6 ms。高亮不在这条路径上：行先按纯文本画出并报告里程碑，区间之后到达 |
 | 滚动与输入 120 fps（5000 行的 diff） | `list` 只排版可见的项（约 60 行）；每项的元素构造是常数：`NodeId` 克隆、`Token` 切片、固定行高。每帧 ≤ 8.3 ms（`review_view/scroll_5000`）。滚动期间 `Prepare` 每帧至多一次，命令立即返回 |
 | 勾选 | `command(MarkSeen)` 返回前 review 已换出 `seen`（< 0.2 ms）；本 crate 只重画 Progress 行和步标题，勾选动画只改透明度与描边进度（`CHECK_FILL`、`CHECK_STROKE`） |
 | 审阅意见（#22） | C 到编辑框画出在下一帧（插入一项，`ListState::splice`）；`command(AddNote)` 返回前 review 已换出 `notes`（< 0.2 ms）；`items::build` 多 O(意见数) 的建表；滚动时每项的元素构造不变，意见块按项排版。prompt 不经过本 crate |
@@ -369,7 +369,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 | ID | 统计量与预算 |
 |---|---|
-| `app/open_diff` | 中位数 < 50 ms（目标；产品能力完成之前 CI 按 < 120 ms 判定，[ADR 0057](../adr/0057.md)；bench 设计已列出，归本 crate）：`Driver::open(OpenTarget::Session)` 到 `DiffShown`；夹具与 `review/open_session_50` 相同的仓库与会话，缓存全空（实际的夹具较小，见「与设计的差异」第 3 步） |
+| `app/open_diff` | 中位数 < 50 ms（目标；产品能力完成之前 CI 按 < 260 ms 判定，[ADR 0059](../adr/0059.md)；bench 设计已列出，归本 crate）：`Driver::open(OpenTarget::Session)` 到 `DiffShown`；夹具与 `review/open_session_50` 相同的仓库与会话，缓存全空（实际的夹具较小，见「与设计的差异」第 3 步） |
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 全部行已准备；进程内，不依赖窗口） |
 | `review_view/scroll_5000` | 每帧工作时间 ≤ 8.3 ms（p95）：`WorkspaceHost::record_frames` 在滚过 5000 行的场景上记录（bench 的 `frames` 应答，随 `workspace` 第 3 步接入） |
 | `plugin/review-view/activate`、`plugin/review-view-handoff/activate`、`plugin/*/resident` | 随 bench 的插件基准自动覆盖 |
@@ -802,7 +802,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 **第 3 步：`app` 装配、`app/open_diff`、帧基准（`Closes #15`；前置 C、D）。**
 
 - `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加一（`review-view`；`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再加一，见「与设计的差异」第 3 步）；启动测试里首帧之前没有 `review_view` 的记录。
-- `just bench app/open_diff`：中位数 < 50 ms（CI 按 < 120 ms，ADR 0057）；日志里 `diff shown` 的 `took_us` 与基准一致。
+- `just bench app/open_diff`：中位数 < 50 ms（CI 按 < 260 ms，ADR 0059）；日志里 `diff shown` 的 `took_us` 与基准一致。
 - `just bench review_view/scroll_5000`：每帧 ≤ 8.3 ms（p95）。
 - 手动在 macOS 上运行发布构建：打开一个有 Claude Code 会话的仓库，项目主页 ↵ 进入审阅：简报、轮次、diff 行显示；V 勾选并滚到下一个文件；⌥⌘I 打开 Progress；⇧⌘O 打开完整文件；⌘[ 返回；切换双栏时内容区变宽。
 - `app/cold_start`、`app/idle_empty` 与改动前相比不变。
@@ -948,7 +948,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 ### 第 3 步
 
-- **`app/open_diff` 在 CI 上按 < 120 ms 判定**（[ADR 0057](../adr/0057.md)）：托管 runner 上中位数 93.6–96 ms，超过 50 ms；50 ms 仍是目标，产品能力完成之后在实体 Mac 上核对。有多少是 Lectern 自己的时间还没有分开：`app/open_diff` 的备注从 #322 起同时记下日志里的 `took_us`，下一次 CI 运行之后比较；如果主要是 Lectern 自己的时间，另开 issue。
+- **`app/open_diff` 在 CI 上按 < 260 ms 判定**（[ADR 0057](../adr/0057.md)、[ADR 0059](../adr/0059.md)）：托管 runner 上中位数 93.6–96 ms，超过 50 ms；50 ms 仍是目标，产品能力完成之后在实体 Mac 上核对。有多少是 Lectern 自己的时间还没有分开：`app/open_diff` 的备注从 #322 起同时记下日志里的 `took_us`，下一次 CI 运行之后比较；如果主要是 Lectern 自己的时间，另开 issue。
 - **`review_view/scroll_5000` 仍是计划中。** 它是测量构建的帧记录（`WorkspaceHost::record_frames`），`workspace` 还不记录帧（`on_frames` 的记录总是空的）。预算表里是 `Planned`，`workspace` 记录帧之后生效（[bench 设计「与设计的差异」](bench.md#与设计的差异)第 7 步）。
 - **`app/open_diff` 的夹具比「性能」写的小。** 不是 `review/open_session_50` 的仓库（2000 个提交、300 条 reflog），而是 200 个文件的合成仓库和一个 Claude Code 会话（17 轮，每轮用 `Write` 改 3 个约 300 行的文件，最后一轮 2 个，共 50 个）。会话日志写在临时 `HOME` 的 `.claude/projects/` 下，`app` 像对待真实会话一样发现、归位和归因，所以测量包含 `agents` 的读取。夹具在 `crates/bench/benches/fixtures/review_session.rs`。
 - **`Driver::open(Diff)` 的会话键是 `<来源>:<id>`**（如 `session-claude-code:<uuid>`），`app` 把它变成 `Push(Route { screen: REVIEW, target: Review(Session(key)) })`，与项目主页的会话行相同。

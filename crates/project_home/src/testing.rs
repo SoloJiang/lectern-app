@@ -40,7 +40,7 @@ use lectern_services::usage::{
 };
 use lectern_services::workspace::{
     CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone, Payload,
-    Registration, SharedPayload, SidebarEntry, SidebarSection, WorkspaceCommand,
+    Registration, Route, SharedPayload, SidebarEntry, SidebarSection, WindowId, WorkspaceCommand,
 };
 use lectern_ui::contrib::SidebarItem;
 
@@ -838,6 +838,9 @@ impl Contributions for FakeContributions {
         lock(&self.listed)
             .get_or_insert_with(|| Arc::from(Vec::new()))
             .clone()
+    }
+    fn current_route(&self, _window: WindowId) -> Option<Route> {
+        None
     }
     fn report_milestone(&self, milestone: Milestone) {
         lock(&self.milestones).push(milestone);

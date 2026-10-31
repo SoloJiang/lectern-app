@@ -473,6 +473,9 @@ impl Contributions for FakeContributions {
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         unreachable!("worktrees never lists the sidebar entries")
     }
+    fn current_route(&self, _window: WindowId) -> Option<Route> {
+        None
+    }
     fn report_milestone(&self, milestone: Milestone) {
         lock(&self.milestones).push(milestone);
     }
