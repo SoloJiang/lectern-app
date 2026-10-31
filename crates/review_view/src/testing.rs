@@ -14,14 +14,17 @@ use lectern_kernel::Emitter;
 use lectern_services::changes::{
     BaseSpec, ChangeDetail, ChangePath, ChangeStatus, ChangeTotals, DiffHunk, FileChange, SideText,
 };
+use lectern_services::project::BlobId;
 use lectern_services::project::{ProjectKey, WorktreeKey};
 use lectern_services::review::{
-    Alignment, AnalysisState, AttributionState, BaseHow, BaseInfo, Brief, BriefItem, BriefRule,
-    BriefRules, BriefRulesRegistration, DiffRow, FileAttribution, FileEntry, FileKey, FileRows,
-    Group, GroupKind, HunkAttribution, HunkInfo, LoadState, NarrativeItem, Need, NoteRoute,
-    NoteRouteRegistration, Overview, OverviewInterest, Progress, Review, ReviewCommand,
-    ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, RowsSide, SeenState,
-    SensitiveKind, SessionRef, StepEntry, StepId, Survival, TextKey, TurnEntry, TurnRef,
+    Alignment, AnalysisState, AttributionState, BaseHow, BaseInfo, BatchId, Brief, BriefItem,
+    BriefRule, BriefRules, BriefRulesRegistration, DiffRow, DiffSide, FileAttribution, FileEntry,
+    FileKey, FileRows, Group, GroupKind, HunkAttribution, HunkInfo, LoadState, NarrativeItem, Need,
+    Note, NoteAnchor, NoteId, NotePlace, NoteRoute, NoteRouteRegistration, NoteRows, NoteState,
+    NotesState, Overview, OverviewInterest, Progress, Review, ReviewCommand, ReviewEvent, ReviewId,
+    ReviewSnapshot, ReviewTarget, RouteKind, RouteOffer, RowsKey, RowsSide, SeenState, SendFailure,
+    SendOutcome, SensitiveKind, SentBatch, SentVia, SessionRef, StepEntry, StepId, Survival,
+    TextKey, TurnEntry, TurnRef, limits,
 };
 use lectern_services::session::{
     Agent, ContentRef, SessionKey, SourceId, Timestamp, ToolCallId, TurnId,
@@ -39,6 +42,9 @@ struct Entry {
     prepared: HashSet<Need>,
     last_needs: Vec<Need>,
     refs: u32,
+    /// The notes written and the batches sent so far (the next IDs).
+    next_note: u64,
+    next_batch: u64,
 }
 
 #[derive(Default)]
@@ -93,6 +99,8 @@ impl FakeReview {
             prepared: HashSet::new(),
             last_needs: Vec::new(),
             refs: 0,
+            next_note: 0,
+            next_batch: 0,
         });
         f(entry)
     }
@@ -118,6 +126,131 @@ impl FakeReview {
     pub fn set_all_rows(&self, id: ReviewId, rows: Vec<(RowsKey, FileRows)>) {
         for (key, rows) in rows {
             self.set_rows(id, key, rows);
+        }
+    }
+
+    /// The outcome of the send in the air: its notes become sent, the batch
+    /// is recorded and `last` says `Sent`; the event goes out. Returns the
+    /// batch.
+    pub fn finish_send(&self, id: ReviewId, via: SentVia) -> Option<BatchId> {
+        let mut batch_out = None;
+        self.change_notes(id, |notes, state| {
+            let batch = state.sending?;
+            let mut count = 0;
+            for note in notes.iter_mut() {
+                if note.state == NoteState::Sending(batch) {
+                    note.state = NoteState::Sent(batch);
+                    count += 1;
+                }
+            }
+            let mut batches = state.batches.to_vec();
+            batches.push(SentBatch {
+                id: batch,
+                at: Timestamp(1_700_000_100_000),
+                via,
+                count,
+                answered_by: None,
+            });
+            state.batches = Arc::from(batches);
+            state.sending = None;
+            state.last = Some(SendOutcome::Sent { batch, via, count });
+            batch_out = Some(batch);
+            Some(())
+        })?;
+        batch_out
+    }
+
+    /// The send in the air failed: its notes are pending again and `last`
+    /// says why.
+    pub fn fail_send(&self, id: ReviewId, route: RouteKind, reason: SendFailure) {
+        self.change_notes(id, |notes, state| {
+            let batch = state.sending?;
+            for note in notes.iter_mut() {
+                if note.state == NoteState::Sending(batch) {
+                    note.state = NoteState::Pending;
+                }
+            }
+            state.sending = None;
+            state.last = Some(SendOutcome::Failed { route, reason });
+            Some(())
+        });
+    }
+
+    /// `CopyBatch` was answered: `last` says `CopiedAgain`.
+    pub fn finish_copy(&self, id: ReviewId, batch: BatchId, failed: Option<SendFailure>) {
+        self.change_notes(id, |notes, state| {
+            let count = notes
+                .iter()
+                .filter(|n| n.state == NoteState::Sent(batch))
+                .count() as u32;
+            state.last = Some(SendOutcome::CopiedAgain {
+                batch,
+                count,
+                failed,
+            });
+            Some(())
+        });
+    }
+
+    /// Records that a turn answered a batch (a session's snapshot): the
+    /// batch's `answered_by` and the turn's `answers`.
+    pub fn answer_batch(&self, id: ReviewId, batch: BatchId, turn: TurnRef) {
+        self.change_notes_and_turns(id, |snapshot| {
+            let mut state = (*snapshot.notes_state).clone();
+            let mut batches = state.batches.to_vec();
+            for sent in batches.iter_mut().filter(|sent| sent.id == batch) {
+                sent.answered_by = Some(turn);
+            }
+            state.batches = Arc::from(batches);
+            snapshot.notes_state = Arc::new(state);
+            if let Some(turns) = snapshot.turns.as_deref() {
+                let mut turns = turns.to_vec();
+                for entry in turns.iter_mut().filter(|entry| entry.at == turn) {
+                    entry.answers = Some(batch);
+                }
+                snapshot.turns = Some(Arc::from(turns));
+            }
+        });
+    }
+
+    fn change_notes(
+        &self,
+        id: ReviewId,
+        change: impl FnOnce(&mut Vec<Note>, &mut NotesState) -> Option<()>,
+    ) -> Option<()> {
+        let mut done = None;
+        self.change_notes_and_turns(id, |snapshot| {
+            let mut notes = snapshot.notes.to_vec();
+            let mut state = (*snapshot.notes_state).clone();
+            done = change(&mut notes, &mut state);
+            if done.is_some() {
+                recount(&notes, &mut state);
+                snapshot.notes = Arc::from(notes);
+                snapshot.notes_state = Arc::new(state);
+            }
+        });
+        done
+    }
+
+    fn change_notes_and_turns(&self, id: ReviewId, change: impl FnOnce(&mut ReviewSnapshot)) {
+        let (generation, emitter) = {
+            let mut inner = lock(&self.inner);
+            let emitter = inner.emitter.clone();
+            let Some(entry) = inner.reviews.get_mut(&id) else {
+                return;
+            };
+            let Some(snapshot) = entry.snapshot.as_ref() else {
+                return;
+            };
+            let mut next = (**snapshot).clone();
+            change(&mut next);
+            next.generation += 1;
+            let generation = next.generation;
+            entry.snapshot = Some(Arc::new(next));
+            (generation, emitter)
+        };
+        if let Some(emitter) = emitter {
+            emitter.emit(ReviewEvent::Changed { id, generation });
         }
     }
 
@@ -272,6 +405,8 @@ impl Review for FakeReview {
             prepared: HashSet::new(),
             last_needs: Vec::new(),
             refs: 0,
+            next_note: 0,
+            next_batch: 0,
         });
         entry.target = target.clone();
         entry.refs += 1;
@@ -313,7 +448,7 @@ impl Review for FakeReview {
                         entry.last_needs = needs.to_vec();
                         prepared = auto;
                     }
-                    _ => {}
+                    other => announce = swap_notes(entry, other),
                 }
             }
             (emitter, announce, prepared)
@@ -384,6 +519,109 @@ impl Review for FakeReview {
     ) -> NoteRouteRegistration {
         NoteRouteRegistration::new(|| {})
     }
+}
+
+/// Applies a command about notes as the real service does before `command`
+/// returns (docs/design/review.md「审阅意见」): the note is in the snapshot
+/// when the call comes back. `CopyBatch` changes nothing. Returns the new
+/// generation, if the snapshot changed.
+fn swap_notes(entry: &mut Entry, command: &ReviewCommand) -> Option<u64> {
+    let snapshot = entry.snapshot.as_ref()?;
+    let mut next = (**snapshot).clone();
+    let mut notes: Vec<Note> = next.notes.to_vec();
+    let mut state: NotesState = (*next.notes_state).clone();
+    match command {
+        ReviewCommand::AddNote {
+            rows,
+            anchor,
+            text,
+            excerpt,
+        } => {
+            if text.trim().is_empty()
+                || text.len() > limits::NOTE_BYTES
+                || state.unsent >= limits::PENDING_NOTES
+            {
+                return None;
+            }
+            // Past the IDs of the notes the fixture already holds.
+            let highest = notes.iter().map(|note| note.id.0).max().unwrap_or(0);
+            entry.next_note = entry.next_note.max(highest) + 1;
+            let place = match rows {
+                Some(RowsKey::Step { step, .. }) => {
+                    NotePlace::Rows(Arc::from(vec![NoteRows::Step(*step)]))
+                }
+                Some(RowsKey::Final { .. }) => NotePlace::Rows(Arc::from(vec![NoteRows::Final])),
+                None => NotePlace::Elsewhere,
+            };
+            notes.push(Note {
+                id: NoteId(entry.next_note),
+                anchor: anchor.clone(),
+                text: text.clone(),
+                created_at: Timestamp(1_700_000_000_000 + entry.next_note as i64 * 1000),
+                edited_at: None,
+                state: NoteState::Pending,
+                place,
+                excerpt: excerpt.clone(),
+            });
+            notes.sort_by_key(|note| (note.anchor.line, note.id));
+            state.last = None;
+        }
+        ReviewCommand::EditNote { note, text } => {
+            let found = notes
+                .iter_mut()
+                .find(|n| n.id == *note && n.state == NoteState::Pending)?;
+            found.text = text.clone();
+            found.edited_at = Some(Timestamp(1_700_000_500_000));
+        }
+        ReviewCommand::RemoveNote(note) => {
+            let before = notes.len();
+            notes.retain(|n| !(n.id == *note && !matches!(n.state, NoteState::Sending(_))));
+            if notes.len() == before {
+                return None;
+            }
+        }
+        ReviewCommand::DiscardNotes => {
+            notes.retain(|n| n.state != NoteState::Pending);
+            state.last = None;
+        }
+        ReviewCommand::SendNotes { route } => {
+            if state.pending == 0
+                || state.sending.is_some()
+                || !state.routes.iter().any(|offer| offer.id == *route)
+            {
+                return None;
+            }
+            entry.next_batch += 1;
+            let batch = BatchId(entry.next_batch);
+            for note in notes.iter_mut().filter(|n| n.state == NoteState::Pending) {
+                note.state = NoteState::Sending(batch);
+            }
+            state.sending = Some(batch);
+            state.last = None;
+        }
+        _ => return None,
+    }
+    recount(&notes, &mut state);
+    next.notes = Arc::from(notes);
+    next.notes_state = Arc::new(state);
+    next.generation += 1;
+    let generation = next.generation;
+    entry.snapshot = Some(Arc::new(next));
+    Some(generation)
+}
+
+/// `pending` and `unsent` from the notes.
+fn recount(notes: &[Note], state: &mut NotesState) {
+    let pending = notes
+        .iter()
+        .filter(|n| n.state == NoteState::Pending)
+        .count();
+    let sending = notes
+        .iter()
+        .filter(|n| matches!(n.state, NoteState::Sending(_)))
+        .count();
+    state.pending = pending as u32;
+    state.unsent = (pending + sending) as u32;
 }
 
 /// Swaps `seen` as the real service does before `command` returns; the new
@@ -731,7 +969,19 @@ pub fn snapshot_fixture_tagged(
         },
         degraded: None,
         notes: Arc::from(Vec::new()),
-        notes_state: Arc::default(),
+        notes_state: Arc::new(NotesState {
+            routes: Arc::from(vec![
+                RouteOffer {
+                    id: Arc::from("terminal"),
+                    kind: RouteKind::Session,
+                },
+                RouteOffer {
+                    id: Arc::from("clipboard"),
+                    kind: RouteKind::Clipboard,
+                },
+            ]),
+            ..NotesState::default()
+        }),
     };
     (snapshot, rows_out)
 }
@@ -745,4 +995,43 @@ pub fn head_range() -> ReviewTarget {
         worktree: WorktreeKey(Arc::from(std::path::Path::new("/fake"))),
         base: BaseSpec::Head,
     }
+}
+
+/// Adds `count` pending notes to a fixture snapshot, spread over its files:
+/// each on a line of the new side of its file's step (the narrative's) and
+/// of the file's final diff, as `review` places a note whose content is in
+/// both. Their text is `note n`. The fixture's rows are those of
+/// `snapshot_fixture`.
+pub fn add_notes(snapshot: &mut ReviewSnapshot, count: u32) {
+    let files = snapshot.files.len() as u32;
+    if files == 0 {
+        return;
+    }
+    let mut notes = snapshot.notes.to_vec();
+    for n in 0..count {
+        let file = n % files;
+        let line = 1 + n / files;
+        notes.push(Note {
+            id: NoteId(u64::from(n) + 1),
+            anchor: NoteAnchor {
+                file: file_key(file),
+                side: DiffSide::New,
+                line,
+                oid: BlobId::Sha1([1; 20]),
+            },
+            text: Arc::from(format!("note {n}")),
+            created_at: Timestamp(1_700_000_000_000 + i64::from(n) * 1000),
+            edited_at: None,
+            state: NoteState::Pending,
+            place: NotePlace::Rows(Arc::from(vec![
+                NoteRows::Step(StepId(file)),
+                NoteRows::Final,
+            ])),
+            excerpt: None,
+        });
+    }
+    let mut state = (*snapshot.notes_state).clone();
+    recount(&notes, &mut state);
+    snapshot.notes = Arc::from(notes);
+    snapshot.notes_state = Arc::new(state);
 }
