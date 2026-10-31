@@ -1,0 +1,35 @@
+---
+source: crates/worktrees/src/tests/build.rs
+expression: render(&built)
+---
+snapshot folder=false settled=true switches=0 base=origin/main (refs/remotes/origin/main)
+sources project=1 sessions=[] changes=Some(5) usage=0
+built_at=0 next_expiry=-
+active 0
+idle 5
+  app/.git head=branch:main flags=[current,main] sessions=0 running=0
+    changes uncommitted=Files(1) committed=Files(2) vs_base=Files(3) counted_ago=2m
+    overlaps none
+    usage absent
+  pend head=branch:pend flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage absent
+  capped head=branch:capped flags=[] sessions=0 running=0
+    changes uncommitted=Capped committed=Files(4) vs_base=Capped counted_ago=2m
+    overlaps unknown
+    usage absent
+  unborn head=unborn:fresh flags=[] sessions=0 running=0
+    changes uncommitted=Files(2) committed=Unavailable vs_base=Unavailable counted_ago=2m
+    overlaps none
+    usage absent
+  gone head=branch:gone flags=[prunable] sessions=0 running=0
+    changes uncommitted=Unavailable committed=Unavailable vs_base=Unavailable counted_ago=-
+    overlaps unknown
+    usage absent
+pending []
+queries
+  worktree app/.git
+  worktree pend
+  worktree capped
+  worktree unborn

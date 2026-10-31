@@ -9,6 +9,39 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
+# The "worktrees" and "worktrees-usage" plugins (docs/design/worktrees.md
+# 「依赖」, ADR 0025): they require services only and are depended on by `app`.
+plugin = true
+
+[dependencies]
+# The views' wake channel: `channel::mpsc::unbounded`, sent from the executor
+# threads and received by a GPUI foreground task, as in `lectern-project-home`.
+futures.workspace = true
+# `keys::worktrees::*` (ADR 0013).
+lectern-i18n = { path = "../i18n" }
+# The `Background` task that composes the snapshot.
+lectern-executor = { path = "../executor" }
+# `Plugin`, `Context`, `PluginHandle`, `ServiceRef`, `ServiceSet`, `ActivationToken`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging (docs/design/worktrees.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Projects`, `dyn SessionSource`, `dyn Review`, `dyn Usage`, `dyn Contributions`
+# and their data types and events.
+lectern-services = { path = "../services" }
+# `NodeId` and the `contrib` payload types (ADR 0015). A library crate of the
+# view layer, not a plugin. It depends on GPUI, so this crate is macOS-only
+# from step 1 (docs/design/worktrees.md「与设计的差异」).
+lectern-ui = { path = "../ui" }
+
+[dev-dependencies]
+# Snapshot tests of `snapshot::build` (AGENTS.md).
+insta.workspace = true
+# `Executor::manual`: the composing task runs when a test says so.
+lectern-executor = { path = "../executor", features = ["test-support"] }
+# `Kernel::barrier`: the plugins run in a real kernel.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]
 workspace = true

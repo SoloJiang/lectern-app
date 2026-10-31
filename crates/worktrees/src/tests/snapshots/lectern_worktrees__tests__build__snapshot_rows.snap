@@ -1,0 +1,32 @@
+---
+source: crates/worktrees/src/tests/build.rs
+expression: render(&built)
+---
+snapshot folder=false settled=true switches=0 base=-
+sources project=1 sessions=["a@3"] changes=None usage=0
+built_at=0 next_expiry=480001ms
+active 1
+  zed head=branch:zed flags=[] sessions=1 running=1
+    session zed-run "title of zed-run" claude-code ago=2m running=true
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage absent
+idle 3
+  app/.git head=branch:main flags=[main] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage absent
+  alpha head=branch:feat/a flags=[current,locked] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage absent
+  gone head=branch:gone flags=[prunable] sessions=1 running=1
+    session gone-run "title of gone-run" claude-code ago=1m running=true
+    changes uncommitted=Unavailable committed=Unavailable vs_base=Unavailable counted_ago=-
+    overlaps unknown
+    usage absent
+pending []
+queries
+  worktree app/.git
+  worktree alpha
+  worktree zed
