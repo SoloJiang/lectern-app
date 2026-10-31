@@ -325,6 +325,79 @@ fn process_launches_with_a_fresh_socket_and_home() {
 }
 
 #[test]
+fn process_home_is_prepared_before_the_launch() {
+    let fake = Fake::new(|p| {
+        p.first_frame(start());
+        p.obey(None)
+    });
+    let scheduler = fake.scheduler(quick());
+    let session = scheduler
+        .session_in_home(&program(), &|home| {
+            std::fs::create_dir_all(home.join(".claude/projects"))?;
+            std::fs::write(home.join(".claude/projects/marker"), b"x")
+        })
+        .unwrap();
+    let launch = &fake.launches()[0];
+    let home = PathBuf::from(launch.var("HOME").unwrap());
+    assert!(home.join(".claude/projects/marker").is_file());
+    assert_eq!(launch.var(PLUGINS_VAR), None, "the whole profile");
+    // The `HOME` is still there after the exit, and removed after the read.
+    let read = session
+        .quit_reading_home(|home| std::fs::read(home.join(".claude/projects/marker")).unwrap())
+        .unwrap();
+    assert_eq!(read, b"x");
+    assert!(!home.exists());
+    // A failing `prepare` launches nothing.
+    let error =
+        message(scheduler.session_in_home(&program(), &|_| Err(io::Error::other("full disk"))));
+    assert!(error.contains("full disk"), "{error}");
+    assert_eq!(fake.launches().len(), 1);
+}
+
+#[test]
+fn process_idle_after_an_open_waits_from_the_milestone() {
+    // The open takes longer than `first_quiescent` after the first frame;
+    // the idle sample after it is still taken.
+    let fake = Fake::new(|p| {
+        p.first_frame(start());
+        p.send(&Report::Quiescent { epoch: 1 });
+        while let Some(request) = p.request() {
+            match request {
+                Request::Open(_) => {
+                    thread::sleep(ms(400));
+                    p.send(&Report::Milestone {
+                        milestone: Milestone::ProjectHome,
+                        presented: SystemTime::now(),
+                    });
+                    p.send(&Report::Busy { epoch: 1 });
+                    thread::sleep(ms(100));
+                    p.send(&Report::Quiescent { epoch: 2 });
+                }
+                Request::Epoch => p.send(&Report::Epoch(Some(2))),
+                Request::Quit => return 0,
+                _ => {}
+            }
+        }
+        0
+    });
+    let limits = Limits {
+        first_quiescent: ms(300),
+        ..quick()
+    };
+    let scheduler = fake.scheduler(limits);
+    let mut session = scheduler.session(&program(), None).unwrap();
+    session
+        .open(
+            OpenTarget::Project("/tmp/p".into()),
+            Milestone::ProjectHome,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(session.idle(|_| Ok(7)).unwrap(), Idle::Sample(7));
+    session.quit().unwrap();
+}
+
+#[test]
 fn process_cold_start_skips_two_warmups_and_takes_twenty() {
     // Launch n shows its first frame 10 + n ms after the process started;
     // every third time comes from the presented handler.

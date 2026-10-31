@@ -79,6 +79,9 @@ lectern-ui = { path = "../ui", features = ["test-support"] }
 # item list is pure, but the crate depends on GPUI. A plugin crate: a tool
 # crate may depend on one (ADR 0025).
 lectern-review-view = { path = "../review_view", features = ["test-support"] }
+# `project_home/build_1000` (docs/design/project_home.md「性能」): the
+# composing is pure, but the crate depends on GPUI. A plugin crate, as above.
+lectern-project-home = { path = "../project_home", features = ["test-support"] }
 # The `empty_window` example: the GPUI platform.
 gpui_platform.workspace = true
 
