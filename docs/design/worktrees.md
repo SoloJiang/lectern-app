@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：实现中。前置条件 C（`worktrees.ftl`，#333）与 A 的 `services` 部分（PR 号待定）已实现；A 的 `review` 部分与「验收」的三步尚未实现。
+状态：实现中。前置条件 C（`worktrees.ftl`，#333）与 A 的 `services` 部分（#334）已实现；A 的 `review` 部分与「验收」的三步尚未实现。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -511,7 +511,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 每一项是一个 PR，写 `Refs #16`，在「验收」里列为前置条件。`project`、`agents`、`usage` 不新增要求：`ProjectSnapshot::worktrees`、`SessionSummary::place` / `open_turn`、`UsageQuery::Worktree` / `Mr` 都已在它们的设计里。
 
-- **A. `review`（含 `services` 的 `review` 模块）：每个 worktree 的改动计数与文件重叠。** `services` 部分（类型、带默认实现的三个方法、事件变体、第 8 条的匹配分支）已实现（PR 号待定）；`review` 部分（第 1 至 7 条的计算）尚未实现。 `Overview` 只含当前 worktree（[review 设计「概览」](review.md#概览)），`ProjectSnapshot` 对非当前 worktree 只有元数据，而技术调研要求总览列出每个 worktree 的未提交改动量。所以由 `review` 补一份按 worktree 的计数，`review` 的设计文档同时更新「接口」「概览」「性能」和调用方一节：
+- **A. `review`（含 `services` 的 `review` 模块）：每个 worktree 的改动计数与文件重叠。** `services` 部分（类型、带默认实现的三个方法、事件变体、第 8 条的匹配分支）已实现（#334）；`review` 部分（第 1 至 7 条的计算）尚未实现。 `Overview` 只含当前 worktree（[review 设计「概览」](review.md#概览)），`ProjectSnapshot` 对非当前 worktree 只有元数据，而技术调研要求总览列出每个 worktree 的未提交改动量。所以由 `review` 补一份按 worktree 的计数，`review` 的设计文档同时更新「接口」「概览」「性能」和调用方一节：
 
   ```rust
   pub trait Review: Send + Sync {
@@ -647,7 +647,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 ### 前置条件 A 的 `services` 部分
 
-PR 号待定，在 macOS（arm64）上运行：`just check` 的格式、架构检查（32 个 crate）和文档链接三步通过；整个工作区的 clippy 这台机器上没有 Metal 工具链，没有运行，改跑 `cargo clippy --locked -p lectern-services --all-targets -- -D warnings`（通过），整个工作区的 clippy 以 CI 为准。`just test -p lectern-services`（112 个测试通过，含 `worktrees_overview_round_trips`、`worktrees_methods_default_to_nothing` 和 `review_event_round_trips` 里新加的 `Worktrees` 变体）。依赖 `services` 的 `lectern-review`、`lectern-review-view`、`lectern-project-home`、`lectern-welcome` 用 `cargo check --locked --all-targets`（默认特性）通过，所以第 8 条的匹配分支（`review_view` 的 `on_review` 补了 `Worktrees` 分支；`project_home` 与 `welcome` 用 `let … else`，不需要改）已通过编译。没有验证：这几个 crate 的 `--all-features` clippy 和它们的测试；`review` 对新方法的实现（A 的 `review` 部分）。
+#334，在 macOS（arm64）上运行：`just check` 的格式、架构检查（32 个 crate）和文档链接三步通过；整个工作区的 clippy 这台机器上没有 Metal 工具链，没有运行，改跑 `cargo clippy --locked -p lectern-services --all-targets -- -D warnings`（通过），整个工作区的 clippy 以 CI 为准。`just test -p lectern-services`（112 个测试通过，含 `worktrees_overview_round_trips`、`worktrees_methods_default_to_nothing` 和 `review_event_round_trips` 里新加的 `Worktrees` 变体）。依赖 `services` 的 `lectern-review`、`lectern-review-view`、`lectern-project-home`、`lectern-welcome` 用 `cargo check --locked --all-targets`（默认特性）通过，所以第 8 条的匹配分支（`review_view` 的 `on_review` 补了 `Worktrees` 分支；`project_home` 与 `welcome` 用 `let … else`，不需要改）已通过编译。没有验证：这几个 crate 的 `--all-features` clippy 和它们的测试；`review` 对新方法的实现（A 的 `review` 部分）。
 
 ### 前置条件 C
 
