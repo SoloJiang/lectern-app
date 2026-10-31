@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。`Contributions::current_route`（conversation 设计的前置条件 A，`Refs #23`）已实现，见「实际验证」。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -73,6 +73,12 @@ pub trait Contributions: Send + Sync {
     /// 当前的侧栏条目（按 `section`、`order`、`id` 排序），供 `project_home` 渲染项目侧栏。
     /// 取锁复制一个 `Arc`，不阻塞；条目增减时换一份新的，`WorkspaceEvent::ContributionsChanged` 通知。
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]>;
+
+    /// 窗口当前的屏幕（栈顶；栈空时是基底）。取锁复制，不阻塞，任何线程。窗口不存在时为 `None`。
+    /// 插件在 `Live` 之前收不到 `ScreenChanged`，`started` 里用它补上激活之前的屏幕（[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求)A）。
+    /// 值与最近一次 `ScreenChanged::to` 一致：`Hub::emit` 在发出 `ScreenChanged` 之前记下 `to`，`WindowClosed` 时去掉该窗口；
+    /// 根视图绑定窗口时（`install`、Dock 重开的 `attach`）记下当前屏幕，所以第一次 `ScreenChanged`（`from: None`，要等 `WorkspacePlugin::started`）之前也有值。
+    fn current_route(&self, window: WindowId) -> Option<Route>;
 
     /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：本 crate 在下一帧回调里
     /// 记下时刻并转给 `app`。任何线程。
@@ -573,6 +579,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 状态机（纯函数，`#[test]`，不依赖 GPUI；`src/tests/nav.rs`，用假的 `nav::Env`）：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`；`push_of_the_top_route_is_ignored`（与当前屏幕相同的 `Route` 忽略，无副作用，目标不同的压栈，`Pop` 后栈顶相同的也忽略）；`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）；`opened_with_a_refusing_view_keeps_the_screen`；`window_state_follows_the_open_path`。
 - 注册表（`#[test]`，`src/tests/registry.rs`，用 `TestKernel` 跑真实激活取 token，`driver::Driver` 代替主线程）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`invalid_ids_are_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`pending_token_is_deferred`（`started` 还没返回时 token 是 `Pending`，应用推迟到下一个 `Tick`）、`late_registration_applies_with_its_token`、`late_registration_needs_no_earlier_commit`（`activate` 里什么也没登记的激活在 `started` 里带 token 登记屏幕、守卫和命令处理函数，都应用）、`late_registration_inside_started_is_deferred_until_live`、`late_registration_with_a_dead_token_is_rejected`（停用后用旧 token 登记：不排队、不占 ID，记 `token-dead`）、`removal_drops_the_shown_screen`、`release_frees_the_id_before_the_main_thread_removes_it`、`screens_can_be_pushed_twice`（第 1 步只检查注册表那一半：同一个屏幕压栈两次、载荷取两次；工厂真的被调用两次在第 2 步）、`a_guard_that_drops_its_answer_allows`、`a_registration_without_a_token_outside_activate_is_reported_on_release`、`sidebar_entries_are_sorted_and_shared`、`command_handlers_guards_and_key_bindings_apply`、`leave_guards_are_asked_through_the_queue`、`commands_wait_for_projects`、`project_events_reach_the_state_machine`、`dispatch_after_shutdown_is_dropped`、`plugin_manifest_matches_the_design`。`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）要 GPUI 的 keymap，归第 2 步。
 - `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`inspector_tab_scoped_to_its_screen`（`screen: Some(s)` 的页只在 `s` 上显示；`s` 有自己的页时不显示 `None` 的页；选中的页不可见时显示第一个可见的页，`nav.inspector_tab` 不变，弹回后恢复）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`；测试平台的窗口没有 `CAMetalLayer`，`platform::frame::record` 返回错误，交回的 `result` 是这个错误）。
+- `current_route_follows_the_screen`（`view.rs`，`#[gpui::test]`）：激活之后、压入、弹出、打开与关闭项目、关闭窗口，`Contributions::current_route(WindowId(0))` 每一步都等于状态机的当前屏幕（即最近一次 `ScreenChanged::to`），窗口关闭后和不存在的窗口为 `None`。`services` 的 `workspace_contributions_is_a_shared_trait_object` 另外调用一次 `current_route`。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
 - 不用真实的 git、会话扫描和文件 IO；`Projects` 用 `services` 的 trait 对象的假实现，只发事件、返回构造好的快照。
@@ -649,6 +656,14 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 空闲内存：空窗口的 `phys_footprint` 与 app 设计「实际验证」的 40 MB 相比增加不超过 1 MB。
 
 ## 实际验证
+
+### `current_route`（conversation 前置条件 A）
+
+`Contributions` 加 `current_route(window) -> Option<Route>`（[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求)A，`Refs #23`）。`Hub` 持有 `Mutex<BTreeMap<WindowId, Route>>`，`Workspace::bind_window` 先记下当前屏幕，`Hub::emit` 在发出 `ScreenChanged` 之前写入 `to`、`WindowClosed` 时删除；状态机的所有屏幕变化都经 `screen_changed` 发 `ScreenChanged`，所以这张表等于状态机的当前屏幕。`welcome`、`review_view`、`worktrees`、`project_home` 的假 `Contributions` 与 `services` 的测试替身各加一个返回 `None` 的实现。在 macOS（arm64）上运行：
+
+- `just test -p lectern-workspace`：81 个通过，新增 `current_route_follows_the_screen`。
+- `cargo test -p lectern-services workspace_`：15 个通过（`workspace_contributions_is_a_shared_trait_object` 多调用一次 `current_route`）。
+- 没有验证：真实 `app` 装配里的值（用它的插件是 conversation 的第 1 步）。
 
 ### `Hub::open_snapshots`（worktrees 第 3 步）
 
@@ -734,6 +749,10 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 没有验证：真实窗口里的样子（工具栏横跨检查器、窗口控件与返回按钮的间距、检查器与侧栏的底色在两种外观下的对比）；窗口控件在 52pt 工具栏里的竖直位置（前置条件 G，[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。
 
 ## 与设计的差异
+
+### `current_route`（conversation 前置条件 A）
+
+- **绑定窗口时就有值**：设计只写「窗口不存在时为 None」，没有说第一次 `ScreenChanged` 之前怎么办。第一次 `ScreenChanged`（`from: None`）要等 `WorkspacePlugin::started` 之后主线程处理 `Started` 项时才发出；插件如果在这之前 `started`，读到 `None` 之后收到的事件又可能发生在它变为 `Live` 之前而被漏掉。所以 `bind_window`（`install` 和 Dock 重开的 `attach` 都经过它）把当前屏幕记进 `Hub`，窗口存在就有值；`attach` 复用同一个 `Workspace`，窗口关闭时被删掉的记录因此在重开时补回来。
 
 ### 为 #283 修订「界面」
 
