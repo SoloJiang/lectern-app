@@ -10,6 +10,7 @@ mod items;
 mod labels;
 mod logs;
 mod needs;
+mod notes;
 mod plugin;
 mod redraw;
 mod screen;

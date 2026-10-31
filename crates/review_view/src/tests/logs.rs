@@ -210,3 +210,167 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
         .unwrap();
     assert!(failed.contains("\"error\":\"io\""), "{failed}");
 }
+
+/// The canary in the texts of notes (written, drafted, changed), their
+/// excerpts and the path of a file that is not in the review goes through
+/// the whole flow of the notes at trace level, and no record carries it.
+#[gpui::test]
+fn logs_hold_no_note_contents(cx: &mut TestAppContext) {
+    use lectern_services::changes::ChangePath;
+    use lectern_services::review::{
+        DiffSide, Excerpt, FileKey, NotePlace, NoteState, ReviewCommand, SentVia,
+    };
+
+    use crate::actions::{DiscardNotes, SendNotes};
+    use crate::tests::notes::{change, note, row, sample, select, set_notes};
+    use crate::tests::step2::step_key;
+
+    let capture = lectern_logging::testing::capture();
+    lectern_logging::testing::set_callsite_limit(1_000_000);
+    let (rig, opened) = sample(cx);
+    let mut visual = opened.visual(cx);
+
+    // A note with the canary in its text and its excerpt, one on a file
+    // that is not in the review, whose path carries it.
+    let mut drifted = note(
+        1,
+        DiffSide::New,
+        1,
+        NoteState::Pending,
+        NotePlace::Drifted {
+            file: crate::testing::file_key(0),
+        },
+    );
+    drifted.text = Arc::from(format!("text {CANARY}"));
+    drifted.excerpt = Some(Excerpt {
+        first: 0,
+        lines: Arc::from(vec![Arc::<str>::from(format!("excerpt {CANARY}"))]),
+    });
+    let mut elsewhere = note(
+        2,
+        DiffSide::New,
+        3,
+        NoteState::Pending,
+        NotePlace::Elsewhere,
+    );
+    elsewhere.anchor.file = FileKey {
+        old: None,
+        new: Some(ChangePath(Arc::from(
+            format!("docs/{CANARY}.md").into_bytes(),
+        ))),
+    };
+    change(&rig, &opened, cx, |snapshot| {
+        set_notes(snapshot, vec![drifted, elsewhere]);
+    });
+
+    // C, a text, Esc (a draft), C again (the draft comes back), ⌘↩.
+    select(&opened, cx, row(&step_key(), None, Some(1)));
+    visual.simulate_keystrokes("c");
+    opened.draw(cx);
+    visual.simulate_input(&format!("drafted {CANARY}"));
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    visual.simulate_keystrokes("c");
+    opened.draw(cx);
+    visual.simulate_keystrokes("cmd-enter");
+    visual.run_until_parked();
+    let added = opened.read(cx, |model| model.snapshot.notes.len());
+    assert_eq!(added, 3, "the note was added");
+
+    // Change a note and delete another.
+    let written = opened.read(cx, |model| {
+        model
+            .snapshot
+            .notes
+            .iter()
+            .find(|n| n.text.starts_with("drafted"))
+            .map(|n| n.id)
+            .unwrap()
+    });
+    opened.draw(cx);
+    let records = opened.record(cx);
+    let id = format!("review.note.item[{:016x}].edit", written.0);
+    visual.simulate_click(
+        crate::tests::screen::must(&records, &id).bounds.center(),
+        gpui::Modifiers::default(),
+    );
+    opened.draw(cx);
+    let state = opened.read(cx, |model| model.editor.as_ref().unwrap().state.clone());
+    visual.update(|window, cx| {
+        state.update(cx, |state, cx| {
+            state.set_text(&format!("changed {CANARY}"), window, cx)
+        })
+    });
+    visual.simulate_keystrokes("cmd-enter");
+    visual.run_until_parked();
+    opened.update(cx, |model, cx| {
+        model.delete_note(lectern_services::review::NoteId(2), cx)
+    });
+
+    // Discard asks and is confirmed; the next note is sent and copied again.
+    visual.dispatch_action(DiscardNotes);
+    visual.run_until_parked();
+    cx.simulate_prompt_answer("Discard");
+    visual.run_until_parked();
+    select(&opened, cx, row(&step_key(), Some(2), Some(2)));
+    visual.simulate_keystrokes("c");
+    opened.draw(cx);
+    visual.simulate_input(&format!("sent {CANARY}"));
+    visual.simulate_keystrokes("cmd-enter");
+    visual.run_until_parked();
+    visual.dispatch_action(SendNotes);
+    visual.run_until_parked();
+    let batch = rig
+        .review
+        .finish_send(crate::testing::FIRST_ID, SentVia::Clipboard)
+        .expect("a send was in the air");
+    rig.settle(cx);
+    opened.draw(cx);
+    opened.update(cx, |model, cx| model.copy_notes_again(cx));
+    rig.review
+        .finish_copy(crate::testing::FIRST_ID, batch, None);
+    rig.settle(cx);
+    assert!(
+        rig.review
+            .commands()
+            .iter()
+            .any(|(_, command)| matches!(command, ReviewCommand::CopyBatch(_)))
+    );
+
+    // The screen goes away.
+    let window = opened.window;
+    drop(opened);
+    window
+        .update(cx, |host, _, cx| {
+            host.clear_child();
+            cx.notify();
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    capture.assert_absent(CANARY);
+    let lines = capture.lines();
+    let has = |msg: &str| {
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("\"msg\":\"{msg}\"")))
+    };
+    assert!(has("note editor"), "{lines:#?}");
+    assert!(has("notes discard"));
+    assert!(has("review screen closed"));
+    let closed = lines
+        .iter()
+        .find(|line| line.contains("\"msg\":\"review screen closed\""))
+        .unwrap();
+    // Two notes were added through the editor.
+    assert!(closed.contains("\"notes_added\":2"), "{closed}");
+    for how in ["opened", "drafted", "saved"] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\"msg\":\"note editor\"")
+                    && line.contains(&format!("\"how\":\"{how}\""))),
+            "no note editor record for {how}"
+        );
+    }
+}

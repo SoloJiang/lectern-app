@@ -25,10 +25,12 @@ mod lines;
 mod model;
 mod needs;
 mod nodes;
+mod notes;
 mod plugin;
 mod progress_tab;
 mod render;
 mod render_diff;
+mod render_notes;
 mod screen;
 
 #[cfg(any(test, feature = "test-support"))]

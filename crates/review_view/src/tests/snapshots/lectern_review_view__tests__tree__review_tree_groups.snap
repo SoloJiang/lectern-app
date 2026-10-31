@@ -31,6 +31,6 @@ review.narrative List items=18 visible=0..18 mode=unified
   review.diff.item[final:src/file_001.rs].row.item[-:2] DiffLine kind=added drifted=false
   review.diff.item[final:src/file_001.rs].row.item[2:3] DiffLine kind=context drifted=false
 review.bar Group
-  review.bar.comments Text <review-comments> "No review notes"
+  review.bar.comments Text <review-comments> "No review notes" pending=0 sending=false
   review.bar.looks-good Button <review-looks-good> "Looks Good"
-  review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" [disabled]
+  review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" [disabled] route=session

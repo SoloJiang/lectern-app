@@ -26,7 +26,7 @@ fn plugins_register_and_deactivate_cleanly(cx: &mut TestAppContext) {
     assert!(keys.contains(&(
         "j".to_owned(),
         "review::NextHunk".to_owned(),
-        Some("Content > review".to_owned())
+        Some("(Content > review) && !Input".to_owned())
     )));
     assert!(keys.contains(&(
         "v".to_owned(),
