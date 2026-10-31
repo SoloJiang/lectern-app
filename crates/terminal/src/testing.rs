@@ -1,4 +1,5 @@
-//! Test support: the engine without a PTY (design 「验收」 step 2).
+//! Test support: the engine without a PTY (design 「验收」 step 2), and the
+//! plugin in a `TestKernel` with fake projects and sessions (step 3).
 //!
 //! Feed it program output, send it input, take the bytes it would write to
 //! the PTY, and build frames. The terminal's own tests and the benchmarks
@@ -9,7 +10,10 @@ use std::time::Instant;
 
 use lectern_services::terminal::{ColorScheme, Frame, GridSize, Input, Rgb, RunState, Theme};
 
+mod harness;
+
 pub use crate::engine::OutputEffects;
+pub use harness::{FakeProjects, FakeSessions, Harness, frame_text};
 
 /// The engine of one terminal, with no PTY and no thread.
 pub struct Engine(crate::engine::Engine);

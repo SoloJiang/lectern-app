@@ -190,6 +190,9 @@ const BENCHES: &[Bench] = &[
     terminal::PARSE_SGR,
     terminal::FRAME_FULL,
     terminal::FRAME_ECHO,
+    terminal::OPEN,
+    terminal::INPUT,
+    terminal::ECHO_LATENCY,
 ];
 
 fn main() -> ExitCode {

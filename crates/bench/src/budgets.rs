@@ -2030,7 +2030,36 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share("log/idle_memory/verbose", RECORD, LOGGING, ACTIVE, Memory),
     // ---- end logging ----
-    // ---- terminal (terminal design, step 2) ----
+    // ---- terminal (terminal design, steps 2 and 3) ----
+    // Step 3, the plugin with a real PTY (`/bin/cat` as the shell): the
+    // calling thread's part of `open` (the terminal is closed again after
+    // each sample); one `input` on a running terminal whose thread sleeps;
+    // `Input::Text` to the echo in a new frame after 12 ms of quiet.
+    share(
+        "terminal/open",
+        &[median(Limit::TimeAtMost(us(100)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/input",
+        &[median(Limit::TimeAtMost(us(2)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/echo_latency",
+        &[
+            median(Limit::TimeAtMost(ms(1))),
+            p95(Limit::TimeAtMost(ms(3))),
+        ],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    // Step 2.
     // `testing::Engine` (no PTY) at 120×40: 1 MiB of plain ASCII / of
     // output with a new 24-bit colour every 8 characters into a new
     // terminal; one frame with every row / one row (an echo) dirty.

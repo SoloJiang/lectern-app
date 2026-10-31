@@ -94,7 +94,9 @@ glob = "0.3"
 # lectern-platform's safe read (docs/design/platform.md): openat2, openat,
 # fstatat, fstat, readlinkat and read through a safe interface. Already in the
 # release build with the same features, through GPUI's async-io / polling.
-rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+# lectern-terminal adds `event` (poll on the PTY's primary end and its wake
+# socket) and `process` (SIGKILL to the process group).
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "event", "process"] }
 # lectern-platform's `window::set_frame_autosave_name` takes any window that
 # implements `HasWindowHandle`; GPUI's `Window` does (docs/design/platform.md
 # 「窗口 frame 的 autosave」). Already in the release build through GPUI.
@@ -181,6 +183,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # kitty-graphics, log, tracing or link-dynamic.
 libghostty-vt = { version = "=0.2.2", default-features = false }
 libghostty-vt-sys = "=0.2.2"
+# lectern-terminal's PTY (docs/design/terminal.md 「portable-pty」): only
+# `native_pty_system().openpty`, `spawn_command`, `MasterPty` and
+# `ChildKiller`. Exact pin; upgrade in its own PR.
+portable-pty = "=0.9.0"
 # Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 # Test-only: temporary directories for lectern-platform's tests, and mkfifo in
