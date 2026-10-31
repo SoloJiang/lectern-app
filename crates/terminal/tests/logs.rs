@@ -105,6 +105,13 @@ fn logs_hold_no_terminal_content() {
     harness.terminals.close(failed);
     harness.kernel.deactivate();
 
+    // Each terminal thread writes its close line after `close` returns.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !log.lines().iter().any(|l| l.contains("terminal closed"))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let lines = log.lines();
     log.assert_absent(CANARY);
     // What is logged: the start, with the kind and the program name.
