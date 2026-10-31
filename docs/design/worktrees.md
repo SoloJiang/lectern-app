@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：已接受，尚未实现。
+状态：实现中。前置条件 C（`worktrees.ftl`，PR 号待定）已实现；A 的 `services` 部分与「验收」的三步尚未实现。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -592,7 +592,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - **B. `workspace` 与 `ui::contrib`：只在一个屏幕显示的检查器页；重复压栈。**
   1. `ui::contrib::InspectorTab` 加一个字段 `pub screen: Option<Name>`。`None` 是现在的行为：页在每个 `layout.inspector` 为 true 的屏幕上显示。`Some(s)`：页只在当前屏幕是 `s` 时显示。当前屏幕有自己的页（`screen == Some(当前屏幕)`）时检查器只显示这些页，不显示 `None` 的页；没有时只显示 `None` 的页。`nav.inspector_tab` 不在可见的页里时显示第一个可见的页，`nav.inspector_tab` 本身不变。原因：Worktree 页要显示在 Worktrees 屏幕上，Files（review_view 的 Progress 列表）和 Conversation 在这里没有内容；Worktree 页也不能出现在审阅屏幕上。已有的页取 `None`，行为不变。测试 `inspector_tab_scoped_to_its_screen`。
   2. `Push(r)` 在栈顶已经是同一个 `Route` 时忽略，记 debug：Worktrees 屏幕显示侧栏，再点侧栏的 Worktrees 条目不会压入第二个同样的屏幕（Usage 条目同理）。测试 `push_of_the_top_route_is_ignored`。
-- **C. `i18n`：`locales/{en,zh-CN}/worktrees.ftl`**，内容是「界面」的键表。
+- **C. `i18n`：`locales/{en,zh-CN}/worktrees.ftl`**，内容是「界面」的键表。已实现（PR 号待定）。
 - **D. `app`。** 装配时构造一个 `UsageLink`，分别交给 `WorktreesPlugin::new(WorktreesDeps { executor, usage })` 和 `WorktreesUsagePlugin::new(executor, link)`；两个插件放进 desktop 与 probe profile 的 `PluginSet`，test profile 不装。bench 的 `Driver::open(OpenTarget::Worktree(path))`：在主线程上取当前项目的 `Projects::snapshot`，找 `root` 等于 `path`、不是 prunable 的 worktree（找不到时报告 `Error`）；然后 `dispatch(Push(Route { screen: WORKTREES, target: Target::None }))`（已在本屏幕时由 B.2 忽略）和 `dispatch(SetActiveWorktree(key))`。终点 `Milestone::WorktreeSwitched` 经 `workspace` 的 `on_milestone` 转给探针（[app 设计「里程碑与帧记录」](app.md#里程碑与帧记录)）。
 - **E. `bench`**：预算表加 `worktrees/build_1000`、`worktrees/resident_bytes`；`app/switch_worktree` 随本 crate 的第 3 步改为生效。
 
@@ -642,3 +642,15 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - 列表不虚拟化：worktree 多于 100 个时每帧的排版随行数增长。
 - 本屏幕依赖 `dyn Review`：`review` 失败时整个屏幕不可用。
 - P1 只读：不创建、删除或 prune worktree。
+
+## 实际验证
+
+### 前置条件 C
+
+`worktrees.ftl`（PR 号待定），在 macOS（arm64）上运行：`just check` 的格式、架构检查（32 个 crate）和文档链接三步通过；其中整个工作区的 clippy 这台机器上没有 Metal 工具链，`gpui-pre-apple` 的构建脚本失败，改跑 `cargo clippy --locked -p lectern-i18n --all-targets --all-features -- -D warnings`（通过），整个工作区的 clippy 以 CI 为准。`just deny`（advisories、bans、licenses、sources 通过，有一条 `Unicode-DFS-2016` 许可证允许项未用的既有警告）、`just test -p lectern-i18n`（57 个测试通过）。「界面」键表的 51 个键在 en 与 zh-CN 里都有，变量一致（编译期校验）。没有验证：键在界面里的实际显示（视图在第 2 步）。
+
+## 与设计的差异
+
+### 前置条件 C
+
+- 键表里 `worktrees-vs-base` 在 en 里分成多行的选择器，文字与键表一致；注释里补了 `$base`、`$time`、`$tokens`、`$limit` 的含义。没有其他差异。
