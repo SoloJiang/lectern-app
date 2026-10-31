@@ -144,11 +144,15 @@ pub(crate) fn pick_shell(
     passwd_shell: Option<&OsStr>,
     fallback: &Path,
 ) -> Option<PathBuf> {
-    [shell_var.map(Path::new), passwd_shell.map(Path::new), Some(fallback)]
-        .into_iter()
-        .flatten()
-        .find(|p| is_executable_file(p))
-        .map(Path::to_path_buf)
+    [
+        shell_var.map(Path::new),
+        passwd_shell.map(Path::new),
+        Some(fallback),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|p| is_executable_file(p))
+    .map(Path::to_path_buf)
 }
 
 /// [`login_env`]'s cache: runs `f` at most once per `cell`, logs its result
@@ -410,7 +414,13 @@ fn passwd_shell() -> Option<OsString> {
         // SAFETY: every pointer is valid for the call and `buf.len()` is
         // the buffer's real size; `result` is set to `pwd` or null.
         let rc = unsafe {
-            libc::getpwuid_r(uid, pwd.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &mut result)
+            libc::getpwuid_r(
+                uid,
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
         };
         if rc == libc::ERANGE && size < 64 << 10 {
             size *= 2;
