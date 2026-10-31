@@ -32,7 +32,7 @@
 
 ## 命令
 
-只用以下入口（需要 `just`、`cargo-nextest`、`cargo-deny`；要在多个 worktree 间共享编译结果，在 `~/.cargo/config.toml` 里设置 `build.rustc-wrapper = "sccache"`）：
+只用以下入口（需要 `just`、`cargo-nextest`、`cargo-deny` 和 Zig 0.15.2（`libghostty-vt` 的构建要用，`scripts/install_zig.sh <目录>` 安装官方发布包并校验 SHA-256，再把那个目录放在 `PATH` 最前面；`just check`、`test`、`doctest`、`bench` 先检查它的版本）；要在多个 worktree 间共享编译结果，在 `~/.cargo/config.toml` 里设置 `build.rustc-wrapper = "sccache"`）：
 
 ```sh
 just check   # 格式 + 架构规则 + 文档链接 + clippy（警告即失败）

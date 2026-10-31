@@ -18,8 +18,23 @@ packages := if os() == "macos" { "--workspace" } else { `python3 scripts/check_a
 
 default: check
 
+# libghostty-vt-sys builds Ghostty with Zig 0.15.2 (docs/design/terminal.md
+# 「依赖」); Zig's minor versions do not build each other's code.
+[private]
+zig:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    want=0.15.2
+    have="$(zig version 2>/dev/null || true)"
+    if [[ "$have" != "$want" ]]; then
+        echo "error: the build needs Zig $want on PATH, found '${have:-no zig}'." >&2
+        echo "Install it with: scripts/install_zig.sh ~/.local/share/zig-$want" >&2
+        echo "then put ~/.local/share/zig-$want first on PATH." >&2
+        exit 1
+    fi
+
 # Format check, architecture rules, doc links, clippy with warnings as errors.
-check:
+check: zig
     cargo fmt --all --check
     python3 scripts/test_check_architecture.py
     python3 scripts/check_architecture.py
@@ -29,7 +44,7 @@ check:
 # Run tests with cargo-nextest. `-p` (also `-pNAME`), `--package` or
 # `--workspace` (or its alias `--all`) before any `--` replace the default package set; arguments
 # after `--` go to the test binaries and are never treated as selectors.
-test *args:
+test *args: zig
     #!/usr/bin/env bash
     set -euo pipefail
     selection=({{packages}})
@@ -44,7 +59,7 @@ test *args:
     cargo nextest run --locked ${selection[@]+"${selection[@]}"} --all-features --no-tests=pass "$@"
 
 # Doctests (nextest does not run them).
-doctest:
+doctest: zig
     cargo test --locked --doc {{packages}} --all-features
 
 # Performance budget benchmarks: gated on Apple silicon macOS, a smoke run
@@ -53,7 +68,7 @@ doctest:
 # `--shard <name>` runs one CI shard (code-intel, process, git or rest) and writes
 # its reports without merging them: CI merges the shards' reports.
 # See docs/design/bench.md.
-bench *args:
+bench *args: zig
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f target/lectern-bench/report-*.json target/lectern-bench/report.json

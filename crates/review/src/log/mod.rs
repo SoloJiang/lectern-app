@@ -6,8 +6,9 @@
 //!   by `fdatasync`, compaction by atomic rename. Blocking; executor tasks
 //!   only, never the UI thread.
 //! - [`Index`] is the in-memory index: per review target and file identity
-//!   the latest `seen` or `unseen`, per session its `base`, plus the records
-//!   this version does not know, kept verbatim. Memory only.
+//!   the latest `seen` or `unseen`, per session its `base`, per review
+//!   target its review notes and the batches they were sent in, plus the
+//!   records this version does not know, kept verbatim. Memory only.
 //!
 //! Compaction rewrites the file from the index, so it runs only when the
 //! index is the file: built by one complete, successful read of it plus this
@@ -32,7 +33,7 @@ use std::time::Instant;
 use lectern_logging::{Value, debug, info, warn};
 use lectern_services::changes::ChangePath;
 use lectern_services::project::BlobId;
-use lectern_services::review::FileKey;
+use lectern_services::review::{BatchId, Excerpt, FileKey, NoteAnchor, NoteId, SentVia};
 use lectern_services::session::Timestamp;
 use sha2::{Digest, Sha256};
 
@@ -48,6 +49,10 @@ pub(crate) const READ_MAX: u64 = 64 << 20;
 const HEADER_MAX: u64 = 64 << 10;
 /// `seen` and `unseen` records older than this are dropped by compaction.
 const RETAIN_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+/// A batch of review notes older than this, and the notes sent in it, are
+/// not kept (docs/design/review.md「审阅意见」: 14 days, by the batch's
+/// `at`). Notes not sent are kept as long as they are not removed.
+pub(crate) const NOTES_RETAIN_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
 /// One record.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -63,6 +68,40 @@ pub(crate) enum Record {
         file: FileKey,
     },
     Base(BaseRecord),
+    /// A note written or changed: the whole note, the latest of its `id`
+    /// wins.
+    Note(NoteRecord),
+    /// Notes the user removed.
+    NoteRemoved {
+        at: Timestamp,
+        target: TargetKey,
+        ids: Vec<NoteId>,
+    },
+    /// Notes sent as one batch.
+    NotesSent(SentRecord),
+}
+
+/// A review note as the log has it (no `place`: that is computed for each
+/// snapshot).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct NoteRecord {
+    /// When this record was written; later than `created` for an edit.
+    pub at: Timestamp,
+    pub target: TargetKey,
+    pub id: NoteId,
+    pub anchor: NoteAnchor,
+    pub excerpt: Option<Excerpt>,
+    pub text: Arc<str>,
+    pub created: Timestamp,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct SentRecord {
+    pub at: Timestamp,
+    pub target: TargetKey,
+    pub batch: BatchId,
+    pub notes: Vec<NoteId>,
+    pub via: SentVia,
 }
 
 /// A session's base, fixed the first time one of its files is marked seen.
@@ -86,8 +125,12 @@ pub(crate) struct SessionId {
 impl Record {
     fn at(&self) -> Timestamp {
         match self {
-            Record::Seen { at, .. } | Record::Unseen { at, .. } => *at,
+            Record::Seen { at, .. }
+            | Record::Unseen { at, .. }
+            | Record::NoteRemoved { at, .. } => *at,
             Record::Base(b) => b.at,
+            Record::Note(n) => n.at,
+            Record::NotesSent(s) => s.at,
         }
     }
 }
@@ -100,6 +143,8 @@ pub(crate) struct Index {
     marks: HashMap<TargetKey, HashMap<ChangePath, Entry>>,
     /// Per session, its first `base` record.
     bases: HashMap<SessionId, Entry>,
+    /// Per review target, its review notes.
+    notes: HashMap<TargetKey, TargetNotes>,
     /// Lines with a record type this version does not know, verbatim
     /// (without the newline).
     unknown: Vec<(u64, Arc<[u8]>)>,
@@ -113,6 +158,165 @@ pub(crate) struct Index {
 struct Entry {
     seq: u64,
     record: Record,
+}
+
+/// One review target's notes. The vectors are sorted by ID (IDs grow with
+/// time, so records mostly append) and exact in size once a read is done:
+/// a hash map's spare buckets would cost more than the entries.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct TargetNotes {
+    pub notes: Vec<NoteEntry>,
+    pub batches: Vec<BatchEntry>,
+    /// The batch each sent note is in, from the batches' lists; kept apart
+    /// from the notes so that the order of the records does not matter.
+    sent: Vec<(NoteId, BatchId)>,
+}
+
+/// A note in the index: its latest `note` record, and the position of its
+/// first one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct NoteEntry {
+    seq: u64,
+    pub at: Timestamp,
+    pub id: NoteId,
+    pub anchor: NoteAnchor,
+    pub excerpt: Option<Excerpt>,
+    pub text: Arc<str>,
+    pub created: Timestamp,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct BatchEntry {
+    seq: u64,
+    pub id: BatchId,
+    pub at: Timestamp,
+    pub via: SentVia,
+    /// As the record listed them, the removed ones included: the batch's
+    /// size does not change when a note is removed.
+    pub notes: Vec<NoteId>,
+}
+
+impl TargetNotes {
+    /// The batch `note` was sent in.
+    pub(crate) fn sent_in(&self, note: NoteId) -> Option<BatchId> {
+        let i = self.sent.binary_search_by_key(&note, |(n, _)| *n).ok()?;
+        Some(self.sent[i].1)
+    }
+
+    pub(crate) fn batch(&self, id: BatchId) -> Option<&BatchEntry> {
+        let i = self.batches.binary_search_by_key(&id, |b| b.id).ok()?;
+        Some(&self.batches[i])
+    }
+
+    pub(crate) fn note(&self, id: NoteId) -> Option<&NoteEntry> {
+        let i = self.notes.binary_search_by_key(&id, |n| n.id).ok()?;
+        Some(&self.notes[i])
+    }
+
+    /// Notes not sent: pending, and sending once that exists.
+    pub(crate) fn unsent(&self) -> usize {
+        self.notes
+            .iter()
+            .filter(|n| self.sent_in(n.id).is_none())
+            .count()
+    }
+
+    fn set_note(&mut self, seq: u64, n: NoteRecord) {
+        let entry = NoteEntry {
+            seq,
+            at: n.at,
+            id: n.id,
+            anchor: n.anchor,
+            excerpt: n.excerpt,
+            text: n.text,
+            created: n.created,
+        };
+        match self.notes.binary_search_by_key(&entry.id, |e| e.id) {
+            // The first position is kept: a note recorded again after it
+            // was sent (its excerpt arriving late) would otherwise come
+            // behind its batch's record in a compacted file.
+            Ok(i) => {
+                let seq = self.notes[i].seq;
+                self.notes[i] = NoteEntry { seq, ..entry };
+            }
+            Err(i) => self.notes.insert(i, entry),
+        }
+    }
+
+    fn remove_notes(&mut self, ids: &[NoteId]) {
+        for id in ids {
+            if let Ok(i) = self.notes.binary_search_by_key(id, |e| e.id) {
+                self.notes.remove(i);
+            }
+        }
+    }
+
+    fn set_sent(&mut self, seq: u64, s: SentRecord) {
+        for id in &s.notes {
+            match self.sent.binary_search_by_key(id, |(n, _)| *n) {
+                Ok(i) => self.sent[i].1 = s.batch,
+                Err(i) => self.sent.insert(i, (*id, s.batch)),
+            }
+        }
+        let entry = BatchEntry {
+            seq,
+            id: s.batch,
+            at: s.at,
+            via: s.via,
+            notes: s.notes,
+        };
+        match self.batches.binary_search_by_key(&entry.id, |b| b.id) {
+            Ok(i) => {
+                let seq = self.batches[i].seq;
+                self.batches[i] = BatchEntry { seq, ..entry };
+            }
+            Err(i) => self.batches.insert(i, entry),
+        }
+    }
+
+    /// Drops the batches sent before `cutoff` and the notes sent in them.
+    fn prune(&mut self, cutoff: i64) {
+        let expired: Vec<BatchId> = self
+            .batches
+            .iter()
+            .filter(|b| b.at.0 < cutoff)
+            .map(|b| b.id)
+            .collect();
+        if expired.is_empty() {
+            return;
+        }
+        let gone: Vec<NoteId> = self
+            .sent
+            .iter()
+            .filter(|(_, b)| expired.contains(b))
+            .map(|(n, _)| *n)
+            .collect();
+        self.batches.retain(|b| b.at.0 >= cutoff);
+        self.sent.retain(|(_, b)| !expired.contains(b));
+        self.remove_notes(&gone);
+    }
+
+    fn shrink(&mut self) {
+        self.notes.shrink_to_fit();
+        self.batches.shrink_to_fit();
+        self.sent.shrink_to_fit();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.notes.is_empty() && self.batches.is_empty()
+    }
+
+    fn record_of(&self, target: &TargetKey, e: &NoteEntry) -> NoteRecord {
+        NoteRecord {
+            at: e.at,
+            target: target.clone(),
+            id: e.id,
+            anchor: e.anchor.clone(),
+            excerpt: e.excerpt.clone(),
+            text: Arc::clone(&e.text),
+            created: e.created,
+        }
+    }
 }
 
 impl Index {
@@ -142,9 +346,58 @@ impl Index {
         }
     }
 
-    /// The records kept: marks, bases and unknown records.
+    /// The records kept: marks, bases, notes, batches and unknown records.
     pub(crate) fn len(&self) -> usize {
-        self.marks.values().map(HashMap::len).sum::<usize>() + self.bases.len() + self.unknown.len()
+        self.marks.values().map(HashMap::len).sum::<usize>()
+            + self.bases.len()
+            + self
+                .notes
+                .values()
+                .map(|t| t.notes.len() + t.batches.len())
+                .sum::<usize>()
+            + self.unknown.len()
+    }
+
+    /// The review notes of `target`.
+    pub(crate) fn target_notes(&self, target: &TargetKey) -> Option<&TargetNotes> {
+        self.notes.get(target)
+    }
+
+    /// Sets the excerpt of a note that has none (it was taken after the
+    /// note was recorded): in the note, in the records of it still queued,
+    /// or, when those were appended already, in a new record. False when
+    /// the note is gone or has an excerpt.
+    pub(crate) fn attach_excerpt(
+        &mut self,
+        target: &TargetKey,
+        id: NoteId,
+        excerpt: Excerpt,
+    ) -> bool {
+        let Some(tn) = self.notes.get_mut(target) else {
+            return false;
+        };
+        let Ok(i) = tn.notes.binary_search_by_key(&id, |e| e.id) else {
+            return false;
+        };
+        if tn.notes[i].excerpt.is_some() {
+            return false;
+        }
+        tn.notes[i].excerpt = Some(excerpt.clone());
+        let mut queued = false;
+        for r in &mut self.pending {
+            if let Record::Note(n) = r
+                && n.id == id
+                && n.target == *target
+            {
+                n.excerpt = Some(excerpt.clone());
+                queued = true;
+            }
+        }
+        if !queued {
+            let record = tn.record_of(target, &tn.notes[i]);
+            self.pending.push(Record::Note(record));
+        }
+        true
     }
 
     /// Records `record` in memory and queues it for the next append.
@@ -178,6 +431,25 @@ impl Index {
     fn apply(&mut self, record: Record) {
         let seq = self.next;
         self.next += 1;
+        let record = match record {
+            Record::Note(n) => {
+                let target = n.target.clone();
+                self.notes.entry(target).or_default().set_note(seq, n);
+                return;
+            }
+            Record::NoteRemoved { target, ids, .. } => {
+                if let Some(tn) = self.notes.get_mut(&target) {
+                    tn.remove_notes(&ids);
+                }
+                return;
+            }
+            Record::NotesSent(s) => {
+                let target = s.target.clone();
+                self.notes.entry(target).or_default().set_sent(seq, s);
+                return;
+            }
+            other => other,
+        };
         let (target, old, new) = match &record {
             Record::Seen { key, .. } => (&key.target, &key.old_path, &key.new_path),
             Record::Unseen { target, file, .. } => (target, &file.old, &file.new),
@@ -187,6 +459,8 @@ impl Index {
                     .or_insert(Entry { seq, record });
                 return;
             }
+            // Taken by value above.
+            Record::Note(_) | Record::NoteRemoved { .. } | Record::NotesSent(_) => return,
         };
         // The decoder and `SeenKey` never give a record without a path.
         let Some(identity) = new.as_ref().or(old.as_ref()).cloned() else {
@@ -229,6 +503,32 @@ impl Index {
                 .map(|e| (e.seq, Line::Record(&e.record))),
         );
         lines.extend(self.unknown.iter().map(|(seq, raw)| (*seq, Line::Raw(raw))));
+        // The notes and batches kept: a note's latest record, a batch's
+        // record. Not the removals; they have done their work.
+        let notes_cutoff = now.0.saturating_sub(NOTES_RETAIN_MS);
+        let mut owned: Vec<(u64, Record)> = Vec::new();
+        for (target, tn) in &self.notes {
+            for e in &tn.notes {
+                let sent = tn.sent_in(e.id).and_then(|b| tn.batch(b));
+                if sent.is_some_and(|b| b.at.0 < notes_cutoff) {
+                    continue;
+                }
+                owned.push((e.seq, Record::Note(tn.record_of(target, e))));
+            }
+            for b in tn.batches.iter().filter(|b| b.at.0 >= notes_cutoff) {
+                owned.push((
+                    b.seq,
+                    Record::NotesSent(SentRecord {
+                        at: b.at,
+                        target: target.clone(),
+                        batch: b.id,
+                        notes: b.notes.clone(),
+                        via: b.via,
+                    }),
+                ));
+            }
+        }
+        lines.extend(owned.iter().map(|(seq, r)| (*seq, Line::Record(r))));
         lines.sort_unstable_by_key(|(seq, _)| *seq);
         let mut out = wire::header(repo);
         for (_, line) in lines {
@@ -243,12 +543,26 @@ impl Index {
         out
     }
 
-    /// Drops the marks compaction dropped.
+    /// Drops what compaction dropped: marks over a year old, notes sent
+    /// over 14 days ago.
     fn prune(&mut self, now: Timestamp) {
         let cutoff = now.0.saturating_sub(RETAIN_MS);
         self.marks.retain(|_, files| {
             files.retain(|_, e| e.record.at().0 >= cutoff);
             !files.is_empty()
+        });
+        self.prune_notes(now);
+    }
+
+    /// Drops the batches sent over 14 days before `now` and the notes sent
+    /// in them; notes not sent stay. Run when a log is read and when it is
+    /// compacted, so that the index is what a replay of the file gives.
+    fn prune_notes(&mut self, now: Timestamp) {
+        let cutoff = now.0.saturating_sub(NOTES_RETAIN_MS);
+        self.notes.retain(|_, tn| {
+            tn.prune(cutoff);
+            tn.shrink();
+            !tn.is_empty()
         });
     }
 }
@@ -466,6 +780,7 @@ impl LogFile {
             return (Index::default(), report);
         }
         report.complete = self.complete;
+        index.prune_notes(now);
         self.log_read(&report, &index, started);
         (index, report)
     }

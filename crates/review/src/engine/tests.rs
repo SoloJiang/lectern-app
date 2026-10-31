@@ -26,7 +26,9 @@ use crate::testing::{Driven, FakeProjects, FakeSessions, ReflogLine, write_reflo
 
 mod brief;
 mod logs;
+mod notes;
 mod overview;
+mod send;
 
 pub(crate) const SOURCE: &str = "session-claude-code";
 /// Unix seconds around which the scenarios happen.

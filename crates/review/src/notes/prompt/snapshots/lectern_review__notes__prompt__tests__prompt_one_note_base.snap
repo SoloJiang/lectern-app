@@ -1,0 +1,10 @@
+---
+source: crates/review/src/notes/prompt/tests.rs
+expression: one
+---
+Review notes from Lectern [lectern-notes 0190f3a2c4b60401]: 1 note on your changes.
+Please address each note.
+
+1. a.rs (line 1 of the version before your changes)
+   Note:
+   Why was this removed?

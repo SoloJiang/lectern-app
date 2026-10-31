@@ -14,13 +14,15 @@
 //! the window frame autosave name of AppKit
 //! ([`window::set_frame_autosave_name`]),
 //! the system appearance's colours, reduce-motion setting and their changes
-//! ([`appearance`]), and, on macOS, the FSEvents and kqueue backend of
+//! ([`appearance`]), writing text to the system clipboard
+//! ([`clipboard::write_text`]), and, on macOS, the FSEvents and kqueue backend of
 //! `lectern-fs-watch` (`fs_events`, docs/design/fs_watch.md「platform 后端」).
 //! `open -a`,
 //! Keychain, Seatbelt and the status line hook follow once their designs are
 //! merged.
 
 pub mod appearance;
+pub mod clipboard;
 pub mod dirs;
 pub mod frame;
 mod hook;
