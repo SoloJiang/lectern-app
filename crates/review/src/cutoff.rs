@@ -258,6 +258,25 @@ pub(crate) fn complete(
         took_us = started.elapsed());
 }
 
+/// The changes between two commits from `review.tree_changes`, else
+/// computed and written there (the key does not hold the time of a
+/// record). None on an error or a cancellation, which the caller tells by
+/// its flag. Blocking. For the worktrees overview's `committed` counts.
+pub(crate) fn tree_changes(
+    repo: &Repo,
+    partition: &Partition,
+    old: Option<Oid>,
+    new: Oid,
+    cancel: &AtomicBool,
+) -> Option<TreeChanges> {
+    let record = Record { time: 0, old, new };
+    let key = key(repo.location().hash, &record);
+    if let Some(CachedTreeChanges(changes)) = partition.get::<CachedTreeChanges>(&key) {
+        return Some(changes);
+    }
+    compute(repo, partition, &record, &key, cancel)
+}
+
 fn compute(
     repo: &Repo,
     partition: &Partition,

@@ -1846,6 +1846,9 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     share("review/overview_cloudprint", RECORD, REVIEW, ACTIVE, Time),
+    // (worktrees A) The parallel worktree overview of 11 worktrees on the
+    // cloudprint shape, cold, from the interest to the last count.
+    share("review/worktrees_cloudprint", RECORD, REVIEW, ACTIVE, Time),
     // (step 5) This crate's resident bytes with an overview ready, the
     // count set not counted (docs/design/review.md「性能」).
     share(

@@ -23,6 +23,70 @@ pub struct ReviewRepo {
     pub now: Timestamp,
     /// The paths the sessions edited.
     pub edited: Vec<String>,
+    /// The base commit `main` and the linked worktrees' branches are at.
+    pub commit: Oid,
+}
+
+impl ReviewRepo {
+    /// `count` linked worktrees (docs/design/review.md「性能」, the
+    /// parallel worktree overview), each on a branch at the base commit with
+    /// the index of the main worktree and, when `whole`, the files of
+    /// `shape`; the first `edits` source files are edited in each, so that
+    /// the worktrees overlap. Index-only (not `whole`), a worktree's files
+    /// are all missing: its comparison is capped.
+    pub fn add_linked(
+        &self,
+        shape: &Shape,
+        whole: bool,
+        count: usize,
+        edits: usize,
+    ) -> Result<(), BenchError> {
+        let hash = self.t.hash();
+        let content = |path: &str| format!("// {path}\nfn f() {{}}\n");
+        let entries: Vec<IndexEntry> = shape
+            .paths
+            .iter()
+            .map(|p| {
+                let oid = if whole {
+                    Oid::for_blob(hash, content(p).as_bytes())
+                } else {
+                    Oid::for_blob(hash, p.as_bytes())
+                };
+                IndexEntry::new(p, Mode::File, oid)
+            })
+            .collect();
+        let sources: Vec<&String> = shape
+            .paths
+            .iter()
+            .filter(|p| !shape.manifests.iter().any(|(m, _)| m == *p))
+            .take(edits)
+            .collect();
+        for i in 0..count {
+            let name = format!("linked-{i}");
+            let branch = format!("refs/heads/{name}");
+            let root = self.t.base().join(&name);
+            let admin = self.t.add_worktree(&name, &root, TestHead::Branch(&branch));
+            self.t.set_ref(&branch, self.commit);
+            self.t.write_index(&admin, &entries);
+            if whole {
+                for p in &shape.paths {
+                    let text = if sources.contains(&p) {
+                        format!("{}// edited in {name}\n", content(p))
+                    } else {
+                        content(p)
+                    };
+                    let file = root.join(p);
+                    if let Some(dir) = file.parent() {
+                        std::fs::create_dir_all(dir)?;
+                    }
+                    std::fs::write(&file, text)?;
+                }
+            }
+            let root = std::fs::canonicalize(&root)?;
+            self.projects.add_worktree(&admin, &root);
+        }
+        Ok(())
+    }
 }
 
 const SOURCE: &str = "session-claude-code";
@@ -115,5 +179,6 @@ pub fn build(shape: &Shape, whole: bool, sessions: usize) -> Result<ReviewRepo, 
         sessions,
         now: Timestamp((T + 3600) * 1000),
         edited,
+        commit,
     })
 }

@@ -35,6 +35,7 @@ pub(crate) mod round;
 mod rows;
 mod send;
 mod watch;
+mod worktrees;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -174,6 +175,9 @@ pub(crate) struct Engine {
     providers: Mutex<brief::Providers>,
     /// The project overviews with an interest (「概览」). A leaf lock.
     overviews: Mutex<overview::Overviews>,
+    /// The parallel worktree overviews with their counts (「并行 worktree
+    /// 总览」). A leaf lock.
+    worktrees: Mutex<worktrees::WtStates>,
     /// The last review note ID given (`next_note_id`). A leaf lock.
     note_ids: Mutex<u64>,
     /// The session routes of review notes registered (「审阅意见的发送
@@ -328,6 +332,7 @@ impl Engine {
             ancestry: Mutex::new(HashMap::new()),
             providers: Mutex::new(brief::Providers::default()),
             overviews: Mutex::new(overview::Overviews::default()),
+            worktrees: Mutex::new(worktrees::WtStates::default()),
             note_ids: Mutex::new(0),
             note_routes: Mutex::new(send::Routes::default()),
             attempts: Mutex::new(0),
@@ -561,6 +566,7 @@ impl Engine {
         lock(&self.providers).clear();
         lock(&self.note_routes).clear();
         self.overviews_clear();
+        self.worktrees_clear();
         lock(&self.gits).clear();
         lock(&self.tables).clear();
         lock(&self.claims).clear();
@@ -1467,6 +1473,19 @@ impl Engine {
         if let Some(git) = lock(&self.gits).get(key) {
             return Ok(Arc::clone(git));
         }
+        let git = self.open_git(project, key)?;
+        lock(&self.gits).insert(key.clone(), Arc::clone(&git));
+        Ok(git)
+    }
+
+    /// The handle of a worktree, opened and not kept in `gits`: the caller
+    /// drops it when it leaves the worktree (the worktrees overview's
+    /// comparisons of worktrees nobody reviews). Blocking.
+    pub(crate) fn open_git(
+        &self,
+        project: &ProjectKey,
+        key: &WorktreeKey,
+    ) -> Result<Arc<Git>, ReviewError> {
         let projects = (self.cfg.projects)().ok_or(ReviewError::NotInOpenProject)?;
         let snapshot = projects
             .snapshot(project)
@@ -1496,7 +1515,7 @@ impl Engine {
             .ok()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
-        let git = Arc::new(Git {
+        Ok(Arc::new(Git {
             project: project.clone(),
             key: key.clone(),
             root: info.root.clone(),
@@ -1504,9 +1523,7 @@ impl Engine {
             repo: found.repo,
             worktree: handle,
             log_name: Arc::from(log_name.as_str()),
-        });
-        lock(&self.gits).insert(key.clone(), Arc::clone(&git));
-        Ok(git)
+        }))
     }
 
     /// The worktree's cutoff table for these records and paths: the one in

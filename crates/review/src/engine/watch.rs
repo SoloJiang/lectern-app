@@ -220,6 +220,8 @@ impl Engine {
         }
         // The overviews' claims and sessions change too.
         self.overviews_request_all(super::overview::Trigger::default());
+        // So are the sessions' worktrees' uncommitted counts.
+        self.worktrees_sessions_changed(event);
     }
 
     /// Subscribes the review to its repository and worktree, once.

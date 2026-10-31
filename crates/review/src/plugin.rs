@@ -18,7 +18,7 @@ use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
 use lectern_services::review::{
     BriefRules, BriefRulesRegistration, FileRows, NoteRoute, NoteRouteRegistration, Overview,
     OverviewInterest, Review, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget,
-    RowsKey, TextKey,
+    RowsKey, TextKey, WorktreesOverview,
 };
 use lectern_services::session::{SessionSource, SessionsChanged, Timestamp};
 
@@ -254,6 +254,18 @@ impl Review for Service {
 
     fn watch_overview(&self, project: &ProjectKey) -> OverviewInterest {
         self.engine.watch_overview(project)
+    }
+
+    fn worktrees(&self, project: &ProjectKey) -> Option<Arc<WorktreesOverview>> {
+        self.engine.worktrees(project)
+    }
+
+    fn watch_worktrees(&self, project: &ProjectKey) -> OverviewInterest {
+        self.engine.watch_worktrees(project)
+    }
+
+    fn refresh_worktrees(&self, project: &ProjectKey) {
+        self.engine.refresh_worktrees(project)
     }
 
     fn register_brief_rules(
