@@ -395,12 +395,12 @@ pub enum FileKind {
   | `set_frame_autosave_name` 失败（「窗口 frame 的 autosave」）：窗口照常工作，只是位置与大小不再恢复和保存 | warn | `the window frame autosave name was not set; the frame is not restored or saved` | `kind`（`WindowError::as_str()`：`invalid_name`、`no_window`、`not_main_thread`、`name_in_use` 之一，`&'static str`） |
   | `appearance::watch` 的回调 panic（在 AppKit 的边界上 `catch_unwind` 截住，回调被丢弃，之后的变化不再送达，「系统外观」） | error | `the appearance change callback panicked; later changes are not delivered` | `change`（`Change::as_str()`：`system_colors` 或 `reduce_motion`，`&'static str`） |
   | `set_language_override` 的写入失败（`WriteFailed`，「系统首选语言」的「语言偏好」）：界面已按新语言显示，只是下次启动不会保持；`Superseded` 不是失败，不记 | warn | `the language preference was not saved; the interface language applies to this run only` | `kind`（`PrefError::as_str()`，`&'static str`） |
-| `login_env()` 第一次取环境失败（「登录 shell 的环境」）：调用方退回 Lectern 自己的环境，这次运行里不再重试 | warn | `the login shell environment was not captured; agents start with the app environment` | `kind`（`LoginEnvError::as_str()`，`&'static str`）；`Spawn` 时另有 `io`（`Value::io`：启动失败的系统错误），其他种类没有 |
-| `login_env()` 第一次取环境成功 | debug | `the login shell environment was captured` | `vars`（变量个数）、`took`（从启动 shell 到得到结果的 `Duration`） |
+  | `login_env()` 第一次取环境失败（「登录 shell 的环境」）：调用方退回 Lectern 自己的环境，这次运行里不再重试 | warn | `the login shell environment was not captured; agents start with the app environment` | `kind`（`LoginEnvError::as_str()`，`&'static str`）；`Spawn` 时另有 `io`（`Value::io`：启动失败的系统错误），其他种类没有 |
+  | `login_env()` 第一次取环境成功 | debug | `the login shell environment was captured` | `vars`（变量个数）、`took`（从启动 shell 到得到结果的 `Duration`） |
 
   - 级别按 [ADR 0046](../adr/0046.md)「默认日志」：kqueue 的订阅之后的事件被放弃，外观回调之后的变化不再送达，都不是降级后继续，所以是 error；frame autosave 名没有设上时窗口继续用当前的 frame，是降级后继续，所以是 warn。外观回调 panic 本身的位置由 `logging` 的 panic 钩子记录，这条记录只说明结果。
   - `login_env` 的两条记录在 `login_env()` 的缓存里、只在真正运行 shell 的那一次写出，`capture` 本身不记（测试直接调用它）；之后的调用不再记录，调用方各自记录这次启动用的是登录环境还是回退（terminal 设计「日志与诊断」的 `login_env` 字段）。取不到登录环境时 agent 照常启动、只是可能找不到程序，是降级后继续，所以是 warn；成功是常规情况，只在详细级别记录。
-  - 这五条记录只在 macOS 上编译（kqueue 和 AppKit 只在 macOS 上；Lectern 只在 macOS 上作为 GUI 应用运行，Linux 上的 `login_env` 只为 `terminal`、`agents` 的 CI 编译和测试，不记录；其他平台的 `set_frame_autosave_name` 不做事，也不记录），`lectern-logging` 因此只是 macOS 上的依赖。kqueue 的记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。frame autosave 的记录由函数自己写出，调用方（`app`）不再记一次；它在首帧之前可能发生，宏只编码记录，落盘由 `logging` 在首帧之后做（ADR 0046）。外观回调的记录在投递通知的线程（应用里是主线程）上写出，宏只编码记录，不做 IO。
+  - 这五处记录只在 macOS 上编译（kqueue 和 AppKit 只在 macOS 上；Lectern 只在 macOS 上作为 GUI 应用运行，Linux 上的 `login_env` 只为 `terminal`、`agents` 的 CI 编译和测试，不记录；其他平台的 `set_frame_autosave_name` 不做事，也不记录），`lectern-logging` 因此只是 macOS 上的依赖。kqueue 的记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。frame autosave 的记录由函数自己写出，调用方（`app`）不再记一次；它在首帧之前可能发生，宏只编码记录，落盘由 `logging` 在首帧之后做（ADR 0046）。外观回调的记录在投递通知的线程（应用里是主线程）上写出，宏只编码记录，不做 IO。
   - `frame` 的替换实现和 block 在 Metal、Core Animation、CoreVideo 的线程上运行，不分配、不加锁，所以也不记日志：安装的错误作为 `HookError` 返回（探针报告给运行器后退出），记录中的问题经 `FrameProblems` 交回（「测量构建的方法替换」）。它们只在测量构建里有。
 - 详细级别：不多记。kqueue 线程每次唤醒、FSEvents 的每个回调都是热路径，不加 debug、trace 记录。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
