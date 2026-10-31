@@ -2047,13 +2047,9 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
-    share(
-        "terminal/input",
-        &[median(Limit::TimeAtMost(us(12)))],
-        TERMINAL,
-        ACTIVE,
-        Time,
-    ),
+    // ADR 0058: the wake of a sleeping thread drifts on hosted runners, so
+    // this one is recorded; `terminal/echo_latency` judges the whole path.
+    share("terminal/input", RECORD, TERMINAL, ACTIVE, Time),
     share(
         "terminal/echo_latency",
         &[
