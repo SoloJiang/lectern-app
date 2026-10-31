@@ -333,9 +333,12 @@ impl Engine {
         let (event, current) = event;
         (self.cfg.emit)(event);
         // The worktrees overview takes the current worktree's
-        // uncommitted count from this set (「并行 worktree 总览」).
-        if let Some(current) = current {
-            self.worktrees_uncommitted_changed(project, current);
+        // uncommitted count from this set (「并行 worktree 总览」). A round
+        // without a set (it failed, or there is no worktree) leaves the
+        // current worktree to be compared there, as when the interest goes.
+        match current {
+            Some(current) => self.worktrees_uncommitted_changed(project, current),
+            None => self.worktrees_current_unsettled(project),
         }
         self.overview_round_ended(project);
     }
