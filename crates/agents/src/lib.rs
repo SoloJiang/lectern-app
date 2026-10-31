@@ -7,6 +7,7 @@
 //!
 //! 解析不先转成 JSON 的通用值树：每行反序列化到只声明用到字段的结构，字符串借用原行（ADR 0026）。
 
+mod acp;
 pub mod claude;
 mod codec;
 pub mod codex;
@@ -29,6 +30,10 @@ pub mod testing;
 #[cfg(test)]
 mod redact;
 
+pub use acp::{
+    ConversationsDeps, ConversationsPlugin, PLUGIN_ID as CONVERSATIONS_PLUGIN_ID,
+    conversations_plugin,
+};
 pub use filter::SessionFilter;
 pub use plugin::{AgentsDeps, SessionPlugin, plugins};
 pub use read::{Activity, Parsed};

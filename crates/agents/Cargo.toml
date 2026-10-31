@@ -22,6 +22,9 @@ lectern-services = { path = "../services" }
 lectern-executor = { path = "../executor" }
 lectern-fs-watch = { path = "../fs_watch" }
 lectern-cache = { path = "../cache" }
+# ACP client: the login shell environment and the program lookup
+# (docs/design/agents.md「ACP 客户端」, ADR 0050).
+lectern-platform = { path = "../platform" }
 # Runtime logging (docs/design/agents.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
 serde.workspace = true

@@ -148,7 +148,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 内嵌终端 | `terminal`（alacritty_terminal）、`terminal_view` | libghostty-vt 内核 + GPUI 自绘网格 | 高 |
 | 识别 Claude Code / Codex 项目 | `agent_servers`、`acp_thread` | 扫描 `~/.claude/projects`、`~/.codex/sessions` 的 JSONL | 低 |
 | 唤起 CLI / GUI | 无直接对应 | 内嵌终端执行 resume 命令；`open -a` 唤起桌面 App | 低 |
-| Agent 原生面板（可选） | `agent_ui` + ACP | `agent-client-protocol` crate + claude-agent-acp / codex-acp 适配器 | 高 |
+| Agent 原生面板（可选） | `agent_ui` + ACP | 自己实现的 ACP 客户端（stdio 上的 JSON-RPC，[ADR 0060](../adr/0060.md)）+ claude-agent-acp / codex-acp 适配器 | 高 |
 
 ## 技术选型
 
@@ -168,7 +168,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | MR 数据 | `octocrab`（GitHub）/ GitLab REST | 调用 `gh` / `glab` CLI | 支持 GitHub 与 GitLab（含自部署版）；按 remote 的域名识别平台，自部署实例由用户配置域名与 API 地址；MVP 调 gh / glab CLI，复用已有登录态 |
 | 本地存储 | SQLite（`rusqlite`，静态链接自带的 SQLite，[ADR 0027](../adr/0027.md)） | 系统 `libsqlite3`、redb | 派生数据缓存与用量记录共用一种引擎；版本随依赖固定，Linux CI 与 macOS 一致 |
 | 文件监听 | `fs_watch`（`platform` 的 FSEvents / kqueue 后端） | `notify`、`watchman` | 事件按 git index 和忽略规则过滤，见 [fs_watch 设计](fs_watch.md) |
-| Agent 协议 | [`agent-client-protocol`](https://agentclientprotocol.com) crate | 直接解析 JSONL | Zed、JetBrains 等都在用 ACP，Claude Code 与 Codex 都有适配器 |
+| Agent 协议 | [ACP](https://agentclientprotocol.com)，自己实现 stdio 上的 JSON-RPC 层（[ADR 0060](../adr/0060.md)） | `agent-client-protocol` crate、直接解析 JSONL | Zed、JetBrains 等都在用 ACP，Claude Code 与 Codex 都有适配器；crate 要异步执行器，与「专用线程、无运行时」冲突 |
 | 界面文案 | [Fluent](https://projectfluent.org)（`fluent-rs`） | `rust-i18n` | 支持复数、语序变化；en 与 zh-CN 的键一致由 CI 检查 |
 
 ### 终端：接入 libghostty-vt 内核
@@ -377,7 +377,7 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 
 ### 4. Agent 原生面板（第二阶段）
 
-用 `agent-client-protocol` crate 做客户端，子进程启动 `@zed-industries/claude-agent-acp` 或 `codex-acp`，通过 stdio 通信。这样能拿到结构化的消息、工具调用、权限请求，做出结构化的对话视图。Zed 的 `acp_thread` / `agent_ui` 是现成的参考实现（注意 GPL）。
+自己实现 ACP 客户端（[ADR 0060](../adr/0060.md)），子进程启动用户安装的 `claude-agent-acp`（npm 包 `@agentclientprotocol/claude-agent-acp`）或 `codex-acp`（`@agentclientprotocol/codex-acp`），通过 stdio 通信。这样能拿到结构化的消息、工具调用、权限请求，做出结构化的对话视图。Zed 的 `acp_thread` / `agent_ui` 是现成的参考实现（注意 GPL）。
 
 ## 代码导航与编辑
 

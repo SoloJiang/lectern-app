@@ -63,5 +63,6 @@
 | [0057](0057.md) | 产品能力完成之前，`app/open_diff` 在 CI 上按中位数 < 120 ms 判定（目标仍是 50 ms） | 已被 0059 修订 |
 | [0058](0058.md) | `terminal/input` 由预算 ≤ 2 µs 改为只记录，目标 ≤ 6 µs，整条路径由 `terminal/echo_latency` 判定；`terminal/open` 改为 ≤ 150 µs；仍用 `poll` 循环 | 已接受 |
 | [0059](0059.md) | 产品能力完成之前，`app/open_diff` 在 CI 上按中位数 < 260 ms 判定，修订 ADR 0057 的 120 ms | 已接受 |
+| [0060](0060.md) | ACP 客户端自己实现 stdio 上的 JSON-RPC，不引入 `agent-client-protocol` crate | 已接受 |
 
 新 ADR 用下一个编号，格式参照现有文件：标题、状态、日期、背景、决策、影响、（已知限制）、来源。ADR 只记录决策、理由和关键约束，一般不超过 3000 字；实现算法和边界情况的处理写进对应 crate 的设计文档（见 [adr 技能](../../.claude/skills/adr/SKILL.md)「ADR 写什么」）。
