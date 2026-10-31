@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（PR 号待定），第 2、3 步尚未实现。
+状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（#339），第 2、3 步尚未实现。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -647,7 +647,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 ### 第 1 步（快照与插件）
 
-PR 号待定，`Refs #16`，在 macOS（arm64）上运行：
+#339，`Refs #16`，在 macOS（arm64）上运行：
 
 - `just check`（格式、架构检查的自测与检查、文档链接、整个工作区的 clippy）通过。`just test -p lectern-worktrees`：46 个测试通过，含 `build_*` 与 4 份 `snapshot_*` 的 insta 快照、「验收」第 1 步列的 13 个插件与 `UsageLink` 用例、`usage_link.rs` 的 6 个、`canary_stays_out_of_worktrees_logs`，另有 `build_1000_fixture_shape`（夹具的形状：17 个 worktree、1000 个会话、每个 worktree 8 个重叠项和一份分支用量）。`just deny`（advisories、bans、licenses、sources 通过，有既有的许可证允许项未用的警告）；`Cargo.lock` 只多了本 crate 的依赖边，没有新的外部包。
 - 「验收」第 1 步的 `rg` 检查：`std::fs|std::process|git2|gix|std::thread::spawn`、对插件 crate 和 `lectern-git` 的依赖行、`eprintln!|println!|log::` 在 `crates/worktrees` 里都没有结果；`python3 scripts/check_architecture.py` 通过。
