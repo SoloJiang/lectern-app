@@ -94,6 +94,31 @@ fn the_page_works_when_the_live_plugin_never_started(cx: &mut TestAppContext) {
     assert_eq!(rig.conversations.watched(), 0);
 }
 
+/// A Dock reopen keeps the navigation and emits no `ScreenChanged`: the new
+/// page finds the session of the review still on the screen.
+#[gpui::test]
+fn a_page_built_after_the_window_closed_follows_the_review(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let one = session(1);
+    rig.conversations
+        .set(with_entries(&one, 1, vec![prompt("h:0:0", "in one")]));
+    rig.activate_main();
+    rig.activate_live();
+    rig.review(&one);
+    rig.kernel
+        .emitter()
+        .emit(lectern_services::workspace::WorkspaceEvent::WindowClosed {
+            window: lectern_services::workspace::WindowId(0),
+        });
+    rig.kernel.barrier();
+
+    let (host, vcx) = window(cx, &rig);
+    assert_eq!(
+        messages_of(&host, vcx).map(|model| vcx.update(|_, cx| model.read(cx).session().clone())),
+        Some(one.clone())
+    );
+}
+
 #[gpui::test]
 fn tab_follows_the_review_route(cx: &mut TestAppContext) {
     let rig = rig(cx);

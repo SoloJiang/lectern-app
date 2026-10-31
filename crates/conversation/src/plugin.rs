@@ -187,9 +187,6 @@ impl Shared {
             WorkspaceEvent::ScreenChanged { window, to, .. } if *window == WindowId(0) => {
                 self.set_current(Current::of(to));
             }
-            WorkspaceEvent::WindowClosed { window } if *window == WindowId(0) => {
-                self.set_current(Current::None);
-            }
             _ => {}
         }
     }
