@@ -342,10 +342,12 @@ fn app_open_diff(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 }
 
 /// `app/switch_worktree`: 5 launches, one at a time. Each opens the
-/// `cloudprint` shape, a repository with 11 worktrees, lets it settle, then
-/// sends `Open(Worktree)` of a linked one: from the request to the
-/// `WorktreeSwitched` milestone's frame, the Worktrees screen drawn with the
-/// settled snapshot of the new worktree (docs/design/worktrees.md「性能」).
+/// `cloudprint` shape, a repository with 11 worktrees, lets it settle, and
+/// switches to one linked worktree untimed: that shows the Worktrees screen,
+/// and the first show is not part of a switch. Once settled it sends
+/// `Open(Worktree)` of another: from the request to the `WorktreeSwitched`
+/// milestone's frame, the screen drawn with the settled snapshot of the new
+/// worktree (docs/design/worktrees.md「性能」).
 /// The roots are canonical, as `project` reports them.
 fn app_switch_worktree(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let program = app(ctx)?;
@@ -358,6 +360,12 @@ fn app_switch_worktree(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         session.open(
             OpenTarget::Project(repo.root().to_owned()),
             Milestone::ProjectHome,
+            OPEN_LIMIT,
+        )?;
+        settle(&mut session, "app/switch_worktree")?;
+        session.open(
+            OpenTarget::Worktree(roots[1].clone()),
+            Milestone::WorktreeSwitched,
             OPEN_LIMIT,
         )?;
         settle(&mut session, "app/switch_worktree")?;

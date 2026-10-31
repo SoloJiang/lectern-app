@@ -344,7 +344,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 | `worktrees/build_1000` | 中位数 < 2 ms：`snapshot::build`，17 个 worktree、1000 个会话、每个 worktree 8 个重叠项、每个 worktree 一份分支用量 |
 | `worktrees/resident_bytes` | 存活字节 < 256 KiB：同一夹具的快照与两个视图的状态（`Memory`）。现在只计快照；视图的状态要在窗口里建，等窗口里的内存测量再加（见「与设计的差异」第 3 步） |
 
-`app/switch_worktree`（[bench 设计「预算表」](bench.md#预算表)里「加入」一列写着 `worktrees`）随本 crate 的第 3 步改为生效：cloudprint 形状、11 个 worktree 的夹具，打开项目并静止之后切换到第一个 linked worktree（5 次启动，中位数）。
+`app/switch_worktree`（[bench 设计「预算表」](bench.md#预算表)里「加入」一列写着 `worktrees`）随本 crate 的第 3 步改为生效：cloudprint 形状、11 个 worktree 的夹具，打开项目并静止之后，先不计时地切换到一个 linked worktree（这一步打开 Worktrees 界面），再次静止之后计时切换到另一个（5 次启动，中位数）。用户在已经打开的界面上切换，界面的首次打开不算切换；不这样分开时 CI 上实测 253 ms、279 ms，其中混入了首次打开的开销。
 
 ## 界面
 
