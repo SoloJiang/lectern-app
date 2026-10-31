@@ -28,7 +28,7 @@ use lectern_services::session::{
 use lectern_services::usage::Usage;
 use lectern_services::workspace::{
     CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone,
-    Registration, SidebarEntry, Target, WorkspaceCommand,
+    Registration, Route, SidebarEntry, Target, WindowId, WorkspaceCommand,
 };
 use lectern_ui::contrib::{InspectorTab, KeyBindings, Screen};
 use lectern_ui::semantic::{Record, Recorder};
@@ -184,6 +184,10 @@ impl Contributions for FakeContributions {
 
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         Arc::from(Vec::new())
+    }
+
+    fn current_route(&self, _window: WindowId) -> Option<Route> {
+        None
     }
 
     fn report_milestone(&self, milestone: Milestone) {

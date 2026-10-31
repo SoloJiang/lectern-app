@@ -18,7 +18,8 @@ use lectern_kernel::{
 use lectern_logging::testing;
 use lectern_services::project::Projects;
 use lectern_services::workspace::{
-    Contribution, ContributionKind, Contributions, LeaveScope, WorkspaceCommand, screens,
+    Contribution, ContributionKind, Contributions, LeaveScope, Route, Target, WindowId,
+    WorkspaceCommand, screens,
 };
 use lectern_ui::contrib::KeyBindings;
 
@@ -209,6 +210,73 @@ fn escape_and_back_return_to_the_home(cx: &mut TestAppContext) {
     cx.simulate_keystrokes(rig.window, "cmd-[");
     rig.settle(cx);
     assert_eq!(rig.nav(cx).depth(), 0, "⌘[ returns to the home");
+}
+
+/// `Contributions::current_route` (conversation design「对其他 crate 的要求」A):
+/// after every navigation it equals the `to` of the last `ScreenChanged`, which
+/// is the state machine's current screen.
+#[gpui::test]
+fn current_route_follows_the_screen(cx: &mut TestAppContext) {
+    let rig = UiRig::prepared(cx);
+    let hub = rig.host.hub().clone();
+    let route = |screen: &str| Route {
+        screen: name(screen),
+        target: Target::None,
+    };
+
+    // Installed, the workspace plugin not activated yet: the window exists
+    // and shows Welcome, for a plugin whose `started` runs before the first
+    // `ScreenChanged` reaches it.
+    assert_eq!(hub.current_route(WindowId(0)), Some(route("welcome")));
+    rig.activate(cx);
+    let _plugins = rig.contribute(Contributor::staged(standard_screens()), cx);
+    assert_eq!(hub.current_route(WindowId(0)), Some(route("welcome")));
+    assert_eq!(hub.current_route(WindowId(1)), None, "no such window");
+
+    rig.open(project_path(), &project(), cx);
+    assert_eq!(
+        hub.current_route(WindowId(0)),
+        Some(Route {
+            screen: name("project-home"),
+            target: Target::Project(project()),
+        })
+    );
+    assert_eq!(hub.current_route(WindowId(0)), Some(rig.nav(cx).current()));
+
+    rig.push(screens::REVIEW, cx);
+    assert_eq!(hub.current_route(WindowId(0)), Some(route("review")));
+    assert_eq!(hub.current_route(WindowId(0)), Some(rig.nav(cx).current()));
+
+    rig.dispatch(WorkspaceCommand::Pop, cx);
+    assert_eq!(hub.current_route(WindowId(0)), Some(rig.nav(cx).current()));
+    assert_eq!(
+        hub.current_route(WindowId(0)).map(|r| r.screen),
+        Some(name("project-home"))
+    );
+
+    rig.emit(closed(&project()), cx);
+    assert_eq!(hub.current_route(WindowId(0)), Some(route("welcome")));
+    assert_eq!(hub.current_route(WindowId(0)), Some(rig.nav(cx).current()));
+
+    cx.dispatch_action(rig.window, CloseWindow);
+    rig.settle(cx);
+    assert_eq!(
+        hub.current_route(WindowId(0)),
+        None,
+        "a closed window has no route"
+    );
+
+    // A Dock reopen puts the workspace in a new window: it has its route again.
+    struct Empty;
+    impl Render for Empty {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+    let second: gpui::AnyWindowHandle = cx.add_window(|_, _| Empty).into();
+    cx.update(|cx| rig.host.attach(second, cx));
+    rig.settle(cx);
+    assert_eq!(hub.current_route(WindowId(0)), Some(rig.nav(cx).current()));
 }
 
 #[gpui::test]
