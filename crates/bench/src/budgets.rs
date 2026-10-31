@@ -183,6 +183,11 @@ const LOGGING: &str = "docs/design/logging.md#性能";
 const USAGE: &str = "docs/design/usage.md#性能";
 const UI: &str = "docs/design/ui.md#性能";
 const REVIEW_VIEW: &str = "docs/design/review_view.md#性能";
+const PROJECT_HOME: &str = "docs/design/project_home.md#性能";
+/// The frame-time budgets of the screens wait for `workspace` to record
+/// frames (`FrameRecord::frames` is always empty, workspace design
+/// 「已知限制」) and for `app` to hand the records to the probe.
+const FRAMES_RECORDED: State = State::Planned("workspace 的帧记录");
 const TERMINAL: &str = "docs/design/terminal.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
@@ -296,7 +301,7 @@ pub static BUDGETS: &[Budget] = &[
         "app/idle_monorepo",
         &[median(Limit::BytesBelow(100 * MB))],
         ADR_0017_DECISION,
-        State::Planned("project_home"),
+        ACTIVE,
         Process,
     ),
     // After all pausable background work (ADR 0029) has finished; the
@@ -315,7 +320,7 @@ pub static BUDGETS: &[Budget] = &[
         "app/idle_100k",
         &[median(Limit::BytesBelow(120 * MB))],
         ADR_0035_DECISION,
-        State::Planned("project_home"),
+        ACTIVE,
         Process,
     ),
     top(
@@ -329,7 +334,7 @@ pub static BUDGETS: &[Budget] = &[
         "app/open_project",
         &[median(Limit::TimeBelow(ms(100)))],
         TECH,
-        State::Planned("project_home"),
+        ACTIVE,
         Process,
     ),
     top(
@@ -341,9 +346,11 @@ pub static BUDGETS: &[Budget] = &[
     ),
     top(
         "app/open_diff",
-        &[median(Limit::TimeBelow(ms(50)))],
+        // ADR 0057: 50 ms is the target; CI judges 120 ms until the product
+        // is complete.
+        &[median(Limit::TimeBelow(ms(120)))],
         TECH,
-        State::Planned("review_view"),
+        ACTIVE,
         Process,
     ),
     top(
@@ -2117,14 +2124,44 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // `review_view/*` (docs/design/review_view.md「性能」): GPUI, so macOS
-    // alone. Step 1's `items_5000`; `scroll_5000` and `app/open_diff` come
-    // with the `app` step.
+    // alone. `scroll_5000` is a frame record of the measurement build.
     share_macos(
         "review_view/items_5000",
         &[median(Limit::TimeBelow(ms(4)))],
         REVIEW_VIEW,
         ACTIVE,
         Time,
+    ),
+    share_macos(
+        "review_view/scroll_5000",
+        &[p95(Limit::TimeAtMost(us(8300)))],
+        REVIEW_VIEW,
+        FRAMES_RECORDED,
+        Process,
+    ),
+    // `project_home/*` (docs/design/project_home.md「性能」): GPUI, so macOS
+    // alone.
+    share_macos(
+        "project_home/build_1000",
+        &[median(Limit::TimeBelow(ms(2)))],
+        PROJECT_HOME,
+        ACTIVE,
+        Time,
+    ),
+    // The snapshot and the two views' state: the views need a window.
+    share_macos(
+        "project_home/resident_bytes",
+        &[median(Limit::BytesBelow(MB))],
+        PROJECT_HOME,
+        State::Planned("project_home 的视图状态（要窗口）"),
+        Memory,
+    ),
+    share_macos(
+        "app/home_frames",
+        FRAMES,
+        PROJECT_HOME,
+        FRAMES_RECORDED,
+        Process,
     ),
 ];
 

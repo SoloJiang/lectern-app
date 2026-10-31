@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现；没有保存过 frame 时设默认尺寸并居中的 `window::set_frame_autosave_name_or_center`（同一节）已实现，真实窗口上的检查见「实际验证」。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；drawable 没有 `presentedTime` 时首帧取显示回调运行的时刻、结果注明来源（`PresentedAt`、`TimeSource`，[ADR 0052](../adr/0052.md)）已实现；`frame::record` 及其类型（B2，见「逐帧记录」）已实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。剪贴板的写入 `clipboard::write_text`（[review 设计](review.md#对其他-crate-的要求)的前置条件 I，[#22](https://github.com/SoloJiang/lectern-app/issues/22)，见「剪贴板」）已实现。登录 shell 的环境 `login_env`（[terminal 设计](terminal.md)「对其他 crate 的要求」第 2 项，[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「登录 shell 的环境」）已接受，尚未实现。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现；没有保存过 frame 时设默认尺寸并居中的 `window::set_frame_autosave_name_or_center`（同一节）已实现，真实窗口上的检查见「实际验证」。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；drawable 没有 `presentedTime` 时首帧取显示回调运行的时刻、结果注明来源（`PresentedAt`、`TimeSource`，[ADR 0052](../adr/0052.md)）已实现；`frame::record` 及其类型（B2，见「逐帧记录」）已实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。剪贴板的写入 `clipboard::write_text`（[review 设计](review.md#对其他-crate-的要求)的前置条件 I，[#22](https://github.com/SoloJiang/lectern-app/issues/22)，见「剪贴板」）已实现。登录 shell 的环境 `login_env`（[terminal 设计](terminal.md)「对其他 crate 的要求」第 2 项，[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「登录 shell 的环境」）已实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -1674,7 +1674,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 
 [terminal 设计「对其他 crate 的要求」](terminal.md#对其他-crate-的要求)第 2 项与 [conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求) C（[ADR 0050](../adr/0050.md)）要的模块 `login_env`：用户的登录 shell、登录 shell 设置之后的环境变量、在 `PATH` 里找程序。从 Finder 或 Dock 启动的应用只有 launchd 给的最小环境（`PATH` 是 `/usr/bin:/bin:/usr/sbin:/sbin`），`claude`、`codex` 常装在 Homebrew、nvm 一类的目录里，代理和 API key 也常在 shell 的配置文件里设置。Terminal 页启动 agent 和 `agents` 的 ACP 客户端都用这份环境，进程内只取一次、两处共用，所以同一个 agent 在两处的环境相同。去掉 `LECTERN_` 开头的变量、加 `TERM` 等是调用方的事（[terminal 设计「子进程的环境」](terminal.md#子进程的环境)），本模块原样返回。
 
-模块在所有 unix target 上编译（`terminal`、`agents` 不依赖 GPUI，Linux CI 也编译和测试它们）。它不是 macOS 专属能力，但「GUI 应用没有登录环境」是 macOS 的问题，所以放在本 crate；用到的 `getpwuid_r`、`setsid`、`poll`、`kill` 都来自已有的 `libc`。
+模块在 macOS 和 Linux 上编译（`terminal`、`agents` 不依赖 GPUI，Linux CI 也编译和测试它们）。它不是 macOS 专属能力，但「GUI 应用没有登录环境」是 macOS 的问题，所以放在本 crate；用到的 `getpwuid_r`、`setsid`、`poll`、`kill` 都来自已有的 `libc`。
 
 ### 接口
 
@@ -1693,7 +1693,7 @@ pub mod login_env {
     /// 阻塞，只在 executor 的任务或专属线程上调用；首帧之前不调用。
     pub fn login_env() -> Result<Arc<LoginEnv>, LoginEnvError>;
 
-    #[derive(Debug)]
+    /// `Debug` 只打印变量个数：名字和值可能含凭据。
     pub struct LoginEnv {
         /// shell 打印的顺序；去掉了 `_`、`SHLVL`、`PWD`、`OLDPWD`（「规则」）。
         pub vars: Box<[(OsString, OsString)]>,
@@ -1734,9 +1734,11 @@ pub mod login_env {
 /// `user_shell` 的选择规则，三个候选由调用方给出。
 pub(crate) fn pick_shell(shell_var: Option<&OsStr>, passwd_shell: Option<&OsStr>, fallback: &Path) -> Option<PathBuf>;
 /// 不缓存的一次取环境：用给定的 shell、工作目录和期限。
-pub(crate) fn capture(shell: &Path, cwd: &Path, timeout: Duration) -> Result<LoginEnv, LoginEnvError>;
+pub(crate) fn capture(shell: &Path, cwd: &Path, timeout: Duration) -> Result<LoginEnv, Failure>;
 /// 缓存：`login_env` 是 `cached(&CELL, || capture(...))`，`CELL` 是全局的 `OnceLock`。
-pub(crate) fn cached(cell: &OnceLock<Result<Arc<LoginEnv>, LoginEnvError>>, f: impl FnOnce() -> Result<LoginEnv, LoginEnvError>) -> Result<Arc<LoginEnv>, LoginEnvError>;
+pub(crate) fn cached(cell: &OnceLock<Result<Arc<LoginEnv>, LoginEnvError>>, f: impl FnOnce() -> Result<LoginEnv, Failure>) -> Result<Arc<LoginEnv>, LoginEnvError>;
+/// 一次失败：调用方看到的种类，和只进日志的系统错误（`Spawn` 时有）。
+pub(crate) struct Failure { pub(crate) kind: LoginEnvError, pub(crate) io: Option<io::Error> }
 ```
 
 ### 规则
@@ -1753,7 +1755,7 @@ pub(crate) fn cached(cell: &OnceLock<Result<Arc<LoginEnv>, LoginEnvError>>, f: i
 - 读取：在调用线程上用 `poll(2)` 等管道可读，每次读 64 KiB，期限是启动时刻加 5 秒，累计超过 1 MiB 时停止并结束进程组（`Unparsable`）。不另开线程（后台线程只由 `executor` 管理，[ADR 0024](../adr/0024.md)）。读到结束标记就停止读取。
 - 解析：在输出里找 `<开始标记>\n`，从它之后找 `<结束标记>\n`；两者之间按 NUL 分成项，最后一项之后可以有一个 NUL。每项在第一个 `=` 处分成名字和值；名字为空或没有 `=` 的项使整个结果为 `Unparsable`（说明这不是 `env -0` 的输出）。找不到一对标记也是 `Unparsable`。
 - 去掉的变量：`_`（`env` 的路径）、`SHLVL`、`PWD`、`OLDPWD`。它们描述的是这次打印环境的 shell，不是用户的环境；调用方按自己的规则设 `PWD`（terminal 设计「子进程的环境」）。
-- 结束：读到完整的环境后，等 shell 自己退出（登录 shell 退出时会运行 `.zlogout`），至多等到同一个期限，用 `try_wait` 加 1 ms 起、至多 20 ms 的间隔轮询；期限到时向进程组发 `SIGKILL` 再 `waitpid`，结果仍是成功。期限之前没有读到完整的环境时，向进程组发 `SIGKILL`、`waitpid`，结果是 `Timeout`。读到 EOF 而没有完整的环境时，同样结束进程组、`waitpid`，结果是 `Unparsable`。shell 的退出码不影响结果。正常退出后不结束进程组：配置文件启动的后台程序（如 `ssh-agent`）留给用户。
+- 结束：读到完整的环境后关闭管道，等 shell 自己退出（登录 shell 退出时会运行 `.zlogout`），至多等到同一个期限，用 `try_wait` 加 1 ms 起、至多 20 ms 的间隔轮询；期限到时向进程组发 `SIGKILL` 再 `waitpid`，结果仍是成功。期限之前没有读到完整的环境时，向进程组发 `SIGKILL`、`waitpid`，结果是 `Timeout`。读到 EOF 而没有完整的环境时，同样结束进程组、`waitpid`，结果是 `Unparsable`。shell 的退出码不影响结果。正常退出后不结束进程组：配置文件启动的后台程序（如 `ssh-agent`）留给用户。
 - 缓存：全局的 `OnceLock<Result<Arc<LoginEnv>, LoginEnvError>>`，`get_or_init` 保证并发的第一次调用只运行一次 shell。失败也缓存：一次运行里不再重试，调用方退回 Lectern 自己的环境（terminal 设计「启动命令」、conversation 设计 C）。用户改了配置文件之后要重启 Lectern 才生效。
 - 首帧之前不调用（[ADR 0017](../adr/0017.md)）：模块没有初始化代码，不在 `app` 的启动路径上；第一次调用来自 Terminal 页启动 agent 或 `agents` 第一次查找 ACP 程序，都在首帧之后、在后台线程上（terminal 设计的 `no_threads_until_open` 检查激活后没有取登录环境）。
 - `find_program`：按 `:` 分开 `path`，跳过空项和不以 `/` 开头的项（POSIX 把空项当作当前目录，Lectern 的当前目录没有意义）；对每个目录拼上 `name`，`stat`（跟随链接）为普通文件且 `access(X_OK)` 通过时返回。
@@ -1780,8 +1782,8 @@ pub(crate) fn cached(cell: &OnceLock<Result<Arc<LoginEnv>, LoginEnvError>>, f: i
 - `login_env_passes_login_interactive_flags`：记录文件里参数是 `-l`、`-i`、`-c` 和一条含两个 `__lectern_env_` 标记与 `/usr/bin/env -0` 的命令；stdin 不是终端；工作目录是传入的 `cwd`。
 - `login_env_without_markers_is_unparsable`：假 shell 只打印杂项就退出；`login_env_only_the_start_marker_is_unparsable`；`login_env_an_entry_without_equals_is_unparsable`；`login_env_output_over_1_mib_is_unparsable`（假 shell 不停地输出，结果在期限之前返回）。
 - `login_env_missing_shell_is_spawn`：shell 路径不存在；`login_env_non_executable_shell_is_spawn`。
-- `login_env_times_out_and_kills_the_group`：假 shell 在后台启动一个 `sleep 30` 的子进程并把它的 pid 写进记录文件，自己也 `sleep 30`；以 300 ms 的期限调用，结果为 `Timeout`，耗时小于 2 秒，之后两个 pid 都已不存在（`kill(pid, 0)` 为 `ESRCH`）。
-- `login_env_waits_for_a_slow_exit`：假 shell 输出环境后 `sleep 0.2` 再退出，结果成功；`login_env_hanging_exit_still_succeeds`：输出环境后 `sleep 30`，以 300 ms 的期限调用，结果成功，shell 已被结束。
+- `login_env_times_out_and_kills_the_group`：假 shell 在后台启动一个 `sleep 30` 的子进程并把它的 pid 写进记录文件，自己也 `sleep 30`；以 2 秒的期限调用，结果为 `Timeout`，耗时小于 4 秒，之后两个 pid 都已不存在（`kill(pid, 0)` 为 `ESRCH`）。
+- `login_env_waits_for_a_slow_exit`：假 shell 输出环境后 `sleep 0.2` 再退出，结果成功；`login_env_hanging_exit_still_succeeds`：输出环境后 `sleep 30`，以 2 秒的期限调用，结果成功，shell 已被结束。
 - `login_env_caches_once`：`cached` 用一个本地的 `OnceLock`，8 个线程同时调用，给出的闭包只运行一次，各线程得到同一个 `Arc`；失败的结果也只运行一次。
 - `pick_shell_*`：`$SHELL` 合格时用它；为空、相对路径、不存在、是目录、不可执行时看用户数据库的值，再看回退值；三者都不合格时 None。
 - `find_program_*`：返回第一个合格的目录里的路径；跳过不可执行的文件、同名目录、空项和相对路径；跟随指向可执行文件的符号链接；`name` 为空、含 `/`、为 `.` 或 `..` 时 None。
@@ -1925,10 +1927,10 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
 
 登录 shell 的环境（[terminal 设计](terminal.md)「对其他 crate 的要求」第 2 项）一个实现 PR，写 `Refs #12`（#12 由 terminal 的最后一个 PR 关闭），在 terminal 第 3 步之前合并：
 
-- `crates/platform/src/login_env.rs` 按「登录 shell 的环境」的「接口」实现，`lib.rs` 里 `#[cfg(unix)] pub mod login_env;`。
+- `crates/platform/src/login_env.rs` 按「登录 shell 的环境」的「接口」实现，`lib.rs` 里 `#[cfg(any(target_os = "linux", target_os = "macos"))] pub mod login_env;`。
 - `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「登录 shell 的环境」「测试」列出的 `login_env_*`、`pick_shell_*`、`find_program_*`，macOS 上另有 `login_env_failure_logs_the_kind_only`、`login_env_success_logs_counts_only`；原有的测试结果不变。
 - `git diff origin/main -- Cargo.lock` 为空（调用都来自已有的 `libc` 和标准库）。
-- `rg -n 'getpwuid_r|setsid|killpg|fn login_env|-l", "-i' crates --glob '!crates/platform/**' -t rust` 没有结果：取登录环境只在本 crate。
+- `rg -n 'getpwuid_r|fn login_env|-l", "-i' crates --glob '!crates/platform/**' -t rust` 没有结果：取登录环境只在本 crate（不查 `setsid`：`terminal` 的 PTY 也用它）。
 - `rg -n 'thread::spawn|Builder::new\(\)' crates/platform/src/login_env.rs` 没有结果（实现不另开线程；测试里的并发调用不受这条限制）。
 - `just check`、`just deny` 通过。
 - `just test -p lectern-platform -- --ignored login_env_reads_this_users_shell` 在本机运行一次，变量个数和耗时写进「实际验证」。
@@ -2059,6 +2061,13 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - `just check`、`just deny` 通过；`git diff origin/main -- Cargo.lock` 为空。
   - 没有验证的：排到主队列的那一步和写入通用剪贴板没有在任何测试里运行（测试进程没有运行中的主线程队列，也不能碰用户的剪贴板）；由 [review_view 设计「验收」](review_view.md#验收)第 4 步在真实应用里手动检查。`clipboard_is_unsupported_elsewhere` 只由 Linux CI 编译和运行，本机没有 Linux 目标。
 
+登录 shell 的环境（#12）：
+
+- `just test -p lectern-platform` 在本机（macOS）通过，其中有 `login_env_*`、`pick_shell_*`、`find_program_*`。Linux CI 与 macOS CI 的结果见实现 PR。
+- `login_env_reads_this_users_shell` 在本机运行一次：用户的 `/bin/zsh`（配置较多），142 个变量，耗时 2.08 s，在 5 秒的上限之内；更早用同一条打印环境的命令手工运行一次约 1 s。耗时随配置和机器负载变化。
+- 变异检查：把 `kill(-pid, …)` 改成 `kill(pid, …)`，`login_env_times_out_and_kills_the_group` 失败（`background is still running`），所以这个测试确实检查了进程组。
+- 打印环境的命令在 `/bin/zsh`、`/bin/bash`、`/bin/sh` 的 `-l -i -c` 下实测输出 NUL 分隔的环境。未验证：本机没有安装 fish；从 Finder 启动的真实应用要等 terminal 第 3 步接入后才能检查。
+
 ## 与设计的差异
 
 - `Walk` 在 `fstatat` 的结果与之前那次打开的错误矛盾时重做这一级，最多 8 次（见「Walk」）。设计写的是直接返回 `Io(原来的错误)`：目录与符号链接来回交换时，这种做法偶尔会让 `race_swap_never_escapes` 得到 `Io`，而这个测试只允许三种结果。重做不改变「不读到根目录之外」，只让并发替换时的结果与某一时刻的状态一致。
@@ -2111,3 +2120,4 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - `mach_absolute_time`、`mach_timebase_info` 在模块里手写声明：`libc` 把它们标为弃用，推荐的 `clock_gettime_nsec_np` 不是 `CVTimeStamp.hostTime` 用的刻度。
   - 只替换第一次找到的命令缓冲类的 `commit`：之后的 `record` 在另一个类的设备上不再替换，那里的帧都计入 `incomplete`（「逐帧记录」已写的「类不同时钩子不生效」）。`FrameRecorder` 不调用 `stop` 就被丢弃时，同样停止记录、释放「同一时刻最多一个记录器」，结果丢弃。
 - 剪贴板（#22，「剪贴板」）：接口按 review 设计的前置条件 I 实现，补充四点。`ClipboardError` 实现 `Display` 和 `Error`（与 `WindowError` 相同）；`done` 的类型有别名 `Done`；`Rejected` 也用于建不出 `NSString` 或没有通用剪贴板对象；`done` 的 panic 被 `catch_unwind` 截住并丢弃，避免它越过 libdispatch 的边界使进程中止。
+- 登录 shell 的环境（#12）：`LoginEnv` 的 `Debug` 是手写的，只打印变量个数，因为名字和值可能含凭据（测试 `login_env_debug_prints_no_names_or_values`）；「接口」原来写的是 derive。`capture` 与 `cached` 用内部类型 `Failure` 代替 `LoginEnvError`，因为缓存的 `LoginEnvError` 是 `Copy`，放不下 `Spawn` 日志要的 `io::Error`；「接口」已改。模块的条件是 macOS 和 Linux，不是所有 unix，因为 `libc` 只是这两个平台的依赖。读到完整的环境后关闭管道再等 shell 退出，这样 `.zlogout` 的输出不会因管道写满而卡到期限。增加了设计没有列出的测试：`login_env_markers_differ_between_runs`、`login_env_caches_a_failure_once`、`login_env_spawn_failure_logs_the_io_error_without_the_path`。超时测试的期限从 300 ms 放宽到 2 秒：期限太短时，负载高的机器上假 shell 可能来不及写完记录，测试会偶发失败。

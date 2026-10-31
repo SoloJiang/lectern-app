@@ -11,6 +11,8 @@
 //! the app data and log directories ([`dirs::app_data`], [`dirs::logs`]),
 //! the OS version for log file headers ([`system::os_version`]),
 //! the local time zone's offset from UTC ([`time::utc_offset`]),
+//! the user's login shell environment for agents ([`login_env`], on macOS
+//! and Linux),
 //! the window frame autosave name of AppKit
 //! ([`window::set_frame_autosave_name`]),
 //! the system appearance's colours, reduce-motion setting and their changes
@@ -27,6 +29,8 @@ pub mod dirs;
 pub mod frame;
 mod hook;
 pub mod host;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod login_env;
 pub mod process;
 #[cfg(unix)]
 pub mod safe_read;
