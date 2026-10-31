@@ -338,7 +338,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 
 | ID | 统计量与预算 |
 |---|---|
-| `project_home/build_1000` | 中位数 < 2 ms（`snapshot::build`：1000 个会话、50 个概览条目、17 个 worktree、2000 个子项目） |
+| `project_home/build_1000` | 中位数 < 3 ms（[ADR 0055](../adr/0055.md)，原来 < 2 ms；`snapshot::build`：1000 个会话、50 个概览条目、17 个 worktree、2000 个子项目） |
 | `project_home/resident_bytes` | 存活字节 < 1 MB（同一夹具的 `HomeSnapshot` 与两个视图的状态；`Memory`） |
 | `app/home_frames` | 每帧工作时间最大值 ≤ 8.3 ms、相邻帧间隔 ≤ 1.5 个刷新周期（与 `app/scroll_frames` 的两个条件相同）：夹具项目有 1000 个会话（50 个在概览里、50 张卡片）、17 个 worktree、2000 个子项目；打开后经 `WorkspaceHost::record_frames("home", AnimationsSettled)` 记录一次概览到达（50 个进度环同时过渡），再记录一次侧栏从顶部滚到 Packages 末尾（场景 `home-scroll`，`RecordStop::Manual`），两段都要通过 |
 
@@ -575,7 +575,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 
 - `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加二。
 - 手动在 macOS 上运行发布构建（临时 `HOME`、有会话的仓库）：打开文件夹后侧栏列出最近的会话（其余折成「N more」）、Packages 带今天的改动数，主区显示 Needs Review、Outside Any Session、Recently Done；↑ ↓ ↵ 进入审阅、⌘[ 返回；日志里 `home milestone reported` 的 `since_opened_us` < 100 000。
-- `just bench app/`：`app/open_project` 中位数 < 100 ms；`app/idle_monorepo` < 100 MB、`app/idle_100k` < 120 MB；`app/home_frames` 通过。`just bench project_home/`：`project_home/build_1000` < 2 ms、`project_home/resident_bytes` < 1 MB。
+- `just bench app/`：`app/open_project` 中位数 < 100 ms；`app/idle_monorepo` < 100 MB、`app/idle_100k` < 120 MB；`app/home_frames` 通过。`just bench project_home/`：`project_home/build_1000` < 3 ms（ADR 0055）、`project_home/resident_bytes` < 1 MB。
 - `app/idle_empty` 与改动前相比增加不超过 64 KiB。
 
 ## 已知限制

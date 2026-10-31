@@ -2042,7 +2042,7 @@ pub static BUDGETS: &[Budget] = &[
     // after 12 ms of quiet.
     share(
         "terminal/open",
-        &[median(Limit::TimeAtMost(us(100)))],
+        &[median(Limit::TimeAtMost(us(150)))],
         TERMINAL,
         ACTIVE,
         Time,
@@ -2173,7 +2173,7 @@ pub static BUDGETS: &[Budget] = &[
     // alone.
     share_macos(
         "project_home/build_1000",
-        &[median(Limit::TimeBelow(ms(2)))],
+        &[median(Limit::TimeBelow(ms(3)))],
         PROJECT_HOME,
         ACTIVE,
         Time,

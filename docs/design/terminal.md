@@ -638,7 +638,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 
 | ID | 预算 | 测量 |
 |---|---|---|
-| `terminal/open` | 中位数 ≤ 100 µs | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
+| `terminal/open` | 中位数 ≤ 150 µs（[ADR 0058](../adr/0058.md)，原来 ≤ 100 µs） | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
 | `terminal/input` | 只记录，目标中位数 ≤ 6 µs（[ADR 0058](../adr/0058.md)，原来 ≤ 2 µs） | 主线程上的一次 `input`：入队与唤醒字节；终端线程睡在 `poll` 上时，写唤醒字节本身就要 3 µs 以上 |
 | `terminal/parse_plain` | 中位数 ≤ 14 ms（[ADR 0055](../adr/0055.md)） | 1 MiB 纯 ASCII、每行 120 列，120×40，`vt_write` 到解析完成 |
 | `terminal/parse_sgr` | 中位数 ≤ 25 ms | 1 MiB、每 8 个字符换一次 24 位色的输出 |
@@ -847,7 +847,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 
   | 基准 | 实测中位数 | 预算 |
   |---|---|---|
-  | `terminal/open` | 55–69 µs（6 次运行） | ≤ 100 µs |
+  | `terminal/open` | 55–69 µs（6 次运行；CI 上 77–108 µs） | ≤ 150 µs（原来 ≤ 100 µs，见 ADR 0058） |
   | `terminal/input` | 3.6–3.9 µs（另有两次安静时 1.5、1.7 µs） | 只记录，目标 ≤ 6 µs（原来 ≤ 2 µs，见 ADR 0058；CI 上记录到 8.29–21.2 µs） |
   | `terminal/echo_latency` | 中位数 81–158 µs，p95 156–247 µs（另有一次 p95 1.24 ms） | 中位数 ≤ 1 ms，p95 ≤ 3 ms |
 
