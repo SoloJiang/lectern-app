@@ -1,0 +1,62 @@
+---
+source: crates/worktrees/src/tests/build.rs
+expression: render(&built)
+---
+snapshot folder=false settled=true switches=0 base=-
+sources project=1 sessions=[] changes=None usage=0
+built_at=0 next_expiry=-
+active 0
+idle 9
+  app/.git head=branch:main flags=[current,main] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage not-counted
+  feat head=branch:feat flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage branch cumulative=420 review=15 since=3d inherited=true backfilling=false
+  loading head=branch:loading flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage pending
+  nothing head=branch:nothing flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage pending
+  back head=branch:back flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage branch cumulative=10 review=15 since=3d inherited=false backfilling=true
+  one head=branch:one flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage mrs 1
+      mr #11 "Add the thing" tokens=Some(42) shared_with=0
+  two head=branch:two flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage mrs 3
+      mr #21 "First" tokens=Some(550) shared_with=2
+      mr #22 "Second" tokens=Some(220) shared_with=1
+      mr #23 "Third" tokens=None shared_with=0
+  det head=detached:01234567 flags=[] sessions=0 running=0
+    changes uncommitted=Pending committed=Pending vs_base=Pending counted_ago=-
+    overlaps pending
+    usage pending
+  gone head=branch:gone flags=[prunable] sessions=0 running=0
+    changes uncommitted=Unavailable committed=Unavailable vs_base=Unavailable counted_ago=-
+    overlaps unknown
+    usage absent
+pending []
+queries
+  worktree app/.git
+  worktree feat
+  worktree loading
+  worktree nothing
+  worktree back
+  worktree one
+  worktree two
+  mr #21
+  mr #22
+  mr #23
+  worktree det
