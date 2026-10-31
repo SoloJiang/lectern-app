@@ -6,14 +6,16 @@
 //! one frame. This module reads no side text and touches no window; its cost
 //! is linear in `files + turns + items + prepared rows`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
 use lectern_services::changes::{ChangeDetail, SideText};
+use lectern_services::project::BlobId;
 use lectern_services::review::{
-    Alignment, CallRef, DiffRow, FileEntry, FileKey, FileRows, GroupKind, IncompleteKind,
-    ReviewSnapshot, RowsKey, StepId, TextKey, TurnRef,
+    Alignment, CallRef, DiffRow, DiffSide, FileEntry, FileKey, FileRows, GroupKind, IncompleteKind,
+    Note, NoteId, NotePlace, NoteRows, NoteState, ReviewSnapshot, RowsKey, StepId, TextKey,
+    TurnRef,
 };
 use lectern_services::session::ToolCallId;
 
@@ -97,12 +99,14 @@ pub enum Item {
         old: u32,
         new: u32,
     },
-    /// One diff row; `ix` indexes `FileRows::rows`.
+    /// One diff row; `ix` indexes the display rows. `notes` says what the
+    /// review notes after it are (the dot in the line-number column).
     Row {
         rows: RowsKey,
         ix: u32,
         old: Option<u32>,
         new: Option<u32>,
+        notes: RowNotes,
     },
     /// Unchanged lines folded: `ix` indexes `FileRows::rows`, `old` is the
     /// first folded line of the old side.
@@ -134,6 +138,30 @@ pub enum Item {
         call: CallRef,
         at: Pos,
     },
+    /// #22: a review note. `rows` is the diff it is drawn in (inside the
+    /// diff's card), None for the notes of the `NotesElsewhere` block.
+    Note {
+        id: NoteId,
+        rows: Option<RowsKey>,
+    },
+    /// #22: the open editor (`ReviewModel::editor`), in the diff of `rows`
+    /// when it sits in one.
+    NoteEditor {
+        rows: Option<RowsKey>,
+    },
+    /// #22: the title of the block of notes on files that are not in this
+    /// review; the notes follow as `Note { rows: None }`.
+    NotesElsewhere {
+        count: u32,
+    },
+}
+
+/// The review notes after a row: how many, and whether one of them is not
+/// sent (the dot is the accent colour then).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct RowNotes {
+    pub count: u16,
+    pub unsent: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -213,6 +241,9 @@ pub enum ItemKey {
     Placeholder(RowsKey),
     Incomplete(RowsKey),
     Call(ToolCallId),
+    Note(NoteId),
+    NoteEditor,
+    NotesElsewhere,
 }
 
 impl Item {
@@ -249,6 +280,9 @@ impl Item {
                 ItemKey::Call(call.call.clone())
             }
             Item::Subagent { call, .. } => ItemKey::Call(call.clone()),
+            Item::Note { id, .. } => ItemKey::Note(*id),
+            Item::NoteEditor { .. } => ItemKey::NoteEditor,
+            Item::NotesElsewhere { .. } => ItemKey::NotesElsewhere,
         }
     }
 
@@ -260,6 +294,7 @@ impl Item {
             | Item::Fold { rows, .. }
             | Item::Placeholder { rows, .. }
             | Item::Incomplete { rows, .. } => Some(rows),
+            Item::Note { rows, .. } | Item::NoteEditor { rows } => rows.as_ref(),
             _ => None,
         }
     }
@@ -334,6 +369,8 @@ pub struct DisplayRow {
     pub inline: Option<u32>,
     /// A folded run of unchanged lines: the old side's line numbers.
     pub fold: Option<Range<u32>>,
+    /// The same run on the new side (review notes find their line in it).
+    pub fold_new: Option<Range<u32>>,
 }
 
 /// The display rows of a diff in `mode`. Linear in the rows; reads no side
@@ -417,13 +454,15 @@ pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow> {
                 hunk: *hunk,
                 inline: None,
                 fold: None,
+                fold_new: None,
             }),
-            DiffRow::Folded { old, .. } => Some(DisplayRow {
+            DiffRow::Folded { old, new, .. } => Some(DisplayRow {
                 left: None,
                 right: None,
                 hunk: None,
                 inline: None,
                 fold: Some(old.clone()),
+                fold_new: Some(new.clone()),
             }),
             _ => None,
         }
@@ -441,6 +480,7 @@ pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow> {
                         hunk: Some(hunk),
                         inline,
                         fold: None,
+                        fold_new: None,
                     });
                 } else if let Some((side, hunk, inline)) = added(row) {
                     out.push(DisplayRow {
@@ -449,6 +489,7 @@ pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow> {
                         hunk: Some(hunk),
                         inline,
                         fold: None,
+                        fold_new: None,
                     });
                 }
             }
@@ -487,6 +528,7 @@ pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow> {
                         hunk: Some(hunk),
                         inline,
                         fold: None,
+                        fold_new: None,
                     });
                 } else if let Some((side, hunk, inline)) = added(row) {
                     if paired[ix] {
@@ -498,6 +540,7 @@ pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow> {
                         hunk: Some(hunk),
                         inline,
                         fold: None,
+                        fold_new: None,
                     });
                 }
             }
@@ -520,6 +563,214 @@ pub struct BuildOptions<'a> {
     /// The height of rows that were prepared once and were dropped again,
     /// in lines, so that a placeholder is as tall as what it replaced.
     pub known_lines: &'a HashMap<RowsKey, u32>,
+    /// #22: where the open note editor sits, if there is one.
+    pub editor: Option<EditorAt>,
+}
+
+/// Where the open note editor sits in the list (#22).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum EditorAt {
+    /// A new note: after the row (`side`, `line`) of the diff `rows` whose
+    /// side has the content `oid`. When that row is not there (the file
+    /// changed), the editor sits at the head of the diff, below the title.
+    Row {
+        rows: RowsKey,
+        side: DiffSide,
+        line: u32,
+        oid: BlobId,
+    },
+    /// Changing a note: right after it.
+    AfterNote(NoteId),
+}
+
+/// A note as the item builder sees it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NoteRef {
+    pub id: NoteId,
+    /// Pending or sending, not sent.
+    pub unsent: bool,
+}
+
+/// The notes drawn in one diff, by line.
+#[derive(Default, Debug)]
+struct PerRows {
+    /// (side, line) → the notes, the earliest first.
+    by_line: BTreeMap<(u8, u32), Vec<NoteRef>>,
+    /// All of them in the order they were written.
+    all: Vec<NoteRef>,
+}
+
+fn side_ord(side: DiffSide) -> u8 {
+    match side {
+        DiffSide::Old => 0,
+        DiffSide::New => 1,
+    }
+}
+
+/// The review notes of a snapshot, arranged for the item builder: built once
+/// per snapshot in O(notes) (docs/design/review_view.md「叙事列表的项」).
+/// A note is drawn once: in the first row set its place lists that this
+/// view shows (a step in a session's narrative, the final diff in the
+/// rule-grouped view); a note that has none, or whose line is not among the
+/// prepared rows, is drawn at the head of its file's diff, as a drifted one.
+#[derive(Default, Debug)]
+pub struct NoteIndex {
+    per_rows: HashMap<(NoteRows, FileKey), PerRows>,
+    drifted: HashMap<FileKey, Vec<NoteRef>>,
+    /// In a session's narrative: the last step that changed each file,
+    /// where its drifted notes are drawn.
+    last_step: HashMap<FileKey, StepId>,
+    elsewhere: Vec<NoteRef>,
+    editor: Option<EditorAt>,
+}
+
+impl NoteIndex {
+    pub fn new(snapshot: &ReviewSnapshot, editor: Option<EditorAt>) -> NoteIndex {
+        let mut index = NoteIndex {
+            editor,
+            ..NoteIndex::default()
+        };
+        if snapshot.notes.is_empty() {
+            return index;
+        }
+        let narrative = snapshot.turns.is_some();
+        let mut notes: Vec<&Note> = snapshot.notes.iter().collect();
+        notes.sort_by_key(|note| note.id);
+        for note in notes {
+            let note_ref = NoteRef {
+                id: note.id,
+                unsent: !matches!(note.state, NoteState::Sent(_)),
+            };
+            match &note.place {
+                NotePlace::Rows(kinds) => {
+                    let shown = kinds
+                        .iter()
+                        .copied()
+                        .find(|kind| matches!(kind, NoteRows::Step(_)) == narrative);
+                    match shown {
+                        Some(kind) => {
+                            let per = index
+                                .per_rows
+                                .entry((kind, note.anchor.file.clone()))
+                                .or_default();
+                            per.by_line
+                                .entry((side_ord(note.anchor.side), note.anchor.line))
+                                .or_default()
+                                .push(note_ref);
+                            per.all.push(note_ref);
+                        }
+                        None => index
+                            .drifted
+                            .entry(note.anchor.file.clone())
+                            .or_default()
+                            .push(note_ref),
+                    }
+                }
+                NotePlace::Drifted { file } => {
+                    index
+                        .drifted
+                        .entry(file.clone())
+                        .or_default()
+                        .push(note_ref);
+                }
+                NotePlace::Elsewhere => index.elsewhere.push(note_ref),
+            }
+        }
+        if !index.drifted.is_empty()
+            && let Some(turns) = snapshot.turns.as_deref()
+        {
+            use lectern_services::review::NarrativeItem;
+            for turn in turns {
+                for item in turn.items.iter() {
+                    if let NarrativeItem::Step(step) = item {
+                        index.last_step.insert(step.file.clone(), step.step);
+                    }
+                }
+            }
+        }
+        index
+    }
+
+    /// The notes of one diff and the editor, if it has any.
+    pub fn context<'a>(&'a self, key: &'a RowsKey, file: &'a FileKey) -> NotesCtx<'a> {
+        let (kind, step) = match key {
+            RowsKey::Step { step, .. } => (NoteRows::Step(*step), Some(*step)),
+            RowsKey::Final { .. } => (NoteRows::Final, None),
+        };
+        let drifted = match (self.drifted.get(file), step) {
+            (Some(notes), None) => &notes[..],
+            (Some(notes), Some(step)) if self.last_step.get(file) == Some(&step) => &notes[..],
+            _ => &[],
+        };
+        NotesCtx {
+            key,
+            per: self.per_rows.get(&(kind, file.clone())),
+            drifted,
+            editor: self.editor.as_ref().filter(|editor| match editor {
+                EditorAt::Row { rows, .. } => same_diff(rows, key),
+                EditorAt::AfterNote(_) => true,
+            }),
+        }
+    }
+
+    /// Whether the diff `key` of `file` has notes of its own or the editor.
+    pub fn touches(&self, key: &RowsKey, file: &FileKey) -> bool {
+        let ctx = self.context(key, file);
+        ctx.per.is_some()
+            || !ctx.drifted.is_empty()
+            || matches!(ctx.editor, Some(EditorAt::Row { .. }))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.per_rows.is_empty()
+            && self.drifted.is_empty()
+            && self.elsewhere.is_empty()
+            && self.editor.is_none()
+    }
+
+    /// The notes on files that are not in the review.
+    pub fn elsewhere(&self) -> &[NoteRef] {
+        &self.elsewhere
+    }
+}
+
+/// Whether two keys are the diff of the same step or file (the context
+/// lines around a hunk may differ).
+pub fn same_diff(a: &RowsKey, b: &RowsKey) -> bool {
+    match (a, b) {
+        (RowsKey::Final { file: a, .. }, RowsKey::Final { file: b, .. }) => a == b,
+        (RowsKey::Step { step: a, .. }, RowsKey::Step { step: b, .. }) => a == b,
+        _ => false,
+    }
+}
+
+/// The notes and the editor of one diff, for `rows_items_with`.
+pub struct NotesCtx<'a> {
+    key: &'a RowsKey,
+    per: Option<&'a PerRows>,
+    drifted: &'a [NoteRef],
+    editor: Option<&'a EditorAt>,
+}
+
+impl NotesCtx<'_> {
+    fn push_note(&self, out: &mut Vec<Item>, note: NoteRef) {
+        out.push(Item::Note {
+            id: note.id,
+            rows: Some(self.key.clone()),
+        });
+        if self.editor == Some(&EditorAt::AfterNote(note.id)) {
+            out.push(Item::NoteEditor {
+                rows: Some(self.key.clone()),
+            });
+        }
+    }
+
+    /// The notes at the head of the diff, below the card's title.
+    fn push_head(&self, out: &mut Vec<Item>) {
+        for note in self.drifted {
+            self.push_note(out, *note);
+        }
+    }
 }
 
 /// The `RowsKey` of a step's diff.
@@ -570,6 +821,19 @@ pub fn build_with(
     opts: &BuildOptions<'_>,
     collapsed: &HashSet<TurnRef>,
 ) -> Vec<Item> {
+    let index = NoteIndex::new(snapshot, opts.editor.clone());
+    build_noted(snapshot, rows, opts, collapsed, &index)
+}
+
+/// [`build_with`] over a note index that was built from the same snapshot
+/// and `opts.editor`.
+pub fn build_noted(
+    snapshot: &ReviewSnapshot,
+    rows: &HashMap<RowsKey, Arc<FileRows>>,
+    opts: &BuildOptions<'_>,
+    collapsed: &HashSet<TurnRef>,
+    notes: &NoteIndex,
+) -> Vec<Item> {
     let mut out = Vec::with_capacity(64 + rows.values().map(|r| r.rows.len() + 2).sum::<usize>());
     out.push(Item::Header);
     out.push(Item::Brief);
@@ -586,8 +850,13 @@ pub fn build_with(
         .filter(|entry| entry.noise.is_some())
         .count() as u32;
     match snapshot.turns.as_deref() {
-        Some(turns) => build_turns(snapshot, turns, &files, rows, opts, collapsed, &mut out),
-        None => build_groups(snapshot, rows, opts, &mut out),
+        Some(turns) => {
+            build_turns(
+                snapshot, turns, &files, rows, opts, collapsed, notes, &mut out,
+            );
+            push_elsewhere(&mut out, notes);
+        }
+        None => build_groups(snapshot, rows, opts, notes, &mut out),
     }
     if noise_count > 0 && snapshot.turns.is_some() {
         out.push(Item::Noise {
@@ -620,6 +889,10 @@ fn push_notices(snapshot: &ReviewSnapshot, out: &mut Vec<Item>) {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the builder's inputs: the snapshot and what the screen holds besides it"
+)]
 fn build_turns(
     snapshot: &ReviewSnapshot,
     turns: &[lectern_services::review::TurnEntry],
@@ -627,6 +900,7 @@ fn build_turns(
     rows: &HashMap<RowsKey, Arc<FileRows>>,
     opts: &BuildOptions<'_>,
     collapsed: &HashSet<TurnRef>,
+    notes: &NoteIndex,
     out: &mut Vec<Item>,
 ) {
     use lectern_services::review::NarrativeItem;
@@ -673,7 +947,8 @@ fn build_turns(
                     out.push(Item::Step { id: step.step, at });
                     let key = step_rows_key(step.step, &step.file, opts.context);
                     let estimate = step.added.saturating_add(step.removed).saturating_add(7);
-                    push_rows(out, &key, rows, estimate, None, opts);
+                    let ctx = notes.context(&key, &step.file);
+                    push_rows(out, &key, rows, estimate, None, opts, &ctx);
                 }
                 NarrativeItem::Command { call, .. } => out.push(Item::Command {
                     call: CallRef {
@@ -703,6 +978,7 @@ fn build_groups(
     snapshot: &ReviewSnapshot,
     rows: &HashMap<RowsKey, Arc<FileRows>>,
     opts: &BuildOptions<'_>,
+    notes: &NoteIndex,
     out: &mut Vec<Item>,
 ) {
     let mut noise_files = 0u32;
@@ -727,9 +1003,11 @@ fn build_groups(
             });
             let key = final_rows_key(&entry.key, opts.context);
             let estimate = final_estimate(entry, opts.context);
-            push_rows(out, &key, rows, estimate, Some(entry), opts);
+            let ctx = notes.context(&key, &entry.key);
+            push_rows(out, &key, rows, estimate, Some(entry), opts, &ctx);
         }
     }
+    push_elsewhere(out, notes);
     if noise_files > 0 {
         out.push(Item::Noise {
             count: noise_files,
@@ -788,7 +1066,8 @@ pub fn incomplete_of_rows(rows: &FileRows) -> Option<IncompleteKind> {
 }
 
 /// Pushes the items of one diff: the prepared rows, a note for a file
-/// without a full diff, or a placeholder.
+/// without a full diff, or a placeholder; with the review notes that belong
+/// to it.
 fn push_rows(
     out: &mut Vec<Item>,
     key: &RowsKey,
@@ -796,8 +1075,10 @@ fn push_rows(
     estimate: u32,
     entry: Option<&FileEntry>,
     opts: &BuildOptions<'_>,
+    notes: &NotesCtx<'_>,
 ) {
     if let Some(kind) = entry.and_then(|entry| incomplete_of_detail(&entry.change.detail)) {
+        notes.push_head(out);
         out.push(Item::Incomplete {
             rows: key.clone(),
             kind,
@@ -805,16 +1086,37 @@ fn push_rows(
         return;
     }
     match rows.get(key) {
-        Some(rows) => rows_items(out, key, rows, opts.mode),
-        None => out.push(Item::Placeholder {
-            rows: key.clone(),
-            lines: opts
-                .known_lines
+        Some(rows) => rows_items_with(out, key, rows, &display_rows(rows, opts.mode), notes),
+        None => placeholder_items(
+            out,
+            key,
+            opts.known_lines
                 .get(key)
                 .copied()
                 .unwrap_or(estimate)
                 .max(1),
-        }),
+            notes,
+        ),
+    }
+}
+
+/// A placeholder: the notes of the diff's head, the placeholder, and all the
+/// diff's notes after it (their rows are not known yet).
+pub fn placeholder_items(out: &mut Vec<Item>, key: &RowsKey, lines: u32, notes: &NotesCtx<'_>) {
+    notes.push_head(out);
+    out.push(Item::Placeholder {
+        rows: key.clone(),
+        lines,
+    });
+    if let Some(per) = notes.per {
+        for note in &per.all {
+            notes.push_note(out, *note);
+        }
+    }
+    if matches!(notes.editor, Some(EditorAt::Row { .. })) {
+        out.push(Item::NoteEditor {
+            rows: Some(key.clone()),
+        });
     }
 }
 
@@ -822,16 +1124,37 @@ fn push_rows(
 /// per display row, a fold for folded lines, or a note when there is nothing
 /// to show because a side is not text.
 pub fn rows_items(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows, mode: DiffMode) {
-    if rows.rows.is_empty() {
-        rows_items_of(out, key, rows, &[]);
-        return;
-    }
-    let display = display_rows(rows, mode);
+    let display = if rows.rows.is_empty() {
+        Vec::new()
+    } else {
+        display_rows(rows, mode)
+    };
     rows_items_of(out, key, rows, &display);
 }
 
 /// [`rows_items`] over display rows that were built already.
 pub fn rows_items_of(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows, display: &[DisplayRow]) {
+    let none = NoteIndex::default();
+    let file = FileKey {
+        old: None,
+        new: None,
+    };
+    rows_items_with(out, key, rows, display, &none.context(key, &file));
+}
+
+/// [`rows_items_of`] with the review notes of the diff: each after the row
+/// it is anchored to (after the fold when the line is in a folded run), the
+/// ones whose line is not among the rows at the head of the diff.
+pub fn rows_items_with(
+    out: &mut Vec<Item>,
+    key: &RowsKey,
+    rows: &FileRows,
+    display: &[DisplayRow],
+    notes: &NotesCtx<'_>,
+) {
+    let start = out.len();
+    let mut placed: HashSet<NoteId> = HashSet::new();
+    let mut editor_placed = false;
     if rows.rows.is_empty() {
         if let Some(kind) = incomplete_of_rows(rows) {
             out.push(Item::Incomplete {
@@ -839,38 +1162,127 @@ pub fn rows_items_of(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows, displa
                 kind,
             });
         }
-        return;
-    }
-    let mut hunk: Option<u32> = None;
-    for (ix, row) in display.iter().enumerate() {
-        let ix = ix as u32;
-        if let Some(old) = &row.fold {
-            out.push(Item::Fold {
+        // Without rows every note goes to the head.
+    } else {
+        let mut hunk: Option<u32> = None;
+        for (ix, row) in display.iter().enumerate() {
+            let ix = ix as u32;
+            if let Some(old) = &row.fold {
+                out.push(Item::Fold {
+                    rows: key.clone(),
+                    ix,
+                    old: old.start,
+                });
+                if let Some(per) = notes.per {
+                    let new = row.fold_new.clone().unwrap_or(0..0);
+                    for (side, range) in [(DiffSide::Old, old), (DiffSide::New, &new)] {
+                        let from = (side_ord(side), range.start);
+                        let to = (side_ord(side), range.end);
+                        for found in per.by_line.range(from..to).flat_map(|(_, v)| v.iter()) {
+                            if placed.insert(found.id) {
+                                notes.push_note(out, *found);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Some(h) = row.hunk
+                && hunk != Some(h)
+            {
+                hunk = Some(h);
+                if let Some(info) = rows.hunks.get(h as usize) {
+                    out.push(Item::Hunk {
+                        rows: key.clone(),
+                        hunk: h,
+                        old: info.old.start,
+                        new: info.new.start,
+                    });
+                }
+            }
+            let sides = [
+                (DiffSide::Old, row.left.map(|side| side.line)),
+                (DiffSide::New, row.right.map(|side| side.line)),
+            ];
+            let mut here: Vec<NoteRef> = Vec::new();
+            if let Some(per) = notes.per {
+                for (side, line) in sides {
+                    if let Some(line) = line
+                        && let Some(found) = per.by_line.get(&(side_ord(side), line))
+                    {
+                        here.extend(found.iter().copied().filter(|n| placed.insert(n.id)));
+                    }
+                }
+            }
+            let mark = RowNotes {
+                count: here.len().min(u16::MAX as usize) as u16,
+                unsent: here.iter().any(|note| note.unsent),
+            };
+            out.push(Item::Row {
                 rows: key.clone(),
                 ix,
-                old: old.start,
+                old: row.left.map(|side| side.line),
+                new: row.right.map(|side| side.line),
+                notes: mark,
             });
-            continue;
-        }
-        if let Some(h) = row.hunk
-            && hunk != Some(h)
-        {
-            hunk = Some(h);
-            if let Some(info) = rows.hunks.get(h as usize) {
-                out.push(Item::Hunk {
-                    rows: key.clone(),
-                    hunk: h,
-                    old: info.old.start,
-                    new: info.new.start,
-                });
+            for note in here {
+                notes.push_note(out, note);
+            }
+            if let Some(EditorAt::Row {
+                side, line, oid, ..
+            }) = notes.editor
+                && !editor_placed
+                && sides.iter().any(|(s, l)| s == side && *l == Some(*line))
+            {
+                let content = match side {
+                    DiffSide::Old => rows.old.oid,
+                    DiffSide::New => rows.new.oid,
+                };
+                if content == Some(*oid) {
+                    editor_placed = true;
+                    out.push(Item::NoteEditor {
+                        rows: Some(key.clone()),
+                    });
+                }
             }
         }
-        out.push(Item::Row {
-            rows: key.clone(),
-            ix,
-            old: row.left.map(|side| side.line),
-            new: row.right.map(|side| side.line),
+    }
+    // What has no row of its own: the drifted ones, the notes whose line is
+    // not among the rows, and an editor whose row is gone.
+    let mut head: Vec<Item> = Vec::new();
+    notes.push_head(&mut head);
+    if let Some(per) = notes.per {
+        for note in per.all.iter().filter(|note| !placed.contains(&note.id)) {
+            notes.push_note(&mut head, *note);
+        }
+    }
+    if !editor_placed && matches!(notes.editor, Some(EditorAt::Row { .. })) {
+        head.push(Item::NoteEditor {
+            rows: Some(key.clone()),
         });
+    }
+    if !head.is_empty() {
+        out.splice(start..start, head);
+    }
+}
+
+/// The block of notes on files that are not in the review, before the
+/// noise.
+fn push_elsewhere(out: &mut Vec<Item>, notes: &NoteIndex) {
+    if notes.elsewhere.is_empty() {
+        return;
+    }
+    out.push(Item::NotesElsewhere {
+        count: notes.elsewhere.len().min(u32::MAX as usize) as u32,
+    });
+    for note in &notes.elsewhere {
+        out.push(Item::Note {
+            id: note.id,
+            rows: None,
+        });
+        if notes.editor == Some(EditorAt::AfterNote(note.id)) {
+            out.push(Item::NoteEditor { rows: None });
+        }
     }
 }
 
@@ -893,6 +1305,10 @@ pub fn item_file(item: &Item, snapshot: &ReviewSnapshot) -> Option<FileKey> {
         | Item::Fold { rows, .. }
         | Item::Placeholder { rows, .. }
         | Item::Incomplete { rows, .. } => rows_file(snapshot, rows),
+        Item::Note {
+            rows: Some(rows), ..
+        }
+        | Item::NoteEditor { rows: Some(rows) } => rows_file(snapshot, rows),
         _ => None,
     }
 }

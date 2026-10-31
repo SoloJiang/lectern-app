@@ -178,3 +178,76 @@ fn review_tree_failed(cx: &mut TestAppContext) {
     let records = opened.record(cx);
     insta::assert_snapshot!("review_tree_failed", render_tree(&records));
 }
+
+#[gpui::test]
+fn review_tree_notes(cx: &mut TestAppContext) {
+    use lectern_services::changes::ChangePath;
+    use lectern_services::project::BlobId;
+    use lectern_services::review::{
+        BatchId, DiffSide, Excerpt, FileKey, NotePlace, NoteState, RouteKind, SendFailure,
+        SendOutcome, SentBatch, SentVia,
+    };
+
+    use crate::testing::file_key;
+    use crate::tests::notes::{change, note, on_step, row, sample, select, set_notes};
+    use crate::tests::step2::step_key;
+
+    let (rig, opened) = sample(cx);
+    // A pending note and a sent one on the first lines, a drifted one with
+    // its excerpt, one on a file that is not in the review; the last send
+    // into the session timed out.
+    let mut drifted = note(
+        3,
+        DiffSide::New,
+        1,
+        NoteState::Pending,
+        NotePlace::Drifted { file: file_key(0) },
+    );
+    drifted.excerpt = Some(Excerpt {
+        first: 0,
+        lines: Arc::from(vec![Arc::<str>::from("a"), Arc::from("b"), Arc::from("c")]),
+    });
+    let mut elsewhere = note(
+        4,
+        DiffSide::New,
+        7,
+        NoteState::Pending,
+        NotePlace::Elsewhere,
+    );
+    elsewhere.anchor.file = FileKey {
+        old: None,
+        new: Some(ChangePath(Arc::from(b"docs/elsewhere.md".to_vec()))),
+    };
+    elsewhere.anchor.oid = BlobId::Sha1([3; 20]);
+    change(&rig, &opened, cx, |snapshot| {
+        set_notes(
+            snapshot,
+            vec![
+                note(1, DiffSide::New, 1, NoteState::Pending, on_step()),
+                note(2, DiffSide::Old, 1, NoteState::Sent(BatchId(1)), on_step()),
+                drifted,
+                elsewhere,
+            ],
+        );
+        let mut state = (*snapshot.notes_state).clone();
+        state.batches = Arc::from(vec![SentBatch {
+            id: BatchId(1),
+            at: Timestamp(1_700_000_100_000),
+            via: SentVia::Clipboard,
+            count: 1,
+            answered_by: None,
+        }]);
+        state.last = Some(SendOutcome::Failed {
+            route: RouteKind::Session,
+            reason: SendFailure::TimedOut,
+        });
+        snapshot.notes_state = Arc::new(state);
+    });
+    // The editor of a new note on a context line.
+    select(&opened, cx, row(&step_key(), Some(2), Some(2)));
+    let mut visual = opened.visual(cx);
+    visual.simulate_keystrokes("c");
+    opened.draw(cx);
+    let text = render_tree(&opened.record(cx));
+    insta::assert_snapshot!("review_tree_notes", text);
+}

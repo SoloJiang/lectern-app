@@ -1,0 +1,23 @@
+---
+source: crates/review/src/notes/prompt/tests.rs
+expression: text
+---
+Review notes from Lectern [lectern-notes 0190f3a2c4b60401]: 2 notes on your changes.
+Please address each note.
+
+1. doc.md:2
+   `````
+     1 | # Title
+   > 2 | ```rust
+     3 | ``` ````
+     4 | tail
+   `````
+   Note:
+   Fence.
+
+2. a.rs:1
+   ```
+   > 1 | let s = "``";
+   ```
+   Note:
+   Two backticks keep the fence at three.

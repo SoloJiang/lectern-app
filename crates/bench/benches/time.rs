@@ -56,6 +56,8 @@ mod review_view;
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
 mod syntax_engine;
+#[path = "time/terminal.rs"]
+mod terminal;
 #[cfg(target_os = "macos")]
 #[path = "time/ui.rs"]
 mod ui;
@@ -162,6 +164,8 @@ const BENCHES: &[Bench] = &[
     review::CUTOFFS_COLD,
     review::ROWS_FIRST,
     review::MARK_SEEN_5000,
+    review::NOTE_ADD,
+    review::NOTES_PROMPT_40,
     review::BRIEF_5000,
     review::ATTRIBUTE_SESSION_50,
     review::REFRESH_ONE,
@@ -182,6 +186,10 @@ const BENCHES: &[Bench] = &[
     usage::ARCHIVE_MONTH,
     usage::COLD_READ_MONTH,
     usage::DISK_DAY_HEAVY,
+    terminal::PARSE_PLAIN,
+    terminal::PARSE_SGR,
+    terminal::FRAME_FULL,
+    terminal::FRAME_ECHO,
 ];
 
 fn main() -> ExitCode {

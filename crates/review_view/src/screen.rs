@@ -9,29 +9,33 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, Styled, Subscription, Window,
-    div, list, px,
+    InteractiveElement, IntoElement, ParentElement, Pixels, PromptLevel, Render, Styled,
+    Subscription, Window, div, list, px,
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_logging::warn;
 use lectern_services::changes::{BaseSpec, ChangeError};
-use lectern_services::review::{LoadState, ReviewError, ReviewTarget};
+use lectern_services::review::{
+    LoadState, ReviewError, ReviewTarget, RouteKind, SendOutcome, SentVia, limits,
+};
 use lectern_services::workspace::{Milestone, Target, WorkspaceCommand};
 use lectern_ui::contrib::ToolbarItems;
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
-    Button, ButtonKind, ButtonSize, Capsule, LoadingPhase, Skeleton, Text, TextRole, TextRoleExt,
-    loading_phase, mono_metrics,
+    Button, ButtonKind, ButtonSize, Capsule, LoadingPhase, Skeleton, SystemColor, Text, TextRole,
+    TextRoleExt, colors, loading_phase, mono_metrics,
 };
 
 use crate::actions::{
-    self, Analyze, Back, CancelAnalyze, Edit, Escape, ExpandFold, LooksGood, MarkSeenAndNext,
-    NextHunk, OpenContext, OpenFile, PreviousHunk, Refresh, ToggleDiffMode, ToggleEarlierTurns,
-    ToggleNoise, ToggleSeen,
+    self, AddNote, Analyze, Back, CancelAnalyze, CancelNote, CopyNotesAgain, CopyNotesAsPrompt,
+    DeleteNote, DiscardNotes, Edit, EditNote, Escape, ExpandFold, LooksGood, MarkSeenAndNext,
+    NextHunk, OpenContext, OpenFile, PreviousHunk, Refresh, SaveNote, SendNotes, ToggleDiffMode,
+    ToggleEarlierTurns, ToggleNoise, ToggleSeen,
 };
 use crate::brief;
 use crate::model::{self, Direction, ReviewModel};
 use crate::nodes;
+use crate::notes::{Reason, Status};
 use crate::plugin::Shared;
 
 /// The room the floating bar takes at the bottom of the list.
@@ -91,9 +95,11 @@ impl ReviewScreen {
         cx: &mut Context<ReviewScreen>,
     ) -> ReviewScreen {
         let observe = cx.observe(&model, |_, _, cx| cx.notify());
+        let focus = cx.focus_handle();
+        model.update(cx, |model, _| model.set_screen_focus(focus.clone()));
         ReviewScreen {
             model,
-            focus: cx.focus_handle(),
+            focus,
             shared,
             milestone_reported: false,
             _observe: observe,
@@ -232,6 +238,40 @@ impl Render for ReviewScreen {
             .on_action(cx.listener(|this, _: &Back, _, cx| {
                 this.model.read(cx).back();
             }))
+            .on_action(cx.listener(|this, _: &AddNote, window, cx| {
+                this.model
+                    .update(cx, |model, cx| model.add_note_at_selection(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SendNotes, _, cx| {
+                this.model.update(cx, |model, cx| model.send_notes(cx));
+            }))
+            .on_action(cx.listener(|this, _: &CopyNotesAsPrompt, _, cx| {
+                this.model
+                    .update(cx, |model, cx| model.copy_notes_as_prompt(cx));
+            }))
+            .on_action(cx.listener(|this, _: &DiscardNotes, window, cx| {
+                this.ask_discard(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyNotesAgain, _, cx| {
+                this.model
+                    .update(cx, |model, cx| model.copy_notes_again(cx));
+            }))
+            .on_action(cx.listener(|this, _: &SaveNote, window, cx| {
+                this.model
+                    .update(cx, |model, cx| model.save_note(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &CancelNote, window, cx| {
+                this.model
+                    .update(cx, |model, cx| model.cancel_note(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &EditNote, window, cx| {
+                this.model
+                    .update(cx, |model, cx| model.edit_selected_note(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &DeleteNote, _, cx| {
+                this.model
+                    .update(cx, |model, cx| model.delete_selected_note(cx));
+            }))
             .on_action(cx.listener(|this, _: &Escape, _, cx| {
                 // Not handled: the event goes on to `workspace`.
                 if !this.model.update(cx, |model, cx| model.escape(cx)) {
@@ -344,8 +384,10 @@ impl ReviewScreen {
         semantic(spec, div().size_full().child(content)).into_any_element()
     }
 
-    /// The floating bar: a capsule with the comment count, Looks Good and
-    /// Send (not available before #22).
+    /// The floating bar (docs/design/review_view.md「审阅意见（#22）」): a
+    /// capsule with what happened to the notes (or how many there are), Copy
+    /// Again, Discard, Looks Good, Copy as Prompt after a failed send, and
+    /// Send.
     fn render_bar(
         &self,
         folder: bool,
@@ -353,28 +395,66 @@ impl ReviewScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (progress, comments, agent) = {
+        let palette = *colors(window, cx);
+        let (progress, status, agent, notes, copy_again, can_discard) = {
             let model = self.model.read(cx);
             (
                 model.progress(),
-                model.snapshot.notes.len() as u32,
+                model.status(),
                 model.agent_label(strings),
+                model.snapshot.notes_state.clone(),
+                model.copy_again_batch(),
+                model.can_discard(),
             )
         };
         let bar = nodes::plain("bar");
-        let comment_text = Text::fmt(
-            strings,
-            keys::review::COMMENTS,
-            &Args::new().num("count", comments),
-        );
+        let (comment_text, warn) = status_text(strings, status);
+        let sending = notes.sending.is_some();
+        let mut shown = div()
+            .text_role(TextRole::Body, window, cx)
+            .font_weight(FontWeight::MEDIUM)
+            .child(comment_text.shared());
+        if warn {
+            shown = shown.text_color(palette.system(SystemColor::Orange));
+        }
         let mut capsule = Capsule::new().child(semantic(
-            Semantic::new(bar.child("comments"), Role::Text).label(&comment_text),
-            div()
-                .text_role(TextRole::Body, window, cx)
-                .font_weight(FontWeight::MEDIUM)
-                .child(comment_text.shared()),
+            Semantic::new(bar.child("comments"), Role::Text)
+                .label(&comment_text)
+                .attr("pending", notes.pending.to_string())
+                .attr("sending", sending.to_string()),
+            shown,
         ));
         if !folder {
+            if let Some((batch, _)) = copy_again {
+                let weak = self.model.downgrade();
+                capsule = capsule.child(
+                    Button::new(
+                        bar.child("copy-again"),
+                        Text::key(strings, keys::review::NOTES_COPY_AGAIN),
+                    )
+                    .kind(ButtonKind::Plain)
+                    .size(ButtonSize::Regular)
+                    .pill()
+                    .attr("batch", format!("{:016x}", batch.0))
+                    .on_click(move |_, cx| {
+                        let _ = weak.update(cx, |model, cx| model.copy_notes_again(cx));
+                    }),
+                );
+            }
+            if can_discard {
+                capsule = capsule.child(
+                    Button::new(
+                        bar.child("discard"),
+                        Text::key(strings, keys::review::NOTES_DISCARD),
+                    )
+                    .kind(ButtonKind::Plain)
+                    .size(ButtonSize::Regular)
+                    .pill()
+                    .on_click(|window, cx| {
+                        window.dispatch_action(Box::new(DiscardNotes), cx);
+                    }),
+                );
+            }
             let all_seen = progress.total > 0 && progress.seen == progress.total;
             if all_seen {
                 capsule = capsule.child(
@@ -398,20 +478,62 @@ impl ReviewScreen {
                     }),
                 );
             }
-            let send = match &agent {
-                Some(agent) => {
-                    strings.format(keys::review::SEND_TO, &Args::new().str("agent", agent))
-                }
-                None => strings.get(keys::review::SEND).to_owned(),
+            let failed_into_session = matches!(
+                notes.last,
+                Some(SendOutcome::Failed {
+                    route: RouteKind::Session,
+                    ..
+                })
+            );
+            let has_clipboard = notes
+                .routes
+                .iter()
+                .any(|route| route.kind == RouteKind::Clipboard);
+            if failed_into_session && has_clipboard {
+                capsule = capsule.child(
+                    Button::new(
+                        bar.child("copy"),
+                        Text::key(strings, keys::review::COPY_PROMPT),
+                    )
+                    .kind(ButtonKind::Plain)
+                    .size(ButtonSize::Regular)
+                    .pill()
+                    .disabled(notes.pending == 0 || sending)
+                    .on_click(|window, cx| {
+                        window.dispatch_action(Box::new(CopyNotesAsPrompt), cx);
+                    }),
+                );
+            }
+            let route = notes.routes.first().map(|route| route.kind);
+            let send = match route {
+                Some(RouteKind::Clipboard) => strings.get(keys::review::COPY_PROMPT).to_owned(),
+                _ => match &agent {
+                    Some(agent) => {
+                        strings.format(keys::review::SEND_TO, &Args::new().str("agent", agent))
+                    }
+                    None => strings.get(keys::review::SEND).to_owned(),
+                },
             };
             let hint = strings.get(keys::review::SEND_TO_SHORTCUT);
-            capsule = capsule.child(
+            let mut button =
                 Button::new(bar.child("send"), Text::verbatim(format!("{send} {hint}")))
                     .kind(ButtonKind::Primary)
                     .size(ButtonSize::Regular)
                     .pill()
-                    .disabled(true),
-            );
+                    .disabled(route.is_none() || notes.pending == 0 || sending)
+                    .on_click(|window, cx| {
+                        window.dispatch_action(Box::new(SendNotes), cx);
+                    });
+            if let Some(route) = route {
+                button = button.attr(
+                    "route",
+                    match route {
+                        RouteKind::Session => "session",
+                        RouteKind::Clipboard => "clipboard",
+                    },
+                );
+            }
+            capsule = capsule.child(button);
         }
         semantic(
             Semantic::new(bar, Role::Group),
@@ -425,6 +547,99 @@ impl ReviewScreen {
                 .child(capsule),
         )
         .into_any_element()
+    }
+
+    /// Discard: asks first; only a yes sends `DiscardNotes`.
+    fn ask_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (allowed, count) = {
+            let model = self.model.read(cx);
+            (model.can_discard(), model.snapshot.notes_state.pending)
+        };
+        if !allowed {
+            return;
+        }
+        let strings = lectern_ui::strings(cx);
+        let message = strings.format(
+            keys::review::NOTES_DISCARD_CONFIRM,
+            &Args::new().num("count", count),
+        );
+        let detail = strings
+            .get(keys::review::NOTES_DISCARD_CONFIRM_DETAIL)
+            .to_owned();
+        let discard = strings.get(keys::review::NOTES_DISCARD).to_owned();
+        let cancel = strings.get(keys::common::CANCEL).to_owned();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &[discard.as_str(), cancel.as_str()],
+            cx,
+        );
+        let model = self.model.downgrade();
+        cx.spawn(async move |_, cx| {
+            let confirmed = matches!(answer.await, Ok(0));
+            let _ = model.update(cx, |model, cx| {
+                if confirmed {
+                    model.discard_confirmed(cx);
+                } else {
+                    model.discard_declined();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+/// What the first place of the bar says, and whether it is a warning.
+fn status_text(strings: &Strings, status: Status) -> (Text, bool) {
+    let reason = |reason: Reason| {
+        strings
+            .get(match reason {
+                Reason::Starting => keys::review::NOTES_ERROR_STARTING,
+                Reason::Busy => keys::review::NOTES_ERROR_BUSY,
+                Reason::NoSession => keys::review::NOTES_ERROR_NO_SESSION,
+                Reason::TimedOut => keys::review::NOTES_ERROR_TIMED_OUT,
+                Reason::Clipboard => keys::review::NOTES_ERROR_CLIPBOARD,
+                Reason::Failed => keys::review::NOTES_ERROR_FAILED,
+            })
+            .to_owned()
+    };
+    let counted = |key, count: u32| Text::fmt(strings, key, &Args::new().num("count", count));
+    match status {
+        Status::Full => (
+            counted(keys::review::NOTES_FULL, limits::PENDING_NOTES),
+            true,
+        ),
+        Status::Sending => (Text::key(strings, keys::review::NOTES_SENDING), false),
+        Status::Sent { via, count } => (
+            counted(
+                match via {
+                    SentVia::Clipboard => keys::review::NOTES_COPIED,
+                    SentVia::TerminalPaste => keys::review::NOTES_PASTED,
+                    SentVia::Acp => keys::review::NOTES_SENT,
+                },
+                count,
+            ),
+            false,
+        ),
+        Status::NotSent { reason: why, .. } => (
+            Text::fmt(
+                strings,
+                keys::review::NOTES_NOT_SENT,
+                &Args::new().str("reason", &reason(why)),
+            ),
+            true,
+        ),
+        Status::Copied { count } => (counted(keys::review::NOTES_COPIED, count), false),
+        Status::NotCopied { reason: why } => (
+            Text::fmt(
+                strings,
+                keys::review::NOTES_NOT_COPIED,
+                &Args::new().str("reason", &reason(why)),
+            ),
+            true,
+        ),
+        Status::Count(count) => (counted(keys::review::COMMENTS, count), false),
     }
 }
 

@@ -35,6 +35,7 @@ pub fn build(
             noise_expanded: noise,
             context: &context,
             known_lines: &known,
+            editor: None,
         },
     )
 }
@@ -76,8 +77,19 @@ pub fn dump(items: &[Item], snapshot: &ReviewSnapshot) -> String {
             } => {
                 format!("  hunk {} #{hunk} {old}:{new}", rows_name(rows))
             }
-            Item::Row { rows, ix, old, new } => {
-                format!("    row {} #{ix} {old:?}:{new:?}", rows_name(rows))
+            Item::Row {
+                rows,
+                ix,
+                old,
+                new,
+                notes,
+            } => {
+                let marked = if notes.count > 0 {
+                    format!(" notes={}", notes.count)
+                } else {
+                    String::new()
+                };
+                format!("    row {} #{ix} {old:?}:{new:?}{marked}", rows_name(rows))
             }
             Item::Fold { rows, ix, old } => format!("    fold {} #{ix} {old}", rows_name(rows)),
             Item::Placeholder { rows, lines } => {
@@ -87,6 +99,15 @@ pub fn dump(items: &[Item], snapshot: &ReviewSnapshot) -> String {
             Item::Command { call, .. } => format!("command {}", call.call.0),
             Item::Subagent { session, call, .. } => format!("subagent {session} {}", call.0),
             Item::Tool { call, .. } => format!("tool {}", call.call.0),
+            Item::Note { id, rows } => {
+                let place = rows.as_ref().map_or("elsewhere".to_owned(), rows_name);
+                format!("      note {:x} in {place}", id.0)
+            }
+            Item::NoteEditor { rows } => {
+                let place = rows.as_ref().map_or("elsewhere".to_owned(), rows_name);
+                format!("      editor in {place}")
+            }
+            Item::NotesElsewhere { count } => format!("notes-elsewhere {count}"),
         };
         out.push_str(&line);
         out.push('\n');
@@ -178,6 +199,7 @@ fn items_unprepared_rows_are_placeholders_with_an_estimate() {
             noise_expanded: false,
             context: &context,
             known_lines: &known,
+            editor: None,
         },
     );
     let first = items.iter().find_map(|item| match item {
@@ -202,6 +224,7 @@ fn items_context_changes_the_rows_key() {
             noise_expanded: false,
             context: &context,
             known_lines: &known,
+            editor: None,
         },
     );
     assert!(items.iter().any(|item| matches!(

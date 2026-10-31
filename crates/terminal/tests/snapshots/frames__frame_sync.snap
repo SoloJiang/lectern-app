@@ -1,0 +1,11 @@
+---
+source: crates/terminal/tests/frames.rs
+expression: "frame_of(\"sync\", 16, 2)"
+---
+size 16x2  colors fg #e5e5e5 bg #101010 cursor #ffffff
+cursor 0,1 Block
+scroll 0/2  modes Modes { bracketed_paste: false, mouse_tracking: false, alt_screen: false, focus_events: false }
+ 0: "inside sync"
+      0..16  fg #e5e5e5
+ 1: ""
+      0..16  fg #e5e5e5

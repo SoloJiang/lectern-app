@@ -60,6 +60,28 @@ impl Review for Empty {
     ) -> BriefRulesRegistration {
         BriefRulesRegistration::new(|| {})
     }
+    fn register_note_route(
+        &self,
+        _route: Arc<dyn NoteRoute>,
+        _token: ActivationToken,
+    ) -> NoteRouteRegistration {
+        NoteRouteRegistration::new(|| {})
+    }
+}
+
+/// A session route that answers every delivery as busy.
+struct BusyRoute;
+
+impl NoteRoute for BusyRoute {
+    fn id(&self) -> Arc<str> {
+        text("conversation")
+    }
+    fn applies(&self, target: &ReviewTarget) -> bool {
+        matches!(target, ReviewTarget::Session(_))
+    }
+    fn deliver(&self, _delivery: NoteDelivery, reply: DeliveryReply) {
+        reply.send(DeliveryOutcome::NotNow(RouteBlock::Busy));
+    }
 }
 
 /// A provider that answers in two batches and stops once cancelled.
@@ -411,6 +433,7 @@ fn snapshot() -> ReviewSnapshot {
                 prompt_preview: text("Fix the parser"),
                 items: Arc::from(items),
                 after_last_seen: false,
+                answers: Some(BatchId(7)),
             },
             TurnEntry {
                 at: turn(1, 1),
@@ -421,6 +444,7 @@ fn snapshot() -> ReviewSnapshot {
                 prompt_preview: text(""),
                 items: Arc::from(Vec::new()),
                 after_last_seen: true,
+                answers: None,
             },
         ])),
         groups: Arc::from(vec![
@@ -449,6 +473,72 @@ fn snapshot() -> ReviewSnapshot {
         },
         degraded: None,
         notes: Arc::from(Vec::<Note>::new()),
+        notes_state: Arc::new(NotesState::default()),
+    }
+}
+
+fn anchor() -> NoteAnchor {
+    NoteAnchor {
+        file: modified("src/lib.rs"),
+        side: DiffSide::New,
+        line: 41,
+        oid: oid(3),
+    }
+}
+
+fn note(id: u64, state: NoteState, place: NotePlace) -> Note {
+    Note {
+        id: NoteId(id),
+        anchor: anchor(),
+        text: text("Keep the old name: callers still use it.\n多行 ✓"),
+        created_at: Timestamp(1_700_000_000_000),
+        edited_at: None,
+        state,
+        place,
+        excerpt: Some(Excerpt {
+            first: 39,
+            lines: Arc::from(vec![text("fn a() {"), text(""), text("}")]),
+        }),
+    }
+}
+
+/// Every route kind, outcome and failure, so the notes state's JSON covers
+/// each variant.
+fn notes_state() -> NotesState {
+    NotesState {
+        routes: Arc::from(vec![
+            RouteOffer {
+                id: text("conversation"),
+                kind: RouteKind::Session,
+            },
+            RouteOffer {
+                id: text("clipboard"),
+                kind: RouteKind::Clipboard,
+            },
+        ]),
+        pending: 2,
+        unsent: 3,
+        sending: Some(BatchId(9)),
+        last: Some(SendOutcome::Failed {
+            route: RouteKind::Session,
+            reason: SendFailure::NotNow(RouteBlock::Starting),
+        }),
+        batches: Arc::from(vec![
+            SentBatch {
+                id: BatchId(7),
+                at: Timestamp(5),
+                via: SentVia::Clipboard,
+                count: 4,
+                answered_by: Some(turn(0, 1)),
+            },
+            SentBatch {
+                id: BatchId(8),
+                at: Timestamp(6),
+                via: SentVia::TerminalPaste,
+                count: 1,
+                answered_by: None,
+            },
+        ]),
     }
 }
 
@@ -500,7 +590,10 @@ fn review_is_a_shared_trait_object() {
     shareable::<FileRows>();
     shareable::<Overview>();
     shareable::<ReviewEvent>();
+    shareable::<Arc<dyn NoteRoute>>();
     sendable::<BriefRulesRegistration>();
+    sendable::<NoteRouteRegistration>();
+    sendable::<DeliveryReply>();
     sendable::<OverviewInterest>();
     shareable::<BriefReply>();
 }
@@ -519,6 +612,126 @@ fn brief_rules_registration_releases_once_on_drop() {
         .join()
         .unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn note_route_is_not_a_service() {
+    // Routes register through `Review::register_note_route`, as brief rules
+    // providers do.
+    const { assert!(!Probe::<dyn NoteRoute>::IS_SERVICE) };
+}
+
+#[test]
+fn note_route_registration_releases_once_on_drop() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    let registration = NoteRouteRegistration::new(move || {
+        c.fetch_add(1, Ordering::SeqCst);
+    });
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert_eq!(format!("{registration:?}"), "NoteRouteRegistration { .. }");
+    std::thread::spawn(move || drop(registration))
+        .join()
+        .unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+/// A reply calls its callback exactly once: with what `send` gives, or with
+/// `Failed` when it is dropped unsent.
+#[test]
+fn delivery_reply_answers_once_and_fails_when_dropped() {
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let reply = |received: &Arc<Mutex<Vec<DeliveryOutcome>>>| {
+        let r = received.clone();
+        DeliveryReply::new(move |outcome| r.lock().unwrap().push(outcome))
+    };
+
+    let route: Arc<dyn NoteRoute> = Arc::new(BusyRoute);
+    assert!(route.applies(&ReviewTarget::Session(session("s-1"))));
+    assert!(!route.applies(&ReviewTarget::Outside {
+        project: project(),
+        worktree: worktree(),
+    }));
+    let delivery = NoteDelivery {
+        batch: BatchId(7),
+        target: ReviewTarget::Session(session("s-1")),
+        root: path("/r"),
+        text: text("[lectern-notes 0000000000000007]"),
+        count: 1,
+        locations: Arc::from(vec![(text("src/lib.rs"), Some(42))]),
+    };
+    route.deliver(delivery, reply(&received));
+
+    let sent = reply(&received);
+    assert_eq!(format!("{sent:?}"), "DeliveryReply { .. }");
+    std::thread::spawn(move || sent.send(DeliveryOutcome::Delivered(SentVia::Acp)))
+        .join()
+        .unwrap();
+
+    let dropped = reply(&received);
+    std::thread::spawn(move || drop(dropped)).join().unwrap();
+
+    assert_eq!(
+        *received.lock().unwrap(),
+        vec![
+            DeliveryOutcome::NotNow(RouteBlock::Busy),
+            DeliveryOutcome::Delivered(SentVia::Acp),
+            DeliveryOutcome::Failed,
+        ]
+    );
+}
+
+#[test]
+fn note_types_round_trip() {
+    let delivery = NoteDelivery {
+        batch: BatchId(7),
+        target: ReviewTarget::Session(session("s-1")),
+        root: path("/r"),
+        text: text("[lectern-notes 0000000000000007]\nbody"),
+        count: 2,
+        locations: Arc::from(vec![
+            (text("src/lib.rs"), Some(42)),
+            (text("README.md"), None),
+        ]),
+    };
+    assert_eq!(round_trip(&delivery), delivery);
+    for outcome in [
+        DeliveryOutcome::Delivered(SentVia::Clipboard),
+        DeliveryOutcome::NotNow(RouteBlock::NoSession),
+        DeliveryOutcome::Failed,
+    ] {
+        assert_eq!(round_trip(&outcome), outcome);
+    }
+    for last in [
+        SendOutcome::Sent {
+            batch: BatchId(7),
+            via: SentVia::Acp,
+            count: 40,
+        },
+        SendOutcome::Failed {
+            route: RouteKind::Clipboard,
+            reason: SendFailure::TimedOut,
+        },
+        SendOutcome::CopiedAgain {
+            batch: BatchId(7),
+            count: 3,
+            failed: Some(SendFailure::Failed),
+        },
+        SendOutcome::CopiedAgain {
+            batch: BatchId(7),
+            count: 3,
+            failed: None,
+        },
+    ] {
+        let state = NotesState {
+            last: Some(last),
+            ..notes_state()
+        };
+        assert_eq!(round_trip(&state), state);
+    }
+    assert_eq!(round_trip(&NotesState::default()), NotesState::default());
+    assert_eq!(limits::NOTE_BYTES, 4096);
+    assert_eq!(limits::PENDING_NOTES, 40);
 }
 
 #[test]
@@ -656,6 +869,37 @@ fn targets_and_commands_round_trip() {
         ReviewCommand::Refresh,
         ReviewCommand::Analyze,
         ReviewCommand::CancelAnalyze,
+        ReviewCommand::AddNote {
+            rows: Some(RowsKey::Step {
+                step: StepId(4),
+                context: 3,
+            }),
+            anchor: anchor(),
+            text: text("Why?"),
+            excerpt: None,
+        },
+        ReviewCommand::AddNote {
+            rows: None,
+            anchor: NoteAnchor {
+                side: DiffSide::Old,
+                ..anchor()
+            },
+            text: text("Caller"),
+            excerpt: Some(Excerpt {
+                first: 0,
+                lines: Arc::from(Vec::new()),
+            }),
+        },
+        ReviewCommand::EditNote {
+            note: NoteId(u64::MAX),
+            text: text("Edited"),
+        },
+        ReviewCommand::RemoveNote(NoteId(1)),
+        ReviewCommand::DiscardNotes,
+        ReviewCommand::SendNotes {
+            route: text("clipboard"),
+        },
+        ReviewCommand::CopyBatch(BatchId(7)),
     ];
     for c in commands {
         assert_eq!(round_trip(&c), c);
@@ -704,7 +948,22 @@ fn snapshot_round_trips() {
             turns: None,
             degraded: degraded.get(i).copied(),
             brief: Arc::new(brief),
-            notes: Arc::from(vec![Note::default()]),
+            notes: Arc::from(vec![
+                note(
+                    1,
+                    NoteState::Pending,
+                    NotePlace::Rows(Arc::from(vec![NoteRows::Final, NoteRows::Step(StepId(2))])),
+                ),
+                note(
+                    2,
+                    NoteState::Sending(BatchId(9)),
+                    NotePlace::Drifted {
+                        file: modified("src/lib.rs"),
+                    },
+                ),
+                note(3, NoteState::Sent(BatchId(7)), NotePlace::Elsewhere),
+            ]),
+            notes_state: Arc::new(notes_state()),
             ..s.clone()
         };
         assert_eq!(round_trip(&other), other);

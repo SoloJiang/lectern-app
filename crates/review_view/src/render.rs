@@ -174,8 +174,13 @@ impl ReviewModel {
                 let line = self.render_hunk(rows, hunk, old, new, &palette, &strings, window, cx);
                 self.in_card(ix, line, None, &palette)
             }
-            Item::Row { rows, ix: row, .. } => {
-                let line = self.render_row(rows, row, &palette, window, cx);
+            Item::Row {
+                rows,
+                ix: row,
+                notes,
+                ..
+            } => {
+                let line = self.render_row(rows, row, notes, &palette, &strings, window, cx);
                 self.in_card(ix, line, None, &palette)
             }
             Item::Fold {
@@ -216,6 +221,27 @@ impl ReviewModel {
                 self.render_subagent(session, call, at, &palette, &strings, window, cx)
             }
             Item::Tool { call, at } => self.render_tool(call, at, &palette, &strings, window, cx),
+            Item::Note { id, rows } => {
+                let in_rows = rows.is_some();
+                let block = self.render_note(id, in_rows, &palette, &strings, window, cx);
+                if in_rows {
+                    self.in_card(ix, block, None, &palette)
+                } else {
+                    block
+                }
+            }
+            Item::NoteEditor { rows } => {
+                let in_rows = rows.is_some();
+                let block = self.render_note_editor(in_rows, &palette, &strings, window, cx);
+                if in_rows {
+                    self.in_card(ix, block, None, &palette)
+                } else {
+                    block
+                }
+            }
+            Item::NotesElsewhere { count } => {
+                self.render_notes_elsewhere(count, &palette, &strings, window, cx)
+            }
         }
     }
 
@@ -809,6 +835,8 @@ impl ReviewModel {
         );
         let files = turn_files(turn);
         let tokens = self.turn_tokens(turn);
+        // The notes this turn answers (#22).
+        let answers = turn.answers.and_then(|batch| self.answered_count(batch));
         let mut spec = Semantic::new(node.clone(), Role::Group)
             .label(&title)
             .state(State {
@@ -820,6 +848,16 @@ impl ReviewModel {
         if let Some(tokens) = tokens {
             spec = spec.attr("tokens", tokens.to_string());
         }
+        if let Some(count) = answers {
+            spec = spec.attr("answers", count.to_string());
+        }
+        let answers_text = answers.map(|count| {
+            Text::fmt(
+                strings,
+                keys::review::TURN_ANSWERS,
+                &Args::new().num("count", count),
+            )
+        });
         let files_text = Text::fmt(
             strings,
             keys::review::TURN_FILES,
@@ -836,6 +874,12 @@ impl ReviewModel {
                 Text::key(strings, keys::review::TURN_NONE)
             } else {
                 files_text
+            };
+            let aside = match &answers_text {
+                Some(answers) => {
+                    verbatim(format!("{}{SEPARATOR}{}", aside.as_str(), answers.as_str()))
+                }
+                None => aside,
             };
             div()
                 .id(&node)
@@ -884,6 +928,7 @@ impl ReviewModel {
             if let Some(tokens) = tokens {
                 facts.push(brief::turn_tokens_text(strings, tokens));
             }
+            facts.extend(answers_text);
             let joined: Vec<String> = facts.iter().map(|text| text.as_str().to_owned()).collect();
             div()
                 .id(&node)
