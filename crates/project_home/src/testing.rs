@@ -24,9 +24,9 @@ use lectern_services::project::{
     Worktree, WorktreeKey,
 };
 use lectern_services::review::{
-    BriefRules, BriefRulesRegistration, FileRows, OutsideCount, Overview, OverviewInterest,
-    Progress, Review, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey,
-    SessionOverview, TextKey,
+    BriefRules, BriefRulesRegistration, FileRows, NoteRoute, NoteRouteRegistration, OutsideCount,
+    Overview, OverviewInterest, Progress, Review, ReviewCommand, ReviewEvent, ReviewId,
+    ReviewSnapshot, ReviewTarget, RowsKey, SessionOverview, TextKey,
 };
 use lectern_services::session::{
     Agent, Batch, Content, ContentRef, Cursor, Format, Parent, Place, ResumeCommand, SessionError,
@@ -635,6 +635,14 @@ impl Review for FakeReview {
         _: ActivationToken,
     ) -> BriefRulesRegistration {
         unreachable!("project_home registers no brief rules")
+    }
+
+    fn register_note_route(
+        &self,
+        _: Arc<dyn NoteRoute>,
+        _: ActivationToken,
+    ) -> NoteRouteRegistration {
+        unreachable!("project_home registers no note routes")
     }
 }
 

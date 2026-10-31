@@ -1,3 +1,7 @@
+//! `review/resident_notes_bytes` (step 6): the annotation log's index with
+//! 280 review notes, in live bytes, read from a file as an open project
+//! reads it.
+//!
 //! `review/resident_cloudprint_bytes`, `review/resident_100k_bytes`
 //! (docs/design/review.md「性能」): what this crate holds at rest with a
 //! project's overview ready, in live bytes (`CountingAlloc`), the count
@@ -20,7 +24,7 @@ use std::sync::atomic::AtomicBool;
 use lectern_bench::{Bench, BenchError, CountingAlloc, Ctx, Measured, Value};
 use lectern_git::{Base, Limits, WorktreeId};
 use lectern_project::testing::Shape;
-use lectern_review::testing::Driven;
+use lectern_review::testing::{Driven, load_notes_log, write_notes_log};
 
 use crate::review_repo::{self, ReviewRepo};
 
@@ -35,6 +39,37 @@ pub const RESIDENT_100K: Bench = Bench {
     id: "review/resident_100k_bytes",
     run: resident_100k,
 };
+
+pub const RESIDENT_NOTES: Bench = Bench {
+    id: "review/resident_notes_bytes",
+    run: resident_notes,
+};
+
+/// 40 notes not sent, 240 sent in six batches; 200 bytes of text and five
+/// lines of excerpt each.
+fn resident_notes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let dir = ctx.scratch().join("notes-log");
+    let common = std::path::Path::new("/bench/repo/.git");
+    write_notes_log(&dir, common, 40, 240)?;
+    let mut samples = Vec::new();
+    for round in 0..=ctx.scale(SAMPLES, 1) {
+        let before = CountingAlloc::live();
+        let held = load_notes_log(&dir, common);
+        let bytes = CountingAlloc::live().saturating_sub(before) as u64;
+        // 280 notes and six batches.
+        if held.records() != 286 {
+            return Err(BenchError::debug("records", held.records()));
+        }
+        drop(held);
+        if round > 0 {
+            samples.push(bytes);
+        }
+    }
+    Ok(vec![
+        Measured::new("review/resident_notes_bytes", Value::Bytes(samples))
+            .with_note(Some("280 notes: 40 not sent, 240 sent".to_owned())),
+    ])
+}
 
 fn resident_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let repo = review_repo::build(&Shape::cloudprint(), true, ctx.scale(20, 4))?;

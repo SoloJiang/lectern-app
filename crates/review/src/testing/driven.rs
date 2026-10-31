@@ -18,12 +18,14 @@ use lectern_kernel::{ActivationToken, BusyGuard};
 use lectern_services::changes::{BaseSpec, ChangePath, RefreshHint};
 use lectern_services::project::{ChangedParts, ProjectKey, Projects, WorktreeKey};
 use lectern_services::review::{
-    BriefRules, BriefRulesRegistration, FileRows, Overview, OverviewInterest, ReviewCommand,
-    ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
+    BriefRules, BriefRulesRegistration, FileRows, NoteRoute, NoteRouteRegistration, Overview,
+    OverviewInterest, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey,
+    TextKey,
 };
 use lectern_services::session::{SessionKey, SessionSource, SourceId, Timestamp};
 
 use super::fake::{FakeProjects, FakeSessions};
+use super::send::FakeClipboard;
 use crate::engine::round::Kind;
 use crate::engine::{Config, Engine, Held, Host, attribute};
 
@@ -42,6 +44,7 @@ pub struct Driven {
     projects: Arc<FakeProjects>,
     cache: Cache,
     host: Option<Arc<ManualHost>>,
+    clipboard: FakeClipboard,
 }
 
 /// The engine's `Host` with a manual clock: tasks run on the manual
@@ -191,6 +194,7 @@ impl Driven {
                 timers: Mutex::new(Vec::new()),
             })
         });
+        let clipboard = FakeClipboard::new();
         let engine = Engine::new(Config {
             executor: executor.clone(),
             cache: cache.clone(),
@@ -222,6 +226,7 @@ impl Driven {
             clock: Arc::new(move || Timestamp(read.load(Ordering::Relaxed))),
             utc_offset: Arc::new(move |_| read_offset.load(Ordering::Relaxed)),
             discover: Arc::new(lectern_git::testing::discover),
+            clipboard: clipboard.writer(),
             interactive_budget,
         });
         let _ = me.set(Arc::downgrade(&engine));
@@ -236,7 +241,23 @@ impl Driven {
             projects,
             cache,
             host,
+            clipboard,
         }
+    }
+
+    /// The clipboard the engine writes to: a fake that keeps the texts
+    /// (`Driven` never touches the real one).
+    pub fn clipboard(&self) -> &FakeClipboard {
+        &self.clipboard
+    }
+
+    /// `Review::register_note_route`.
+    pub fn register_note_route(
+        &self,
+        route: Arc<dyn NoteRoute>,
+        token: ActivationToken,
+    ) -> NoteRouteRegistration {
+        self.engine.register_note_route(route, token)
     }
 
     /// Moves the manual host's clock by `by` and runs what came due (the

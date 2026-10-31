@@ -18,7 +18,7 @@ use crate::semantic::{
 use crate::{
     ActionCard, Agent, AgentDot, Appearance, Button, ButtonKind, CircleCheck, Expander,
     GroupedList, Hint, Icon, MenuItem, PopUpButton, Progress, ProgressShape, Row, Segmented,
-    SidebarRow, Text, init_fixed, strings,
+    SidebarRow, Text, TextArea, TextAreaState, init_fixed, strings,
 };
 
 /// A root view that renders whatever the test hands it.
@@ -718,6 +718,36 @@ fn semantic_snapshot_sidebar_row(cx: &mut TestAppContext) {
                         .compact()
                         .trailing(verbatim("11"))
                         .child(verbatim("Worktrees").shared()),
+                )
+                .into_any_element()
+        }),
+    );
+}
+
+/// The text box declares a `TextField` node and no label: the typed text
+/// and the placeholder are not recorded.
+#[gpui::test]
+fn semantic_snapshot_text_area(cx: &mut TestAppContext) {
+    check(
+        "text_area",
+        snapshot_of(cx, |window, cx| {
+            let state = window.use_keyed_state("snap-text-area", cx, |window, cx| {
+                TextAreaState::new(window, cx)
+            });
+            let off = window.use_keyed_state("snap-text-area-off", cx, |window, cx| {
+                TextAreaState::new(window, cx)
+            });
+            div()
+                .w(px(240.0))
+                .child(
+                    TextArea::new(root().child("text"), &state)
+                        .placeholder(verbatim("Write a note"))
+                        .lines(2, 8),
+                )
+                .child(
+                    TextArea::new(root().child("off"), &off)
+                        .disabled(true)
+                        .lines(1, 1),
                 )
                 .into_any_element()
         }),

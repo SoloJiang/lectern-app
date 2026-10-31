@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -32,7 +32,7 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gpui`、`gpui-component` | 元素、窗口外观、文字系统、动画元素；gpui-component 的 `Button`、`Icon` 作为底层（`Skeleton`、`ProgressCircle` 自带不可关的动画，不用，见「与设计的差异」第 3 步） | 已锁定（[ADR 0016](../adr/0016.md)） |
+| `gpui`、`gpui-component` | 元素、窗口外观、文字系统、动画元素；gpui-component 的 `Button`、`Icon`、`Textarea` 作为底层（`Skeleton`、`ProgressCircle` 自带不可关的动画，不用，见「与设计的差异」第 3 步） | 已锁定（[ADR 0016](../adr/0016.md)） |
 | `gpui-kit-assets`（`=0.7.0`，gpui-component 的依赖） | `icon_assets!` 宏生成 `Icon` 的 16 个图标的资源来源，`IconAssets` 包着它再加上应用图标的 SVG（只嵌入这 17 个文件） | 已在 Cargo.lock，与 gpui-component 同版本、一起升级；直接依赖只为用它的宏 |
 | `lectern-i18n` | `Strings`、`Key`、`FmtKey`、`Args`、`Locale`：`Text` 的构造 | 界面字符串不硬编码（[ADR 0013](../adr/0013.md)） |
 | `lectern-platform` | `appearance::{system_colors, reduce_motion, watch}`（前置条件 A） | macOS 专属能力只在 `platform`（架构规则 6）；视图层可以依赖基础设施层 |
@@ -633,6 +633,43 @@ pub struct Switch { /* id, on, knob: f32, on_change */ }
 - 「侧栏材质」（Welcome 的右栏、工作区的侧栏、检查器）：画布用半透明加背景模糊。GPUI 的元素画不了模糊，所以这些面板都用不透明的 `under_page_background`。工作区的侧栏原来不画底色，想透出窗口的 `Blurred` 背景；在真实窗口里（2026-10-28，macOS 27）窗口背景没有模糊，侧栏完全透明，能看清后面其他应用的文字，所以改成同样不透明。
 - 侧栏行尾的数量（Worktrees 的 11、Merge Requests 的 2）不在这一批：`SidebarRow::trailing` 能画它，但数量是会变的项目数据，而 `SidebarItem` 是登记时应用一次的载荷，谁提供数量、数量变化时谁触发重画要由 [workspace 设计](workspace.md)决定。在那之前不画数量（[project_home 设计](project_home.md)「对其他 crate 的要求」C）。
 
+#### 多行文本框（[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）
+
+回复框（`conversation`）和意见框（`review_view`）共用。接口以 conversation 设计的 F 为准，本节记录本 crate 的决定。视图不直接用 gpui-component 的 `Input`、`Textarea`。
+
+```rust
+/// 多行文本框：`control_background` 底、圆角 6pt、0.5pt `separator` 边；聚焦时边变 `accent`，外面加 3pt、35% 不透明度的 `accent` 焦点环。
+/// 文字是 `Body`。包装 gpui-component 的 `Textarea`（不画它自己的底和边）。探针节点 `TextField`，没有 `Label`，不记录输入的文字，也不记录占位文字；状态有 `focused`、`disabled`。
+pub struct TextArea { /* id, state, placeholder, lines, disabled, on_submit, on_cancel */ }
+/// 内部是一个 `Entity<gpui_component::input::TextareaState>`，外加当前文字的缓存、焦点句柄和订阅。
+pub struct TextAreaState { /* … */ }
+impl TextArea {
+    pub fn new(id: NodeId, state: &Entity<TextAreaState>) -> TextArea;
+    pub fn placeholder(self, text: Text) -> TextArea;
+    /// 高度随内容从 `min` 行长到 `max` 行，再往上滚动；`min` 至少 1，`max` 至少 `min`。没有调用时是 2 到 6 行。
+    pub fn lines(self, min: u8, max: u8) -> TextArea;
+    pub fn disabled(self, disabled: bool) -> TextArea;
+    /// ⌘↩。文本框自己处理，不插入换行。
+    pub fn on_submit(self, f: impl Fn(&mut Window, &mut App) + 'static) -> TextArea;
+    /// Esc。文本框自己处理；输入法组字时 Esc 先给输入法，不调用。没有设置时 Esc 照常冒泡。
+    pub fn on_cancel(self, f: impl Fn(&mut Window, &mut App) + 'static) -> TextArea;
+}
+impl TextAreaState {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self;
+    pub fn text(&self) -> SharedString;
+    /// 清空撤销历史，光标回到开头；会 `cx.notify()`。
+    pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>);
+    pub fn focus_handle(&self) -> FocusHandle;
+}
+```
+
+- ⌘↩ 和 Esc 在文本框外框上用 `capture_action` 处理（`Enter { secondary: true }`、`Escape`），先于 `Textarea` 自己的处理。两个原因：`Textarea` 的 KeyContext（`Input`）比屏幕的深，屏幕上的绑定拿不到这两个键；它的 `Enter` 动作在多行模式下对 ⌘↩ 也插入换行，只订阅 `InputEvent::PressEnter` 会在换行之后才调用 `on_submit`。
+- Esc 先问内部的输入状态有没有正在组字的标记范围（`marked_text_range`）：有，就不调用 `on_cancel`，由 `Textarea` 结束组字；`Textarea` 结束组字后会让 Esc 继续冒泡，外框上有一个什么也不做的冒泡处理把它接住，所以组字时的 Esc 到不了屏幕。没有设置 `on_cancel` 时两个处理都不注册。
+- `disabled(true)` 时不注册这两个处理：⌘↩ 不调用 `on_submit`，Esc 照常冒泡（禁用的文本框仍可能持有焦点）。
+- `TextAreaState` 在用户改变文字（`InputEvent::Change`）和 `set_text` 时 `cx.notify()`。引擎的 `set_value` 不发 `Change`，所以 `set_text` 自己通知。`text()` 读缓存，缓存在这两处更新；`text()` 与 `focus_handle()` 没有 `cx` 参数，所以不能读引擎。
+- 占位文字和行数范围在 `TextArea` 渲染时推给引擎，只在与上次不同时推：引擎的 `set_placeholder` 和 `set_auto_grow` 无条件 `cx.notify()`，每帧推会让文本框每帧重画。这个推送不通知 `TextAreaState`，否则观察它的视图会在自己的渲染里被通知。
+- 输入法、撤销重做、↵ 换行、选择、右键系统菜单（剪切、复制、粘贴、全选）是 `Textarea` 自带的。
+
 ### 贡献载荷（`contrib`）
 
 `workspace` 的注册表（`services::workspace`）在 kernel 层，装不下 GPUI 的类型和 Fluent 键，所以每种贡献的具体载荷放在本 crate 的 `contrib` 模块，`workspace` 从 `Payload` 里 `downcast` 回来。字段、调用线程和生命周期以 [workspace 设计](workspace.md)「`ui::contrib` 的载荷类型」为准，本文只列名字和本 crate 决定的两点：
@@ -842,6 +879,7 @@ pub mod semantic {
   - `reduced_motion_has_no_displacement`：`init_fixed(…, reduced_motion: true)` 下，`Expander`、`Segmented` 的滑块和面板偏移（用 `Transition` + `Effective::Fade` 的示例）在整个过渡里位移为 0，只有透明度变化。ADR 0015「影响」里「开启减弱动态效果时没有位移动画」的检查项。
   - `semantic_records_bounds_and_parents`：`Recorder::begin` 后渲染一个 `GroupedList` 里两个 `Row` 的帧，`finish` 给出 3 条记录，`Row` 的 `parent` 指向 `GroupedList`，`bounds` 与元素一致，滚出内容遮罩的行 `visible` 为 false；没有 `begin` 时渲染不产生记录，`is_armed` 为 false。
   - 每个控件的语义节点各一份 insta 快照（`Recorder::finish` 的记录去掉 `bounds` 和 `declared_at` 后的 JSON）。
+  - `TextArea`（`tests/text_area.rs`，无头，不开真实窗口；测试里开记录器，所以像探针测试一样每个测试一个进程，用 nextest）：`typing_changes_the_text_and_notifies`（输入改变 `text()` 并通知观察者；↵ 是换行不是提交；`set_text` 也通知）、`cmd_enter_submits_and_inserts_no_newline`（`on_submit` 被调用，文字不变）、`escape_cancels_when_a_handler_is_set` 与 `escape_bubbles_without_a_handler`、`escape_during_composition_goes_to_the_input_method`（用 `replace_and_mark_text_in_range` 造一段组字：第一次 Esc 结束组字、不调用 `on_cancel`、也不冒泡到屏幕，第二次调用）、`height_follows_the_content_between_the_line_limits`（`lines(2, 4)`：空和一行是两行高，三行、四行逐行增高，十行仍是四行高）、`placeholder_reaches_the_engine`、`a_disabled_box_takes_no_input`（不接受输入，⌘↩ 不提交，Esc 冒泡）；`semantic_snapshot_text_area`（`tests/probe.rs`）。
 - fixtures：没有外部格式。内置系统色表是源码里的常量，不是夹具。
 - 只能在 macOS 上跑的部分：全部（依赖 GPUI）。`platform::appearance` 的真实读取在 `platform` 的测试里验证；本 crate 的测试全用 `init_fixed`。另有一个手动检查在「验收」里：发布构建下 `mono_metrics().family` 为 `MONO_FAMILY`。
 
@@ -901,7 +939,7 @@ pub mod semantic {
 
 ## 验收
 
-分五步（第 5 步是 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 的第二批控件），每步一个 PR；前置条件 A 在 `platform` 单独一个 PR；第 1 步的 `contrib` 还要 `services` 的 `workspace` 模块（[workspace 设计](workspace.md)「对其他 crate 的要求」A，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）先合并。每步都要在 macOS 上 `just check`、`just test -p lectern-ui`、`just doctest`、`just deny` 通过，并且 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 没有结果。
+分六步（第 5 步是 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 的第二批控件，第 6 步是 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 要用的多行文本框），每步一个 PR；前置条件 A 在 `platform` 单独一个 PR；第 1 步的 `contrib` 还要 `services` 的 `workspace` 模块（[workspace 设计](workspace.md)「对其他 crate 的要求」A，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）先合并。每步都要在 macOS 上 `just check`、`just test -p lectern-ui`、`just doctest`、`just deny` 通过，并且 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 没有结果。
 
 **前置条件 A（`platform`，`Refs #214`）**：`platform::appearance` 的三个函数与 `Watch`；[platform 设计](platform.md)增加「系统外观」一节。`just test -p lectern-platform` 里 `appearance_*` 通过：两个外观各读到一份 `SystemColors`、`label` 的明度在浅色下低于 0.5、深色下高于 0.5；`reduce_motion` 返回 Some；`watch` 在 drop 后不再回调（测试里经 `NSNotificationCenter` 手动投递一次通知）。
 
@@ -936,6 +974,12 @@ pub mod semantic {
 - `Palette::fill`、`fill_strong`，6 个新图标，`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`（含 `crates/ui/assets/app-icon.svg` 和 `IconAssets` 对它的服务）。`Switch` 随 #21 的调用方实现。
 - `palette_builtin_*` 检查两个新颜色在两个外观下都比底色深一档（浅色）或浅一档（深色）；`icon_assets_hold_every_icon` 覆盖 16 个图标，并且 `IconAssets` 给出应用图标路径的非空 SVG、`list` 恰好 17 项；`every_control_renders_after_ready` 渲染 `AppIcon`；`ActionCard`、`PopUpButton`、`SidebarRow`（默认、`accent`、`compact` 加 `trailing`）、`Segmented::fill` 的语义节点快照；`disclosure_rotates_with_its_value`（0、0.5、1 三个值的角度）；`popup_items_dispatch_their_action`（菜单项的 `Action` 经 `dispatch_action` 到达，用 `TestAppContext`，不弹出系统菜单）。
 - 同一节里的 `rg` 检查仍没有结果。
+
+**第 6 步：多行文本框（`Refs #22`，conversation 设计 F、review_view 设计「对其他 crate 的要求」J）。**
+
+- `TextArea`、`TextAreaState`。
+- 「测试」里 `TextArea` 的各项和 `semantic_snapshot_text_area` 通过；「同一节里的 `rg` 检查」仍没有结果（颜色值、时长、`std::fs` 等）。
+- 手动（macOS，发布构建；调用方 `conversation` 或 `review_view` 的屏幕 PR 之后）：用系统输入法（拼音、日语假名）组字时按 Esc，只结束组字；⌘↩ 触发提交且不插入换行；聚焦时有焦点环；深色外观下文字、占位文字和选区可读。
 
 **视图 crate 接入后的持续检查**（写进各视图设计的验收，这里列出口径）：`rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|\.font_family\(|gpui_component::Button' crates/{workspace,welcome,project_home,review_view,file_reader}/src` 没有结果。
 
@@ -1005,6 +1049,12 @@ pub mod semantic {
 - 验收的 `rg`（颜色值、`Duration::from_millis`、IO、`Recorder::begin`）没有结果；`Cargo.lock` 没有变化。
 - `AppIcon`（后加的一次提交）：`crates/ui/assets/app-icon.svg` 用 macOS 的 `qlmanage` 渲染成 288 px 的位图，看到圆角方块、竖直渐变和符号（杯形的讲台线稿）；测试里 `IconAssets` 给出非空 SVG，画廊渲染 `AppIcon` 没有 panic，但测试平台的资源来源是空的，图片本身没有加载，测试没有验证它画出来。
 - **没有做**：看真实窗口的效果和弹出真正的系统菜单（`#[gpui::test]` 的测试窗口没有 `NSView`，`NativeMenu::show` 直接返回）。解锁屏幕后要看：`PopUpButton` 的菜单是否贴在按钮左下角、勾选项带勾；`SidebarRow` 与 `Row` 的右键是否先选中再弹出；`Disclosure` 的 `rotate` 在 GPUI 里是否顺时针（右 → 下）；`ActionCard` 的悬停过渡；`Capsule` 的阴影；`Button::pill` 在 `Capsule` 里的样子；`fill` / `fill_strong` 在两种外观下相对 `control_background` 的深浅。`NativeMenu` 的选中项经 `Window::dispatch_action` 派发由 `popup_items_dispatch_their_action` 在 GPUI 一侧验证，没有走 `NSMenu`。
+
+第 6 步（`TextArea`，macOS，Apple 芯片）：
+
+- `just test -p lectern-ui`：95 个测试通过，其中 `tests/text_area.rs` 的 8 个和 `semantic_snapshot_text_area`。把 `on_submit` 的 ⌘↩ 判断和 `on_cancel` 的组字判断临时改坏，`cmd_enter_submits_and_inserts_no_newline` 和 `escape_during_composition_goes_to_the_input_method` 随之失败（改回后通过）。
+- 组字用 `EntityInputHandler::replace_and_mark_text_in_range` 造出标记范围来检验，不是真实的输入法。
+- 没有做：窗口里的视觉检查（底色、边、焦点环、深色外观下的文字与占位文字）和真实输入法的 Esc；这两项等调用方的屏幕 PR 之后手动检查（「验收」第 6 步）。
 
 ## 与设计的差异
 
@@ -1085,3 +1135,12 @@ pub mod semantic {
 ### project_home 第 2 步
 
 - `on_accent()` 公开（`lectern_ui::on_accent`）：视图在选中的 `Row` 里放自己的文字时，次要文字要用强调色上的字色（`TextRole::Secondary` 的灰色在强调色上看不清）。仍然不是 `Palette` 的字段，值仍只在 `palette/builtin.rs`。控件对齐画布之后，选中默认是安静的灰底，`on_accent` 只剩 `Row::accent()` 的行（Welcome 的源列表）、`Button`、`CircleCheck` 和 gpui-component 的主题投影用。
+
+### 第 6 步：多行文本框
+
+- 锁定的 gpui-component 是 0.7.0，它的多行输入是 `Textarea` / `TextareaState`（`gpui-base` 里 `InputBaseState<TextareaMode>` 的别名），不是 conversation 设计 F 的注释里写的「`InputState` 的多行模式」。`TextAreaState` 里放的是 `Entity<TextareaState>`；接口（名字与签名）与 F 一致。0.7.0 的 `InputState` 只有单行。
+- F 说「⌘↩ 由文本框自己处理」。实现不订阅 `InputEvent::PressEnter`：`Textarea` 对 ⌘↩ 也先插入换行再发事件。⌘↩ 和 Esc 在外框上用 `capture_action` 拦截（见「多行文本框」一节）。
+- `lines` 没有调用时的范围（2 到 6 行）是本 crate 定的，F 没有写默认值；两个调用方都显式调用 `lines`。
+- `TextAreaState::text()` 与 `focus_handle()` 读缓存（F 的签名没有 `cx`）。`set_text` 的文字会清空撤销历史并把光标放回开头，这是 gpui-component 的 `set_value` 的行为。
+- 文本框的底、边和焦点环由本 crate 画（`Textarea::appearance(false)`），不用 gpui-component 的：它的边是 1px 的 `ring`、圆角取主题的，与 F 要求的 0.5pt `separator` 和 `accent` 焦点环不同。文字大小与行高用 `TextRole::Body`；内边距用 gpui-component 的 `Size::Medium`（左右 10pt、上下 8pt），它没有提供设置内边距的接口。
+- 占位文字的颜色是 gpui-component 的 `muted_foreground`，即 `secondary_label`（`init.rs` 的投影），不是 HIG 的 `tertiary_label`；要不要换取决于窗口里的视觉检查。

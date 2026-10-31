@@ -1,0 +1,35 @@
+---
+source: crates/ui/src/tests/probe.rs
+---
+[
+    Node {
+        id: "snap.root.text",
+        role: TextField,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+    Node {
+        id: "snap.root.off",
+        role: TextField,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: true,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+]

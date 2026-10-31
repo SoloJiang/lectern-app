@@ -1,6 +1,6 @@
 # terminal 设计
 
-状态：已接受，尚未实现。
+状态：已接受；「验收」第 1 步（`services::terminal`，[#318](https://github.com/SoloJiang/lectern-app/pull/318)）和第 2 步（libghostty-vt 接入与网格快照）已实现，第 3、4 步尚未实现。
 
 对应 issue [#12](https://github.com/SoloJiang/lectern-app/issues/12)（终端：portable-pty + libghostty-vt，会话 resume）与 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 的内核部分（libghostty-vt 接入）。`terminal` 启动 PTY 和其中的程序（`claude --resume`、`codex resume`、新会话、登录 shell），把输出交给 libghostty-vt 解析，生成视口的网格快照交给视图；视图发来的按键、粘贴、鼠标和尺寸变化经 libghostty-vt 编码后写回 PTY（[技术调研「终端：接入 libghostty-vt 内核」](tech-research.md#终端接入-libghostty-vt-内核)、[ADR 0002](../adr/0002.md)）。终端在界面的「收起」一层，是 Conversation 的 Terminal 页（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）；网格的绘制在 `terminal_view`，页面在 `conversation`。
 
@@ -475,6 +475,12 @@ pub struct CellStyle {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
 pub struct StyleFlags(pub u8);
 
+impl StyleFlags {
+    /// 依次是第 0 到第 5 位。
+    pub const BOLD: u8; pub const ITALIC: u8; pub const FAINT: u8;
+    pub const STRIKETHROUGH: u8; pub const OVERLINE: u8; pub const INVISIBLE: u8;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Underline { None, Single, Double, Curly, Dotted, Dashed }
 
@@ -644,7 +650,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 | `plugin/terminal/resident` | < 1 MB | 进程级，两次启动之差（[bench 设计「进程级基准」](bench.md#进程级基准)），没有打开的终端 |
 | `plugin/terminal/activate` | kernel 的默认条目（< 1 ms） | 由进程级的 `plugin/*/activate` 测量（bench 第 5 步；之前 `plugin/review/activate` 在 `TestKernel` 里取四段耗时） |
 
-滚动缓冲 10,000 行的单位按 libghostty-vt 的文档是行；实现时如果测出它是字节，按 `terminal/scrollback_footprint` 的份额换算上限，份额不变。
+滚动缓冲的上限：libghostty-vt 0.2.2 的 `max_scrollback` 实测是字节，不是行（「与设计的差异」第 1 条）。本 crate 设为 12 MiB，120 列带颜色的输出保留 10,000 行以上，`terminal/scrollback_footprint` 的份额不变。
 
 ## 状态与异常
 
@@ -761,7 +767,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 5. `terminal_view`：非插件的视图库。把 GPUI 的按键、IME 文字、粘贴、鼠标、滚动、焦点、尺寸转成 `Input`；从 `ui` 的 `Palette` 推出 `Theme`，外观变化时发 `SetTheme`；按 `Frame` 绘制；拥有 `app/input_frames`（另写设计文档，按 conversation 设计「对其他 crate 的要求」E）。
 6. `app`：装配 `TerminalPlugin::new(TerminalDeps { executor })`，排在 `project` 与 `agents` 之后（第 4 步）；`app/bundle_size` 记录静态库的增量。
 7. `bench`：预算表加入「性能」里的条目。`app/input_frames` 在 Conversation 的 Terminal 页里恢复夹具会话（`Launch::Resume`），所以它的 profile 用 `with_login_env` 给出一个 `PATH`，其中的 `claude`、`codex` 是回显程序（本 crate 的假程序，或 bench 自带的同类程序，由 bench 的实现决定）；不运行用户的 shell 和它的配置，也不运行真实的 agent。
-8. `review_view` / `conversation`（#22 发回会话）：驱动会话的终端是 `Running` 时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。终端还是 `Starting` 时不发送：这期间的输入和粘贴被丢弃（`input`），所以调用方等 `Listed` 报告 `Running` 之后再发，或提示用户稍后再发。
+8. `conversation` 的审阅意见会话途径（#22 发回会话，实现 `review` 的 `NoteRoute`；`review_view` 不直接调用本 crate）：驱动会话的终端是 `Running` 时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。终端还是 `Starting` 时不发送：这期间的输入和粘贴被丢弃（`input`），所以途径答复「现在送不了（终端正在启动）」，审阅屏幕提示用户稍后再发或改用剪贴板（[review 设计「审阅意见的发送途径」](review.md#审阅意见的发送途径noteroute)）。
 9. `project_home`：空状态的 New session 调用 `Launch::NewSession`（本 issue 之外）。
 
 ## 未决问题
@@ -780,6 +786,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 4. libghostty-vt 内部（Zig 代码）的 panic 会结束整个 Lectern 进程，不能按终端隔离；发布构建（ReleaseFast）里 Zig 的运行时安全检查关闭，出现的可能很小。
 5. 闪烁文字按普通文字显示；kitty 图形协议、Sixel 不支持。
 6. 视图在主线程上画帧不计入静止（「数据流与线程」）：UI 探针在静止之后读语义树时，终端的最后一帧可能还没画出，探针要另等一帧。
+7. Zig 0.15.2 不能链接 macOS 27 的 SDK（它的 `libSystem.tbd` 只列 `arm64e`），本机用 macOS 27 的 Xcode 或命令行工具时构建失败。临时办法：`DEVELOPER_DIR` 指向带旧 SDK 的命令行工具（如 SDK 14.4 的 `/Library/Developer/CommandLineTools`）再运行 Zig。CI 的 `macos-15` runner 不受影响；判定机器升级到 macOS 27 之前要先确认。
 
 ## 验收
 
@@ -809,3 +816,35 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 - `app` 的 profile 里有 "terminal"，`app/idle_empty` 的 `Plugins` 应答列出它。
 - `plugin/terminal/resident` < 1 MB；`app/idle_empty`、`app/cold_start` 在预算内；`app/bundle_size` ≤ 80 MB，增量写进「实际验证」。
 - 启动后、没有打开终端时，`ps -M <pid>` 里没有 `terminal-` 开头的线程。
+
+## 实际验证
+
+第 2 步（libghostty-vt 接入与网格快照，`Refs #5`），本机 Apple M5 Pro、macOS 27.0.1：
+
+- 构建：Zig 0.15.2（官方发布包，SHA-256 与 `scripts/install_zig.sh` 里的一致）编出 Ghostty 提交 `a887df42c56f6de86c0fe6da9c4eeca37931e083` 的 `libghostty-vt.a`；那个提交的 `build.zig.zon` 写的 `minimum_zig_version` 是 `0.15.2`。macOS 27 的 SDK 上链接失败，见「已知限制」第 7 条。
+- 依赖：`cargo tree -p lectern-terminal -e features` 里没有 `kitty-graphics`、`log`、`tracing`、`link-dynamic`；`cargo tree -i libghostty-vt-sys` 只有 0.2.2；`rg 'set_logger' crates/terminal/src` 没有结果；`just deny` 通过。
+- 编进静态库的 C / C++ 代码（`ar t libghostty-vt.a` 列出的目标文件）：Ghostty 自己的 Zig 与 C++ SIMD 代码（MIT），simdutf（MIT OR Apache-2.0，Ghostty 的 `pkg/simdutf/vendor` 里的单文件版，不需要 libc++），Highway（Apache-2.0 OR BSD-3-Clause，`deps.files.ghostty.org` 上按哈希固定的源码包），Zig 的 `compiler_rt`（MIT）。都在 `deny.toml` 的许可证白名单里。`build.zig.zon` 里的其他包（FreeType、HarfBuzz、Oniguruma 等）是 `lazy`，libghostty-vt 的目标不取。
+- 测试：`cargo test -p lectern-terminal --all-features` 里单元测试 5 个（`palette_*`、`pacing_*`）、`tests/frames.rs` 32 个（`frame_*` 15 个快照逐个看过，`row_reuse_*`、`copy_*`、`theme_*`）、`tests/input.rs` 16 个（`input_*`、`paste_*`、`no_echo_of_program_text_in_replies`）通过。
+- 基准（release，`cargo bench -p lectern-bench --bench time --bench memory -- terminal/`）：
+
+  | 基准 | 实测中位数 | 预算 |
+  |---|---|---|
+  | `terminal/parse_plain` | 1.06 ms | ≤ 10 ms |
+  | `terminal/parse_sgr` | 5.33 ms | ≤ 25 ms |
+  | `terminal/frame_full` | 133 µs | ≤ 300 µs |
+  | `terminal/frame_echo` | 2.38 µs | ≤ 30 µs |
+  | `terminal/idle_footprint` | 672 KB | ≤ 4 MB |
+  | `terminal/scrollback_footprint` | 10.7 MB（写入 10,000 行，保留 10,001 行） | ≤ 24 MB |
+
+- 没有验证的：CI 上缓存未命中时多出的构建时间见 [ci 设计「实际验证」](ci.md#实际验证)。
+
+## 与设计的差异
+
+第 2 步：
+
+1. 滚动缓冲的上限是字节：libghostty-vt 0.2.2 的 `max_scrollback` 按字节计（120 列一行约 1 KiB：10 MiB 保留 9,469 行）。按「性能」那一段换算为 12 MiB，`terminal/scrollback_footprint` 实测保留全部 10,000 行。
+2. 反显由本 crate 换算：libghostty-vt 的单元格颜色不含 SGR 7，`grid` 交换前景与背景色，帧里的颜色仍是「已解析」的。
+3. 默认打开 mode 2027（字素簇）：不打开时 ZWJ 表情被拆成几个单元格，`frame_emoji` 的快照每个表情一个簇。
+4. 去掉标题与图标的报告：libghostty-vt 无条件应答 `CSI 21 t` / `CSI 20 t`，应答里是程序写过的标题（`ESC ] l <标题> ESC \`），等于把程序的文字回显给它，违反「安全边界」。它没有开关，所以写回 PTY 之前丢掉 `ESC ] l`、`ESC ] L` 开头的应答（`no_echo_of_program_text_in_replies`）。
+5. `ClearScrollback` 经 `vt_write("\x1b[3J")`（ED 3）实现，libghostty-vt 0.2.2 没有单独的接口。
+6. 工具链：`scripts/install_zig.sh` 安装并校验 Zig，CI 的三类任务调用它；`justfile` 的版本检查也在 `doctest` 之前（它同样编译本 crate）。

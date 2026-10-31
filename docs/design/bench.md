@@ -542,7 +542,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)），`log/idle_memory` 及其场景也是；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`（含 `plugin/usage/activate`、`plugin/review/activate`：它们在进程级插件基准实现之前属于 `Time`，在 `TestKernel` 下进程内取 kernel 的四段耗时，第 5 步改为 `Process`）、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)），`log/idle_memory` 及其场景也是，`terminal/idle_footprint`、`terminal/scrollback_footprint`（子进程的常驻增量，同 `cache/memory`）也是；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`（含 `plugin/usage/activate`、`plugin/review/activate`：它们在进程级插件基准实现之前属于 `Time`，在 `TestKernel` 下进程内取 kernel 的四段耗时，第 5 步改为 `Process`）、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -806,6 +806,9 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `review/open_session_settled`、`review/cutoffs_cold`、`review/attribute_session_50` | 只记录（同一夹具：缓存全空时从 `open` 到最后一份快照；300 条记录的 `tree_changes` 全部未命中时建出截止时刻表；其余 49 个文件的改动链与归因，每一步都 `load`，不含缓存的读写） | [review](review.md#性能) | `review` 第 3 步 |
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 的全部 5000 行；进程内，不开窗口，只在 macOS 编译） | [review_view](review_view.md#性能) | `review_view` 第 1 步 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
+| `review/note_add` | 中位数 < 0.2 ms（`testing::MarkSeenFixture::seed_notes` 写好 39 条待发送、240 条已发送的会话外改动审阅上 `command(AddNote)` 到快照替换；每个样本之前删掉上一个样本加的那条，不计时） | [review](review.md#性能) | `review` 第 6 步 |
+| `review/notes_prompt_40` | 中位数 < 5 ms（`notes::prompt` 拼 40 条意见，每条 4 KiB 文字、5 行摘录和一个路径，约 200 KiB；纯文字处理，进程内，不开窗口） | [review](review.md#性能) | `review` 第 7 步 |
+| `review/resident_notes_bytes` | 中位数 < 300 KB（标注日志读完之后索引的存活字节：280 条意见，40 条待发送、240 条已发送，每条 200 字节文字和 5 行摘录；`Memory`；夹具 `testing::write_notes_log`、`load_notes_log`） | [review](review.md#性能) | `review` 第 6 步 |
 | `review/refresh_one` | 中位数 < 20 ms（同一夹具、审阅已完成时，agent 追加一轮并改写第一个改动文件：从 worktree 的路径批次和来源的 `SessionsChanged` 到第一份同时显示新一轮和新内容的快照；`testing::Driven` 不经插件和 fs_watch，批次与事件直接交给引擎） | [review](review.md#性能) | `review` 第 4 步 |
 | `plugin/review/activate` | 中位数 < 1 ms（kernel 记下的四段耗时之和；`Process` 目标，第 5 步起与 `plugin/*/activate` 的展开一致，原来在 `TestKernel` 下进程内测量；激活没有提交任务也没有写文件由 `review` 的插件测试验证） | [review](review.md#性能) | `review` 第 4 步 |
 | `usage/ingest_append_4k`、`usage/backfill_batch` | 中位数 < 5 ms / < 150 ms（`lectern_usage::testing::Scenario` 不经插件驱动存储；夹具 `testing::heavy_days`：30 个重度日、20 个仓库、约 18 万条事实行。活跃会话追加约 4 KiB（一个轮次开始、两条用量记录）从读取到游标提交；一批 8 MiB 的合成会话（约 390 轮、1170 条用量记录）的读取与入库） | [usage](usage.md#性能) | `usage` 第 1 步 |
@@ -824,6 +827,9 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `executor/spawn_10k`、`executor/wake_1000x100` | 只记录 | [executor](executor.md#性能) | 第 1 步 |
 | `kernel/service_get`、`kernel/service_for_each/{1,4,16}`、`kernel/service_current/{1,4,16}`、`kernel/emit`、`kernel/emit_nested` | 只记录 | [kernel](kernel.md#性能) | 第 1 步 |
 | `i18n/frame_strings` | 只记录（en 资源里每条消息各取一次、带变量的用样例参数格式化） | [i18n](i18n.md#性能) | 第 1 步 |
+| `terminal/parse_plain`、`terminal/parse_sgr` | 中位数 ≤ 10 ms / ≤ 25 ms（`lectern_terminal::testing::Engine`，120×40，新终端里 `vt_write` 1 MiB：纯 ASCII、每行 119 列 / 每 8 个字符换一次 24 位色；夹具是 `testing::plain_output`、`testing::sgr_output`） | [terminal](terminal.md#性能) | `terminal` 第 2 步 |
+| `terminal/frame_full`、`terminal/frame_echo` | 中位数 ≤ 300 µs / ≤ 30 µs（同一引擎上整屏重画（`testing::full_screen`）/ 回显一个字符之后生成一帧） | [terminal](terminal.md#性能) | `terminal` 第 2 步 |
+| `terminal/idle_footprint`、`terminal/scrollback_footprint` | 中位数 ≤ 4 MB / ≤ 24 MB（子进程：一个 120×40 的终端，输出 4 KiB / 10,000 行 119 列的 24 位色文字（`testing::colored_lines`）之后生成一帧，常驻增量；libghostty-vt 的页面不经计数分配器；`Memory`） | [terminal](terminal.md#性能) | `terminal` 第 2 步 |
 | `log/disabled_call`、`log/filtered_call`、`log/enabled_call` | 中位数 ≤ 2 ns / ≤ 5 ns / ≤ 1 µs（调用线程上：低于全局级别的调用；全局级别放行、按 target 拒绝的调用；写出的 info 记录，4 个字段，每个样本是写盘线程清空缓冲后的 256 次调用） | [logging](logging.md#性能) | `logging` 第 1 步 |
 | `log/contended_call` | 10 000 次里超过 5 µs 的不超过 300 次，即 p97 ≤ 5 µs（[ADR 0055](../adr/0055.md) 从 100 次放宽；`min(4, 可用核数 − 1)` 个线程同时写，至少 1 个，个数和调用线程慢路径的计数（遇到缓冲锁被占着、自旋后仍阻塞、唤醒写盘线程的次数）写在报告的备注里；线程只建一次、先各写一条不计时的记录，每轮在写盘线程清空缓冲后同时开始；每次调用单独计时，每轮约 400 条小于缓冲，不丢记录） | [logging](logging.md#性能) | `logging` 第 1 步 |
 | `log/third_party_limited`、`log/install_early` | 中位数 ≤ 30 ns / ≤ 20 µs（被限流的第三方记录；`install_early` 的全部工作，经 `testing::install_early_again`） | [logging](logging.md#性能) | `logging` 第 1 步 |
