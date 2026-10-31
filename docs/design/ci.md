@@ -20,7 +20,7 @@
 
 `code_intel` 的分片另用 `actions/cache` 保存和还原 `target/lectern-bench/fixtures`（跨运行保留的基准夹具，现在是 `code_intel` 的 10 万文件虚拟仓库，约 330 MB）。键是生成它的源码的哈希（`crates/code_intel/src`、`crates/cache/src`、`crates/bench/benches/fixtures` 和 `Cargo.lock`）；这个键只决定命中率。正确性靠夹具自己：还原的夹具在使用前对照当前的写入逻辑核对单元数和抽样单元，不符就重写（[ADR 0039](../adr/0039.md)，[bench 设计「夹具与 `test-support`」](bench.md#夹具与-test-support)）。源码哈希是另一层防护：`code_intel` 的源码一改就不命中，连核对看不出的、只影响样本之外文件的改动也会重写。键没变时还原约十几秒，代替约一分钟的写入。每个基准的耗时写进 `report.json`，最慢的 10 个是 check run 的一条 notice（[bench 设计「报告」](bench.md#报告)），超过目标时据此定位。
 
-检查名就是 GitHub 分支保护里必需检查的名字，改名要同时改分支保护。`Benchmarks (macOS arm64)` 由 ADR 0036 加入，要由仓库管理员加进必需检查；在那之前，基准超标只让这个任务失败，不阻止合并。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，可选 feature 后的代码也参与编译和测试。
+检查名就是 GitHub 分支保护里必需检查的名字，改名要同时改分支保护。`Benchmarks (macOS arm64)` 由 ADR 0036 加入，要由仓库管理员加进必需检查；在那之前，基准超标只让这个任务失败，不阻止合并。`Checks (Linux, GPUI-free crates)`、`Build and test (macOS arm64)` 和每个分片在构建之前运行 [`scripts/install_zig.sh`](../../scripts/install_zig.sh)，装 Zig 0.15.2 到 `RUNNER_TEMP`：官方发布包，校验 SHA-256，`libghostty-vt-sys` 的构建脚本用它编出 Ghostty 的静态库（[terminal 设计「libghostty-vt」](terminal.md#libghostty-vt)）。Ghostty 的源码和静态库在 `target/` 的 `OUT_DIR` 里，随 `rust-cache` 缓存；合并任务只编译 `lectern-bench-report`，不需要 Zig。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，可选 feature 后的代码也参与编译和测试。
 
 ## 判定机器
 
@@ -29,7 +29,7 @@
 - 条件：仓库变量 `LECTERN_JUDGE_RUNNER` 为 `true`，事件是 push（只有 `main`）或 `workflow_dispatch`。任务不在 `pull_request` 上运行，也没有 `pull_request_target`，runner 不自动运行 PR 的代码；所以它不是必需检查。
 - `runs-on: [self-hosted, macOS, ARM64, lectern-judge]`，`timeout-minutes: 60`。
 - `permissions: contents: read`，不引用 secret。action 固定到提交的 SHA，行尾注释写版本（`actions/checkout` v4.4.0、`actions/upload-artifact` v4.6.2）；升级时 SHA 和注释一起改。
-- 不下载工具：`RUSTUP_HOME=/opt/lectern-judge/rustup`、`RUSTUP_AUTO_INSTALL=0`，`PATH` 前面加 `/opt/lectern-judge/cargo/bin`，这些目录专用用户只能读（下面第 6 步）。第一步把 `HOME`、`CARGO_HOME`、`TMPDIR` 设到 `RUNNER_TEMP` 下，GitHub 在每个任务开始和结束时清空它。检查工具的一步只运行 `rustc`、`just`、`xcrun metal` 的 `--version`，缺了就失败。依赖的 crate 按 `Cargo.lock` 下载到这个任务的 `CARGO_HOME`。
+- 不下载工具：`RUSTUP_HOME=/opt/lectern-judge/rustup`、`RUSTUP_AUTO_INSTALL=0`，`PATH` 前面加 `/opt/lectern-judge/cargo/bin`，这些目录专用用户只能读（下面第 6 步）。第一步把 `HOME`、`CARGO_HOME`、`TMPDIR` 设到 `RUNNER_TEMP` 下，GitHub 在每个任务开始和结束时清空它。检查工具的一步只运行 `rustc`、`just`、`xcrun metal` 的 `--version` 和 `zig version`，缺了就失败。依赖的 crate 按 `Cargo.lock` 下载到这个任务的 `CARGO_HOME`。
 - checkout 带 `persist-credentials: false` 和 `clean: true`（开始时 `git clean -ffdx`）。没有 `rust-cache`，构建产物不跨任务保留，每次从头构建 release。
 - 任务启动的进程由 runner 的 job-completed 钩子结束，不由工作流结束：[`scripts/judge-runner/job-completed.sh`](../../scripts/judge-runner/job-completed.sh)，管理员把它装成 root 所有的 `/opt/lectern-judge/hooks/job-completed.sh`，runner 的 `.env` 用 `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` 指向它（下面第 7 步）。runner 在每个任务的最后一步之后运行它，失败或取消的任务也一样，工作流改不掉。它按内核记录的启动时刻（`ps` 的 `etime`）挑选：专用用户在这个任务的 `Runner.Worker` 之后启动的每个进程都结束（`kill -9`），只留下钩子自己的祖先（runner）和子进程；不按名字、路径或任务能改的列表。改了名字、换了路径、离开了进程组或会话、被 launchd 收养的进程都在其中。最多 5 轮，每轮之间等 1 秒，结束期间又 fork 出来的进程在下一轮结束。失败时关闭：在祖先里找不到 `Runner.Worker`、读不到它的启动时刻或列不出进程时，结束专用用户在 runner 之外的全部进程（登录会话也随之结束），退出码 1，任务失败；5 轮之后还有进程时也是 1。工作流的最后一步（`if: always()`）只再清一次工作区。bench 自己会结束测量的进程组，钩子处理被取消的运行和别的原因留下的进程。
 - 钩子也会结束任务期间按需启动的、属于专用用户的系统代理（如图形会话的 XPC 服务）。launchd 在需要时重新启动它们，判定不受影响。任务开始之前已经在运行的进程不在它的范围里：清理没有运行过钩子的任务（runner 进程被结束、机器断电）留下的进程，要靠第 11 步的定期重建和重启机器结束（ADR 0052「已知限制」）。
@@ -42,7 +42,7 @@
 3. 专用用户：系统设置 → 用户与群组，添加一个「标准」用户（不是管理员）。不登录 Apple ID，不放 SSH 密钥、git 凭据和别的凭据。
 4. 电源和屏幕：在管理员终端运行 `sudo pmset -a sleep 0 displaysleep 0 disksleep 0`。以专用用户登录，在系统设置 → 锁定屏幕里，「不活跃时启动屏幕保护程序」和「屏幕保护程序启动或显示器关闭后需要密码」都选「永不」。
 5. 登录：在系统设置 → 隐私与安全性里关闭 FileVault，再在系统设置 → 用户与群组里把「自动以此身份登录」设为专用用户。不关 FileVault 时，开机后手动登录专用用户，一直保持登录。
-6. 只读的工具（以管理员）：安装 Xcode，打开一次接受许可，运行 `sudo xcodebuild -downloadComponent MetalToolchain`。从 rustup.rs 取得 `rustup-init.sh`，然后运行下面的命令。`1.97.0`、组件和 target 取自 `rust-toolchain.toml`；它改变时重做这一步，任务不会自己安装，缺工具链时失败。
+6. 只读的工具（以管理员）：安装 Xcode，打开一次接受许可，运行 `sudo xcodebuild -downloadComponent MetalToolchain`。从 rustup.rs 取得 `rustup-init.sh`，然后运行下面的命令。`1.97.0`、组件和 target 取自 `rust-toolchain.toml`，Zig 的版本取自 `scripts/install_zig.sh`（在本仓库 `main` 的一份检出里运行）；它们改变时重做这一步，任务不会自己安装，缺工具链时失败。
 
    ```sh
    sudo env RUSTUP_HOME=/opt/lectern-judge/rustup CARGO_HOME=/opt/lectern-judge/cargo \
@@ -52,6 +52,8 @@
      --component rustfmt,clippy --target aarch64-apple-darwin
    sudo env RUSTUP_HOME=/opt/lectern-judge/rustup CARGO_HOME=/opt/lectern-judge/cargo \
      /opt/lectern-judge/cargo/bin/cargo +1.97.0 install --locked just
+   sudo scripts/install_zig.sh /opt/lectern-judge/zig
+   sudo ln -s /opt/lectern-judge/zig/zig /opt/lectern-judge/cargo/bin/zig
    sudo chown -R root:wheel /opt/lectern-judge
    sudo chmod -R go-w /opt/lectern-judge
    ```

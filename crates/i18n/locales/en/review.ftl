@@ -250,3 +250,61 @@ review-error-no-merge-base = no merge base
 review-error-too-many-entries = too many entries
 review-error-io = read error
 review-error-cancelled = cancelled
+
+## Review notes (#22). The prompt itself is English and not translated (it is read by the agent).
+
+review-copy-prompt = Copy as Prompt
+    .tooltip = Copy the review notes as a prompt, then paste it into the session
+review-notes-discard = Discard
+review-notes-discard-confirm = { $count ->
+    [one] Discard { $count } review note?
+   *[other] Discard { $count } review notes?
+}
+    .detail = They haven't been sent. This can't be undone.
+review-notes-sending = Sending…
+review-notes-copied = { $count ->
+    [one] Copied { $count } review note. Paste it into the session.
+   *[other] Copied { $count } review notes. Paste them into the session.
+}
+review-notes-pasted = { $count ->
+    [one] Pasted { $count } review note into the terminal. Press Return there to send.
+   *[other] Pasted { $count } review notes into the terminal. Press Return there to send.
+}
+review-notes-sent = { $count ->
+    [one] Sent { $count } review note
+   *[other] Sent { $count } review notes
+}
+# $reason is the text of one of the review-notes-error-* messages.
+review-notes-not-sent = Not sent: { $reason }
+review-notes-error-starting = the terminal is still starting
+review-notes-error-busy = the agent is working
+review-notes-error-no-session = no session can receive them
+review-notes-error-timed-out = no answer in 10 seconds
+review-notes-error-clipboard = the clipboard couldn't be written
+review-notes-error-failed = the session didn't take them
+review-notes-full = Up to { $count } notes can be unsent at a time. Send or discard some first.
+review-notes-copy-again = Copy Again
+    .tooltip = { $count ->
+        [one] Copy the { $count } review note you sent last, with the same marker
+       *[other] Copy the { $count } review notes you sent last, with the same marker
+    }
+review-notes-not-copied = Not copied: { $reason }
+review-notes-elsewhere = Notes on files no longer in this review
+review-note-placeholder = Write a note for the agent
+review-note-add = Add Note
+review-note-save = Save
+review-note-too-long = This note is too long.
+review-note-add-here = Add Note
+    .tooltip = Add a review note (C)
+review-note-edit = Edit
+review-note-delete = Delete
+review-note-pending = Not sent
+# $when is a relative time, e.g. "2 minutes ago".
+review-note-sent = Sent { $when }
+review-note-copied = Copied { $when }
+# $line is 1-based.
+review-note-drifted = Line { $line } changed after this note was written
+review-turn-answers = { $count ->
+    [one] answers { $count } review note
+   *[other] answers { $count } review notes
+}

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Brief, Group, GroupKind, NoiseKind, ReviewId, ReviewTarget};
+use super::{
+    BatchId, Brief, Group, GroupKind, NoiseKind, Note, NotesState, ReviewId, ReviewTarget,
+};
 use crate::changes::{ChangeError, ChangePath, ChangeTotals, FileChange};
 use crate::project::{BlobId, RelPath};
 use crate::session::{Agent, ContentRef, SessionKey, Timestamp, ToolCallId, ToolStatus, TurnId};
@@ -42,8 +44,12 @@ pub struct ReviewSnapshot {
     pub focus_touched: Arc<[RelPath]>,
     pub totals: ChangeTotals,
     pub degraded: Option<Degraded>,
-    /// #22 加入；本 issue 里总是空的。
+    /// #22：这个审阅对象的审阅意见：全部待发送、发送中的，加上 14 天内发出的。按
+    /// `files` 的顺序、同一文件按行号；`NotePlace::Elsewhere` 的排在最后，按写下的时刻。
     pub notes: Arc<[Note]>,
+    /// #22：发送途径、发送中的批次、上一次发送的结果和已发出的批次。单独一个结构，
+    /// 意见变化时只换它和 `notes`。
+    pub notes_state: Arc<NotesState>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -188,6 +194,8 @@ pub struct TurnEntry {
     pub items: Arc<[NarrativeItem]>,
     /// 这一轮在这个审阅对象最近一次已看标记之后开始（「回到第 3 步只看新轮次」）。
     pub after_last_seen: bool,
+    /// #22：这一轮的 prompt 是哪一批审阅意见；没有时为 None。
+    pub answers: Option<BatchId>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -255,7 +263,3 @@ pub struct TextKey {
     pub session: u16,
     pub at: ContentRef,
 }
-
-/// 审阅意见。字段由 #22 定义；本 issue 里是空结构，`ReviewSnapshot::notes` 总为空。
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub struct Note {}

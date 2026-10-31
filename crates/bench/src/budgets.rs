@@ -188,6 +188,7 @@ const PROJECT_HOME: &str = "docs/design/project_home.md#性能";
 /// frames (`FrameRecord::frames` is always empty, workspace design
 /// 「已知限制」) and for `app` to hand the records to the probe.
 const FRAMES_RECORDED: State = State::Planned("workspace 的帧记录");
+const TERMINAL: &str = "docs/design/terminal.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -1801,6 +1802,23 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // (step 6) `command(AddNote)` with 39 notes not sent and 240 sent.
+    share(
+        "review/note_add",
+        &[median(Limit::TimeBelow(us(200)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
+    // (step 7) `notes::prompt` of 40 notes with 4 KiB of text and a
+    // five-line excerpt each.
+    share(
+        "review/notes_prompt_40",
+        &[median(Limit::TimeBelow(ms(5)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
     // (step 5) The rule brief of 5000 files.
     share(
         "review/brief_5000",
@@ -1840,6 +1858,16 @@ pub static BUDGETS: &[Budget] = &[
     share(
         "review/resident_100k_bytes",
         &[median(Limit::BytesBelow(MB))],
+        REVIEW,
+        ACTIVE,
+        Memory,
+    ),
+    // (step 6) The annotation log's index with 280 review notes (40 not
+    // sent, 240 sent; 200 bytes of text and five excerpt lines each):
+    // 300 KB (2^10 bytes).
+    share(
+        "review/resident_notes_bytes",
+        &[median(Limit::BytesBelow(300 << 10))],
         REVIEW,
         ACTIVE,
         Memory,
@@ -2002,6 +2030,56 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share("log/idle_memory/verbose", RECORD, LOGGING, ACTIVE, Memory),
     // ---- end logging ----
+    // ---- terminal (terminal design, step 2) ----
+    // `testing::Engine` (no PTY) at 120×40: 1 MiB of plain ASCII / of
+    // output with a new 24-bit colour every 8 characters into a new
+    // terminal; one frame with every row / one row (an echo) dirty.
+    share(
+        "terminal/parse_plain",
+        &[median(Limit::TimeAtMost(ms(10)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/parse_sgr",
+        &[median(Limit::TimeAtMost(ms(25)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/frame_full",
+        &[median(Limit::TimeAtMost(us(300)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/frame_echo",
+        &[median(Limit::TimeAtMost(us(30)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    // Resident growth of a child process: libghostty-vt's pages bypass
+    // CountingAlloc. 4 KiB of output / 10,000 coloured lines of 120
+    // columns, then a frame.
+    share(
+        "terminal/idle_footprint",
+        &[median(Limit::BytesAtMost(4 * MB))],
+        TERMINAL,
+        ACTIVE,
+        Memory,
+    ),
+    share(
+        "terminal/scrollback_footprint",
+        &[median(Limit::BytesAtMost(24 * MB))],
+        TERMINAL,
+        ACTIVE,
+        Memory,
+    ),
+    // ---- end terminal ----
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),
     share("executor/wake_1000x100", RECORD, EXECUTOR, ACTIVE, Time),
     share("kernel/service_get", RECORD, KERNEL, ACTIVE, Time),

@@ -18,10 +18,10 @@ use lectern_services::project::{ProjectKey, WorktreeKey};
 use lectern_services::review::{
     Alignment, AnalysisState, AttributionState, BaseHow, BaseInfo, Brief, BriefItem, BriefRule,
     BriefRules, BriefRulesRegistration, DiffRow, FileAttribution, FileEntry, FileKey, FileRows,
-    Group, GroupKind, HunkAttribution, HunkInfo, LoadState, NarrativeItem, Need, Overview,
-    OverviewInterest, Progress, Review, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot,
-    ReviewTarget, RowsKey, RowsSide, SeenState, SensitiveKind, SessionRef, StepEntry, StepId,
-    Survival, TextKey, TurnEntry, TurnRef,
+    Group, GroupKind, HunkAttribution, HunkInfo, LoadState, NarrativeItem, Need, NoteRoute,
+    NoteRouteRegistration, Overview, OverviewInterest, Progress, Review, ReviewCommand,
+    ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, RowsSide, SeenState,
+    SensitiveKind, SessionRef, StepEntry, StepId, Survival, TextKey, TurnEntry, TurnRef,
 };
 use lectern_services::session::{
     Agent, ContentRef, SessionKey, SourceId, Timestamp, ToolCallId, TurnId,
@@ -376,6 +376,14 @@ impl Review for FakeReview {
     ) -> BriefRulesRegistration {
         BriefRulesRegistration::new(|| {})
     }
+
+    fn register_note_route(
+        &self,
+        _: Arc<dyn NoteRoute>,
+        _: ActivationToken,
+    ) -> NoteRouteRegistration {
+        NoteRouteRegistration::new(|| {})
+    }
 }
 
 /// Swaps `seen` as the real service does before `command` returns; the new
@@ -661,6 +669,7 @@ pub fn snapshot_fixture_tagged(
                 prompt_preview: Arc::from(format!("{tag}prompt of turn {t}")),
                 items: Arc::from(items),
                 after_last_seen: true,
+                answers: None,
             }
         })
         .collect();
@@ -722,6 +731,7 @@ pub fn snapshot_fixture_tagged(
         },
         degraded: None,
         notes: Arc::from(Vec::new()),
+        notes_state: Arc::default(),
     };
     (snapshot, rows_out)
 }

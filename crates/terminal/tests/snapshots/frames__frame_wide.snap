@@ -1,0 +1,15 @@
+---
+source: crates/terminal/tests/frames.rs
+expression: "frame_of(\"wide\", 16, 3)"
+---
+size 16x3  colors fg #e5e5e5 bg #101010 cursor #ffffff
+cursor 0,2 Block
+scroll 0/3  modes Modes { bracketed_paste: false, mouse_tracking: false, alt_screen: false, focus_events: false }
+ 0: "中文 abc"
+    clusters 0@0w 3@2w 6@4 7@5 8@6 9@7
+      0..16  fg #e5e5e5
+ 1: "日本語テキスト"
+    clusters 0@0w 3@2w 6@4w 9@6w 12@8w 15@10w 18@12w
+      0..16  fg #e5e5e5
+ 2: ""
+      0..16  fg #e5e5e5
