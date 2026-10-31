@@ -23,6 +23,7 @@ mod overview;
 mod rows;
 mod rules;
 mod snapshot;
+mod worktrees;
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,7 @@ pub use snapshot::{
     FileKey, LoadState, NarrativeItem, Progress, ReviewError, ReviewSnapshot, SeenState,
     SessionRef, StepEntry, StepId, Survival, TextKey, TurnEntry, TurnRef,
 };
+pub use worktrees::{ChangeCount, Overlap, WorktreeChanges, WorktreesOverview};
 
 /// 单实现服务，"review" 插件提供。
 pub trait Review: Send + Sync {
@@ -81,6 +83,26 @@ pub trait Review: Send + Sync {
     /// 关注一个项目的概览：返回值持有期间实现方计算并保持它（含 ADR 0035 的计数比较），
     /// drop 后释放。立即返回。
     fn watch_overview(&self, project: &ProjectKey) -> OverviewInterest;
+
+    /// 并行 worktree 总览（worktrees 设计「对其他 crate 的要求」A）。不阻塞，取锁复制
+    /// `Arc`；没有关注者、也没有保留的结果时为 None。
+    fn worktrees(&self, project: &ProjectKey) -> Option<Arc<WorktreesOverview>> {
+        let _ = project;
+        None
+    }
+
+    /// 关注一个项目全部 worktree 的改动计数。立即返回；持有期间实现方计算并保持它，
+    /// drop 后停止计算。
+    fn watch_worktrees(&self, project: &ProjectKey) -> OverviewInterest {
+        let _ = project;
+        OverviewInterest::new(|| {})
+    }
+
+    /// 用户要求刷新（⌘R）：有关注者时把这个项目的全部 worktree 标为失效，按节流规则
+    /// 重算。立即返回。
+    fn refresh_worktrees(&self, project: &ProjectKey) {
+        let _ = project;
+    }
 
     /// 登记一个简报规则的提供者。立即返回，任何线程。实现方每次调用提供者之前
     /// `token.enter()`，取不到（提供者已停用）就当作没有登记。返回值 drop 时注销。
@@ -121,6 +143,11 @@ pub enum ReviewEvent {
         project: ProjectKey,
         generation: u64,
     },
+    /// `Review::worktrees(project)` 换了一份新的。
+    Worktrees {
+        project: ProjectKey,
+        generation: u64,
+    },
 }
 
 impl Event for ReviewEvent {}
@@ -129,7 +156,7 @@ impl Event for ReviewEvent {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct ReviewId(pub u64);
 
-/// `watch_overview` 的关注，drop 时注销（任何线程，不阻塞）。`review` 用 `new` 构造，
+/// `watch_overview` 与 `watch_worktrees` 的关注，drop 时注销（任何线程，不阻塞）。`review` 用 `new` 构造，
 /// 传入的回调持有关注表的 `Weak` 和关注序号；实现方已停用时回调不做任何事。回调最多
 /// 调用一次，不得 panic。不序列化：进程插件的代理在宿主进程里持有它。
 pub struct OverviewInterest {
