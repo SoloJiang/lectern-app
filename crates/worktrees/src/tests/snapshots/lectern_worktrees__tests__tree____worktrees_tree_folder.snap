@@ -1,0 +1,8 @@
+---
+source: crates/worktrees/src/tests/tree.rs
+expression: "tree(vcx, | id | id.starts_with(\"worktrees.\"))"
+---
+worktrees.toolbar.refresh Button label=[worktrees-refresh]
+worktrees.empty Text label=[worktrees-not-git]
+worktrees.detail Panel selected=false
+  worktrees.detail.empty Text label=[worktrees-detail-empty]

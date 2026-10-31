@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（#339），第 2、3 步尚未实现。
+状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（#339），第 2 步（视图）已实现（PR 号待定），第 3 步尚未实现。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -639,6 +639,8 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - 「相对主干」的合计是已提交与未提交路径的并集：已提交的改动在工作区里又改回原样时，这个文件仍计入，而「相对主干」的审阅里没有它。
 - 改动路径超过 4000 个的 worktree 没有重叠信息。
 - 相对时间只随合成刷新；Active 到期由一次性定时触发一次合成。
+- `LoadingPhase::Progress` 的不确定进度：`ui` 没有这个控件（`Progress` 只有 `Bar` / `Ring` 两种确定的），超过 1 秒仍显示骨架，节点的 `phase=progress` 记下阶段；等 `ui` 有了控件再换（与项目主页相同）。
+- `review` 的第一轮概览失败而概览关注者还在时，当前 worktree 的 `uncommitted` 与 `vs_base` 停在 `Pending`（见「与设计的差异 / 前置条件 A 的遗留」）：第 2 步的骨架在这时一直显示，直到 `review` 修复。
 - 列表不虚拟化：worktree 多于 100 个时每帧的排版随行数增长。
 - 本屏幕依赖 `dyn Review`：`review` 失败时整个屏幕不可用。
 - P1 只读：不创建、删除或 prune worktree。
@@ -653,6 +655,15 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - 「验收」第 1 步的 `rg` 检查：`std::fs|std::process|git2|gix|std::thread::spawn`、对插件 crate 和 `lectern-git` 的依赖行、`eprintln!|println!|log::` 在 `crates/worktrees` 里都没有结果；`python3 scripts/check_architecture.py` 通过。
 - `snapshot::build` 的耗时：不属于第 1 步的基准（`worktrees/build_1000` 随第 3 步进 `bench`）。用同一份夹具在 `cargo test --release` 里临时量过（200 次，没有留在仓库里）：中位数约 0.38 ms，最大约 0.87 ms，预算 < 2 ms。
 - 没有验证：视图（第 2 步）；真实 kernel 里的 `usage` 与 `review` 插件（假服务代替，插件之间不依赖）；`warn` `usage call refused` 的写出（要 `usage` 插件的 token 在 `started` 与停用之间死掉，假服务做不出这个时刻）；`worktrees milestone reported` 和 `worktrees command` 等视图一侧的日志（第 2 步）；内存的 `worktrees/resident_bytes`（第 3 步）。
+
+### 第 2 步（视图）
+
+PR 号待定，`Refs #16`，在 macOS（arm64）上运行，没有打开真实窗口（窗口是 GPUI 的测试窗口）：
+
+- `just check`（格式、架构检查、文档链接、整个工作区的 clippy）、`just test -p lectern-worktrees`（71 个测试通过：第 1 步的 46 个，其中 `activate_registers_nothing_and_does_no_work` 换成 `activate_registers_contributions_only`；新增 `views.rs` 的 `#[gpui::test]`（「测试」列的 15 个，另有 `the_dot_blinks_when_a_worktree_starts_running`、`the_page_shows_usage_of_merge_requests`、`without_a_base_the_range_is_against_head`、`a_switch_before_the_screen_is_built_is_not_reported`、`a_screen_built_before_the_snapshot_follows_it`、`a_repository_with_one_worktree_says_so`、`a_folder_project_says_it_is_not_a_repository`、`the_page_and_the_text_are_in_the_language_of_the_interface` 等）、`tree.rs` 的 3 份语义树 insta 快照、`canary_stays_out_of_worktrees_logs` 扩到渲染、↓、↵、切换按钮、⌘R 与关闭项目）、`just deny` 通过。
+- 「验收」第 2 步的 `rg`：`hsla\(|rgb\(|…|gpui_component::Button`、`"[A-Z][a-z]+ [a-z]`（非测试）在 `crates/worktrees/src` 没有结果；`NodeId::new("worktrees"` 有结果；第 1 步的几条 `rg` 仍没有结果。
+- 前置条件：`ui` 设计的第 3、4 步（#236、#242，另有第 5、6 步）、B（#336）、C、A 的 `services` 与 `review` 部分都已在 `main`。
+- 没有验证：窗口里的实际显示（行的间距、徽标、骨架、检查器页的外观、`Expander` 与 `Disclosure` 的动画、圆点的轻闪）；`workspace` 真实地调用 `Screen::build`、`InspectorTab::build` 与 `toolbar`（测试里的 `Host` 代替它）；`ScreenChanged` 经真实窗口到达；`worktrees milestone reported` 到 `app` 的转接和 `app/switch_worktree` 基准（第 3 步）；`worktrees/resident_bytes`（第 3 步）；`LoadingPhase::Progress` 的不确定进度（`ui` 没有控件）；`review` 第一轮失败时骨架一直显示的情形（在 `review`，见「已知限制」）。
 
 ### 前置条件 B（`workspace` 与 `ui::contrib`）
 
@@ -694,7 +705,27 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - **侧栏条目。** `Views` 区，ID `worktrees`，`order` 0（交互规范的顺序是 Worktrees 在 Files 之前），图标 `Icon::Worktrees`，登记时带激活的 token。
 - **日志。** 多一条 debug `worktrees complete requested`（`sessions`：数量），与 project_home 的同类记录对应；`worktrees build dropped` 只带 `reason`。其余字段按「日志与诊断」。
 - **测试。** 夹具 `fixture_1000` 在 `src/tests/build.rs`（`pub(crate)`），形状由 `build_1000_fixture_shape` 检查；第 3 步的基准要用它时再放到 `test-support` 特性后面（`crates/bench` 在第 3 步，这里没有动）。多出的用例：`build_merges_a_child_only_into_a_parent_that_counts`、`build_cuts_a_cycle_of_parents`、`build_queries_an_mr_once`、`build_folder_project`、`build_files_settled_and_generations`、`usage_link.rs` 的 6 个、插件一侧的 `activate_registers_nothing_and_does_no_work`、`opening_another_project_replaces_the_entry`、`usage_events_of_wanted_queries_recompose`、`usage_of_a_branch_in_several_mrs_asks_for_each_mr`、`complete_is_requested_once_per_pending_session`、`a_result_for_a_hidden_screen_is_dropped`、`a_result_for_a_closed_project_is_dropped`、`a_project_without_a_snapshot_is_skipped_and_recovers`、`views_get_each_snapshot_and_an_empty_one_when_the_project_closes`、`deactivation_drops_everything`。
-- **前置条件 A 的遗留（`review`，未改）。** 第一轮的概览（`watch_overview`）没有发布过快照（例如第一轮失败）而概览关注者还在时，`overview_counted` 一直是 `Counted::Pending`，当前 worktree 的 `uncommitted` 与 `vs_base` 在下一次标记之前停在 `Pending`。这是读 `overview_counted` 的代码得出的，没有用测试复现。第 1 步只把 `Pending` 原样映射，没有显示，所以没有让它可见，也没有改 `review`；第 2 步的骨架会让它在这个失败情形下一直转。修法在 `review` 的概览状态里记一个「第一轮已失败」，之后按「没有概览」处理（自己比较），要在 `Driven` 里加失败的用例，不在第 1 步的范围。
+- **前置条件 A 的遗留（`review`，未改）。** 第一轮的概览（`watch_overview`）没有发布过快照（例如第一轮失败）而概览关注者还在时，`overview_counted` 一直是 `Counted::Pending`，当前 worktree 的 `uncommitted` 与 `vs_base` 在下一次标记之前停在 `Pending`。这是读 `overview_counted` 的代码得出的，没有用测试复现。第 1 步只把 `Pending` 原样映射，没有显示，所以没有让它可见，也没有改 `review`；第 2 步的骨架让它在这个失败情形下一直显示（见「第 2 步」的差异和「已知限制」）。修法在 `review` 的概览状态里记一个「第一轮已失败」，之后按「没有概览」处理（自己比较），要在 `Driven` 里加失败的用例，不在第 1 步的范围。
+
+### 第 2 步（视图）
+
+技术决定，没有需要产品决定的：
+
+- **本屏幕的所有 Action 都在屏幕上处理，包括 `OpenSession`、`ToggleOverlap`。** 检查器页没有键盘焦点，探针触发的 Action 只会落在焦点路径上的屏幕，所以屏幕的根视图监听全部十个 Action；检查器页的点击直接调用共享的 `WorktreesModel` 的同一批方法（经弱引用），两条路径做同一件事。
+- **语义节点。**
+  - 行的属性放在 `<行>.facts`（`Group`，行内容的节点），不放在 `Row` 自己的 `ListItem` 上（`Row` 没有属性，与项目主页相同）；一个节点至多 8 个属性（`ui::semantic`），设计的行属性有 9 个，所以 `tokens` 单独在 `<行>.tokens`（`Text`，数字或 `pending`，默认分支和没有 `usage` 插件时没有这个节点）。
+  - 徽标是 `<行>.badge.item[current / locked / missing]`，设计的 `badge[…]` 造不出（与第 1 步的 `list.item` 同一原因）。
+  - `GroupedList` 自己声明节点，角色是 `List`，不是设计表里的 `Group`（`worktrees.active`、`worktrees.idle`）；`worktrees.list` 是外面包的 `List` 节点，属性 `rows`、`active`、`idle`、`ready`，另有 `phase`（`nothing` / `skeleton` / `progress`）。
+  - `worktrees.detail.usage.mr` 的键是 MR 的编号；检查器里重叠项与会话行的属性在各自的 `….facts` 上，重叠项展开的路径在 `….paths`（`Expander`）。空状态节点是 `worktrees.empty`（文件夹项目）和 `worktrees.detail.empty`（检查器没有选中的行）。
+  - `ready` 为 true 需要概览已到达、改动计数、重叠和用量都不在 `Pending`。
+- **一个模型，一个唤醒通道。** `WorktreesModel` 在建好时向 `Hub` 登记一次（`attach_view("screen")`），检查器页不登记，它经 `cx.observe` 跟随模型；唤醒消息就是新快照（项目关闭时的空快照只能经这条通道到达，`Hub::snapshot()` 此时为 None）。日志 `worktrees view attached` / `detached` 的 `view` 为 `screen` 或 `detail`。
+- **`Hub` 多出的方法。** `now()`（模型用合成所用的时钟算定时的延迟）、`dispatch(command, target)`（记 debug `worktrees command`）、`refresh(project)`、`log_switch(project, worktree)`（记 info `worktree switch requested`，下标取自 `ProjectSnapshot::worktrees`，经 `Projects::snapshot`，取锁复制 `Arc`）、`report_milestone(switches)`（记 info `worktrees milestone reported`）。
+- **选中与展开。** 选中换到另一个 worktree 时，检查器里展开的重叠项收起（设计只写了选中的保持规则）。检查器里 `recent` 为空时显示 `worktrees-no-sessions`（设计没有写）。
+- **`vs-base` 的显示。** 有主干时显示计数；`Pending` 时不论有没有主干都显示骨架（第一份概览到达之前主干还不知道）；没有主干且计数不是 `Pending` 时不显示。
+- **时钟与定时。** 展开定时用 `Duration::from_secs_f64`（「验收」的 `rg` 不允许 `Duration::from_millis`）；定时到点后只请求一次合成，`next_expiry` 不变时不再设定时（时钟回拨时会停在 Active，下一个事件修正）。测试里的 `Rig` 的时钟可以前进（`advance`），否则到点后的合成仍看到同一个 `now`。
+- **不确定进度。** 见「已知限制」：`ui` 没有控件，`LoadingPhase::Progress` 继续显示骨架（`ui` 的控件缺口，没有写在本 crate 里）。
+- **测试。** `activate_registers_nothing_and_does_no_work` 换成 `activate_registers_contributions_only`；`FakeContributions` 的 `dispatch` 与 `report_milestone` 改为记录，`FakeReview` 记录 `refresh_worktrees`；第 1 步里数侧栏条目的用例改用 `entries()`，`deactivation_drops_everything` 的注销数从 1 变为 4。语义树快照的文件名由 insta 按模块与函数名生成。
+- **前置条件 A 的遗留（`review`，未改）在第 2 步可见。** `review` 的第一轮概览失败而概览关注者还在时，当前 worktree 的 `uncommitted` 与 `vs_base` 停在 `Pending`，现在会让那一行的计数位置一直画骨架。它在 `review` 的概览状态里，不是小改动（要在 `Driven` 里加失败的用例），没有在本 PR 里改；记入「已知限制」。
 
 ### 前置条件 A 的 `review` 部分
 

@@ -3,26 +3,32 @@
 //! directories, the paths of the overlaps, the session titles and the MR
 //! titles carry the canary through the whole flow at trace level (the
 //! plugins and the composition: opening, showing, events, usage, hiding,
-//! closing, deactivation), and no record carries it. The views' part of the
-//! flow comes with step 2.
+//! closing, deactivation) and the views (a frame of the screen and the
+//! inspector's page, ↓, ↵, the switch button, ⌘R and the project closing with
+//! the views on screen), and no record carries it.
+
+use gpui::TestAppContext;
 
 use lectern_logging::testing;
 use lectern_services::project::{ChangedParts, Head};
 use lectern_services::usage::UsageState;
+use lectern_services::workspace::WorkspaceCommand;
 
 use crate::testing::{
-    MINUTE, ProjectFx, Rig, branch, branch_usage, counted, mr_label, mr_ref, mr_snapshot, overlap,
+    MINUTE, ProjectFx, branch, branch_usage, counted, mr_label, mr_ref, mr_snapshot, overlap,
     overview_of, sess, tokens, worktree_query, worktree_snapshot,
 };
 use lectern_services::usage::UsageQuery;
 
+use super::stage::{click, frame, rig, window};
+
 const CANARY: &str = "worktrees-canary-8c41e07a";
 
-#[test]
-fn canary_stays_out_of_worktrees_logs() {
+#[gpui::test]
+fn canary_stays_out_of_worktrees_logs(cx: &mut TestAppContext) {
     let capture = testing::capture();
     testing::set_callsite_limit(1_000_000);
-    let rig = Rig::new();
+    let rig = rig(cx);
     rig.activate_main();
     rig.activate_usage();
 
@@ -96,6 +102,22 @@ fn canary_stays_out_of_worktrees_logs() {
     rig.opened(&key);
     rig.show();
     rig.run();
+    // The views: a frame of both, ↓ to the next worktree, ↵, the inspector's
+    // switch button, ⌘R.
+    let (_host, vcx) = window(cx, &rig);
+    vcx.simulate_keystrokes("down enter cmd-r");
+    click(vcx, "worktrees.detail.switch");
+    assert!(
+        matches!(
+            rig.contributions.commands().as_slice(),
+            [
+                WorkspaceCommand::Push(_),
+                WorkspaceCommand::SetActiveWorktree(_)
+            ]
+        ),
+        "↵ opened the review and the button switched"
+    );
+    assert_eq!(rig.review.refreshed().len(), 1);
     rig.sessions_changed();
     rig.changed_parts(
         &key,
@@ -130,9 +152,11 @@ fn canary_stays_out_of_worktrees_logs() {
     rig.run();
     rig.deactivate_usage();
     rig.run();
+    frame(vcx);
     rig.projects.remove(&key);
     rig.closed(&key);
     rig.run();
+    frame(vcx);
     rig.deactivate_main();
 
     capture.assert_absent(CANARY);
@@ -148,6 +172,9 @@ fn canary_stays_out_of_worktrees_logs() {
         "counts are written instead of names: {built:#?}"
     );
     for message in [
+        "worktrees command",
+        "worktree switch requested",
+        "worktrees view attached",
         "worktrees shown",
         "worktrees hidden",
         "worktrees build dropped",

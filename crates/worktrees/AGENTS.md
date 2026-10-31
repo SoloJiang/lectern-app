@@ -6,7 +6,7 @@
 - 设计文档：[docs/design/worktrees.md](../../docs/design/worktrees.md)
 - issue：[#16](https://github.com/SoloJiang/lectern-app/issues/16)
 - ADR：[0006](../../docs/adr/0006.md)、[0022](../../docs/adr/0022.md)、[0025](../../docs/adr/0025.md)、[0046](../../docs/adr/0046.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不开窗口：`snapshot`（`WorktreesSnapshot` 与纯函数 `snapshot::build`）、`Hub`（插件状态与合成任务）、`WorktreesPlugin`、`WorktreesUsagePlugin`、`UsageLink`（#339）。第 2 步（视图、Action、屏幕与检查器页的登记）和第 3 步（`app` 装配、里程碑、基准）尚未实现。
+- 进度（设计文档「验收」）：第 1 步已实现，不开窗口：`snapshot`（`WorktreesSnapshot` 与纯函数 `snapshot::build`）、`Hub`（插件状态与合成任务）、`WorktreesPlugin`、`WorktreesUsagePlugin`、`UsageLink`（#339）。第 2 步已实现，不开真实窗口：`actions`（Action 与快捷键）、`model`（`WorktreesModel`：选中、展开、里程碑、定时）、`screen`（`WorktreesScreen` 与工具栏）、`detail`（`DetailTab`，检查器页）、`present`（文字与命令）、`contribute`（屏幕、检查器页、快捷键的登记）（PR 号待定）。第 3 步（`app` 装配、里程碑接到探针、基准）尚未实现。
 
 ## 模块
 
@@ -16,6 +16,9 @@
 | `hub.rs` | `Hub`：插件状态、合成任务、侧栏条目的登记、关注的持有、视图的唤醒通道（`attach_view`）、`switches` |
 | `plugin.rs`、`usage_link.rs` | 两个插件与共用的 `UsageLink`（一组 `UsageQuery` 的关注，对账） |
 | `nodes.rs`、`diag.rs` | 探针 ID（业务键先过 `nodes::safe`）；日志字段的辅助（只有计数） |
+| `actions.rs`、`contribute.rs` | Action 与按键（谓词 `Content > worktrees`）；`activate` 里经 `ctx.own_staged` 登记 `Screen(WORKTREES)`、`InspectorTab("worktree")`（`screen: Some(WORKTREES)`）、`KeyBindings` |
+| `model.rs` | `WorktreesModel`（屏幕与检查器页共用的 `Entity`）和 GPUI 全局 `Current`；所有命令都经它发出；快照来自 `Hub::attach_view` 的通道 |
+| `screen.rs`、`detail.rs`、`present.rs` | `WorktreesScreen`（两个 `GroupedList`、工具栏）、`DetailTab`（用量、对比、重叠、会话）、把快照变成文字与命令的纯函数 |
 | `testing.rs`（测试） | `services` trait 的假实现、夹具和 `Rig` |
 
 ## 边界
@@ -35,8 +38,9 @@
 just test -p lectern-worktrees       # macOS
 ```
 
+- 第 2 步的测试用 GPUI 的测试窗口（`#[gpui::test]`，不开真实窗口）：`src/tests/stage.rs`（`Host` 摆屏幕、检查器页和工具栏，`standard()` 的四个 worktree 夹具，`tree_of` 把语义树渲染成文本）、`src/tests/views.rs`、`src/tests/tree.rs`（语义树的 insta 快照，更新用 `INSTA_UPDATE=always just test -p lectern-worktrees`）。不要写启动、探针或基准类的开窗口测试。
 - 第 1 步的测试是普通 `#[test]`，不开窗口：`src/tests/build.rs`（`snapshot::build` 的合成规则，快照渲染成文本做 insta，更新用 `INSTA_UPDATE=always just test -p lectern-worktrees`，之后用 `git diff` 逐个看）；`src/tests/plugin.rs`（两个插件在真实的 kernel 里，`Executor::manual()` 在测试说跑的时候才跑合成任务，事件由测试经 `Kernel::emitter()` 同步发出）；`src/tests/usage_link.rs`；`src/tests/logs.rs`（金丝雀测试 `canary_stays_out_of_worktrees_logs`，`lectern_logging::testing::capture()` 的开关是进程级的，要用 nextest，`just test` 就是）。假服务在 `src/testing.rs`，不依赖 `review`、`usage` 等插件 crate 的 `test-support`；本 crate 不得调用的方法一律 `unreachable!`。
-- 交互行为用 `#[gpui::test]` 配合 `TestAppContext` 模拟按键、Action 和状态变化（第 2 步）。
+- 交互行为用 `#[gpui::test]` 配合 `TestAppContext` 模拟按键、Action 和状态变化。
 - 视图只读领域层提供的快照。测试里直接构造快照，不使用真实的 git、会话扫描或文件 IO。
-- 可交互元素带稳定 ID（`视图.区域.条目[业务键]`），UI 探针（[#6](https://github.com/SoloJiang/lectern-app/issues/6)）完成后语义树用 insta 快照验收。
+- 可交互元素带稳定 ID（`视图.区域.条目[业务键]`），语义树用 insta 快照验收（`ui::semantic::Recorder`）。
 - 所有字符串走 `lectern-i18n`，en 与 zh-CN 同时提供。

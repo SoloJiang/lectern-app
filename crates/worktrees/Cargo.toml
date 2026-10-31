@@ -14,6 +14,9 @@ layer = "view"
 plugin = true
 
 [dependencies]
+# Views, Action, the one-shot timers, `#[gpui::test]` (docs/design/worktrees.md
+# 「依赖」). The views keep this crate macOS-only.
+gpui.workspace = true
 # The views' wake channel: `channel::mpsc::unbounded`, sent from the executor
 # threads and received by a GPUI foreground task, as in `lectern-project-home`.
 futures.workspace = true
@@ -34,6 +37,8 @@ lectern-services = { path = "../services" }
 lectern-ui = { path = "../ui" }
 
 [dev-dependencies]
+# `TestAppContext`, `VisualTestContext`, `#[gpui::test]`.
+gpui = { workspace = true, features = ["test-support"] }
 # Snapshot tests of `snapshot::build` (AGENTS.md).
 insta.workspace = true
 # `Executor::manual`: the composing task runs when a test says so.

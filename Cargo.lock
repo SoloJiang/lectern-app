@@ -5003,6 +5003,7 @@ name = "lectern-worktrees"
 version = "0.0.0"
 dependencies = [
  "futures",
+ "gpui-pre",
  "insta",
  "lectern-executor",
  "lectern-i18n",

@@ -16,15 +16,15 @@ use futures::channel::mpsc;
 use lectern_executor::{Executor, Priority};
 use lectern_kernel::{Name, PluginHandle, ServiceRef, ServiceSet};
 use lectern_logging::{debug, info, trace, warn};
-use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
+use lectern_services::project::{ProjectEvent, ProjectKey, Projects, WorktreeKey};
 use lectern_services::review::{OverviewInterest, Review, ReviewEvent};
 use lectern_services::session::{
     SessionKey, SessionList, SessionSource, SessionsChanged, SourceId, Timestamp,
 };
 use lectern_services::usage::UsageQuery;
 use lectern_services::workspace::{
-    Contribution, ContributionKind, Contributions, Registration, Route, SidebarSection, Target,
-    WorkspaceCommand, WorkspaceEvent, screens,
+    Contribution, ContributionKind, Contributions, Milestone, Registration, Route, SidebarSection,
+    Target, WorkspaceCommand, WorkspaceEvent, screens,
 };
 use lectern_ui::Icon;
 use lectern_ui::contrib::SidebarItem;
@@ -175,6 +175,62 @@ impl Hub {
         if let Some(handle) = handle {
             self.schedule(&handle);
         }
+    }
+
+    /// The time of day, in the unit of the sessions' timestamps: the views
+    /// arm their expiry timer from the same clock the snapshot was composed
+    /// with (tests move it).
+    pub fn now(&self) -> Timestamp {
+        (self.wall)()
+    }
+
+    /// `Contributions::dispatch`, logged. The command goes to the window's
+    /// queue; nothing waits for it. `target` is the kind of the destination
+    /// (`range-base`, `range-head`, `session`, `switch`), never a name or a
+    /// path. Main thread.
+    pub(crate) fn dispatch(&self, command: WorkspaceCommand, target: &'static str) {
+        debug!("worktrees command"; command = command_name(&command), target = target);
+        if let Some(contributions) = self.contributions.get() {
+            contributions.dispatch(command);
+        }
+    }
+
+    /// ⌘R and the toolbar's Refresh: `Review::refresh_worktrees` for the
+    /// project the snapshot is of. It returns at once. Main thread.
+    pub(crate) fn refresh(&self, project: &ProjectKey) {
+        debug!("worktrees command"; command = "refresh", target = "refresh");
+        if let Some(review) = self.review.get() {
+            review.refresh_worktrees(project);
+        }
+    }
+
+    /// The target's place in `ProjectSnapshot::worktrees`, for the log of a
+    /// switch (a copy of an `Arc` under a lock). Main thread.
+    pub(crate) fn log_switch(&self, project: &ProjectKey, worktree: &WorktreeKey) {
+        let snapshot = self
+            .projects
+            .get()
+            .and_then(|projects| projects.snapshot(project));
+        let found = snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .worktrees
+                .iter()
+                .position(|candidate| candidate.key == *worktree)
+                .map(|index| (index, snapshot.worktrees[index].is_main))
+        });
+        if let Some((index, main)) = found {
+            info!("worktree switch requested"; index = count(index), main = main);
+        }
+    }
+
+    /// The screen drew the first frame of the settled snapshot after a
+    /// switch (「性能」): tells `workspace`, which hands it to `app`. Any
+    /// thread.
+    pub(crate) fn report_milestone(&self, switches: u64) {
+        if let Some(contributions) = self.contributions.get() {
+            contributions.report_milestone(Milestone::WorktreeSwitched);
+        }
+        info!("worktrees milestone reported"; switches = switches);
     }
 
     /// `started`: keeps the handle, lets the usage link schedule, and takes up
@@ -650,5 +706,14 @@ impl Hub {
             }
         }
         debug!("worktrees complete requested"; sessions = count(keys.len()));
+    }
+}
+
+/// The kind of a command, for the log (never the route's target).
+fn command_name(command: &WorkspaceCommand) -> &'static str {
+    match command {
+        WorkspaceCommand::Push(_) => "push",
+        WorkspaceCommand::SetActiveWorktree(_) => "set-active-worktree",
+        _ => "other",
     }
 }
