@@ -77,6 +77,7 @@ layer = "domain"
   - 四者只能一起升级，并且必须是 gpui-component 发布时使用的同一个快照；另外要等 gpui-mcp 有目标版本的补丁，或者自己移植（ADR 0056）。`Cargo.lock` 提交到仓库。
   - 本工作区没有 `[patch]`：打过补丁的 GPUI 只在单独的自动化工作区里（ADR 0056）。
 - **libghostty-vt**：[#5](https://github.com/SoloJiang/lectern-app/issues/5) 加入，`libghostty-vt = { version = "=0.2.2", default-features = false }` 与 `libghostty-vt-sys = "=0.2.2"`，后者的构建脚本固定 Ghostty 提交 `a887df42c56f6de86c0fe6da9c4eeca37931e083`，用 Zig 0.15.2 编出静态库（[terminal 设计「libghostty-vt」](terminal.md#libghostty-vt)）。升级就是同时改这两个版本号，先确认。
+- **portable-pty**：[#12](https://github.com/SoloJiang/lectern-app/issues/12) 加入，`portable-pty = "=0.9.0"`，只有 `terminal` 用（[terminal 设计「portable-pty」](terminal.md#portable-pty)）；`rustix` 的 `event`、`process` feature 同时加进工作区依赖。精确锁定，升级单独一个 PR。
 
 依赖只在 `[workspace.dependencies]` 里写版本，crate 内用 `{ workspace = true }` 引用，版本只有一处。
 

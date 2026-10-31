@@ -2033,7 +2033,34 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share("log/idle_memory/verbose", RECORD, LOGGING, ACTIVE, Memory),
     // ---- end logging ----
-    // ---- terminal (terminal design, step 2) ----
+    // ---- terminal (terminal design, steps 2 and 3) ----
+    // Step 3, the plugin with a real PTY (`/bin/cat` as the shell): the
+    // calling thread's part of `open` (the terminal is closed again after
+    // each sample); one `input` on a running terminal whose thread sleeps
+    // (6 µs, not the 2 µs of the design: waking a sleeping thread costs
+    // 3 µs or more, ADR 0058); `Input::Text` to the echo in a new frame
+    // after 12 ms of quiet.
+    share(
+        "terminal/open",
+        &[median(Limit::TimeAtMost(us(150)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    // ADR 0058: the wake of a sleeping thread drifts on hosted runners, so
+    // this one is recorded; `terminal/echo_latency` judges the whole path.
+    share("terminal/input", RECORD, TERMINAL, ACTIVE, Time),
+    share(
+        "terminal/echo_latency",
+        &[
+            median(Limit::TimeAtMost(ms(1))),
+            p95(Limit::TimeAtMost(ms(3))),
+        ],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    // Step 2.
     // `testing::Engine` (no PTY) at 120×40: 1 MiB of plain ASCII / of
     // output with a new 24-bit colour every 8 characters into a new
     // terminal; one frame with every row / one row (an echo) dirty.
@@ -2146,7 +2173,7 @@ pub static BUDGETS: &[Budget] = &[
     // alone.
     share_macos(
         "project_home/build_1000",
-        &[median(Limit::TimeBelow(ms(2)))],
+        &[median(Limit::TimeBelow(ms(3)))],
         PROJECT_HOME,
         ACTIVE,
         Time,

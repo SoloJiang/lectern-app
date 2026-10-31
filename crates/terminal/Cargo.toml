@@ -9,20 +9,38 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "domain"
+plugin = true
 
 [features]
-# `testing::Engine`: the engine without a PTY, for tests and benchmarks.
-test-support = []
+# `testing::Engine` (the engine without a PTY), the plugin's test overrides
+# and the fake program `lectern-terminal-fake`, for tests and benchmarks.
+test-support = ["lectern-kernel/test-support", "dep:libc"]
+
+[[bin]]
+name = "lectern-terminal-fake"
+path = "src/bin/fake.rs"
+required-features = ["test-support"]
 
 [dependencies]
+lectern-executor = { path = "../executor" }
+lectern-kernel = { path = "../kernel" }
+lectern-logging = { path = "../logging" }
+lectern-platform = { path = "../platform" }
 lectern-services = { path = "../services" }
+# The fake program's raw mode and signals; compiled only with `test-support`.
+libc = { workspace = true, optional = true }
 libghostty-vt.workspace = true
 # Not called: a direct dependency only to pin the Ghostty sources (design
 # 「libghostty-vt」).
 libghostty-vt-sys.workspace = true
+portable-pty.workspace = true
+rustix.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# testing::capture for `logs_hold_no_terminal_content`.
+lectern-logging = { path = "../logging", features = ["test-support"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -19,9 +19,10 @@ use libghostty_vt::fmt::Format;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::terminal::{
-    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, Point,
-    PointCoordinate, PointSpace, PrimaryDeviceAttributes, ScrollViewport,
-    SecondaryDeviceAttributes, SizeReportSize, TertiaryDeviceAttributes,
+    CompressionActivity, CompressionMode, CompressionResult, ConformanceLevel,
+    DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, Point, PointCoordinate, PointSpace,
+    PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
+    TertiaryDeviceAttributes,
 };
 use libghostty_vt::{RenderState, Terminal, TerminalOptions, focus, key, mouse, paste};
 
@@ -79,6 +80,9 @@ pub(crate) struct Engine {
     buttons_down: u8,
     /// Where a selection drag started, in screen coordinates.
     anchor: Option<PointCoordinate>,
+    /// Rows rebuilt by `frame` so far (the `dirty_rows` of the throughput
+    /// log).
+    rebuilt_rows: u64,
 }
 
 impl Engine {
@@ -159,6 +163,7 @@ impl Engine {
             pacer: Pacer::default(),
             buttons_down: 0,
             anchor: None,
+            rebuilt_rows: 0,
         };
         engine.apply_theme(theme)?;
         Ok(engine)
@@ -317,6 +322,31 @@ impl Engine {
         self.pacer.is_due(now)
     }
 
+    /// When the next frame is due: None when nothing changed since the last
+    /// one, `Some(None)` when it is due at once.
+    pub(crate) fn frame_deadline(&self) -> Option<Option<Instant>> {
+        self.pacer.due()
+    }
+
+    /// Rows rebuilt by `frame` since the terminal was created.
+    pub(crate) fn rebuilt_rows(&self) -> u64 {
+        self.rebuilt_rows
+    }
+
+    /// The token that changes when the scrollback changes (design 「数据流与线程」,
+    /// idle compression).
+    pub(crate) fn compression_activity(&self) -> Option<CompressionActivity> {
+        self.terminal.compression_activity().ok()
+    }
+
+    /// One bounded compression step. True while more work remains.
+    pub(crate) fn compress_step(&mut self) -> bool {
+        matches!(
+            self.terminal.compress(CompressionMode::Incremental),
+            Ok(CompressionResult::Pending)
+        )
+    }
+
     /// Builds and publishes a frame at `now`.
     pub(crate) fn publish(&mut self, now: Instant) -> libghostty_vt::error::Result<Arc<Frame>> {
         let frame = self.frame()?;
@@ -352,6 +382,7 @@ impl Engine {
             let built = match prev {
                 Some(prev) if !full && !row.dirty()? => prev.clone(),
                 _ => {
+                    self.rebuilt_rows += 1;
                     let wrapped = row.raw_row()?.is_wrap_continuation()?;
                     let mut cells = self.cells.update(row)?;
                     reuse(prev, self.builder.build(&mut cells, &colors, wrapped)?)

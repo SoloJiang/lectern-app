@@ -1,6 +1,6 @@
 # terminal 设计
 
-状态：已接受；「验收」第 1 步（`services::terminal`，[#318](https://github.com/SoloJiang/lectern-app/pull/318)）和第 2 步（libghostty-vt 接入与网格快照）已实现，第 3、4 步尚未实现。
+状态：已接受；「验收」第 1 步（`services::terminal`，[#318](https://github.com/SoloJiang/lectern-app/pull/318)）、第 2 步（libghostty-vt 接入与网格快照）和第 3 步（PTY、启动、插件与服务，#338）已实现，第 4 步（`app` 装配）尚未实现。
 
 对应 issue [#12](https://github.com/SoloJiang/lectern-app/issues/12)（终端：portable-pty + libghostty-vt，会话 resume）与 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 的内核部分（libghostty-vt 接入）。`terminal` 启动 PTY 和其中的程序（`claude --resume`、`codex resume`、新会话、登录 shell），把输出交给 libghostty-vt 解析，生成视口的网格快照交给视图；视图发来的按键、粘贴、鼠标和尺寸变化经 libghostty-vt 编码后写回 PTY（[技术调研「终端：接入 libghostty-vt 内核」](tech-research.md#终端接入-libghostty-vt-内核)、[ADR 0002](../adr/0002.md)）。终端在界面的「收起」一层，是 Conversation 的 Terminal 页（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）；网格的绘制在 `terminal_view`，页面在 `conversation`。
 
@@ -629,7 +629,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 |---|---|---|
 | 冷启动 20 ms（ADR 0017） | 首帧之前不做任何事 | `AfterFirstFrame` 激活；`activate` 只建空表，< 1 ms（kernel「性能」的 `plugin/*/activate`）。静态库只增加二进制的代码段，不在启动时做初始化 |
 | 空闲内存 60 MB（空窗口）、100 MB（monorepo） | 没有终端时不建线程、不打开 PTY、不取登录环境 | `plugin/terminal/resident` < 1 MB。空闲预算的采样里没有打开的终端 |
-| 滚动与输入 120 fps | 回显与输出不占主线程 | 解析、编码、建帧都在终端线程；主线程上的 `input` ≤ 2 µs、`frame` 只复制 `Arc`。整条路径由 `app/input_frames` 判定（负责的 crate 是 `terminal_view`） |
+| 滚动与输入 120 fps | 回显与输出不占主线程 | 解析、编码、建帧都在终端线程；主线程上的 `input` 目标 ≤ 6 µs（[ADR 0058](../adr/0058.md)）、`frame` 只复制 `Arc`。整条路径由 `app/input_frames` 判定（负责的 crate 是 `terminal_view`） |
 | 安装包 ≤ 80 MB（ADR 0018） | 静态链接的 `libghostty-vt.a` | 实现 PR 记录 `app/bundle_size` 的增量（预计几 MB），写进「实际验证」 |
 
 打开的终端不属于任何空闲预算，它的内存是新的份额（下表）。8 个终端都写满滚动缓冲时约 8 × 24 MB，与 Terminal.app 一类终端相当；份额以单个终端计，便于发现回退。第一次启动 agent 时取登录环境要运行一次用户的 shell（通常几百毫秒，上限 5 秒），只在用户点了恢复之后、在终端线程上，期间 Terminal 页显示 `Starting`。
@@ -638,8 +638,8 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 
 | ID | 预算 | 测量 |
 |---|---|---|
-| `terminal/open` | 中位数 ≤ 100 µs | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
-| `terminal/input` | 中位数 ≤ 2 µs | 主线程上的一次 `input`：入队与唤醒字节 |
+| `terminal/open` | 中位数 ≤ 150 µs（[ADR 0058](../adr/0058.md)，原来 ≤ 100 µs） | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
+| `terminal/input` | 只记录，目标中位数 ≤ 6 µs（[ADR 0058](../adr/0058.md)，原来 ≤ 2 µs） | 主线程上的一次 `input`：入队与唤醒字节；终端线程睡在 `poll` 上时，写唤醒字节本身就要 3 µs 以上 |
 | `terminal/parse_plain` | 中位数 ≤ 14 ms（[ADR 0055](../adr/0055.md)） | 1 MiB 纯 ASCII、每行 120 列，120×40，`vt_write` 到解析完成 |
 | `terminal/parse_sgr` | 中位数 ≤ 25 ms | 1 MiB、每 8 个字符换一次 24 位色的输出 |
 | `terminal/frame_full` | 中位数 ≤ 300 µs | 120×40 全部行脏，生成一帧 |
@@ -787,6 +787,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 5. 闪烁文字按普通文字显示；kitty 图形协议、Sixel 不支持。
 6. 视图在主线程上画帧不计入静止（「数据流与线程」）：UI 探针在静止之后读语义树时，终端的最后一帧可能还没画出，探针要另等一帧。
 7. Zig 0.15.2 不能链接 macOS 27 的 SDK（它的 `libSystem.tbd` 只列 `arm64e`），本机用 macOS 27 的 Xcode 或命令行工具时构建失败。临时办法：`DEVELOPER_DIR` 指向带旧 SDK 的命令行工具（如 SDK 14.4 的 `/Library/Developer/CommandLineTools`）再运行 Zig。CI 的 `macos-15` runner 不受影响；判定机器升级到 macOS 27 之前要先确认。
+8. 进程里同一时刻有别的线程在 `fork`、或在第一次使用 libSystem 的通知库时，子进程可能在 `exec` 之前就死掉。macOS 的 `fork` 在子进程里运行 libSystem 的 atfork 处理（`_notify_fork_child`），它用 `os_once` 初始化通知库的全局状态；父进程里另一个线程当时正持有同一个 once 门（第一次初始化还没做完）时，子进程发现门被一个不存在的线程占着，报「os_once_t is corrupt」并以 `SIGKILL` 结束（崩溃报告写「crashed on child side of fork pre-exec」，调用栈 `fork` → `libSystem_atfork_child` → `_notify_fork_child` → `_os_alloc_once` → `_os_once_gate_corruption_abort`）。表现是刚启动的程序在写出第一个字节之前被杀，状态 `Exited { signaled: true }`。只在进程里最初的几次 `fork` 同时进行时出现；通知库初始化之后（应用启动时 AppKit / GPUI 早已用过它）不会再出现。本 crate 的处理：所有启动经 `pty::spawn` 里一把进程内的锁，同一时刻只有一个线程 `fork`；回归测试 `concurrent_first_forks_from_several_plugins_start_every_program`（8 个插件实例、48 个线程在新进程里同时 `open`）不加锁时约 13–20% 的运行失败，加锁后 30 次都通过。仍然留下的：本 crate 之外的线程同时 `fork`（`platform::login_env` 取登录环境的 shell、其他插件启动的进程），或同时第一次初始化通知库，仍可能碰上这个窗口；彻底的办法是把这把锁放进 `platform`，所有 `fork` 的调用方共用，另开 issue。
 
 ## 验收
 
@@ -809,7 +810,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 - `Cargo.toml` 加 `plugin = true`，`python3 scripts/check_architecture.py` 通过；`portable-pty = "=0.9.0"` 与 rustix 的 `event`、`process` feature 加入工作区依赖，`just deny` 通过。
 - `just test -p lectern-terminal` 里 `launch_*`、`resume_refuses_*`、`no_echo_of_program_text`、`no_threads_until_open`、`resume_refuses_while_running`、`exited_terminal_is_replaced`、`failed_terminal_is_replaced`、`close_*`、`project_closed_closes_its_terminals`、`deactivate_closes_all`、`exit_codes_*`、`input_*`（进程退出的部分）、`input_overflow_*`、`panic_fails_only_that_terminal`、`quiescent_after_output_stops`、`concurrent_spawn`、`logs_hold_no_terminal_content` 通过。
 - `rg 'try_clone_reader|take_writer|\.kill\(\)' crates/terminal/src` 只有 `ChildKiller` 的 `kill`；`rg 'Command::new|"sh"|"-c"' crates/terminal/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果（agent 不经 shell 启动）。
-- `just bench terminal/` 里 `terminal/open`、`terminal/input`、`terminal/echo_latency`（macOS）、`plugin/terminal/activate` 在预算内。
+- `just bench terminal/` 里 `terminal/open`、`terminal/echo_latency`（macOS）、`plugin/terminal/activate` 在预算内，`terminal/input` 有记录（[ADR 0058](../adr/0058.md)）。
 
 **第 4 步：`app` 装配（`app` 的 PR，`Refs #12`）。**
 
@@ -838,6 +839,22 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 
 - 没有验证的：CI 上缓存未命中时多出的构建时间见 [ci 设计「实际验证」](ci.md#实际验证)。
 
+第 3 步（PTY、启动、插件与服务，`Refs #12`），同一台机器：
+
+- 依赖与架构：`python3 scripts/check_architecture.py` 通过（`plugin = true`）；`portable-pty = "=0.9.0"` 与 rustix 的 `event`、`process` feature 在工作区依赖里；`just deny` 通过（新增 `nix` 0.28、`filedescriptor`、`serial2`、`shell-words`、`downcast-rs`、`shared_library`、`lazy_static` 等传递依赖，都是宽松许可）。`rg 'try_clone_reader|take_writer|\.kill\(\)' crates/terminal/src` 只有 `src/pty.rs` 里 `ChildKiller` 的那一处；`rg 'Command::new|"sh"|"-c"' crates/terminal/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果；`rg 'set_logger' crates/terminal/src` 没有结果。
+- 测试：`just test -p lectern-terminal` 110 个测试，连续 10 次都通过（nextest，一个测试一个进程；单元测试 `diag`、`launch`、`pacing`、`palette`，`tests/frames.rs`、`tests/input.rs` 是第 2 步的；第 3 步新增 `tests/launch.rs` 25 个（`launch_*`、`resume_refuses_*`、`no_echo_of_program_text`）、`tests/lifecycle.rs` 16 个、`tests/pty_input.rs` 7 个（`input_*` 经真实 PTY）、`tests/logs.rs` 1 个（`logs_hold_no_terminal_content`））。`just check`、`just test -p lectern-terminal -p lectern-bench -p lectern-services` 通过。程序是假程序 `lectern-terminal-fake`，没有运行真实的 `claude`、`codex` 或用户的 shell。把 `tests/lifecycle.rs` 的测试放在同一个进程里并行跑（直接运行 libtest 的测试二进制）时，加锁之前约三分之一的运行里有刚启动的程序被 `SIGKILL`，原因和处理见「已知限制」第 8 条；加锁之后连续 30 次运行没有一次出现，崩溃报告也没有新增。
+- 基准（release，`cargo bench -p lectern-bench --bench time -- terminal/`）：
+
+  | 基准 | 实测中位数 | 预算 |
+  |---|---|---|
+  | `terminal/open` | 55–69 µs（6 次运行；CI 上 77–108 µs） | ≤ 150 µs（原来 ≤ 100 µs，见 ADR 0058） |
+  | `terminal/input` | 3.6–3.9 µs（另有两次安静时 1.5、1.7 µs） | 只记录，目标 ≤ 6 µs（原来 ≤ 2 µs，见 ADR 0058；CI 上记录到 8.29–21.2 µs） |
+  | `terminal/echo_latency` | 中位数 81–158 µs，p95 156–247 µs（另有一次 p95 1.24 ms） | 中位数 ≤ 1 ms，p95 ≤ 3 ms |
+
+  `terminal/input` 的 3.6–3.9 µs 是调用线程在终端线程睡在 `poll` 上时写唤醒字节的代价，不是本 crate 的其他工作：同机器上，一个线程睡在 `poll` 上时向 socketpair 写一个字节，中位数 3.1–3.8 µs，向 pipe 写 2.3–2.8 µs，用 `kqueue` 的 `EVFILT_USER` 触发 1.9–2.0 µs；没有线程在等时同一次写只要 0.33 µs。入队、查表和 `Arc` 克隆合起来不到 1 µs。所以设计原来的 2 µs 在「终端线程睡着」时用 socket 和 `poll`（设计的做法）做不到。这个 PR 引入了被测的代码，所以不是 [ADR 0055](../adr/0055.md) 的放宽，而是 [ADR 0058](../adr/0058.md) 改为只记录，目标 ≤ 6 µs，仍用 `poll`。终端代码相同的两个提交在 CI 上分别是 9.67、8.29 µs 和 21.2、18 µs，托管 runner 不能判定这个数（托管 runner 是虚拟机，唤醒可能更慢）。
+- `plugin/terminal/activate`：进程级基准要等第 4 步。`TestKernel` 里 kernel 记下的四段耗时（`manifest`、`activate`、提交、`started`）之和，30 次激活的中位数 3.7 µs，最大 47 µs，≪ 1 ms。
+- 没有验证的：`plugin/terminal/resident`、`app/bundle_size` 的增量、「启动后没有 `terminal-` 线程」（`ps -M`）都要等第 4 步；CI 的 Linux 任务没有在本机跑（`portable-pty`、`rustix` 的 `event` / `process` 和假程序都不含 macOS 专属调用，但没有验证）；`terminal/echo_latency` 在 Linux 上只做冒烟；`input_overflow_*` 里 PTY 输入队列的大小因系统而异，测试只断言「发出的输入多于 4 MiB 缓冲时有输入被丢弃」。
+
 ## 与设计的差异
 
 第 2 步：
@@ -848,3 +865,18 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 4. 去掉标题与图标的报告：libghostty-vt 无条件应答 `CSI 21 t` / `CSI 20 t`，应答里是程序写过的标题（`ESC ] l <标题> ESC \`），等于把程序的文字回显给它，违反「安全边界」。它没有开关，所以写回 PTY 之前丢掉 `ESC ] l`、`ESC ] L` 开头的应答（`no_echo_of_program_text_in_replies`）。
 5. `ClearScrollback` 经 `vt_write("\x1b[3J")`（ED 3）实现，libghostty-vt 0.2.2 没有单独的接口。
 6. 工具链：`scripts/install_zig.sh` 安装并校验 Zig，CI 的三类任务调用它；`justfile` 的版本检查也在 `doctest` 之前（它同样编译本 crate）。
+
+第 3 步：
+
+1. agent 的 argv[0] 是登录环境的 `PATH` 里找到的完整路径，不是 `claude` / `codex`：portable-pty 的 `CommandBuilder` 用同一个 `args[0]` 既查找程序、又作 argv[0]，而它自己的查找会把 `PATH` 里的相对项接在工作目录后面（项目里的 `bin/claude` 会被执行）。所以先用 `platform::login_env::find_program`（只认绝对路径的项）找到程序，再把绝对路径交给它。参数仍是「启动命令」表里的 `--resume <uuid>` / `resume <uuid>` / 无。`Shell` 用 `CommandBuilder::new_default_prog()`，它按 `SHELL` 环境变量（本 crate 设为选定的 shell）启动，argv[0] 是 `-<文件名>`。
+2. agent 环境里的 `SHELL` 不是可执行文件时去掉它：portable-pty 会把这样的值写进 `log` 门面（第三方记录，带路径），子进程改用用户数据库里的 shell。
+3. `LaunchKind`、`AgentCommand`、`LaunchError`、`FailReason` 不实现 `Field`：它们在 `services`，那里不依赖 `logging`（孤儿规则也不允许在本 crate 实现），所以 `src/diag.rs` 里写成返回固定小写名的函数。
+4. `with_shell`、`with_login_env` 只在测试和 `test-support` 下存在（设计的接口没有写条件编译）；另有只给测试用的 `with_thread_hook`（每轮开始时在终端线程上调用，`panic_fails_only_that_terminal` 用它）、`provided`、`token`、`threads`（正在运行的终端线程数）。`testing::Harness`、`FakeProjects`、`FakeSessions` 供测试和基准把插件放进 `TestKernel`。
+5. 假程序用到 `libc`（设置原始模式、`SIGHUP` 忽略、`ioctl`）：加为可选依赖，只在 `test-support` 下编译；设计的依赖表只有 rustix。
+6. 状态变化（`Starting` → `Running` / `Failed` → `Exited`）时终端线程总是发布一帧，没有关注者也一样，所以 `frame(id)` 在终端登记之后很快就有值，`Frame::state` 与 `info().state` 一致；`Frame` 事件仍只在有关注者时发出。
+7. `Terminals::open` 在两种设计没有写的情况下返回错误：插件已停用或线程提交被拒绝时 `UnknownSession`（消费方经 `ServiceRef` 取不到已停用的提供者，所以实际不会遇到）；唤醒 socket 建不起来（文件描述符用完）时 `TooMany`。
+8. `terminal/echo_latency` 用 `/bin/cat` 作 shell，不用假程序：`lectern-bench` 里没有 `CARGO_BIN_EXE_lectern-terminal-fake`。`cat` 在行模式下读终端，回显是内核行规程的，本 crate 这一侧的路径（唤醒、编码写、读、解析、建帧）都在里面。
+9. `plugin/terminal/activate` 在这个 PR 里没有基准条目：它由进程级的 `plugin/*/activate` 测量，要等第 4 步 `app` 装配。数字见「实际验证」（`TestKernel` 里 kernel 记下的四段耗时）。
+10. 终端表和唤醒 socket 的细节：`Slot` 是命令队列加唤醒 socket 的一对，只在队列由空变非空时写唤醒字节（`woken` 标志），所以连续的 `input` 只写一次。
+11. `terminal/input` 的预算由中位数 ≤ 2 µs 改为只记录，目标 ≤ 6 µs（[ADR 0058](../adr/0058.md)）：本机实测 3.6–3.9 µs，CI 上 9.67、8.29 µs，原因是唤醒一个睡在 `poll` 上的线程的系统调用本身要 3 µs 以上，对照数字见「实际验证」。保持 `poll` 循环；`kqueue` 只到约 1.9 µs，且要改「数据流与线程」。终端代码相同的两个提交在 CI 上分别是 9.67、8.29 µs 和 21.2、18 µs，托管 runner 不能判定这个数。
+12. 所有启动经一把进程内的锁（`src/pty.rs` 的 `SPAWN`），同一时刻只有一个线程 `fork`，设计没有写：原因见「已知限制」第 8 条。
