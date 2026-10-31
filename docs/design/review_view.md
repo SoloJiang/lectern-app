@@ -1,8 +1,8 @@
 # review_view 设计
 
-状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画（标题区、轮次标题与折叠行、文件卡片、检查器的 Files 页、胶囊浮条、工具栏的 Mark Reviewed；`Switch`、包数、Drifted 的编辑时间、统一 / 双栏与 Refresh 的 View 菜单不在内），实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。
+状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画（标题区、轮次标题与折叠行、文件卡片、检查器的 Files 页、胶囊浮条、工具栏的 Mark Reviewed；`Switch`、包数、Drifted 的编辑时间、统一 / 双栏与 Refresh 的 View 菜单不在内），实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）的界面已设计（「审阅意见（#22）」，「验收」第 4 步），尚未实现。
 
-对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、检查器里的 Progress 列表、底部浮条，以及 J / K / V 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
+对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
 ## 范围
 
@@ -16,6 +16,7 @@
   - 交接：⇧⌘O 经 `dyn Reader` 打开完整文件（[file_reader 设计](file_reader.md)），diff 两侧的对象库内容经 `Reader::share_object` 登记；`CodeIntel::set_focus` 的 `Review`、`Touched`、`Current`（[code_intel 设计「接口」](code_intel.md#接口)）；Space 打开上下文面板。
   - 两侧文本的语法高亮：在 executor 上调用 `syntax` 的 `highlight::window`（[file_reader 设计「`syntax` 的公开项」](file_reader.md#syntax-的公开项)），结果按 OID 缓存。
   - 全部界面字符串的 Fluent 键、UI 探针的语义节点、具名 Action 与快捷键、向 `workspace` 登记的贡献、`DiffShown` 里程碑。
+  - 审阅意见（#22，「审阅意见（#22）」）：C 或行尾的 + 在选中的行上打开编辑框，⌘↩ 保存、Esc 关闭；意见画在锚点行之下，行号栏有标记；浮条显示待发送的条数、放弃、发送（⌘↩）和最近一批的再次复制；回应一批意见的那一轮在标题上标出。
 - 不做：
   - 归因、改动链、已看状态、简报规则、噪声列表、展示行与正文的计算：`review`。本 crate 不读 git、不读会话日志、不碰文件系统。
   - 窗口骨架、侧栏、工具栏容器、检查器容器、面板容器、导航栈：`workspace`。
@@ -23,7 +24,7 @@
   - 完整文件阅读与编辑：`file_reader`。上下文面板的内容与符号查询：`context_drawer`（[#20](https://github.com/SoloJiang/lectern-app/issues/20)）。Conversation 页：`conversation`。
   - 分支用量的计算：`usage`；本 crate 只读 `UsageSnapshot::Session`。
 - 本 issue 之外：
-  - 审阅意见（[#22](https://github.com/SoloJiang/lectern-app/issues/22)）：C 加意见、⌘↩ 发送、浮条里的意见数。本文为它留出浮条的位置和 `ReviewSnapshot::notes` 的读取点；#22 之前浮条显示「没有审阅意见」、发送按钮不可用，C 与 ⌘↩ 不绑定。
+  - 审阅意见的存储、锚点与 Drifted、prompt 的拼装和发送途径：`review`（[review 设计「审阅意见」](review.md#审阅意见)）。经终端粘贴或 ACP 送进会话的途径由 `conversation` 实现并登记（[review 设计「审阅意见的发送途径」](review.md#审阅意见的发送途径noteroute)）；本 crate 只发 `SendNotes`，不依赖 `terminal`、`conversation`，也不经手 prompt 的文字。
   - Analyze 的结果显示（#66）：`AnalysisState::Done` / `Failed` 的内容由 #66 在 `brief` 上加字段后显示；本文只定 `Analyze` / `CancelAnalyze` 两个命令的触发、进行中与不可用的显示。
   - 提交与开 MR（Looks good 之后的下一步，[git 设计「未决问题」](git.md#未决问题)1）：P1 不做，浮条上没有对应按钮。
   - 结构化 diff（[#21](https://github.com/SoloJiang/lectern-app/issues/21)）：展示行的来源不变，本 crate 不受影响。
@@ -33,8 +34,8 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gpui` | 视图、`list` 与 `ListState`（变高的虚拟列表）、Action、`cx.spawn` 的前台任务 | 已锁定（[ADR 0016](../adr/0016.md)） |
-| `lectern-ui` | 颜色、`TextRole`、`MonoMetrics`、`code_style`、`motion`、`Transition`、控件（`CircleCheck`、`Progress`、`Button`、浮条容器、开关、`AgentDot`、`GroupedList`、`Row`、`Skeleton`、`Expander`）、`Text`、`semantic`、`contrib` 的载荷类型 | 视图层的公共库（[ADR 0015](../adr/0015.md)） |
+| `gpui` | 视图、`list` 与 `ListState`（变高的虚拟列表）、Action、`cx.spawn` 的前台任务；`Window::prompt`（放弃审阅意见的系统确认框，#22） | 已锁定（[ADR 0016](../adr/0016.md)） |
+| `lectern-ui` | 颜色、`TextRole`、`MonoMetrics`、`code_style`、`motion`、`Transition`、控件（`CircleCheck`、`Progress`、`Button`、浮条容器、开关、`AgentDot`、`GroupedList`、`Row`、`Skeleton`、`Expander`；#22 的多行文本框 `TextArea`）、`Text`、`semantic`、`contrib` 的载荷类型 | 视图层的公共库（[ADR 0015](../adr/0015.md)） |
 | `lectern-i18n` | `keys::review::*`、`Args`、`relative_time`、`count_compact` | [ADR 0013](../adr/0013.md) |
 | `lectern-kernel`、`lectern-services` | `Plugin`、`PluginHandle`、`ServiceRef`；使用 `dyn Contributions`、`dyn Review`、`dyn SessionSource`、`dyn Reader`、`dyn CodeIntel`、`dyn Usage` 和它们的数据类型 | 架构规则 7（[ADR 0025](../adr/0025.md)）：插件之间只经 `services` |
 | `lectern-syntax` | `Languages`、`Lang`、`highlight::window`、`WindowSpans`、`Token` | 非插件的领域库，视图层可以依赖；高亮不另写一份 |
@@ -129,7 +130,22 @@ pub struct ReviewModel {
     usage_interest: Option<UsageInterest>,
     marked: u32,                                // 本次打开发出的 `MarkSeen` 数（日志用）
     layer_open: bool,                           // 面板或覆盖层是否开着（`WorkspaceEvent::LayerChanged`），Esc 的归属按它判断
+    editor: Option<NoteEditor>,                 // #22：打开着的意见编辑框，至多一个
+    drafts: VecDeque<(NoteAnchor, SharedString)>, // #22：Esc 关掉的新意见的文字，按锚点，至多 20 条；屏幕 drop 时丢弃
+    switched_for: Option<BatchId>,              // #22：已经为哪一批切到过 Conversation 页（不重复切换）
+    notes_full_hint: bool,                      // #22：按了 C 而待发送已满，浮条显示 `review-notes-full`；下一次发命令时清除
     // 事件通道的接收端不在这里：它由构造时 `cx.spawn` 的前台任务持有（「数据流与线程」）。
+}
+
+/// #22：意见编辑框。
+pub(crate) struct NoteEditor {
+    target: EditorTarget,
+    state: Entity<TextAreaState>,
+    _changed: Subscription,                     // `cx.observe(state)`：文字变化时重画（保存按钮的可用状态、太长的提示）
+}
+pub(crate) enum EditorTarget {
+    New { rows: RowsKey, anchor: NoteAnchor },
+    Existing(NoteId),
 }
 
 pub enum DiffMode { Unified, SideBySide }
@@ -204,6 +220,9 @@ pub enum Item {
     Fold { rows: RowsKey, ix: u32 },         // 折叠的未改动行：「Show n lines」
     Placeholder { rows: RowsKey, lines: u32 }, // 还没有准备好的展示行：按估计的行数占高度
     Command(CallRef), Subagent { session: u16, call: ToolCallId }, Tool(CallRef),
+    Note(NoteId),                            // #22：一条审阅意见
+    NoteEditor,                              // #22：打开着的编辑框（`ReviewModel::editor`）
+    NotesElsewhere { count: u32 },           // #22：文件不在这次审阅里的意见（`NotePlace::Elsewhere`），一块
 }
 
 /// 项的稳定键：刷新后按它找回滚动位置和选中项。`Row` 的键是两侧行号，不是下标。
@@ -211,6 +230,7 @@ pub enum ItemKey {
     Header, Brief, Notice(NoticeKind), EarlierTurns, Turn(TurnRef), Text(TextKey), Step(StepId), File(FileKey), Group(GroupKind), Noise,
     Hunk { rows: RowsKey, old: u32, new: u32 }, Row { rows: RowsKey, old: Option<u32>, new: Option<u32> },
     Fold { rows: RowsKey, old: u32 }, Placeholder(RowsKey), Call(ToolCallId),
+    Note(NoteId), NoteEditor, NotesElsewhere,
 }
 
 /// 一个显示行。统一视图：与 `DiffRow` 一一对应。双栏：`Removed` 与它 `pair` 指向的 `Added` 合成一行，
@@ -222,6 +242,7 @@ pub enum RowKind { Context, Removed, Added }
 
 - 顺序（会话审阅，`turns` 为 Some）：`Header`、`Brief`、`Notice*`、`EarlierTurns`（有时）、每轮 `Turn` → `Prompt` → 按 `items` 顺序的 `Text` / `Injected` / `Step`（紧跟它的 `Hunk` / `Row` / `Fold` 或 `Placeholder`）/ `Command` / `Subagent` / `Tool`；最后 `Noise`。噪声文件的 `Step` 不在轮次里出现，折叠成 `Noise` 一行，展开后按叙事顺序出现在各自的轮次里。
 - 规则分组视图（`turns` 为 None：认不出格式、会话外的改动、比较范围）：`Header`、`Brief`、`Notice*`、每个 `Group` → 组内 `File` 与它的行；`Noise(…)` 组折叠成 `Noise`。
+- 审阅意见（#22）：`Note` 紧跟它锚定的 `Row` 之后（`NotePlace::Rows` 里有这份行的种类：`Step` 的行对应 `NoteRows::Step`，`File` 的行对应 `NoteRows::Final`；同一行有几条时按写下的时刻），`NoteEditor` 在这一行的意见之后；锚点行在折叠段里时跟在那个 `Fold` 之后，行还没准备好时跟在 `Placeholder` 之后；`Drifted` 的意见跟在这个文件的 `Step` / `File` 标题之后（会话审阅里是改过这个文件的最后一步）；`Elsewhere` 的意见在叙事末尾、`Noise` 之前的 `NotesElsewhere` 块里。`items::build` 先把 `snapshot.notes` 按（行的种类、文件、一侧、行号）建一张表，代价 O(意见数)。`BuildOptions` 加 `editor: Option<EditorAt>`（编辑框所在的行或文件）。
 - `Prompt` 在正文到达前显示 `TurnEntry::prompt_preview`，到达后换成 `texts[key]`；`Text` / `Injected` 到达前显示一块 `Skeleton`（一行高）。
 - `Step` 的行用 `RowsKey::Step { step, context }`；`File` 的行用 `RowsKey::Final { file, context }`。`context` 取 `ReviewModel::context[file]`，默认 3；点 `Fold` 时把这个文件的 `context` 加大到覆盖那段折叠（上限 `u32::MAX` 表示全部），重新 `Prepare`，不自己切两侧文本。
 - `Placeholder` 的高度 = 估计的行数 × `MonoMetrics::line_height`：`ChangeDetail::Text { hunks, added, removed }` 时取 `added + removed + hunks × (2 × context + 1)`；`StepEntry` 取 `added + removed + 7`；其余 1 行。行准备好后用 `ListState::splice(range, new_count)` 换成真实的项，列表总高度只在这一处变化。
@@ -277,6 +298,35 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
 | `None`（会话外） | 不显示 | 照常 |
 | `StepEntry::alignment` 为 `Partial` / `Unaligned` | 步标题加 `review-step-partial` / `review-step-unaligned`；`Unaligned` 的行按日志原文（`RowsKey::Step` 的行），hunk 标题全部为 Drifted | |
 
+### 审阅意见（#22）
+
+意见的存储、位置（`NotePlace`）和发送都在 `review`（[review 设计「审阅意见」](review.md#审阅意见)）；本 crate 只读 `snapshot.notes`、`snapshot.notes_state`，发 `AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`、`SendNotes`、`CopyBatch`。发命令之前按 `services::review::limits` 做同样的检查，所以命令不会被 `review` 忽略。
+
+- 打开编辑框（C，或选中行行尾的 +）：
+  - 选中项是 `Row`：锚在这一行。增加的行和上下文行取新一侧，删除的行取旧一侧；双栏里一项是一对行时取新一侧，没有新一侧时取旧一侧。`anchor.oid` 是那一侧的 `RowsSide::oid`，`anchor.file` 是这份行的文件；`oid` 为 None（这一侧没有文本）时不可用。
+  - 选中项是 `Hunk`（J / K 之后）：锚在这个 hunk 的第一个增加的行，没有增加的行时取第一个删除的行。
+  - 其他选中项或没有选中：不做事。
+  - 还没发出的意见（`notes_state.unsent`，待发送加发送中）已有 `limits::PENDING_NOTES` 条：不打开，浮条的计数位置显示 `review-notes-full`。发送中的一批失败退回时不会超过这个数（[review 设计「审阅意见」](review.md#审阅意见)的「发送」）。
+  - 已经有一个编辑框开着：它是新意见且有文字时，文字存为它的锚点的草稿，然后关掉它，再打开新的。
+  - 这个锚点有草稿时，编辑框带上草稿的文字。
+  - 编辑框是一个 `Item::NoteEditor`，插在锚点行的意见之后，展开用 `EXPAND_HEIGHT` / `EXPAND_FADE`；焦点移到文本框（`TextAreaState::focus_handle`）。
+- 编辑框里：`ui::TextArea`（`lines(2, 8)`，占位 `review-note-placeholder`）；下面一行右边是取消（朴素按钮，`review-cancel`）和保存（主按钮：新意见 `review-note-add`，已有的意见 `review-note-save`，后面跟键提示 ⌘↩）。文字去掉首尾空白后为空、超过 `limits::NOTE_BYTES` 字节、或与原来相同（已有的意见）时保存不可用；超过上限时左边显示 `review-note-too-long`。
+  - ⌘↩：文本框的 `on_submit` 派发 `review::SaveNote`（gpui-component 的 `Input` 的上下文比屏幕的 KeyContext 深，屏幕上 ⌘↩ 的绑定收不到这个键，[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求) F）。新意见发 `AddNote { rows: Some(这份行的 RowsKey), anchor, text, excerpt: None }`，已有的意见发 `EditNote`。`command` 返回时快照里已经有这条意见：编辑框随即收起，焦点回到屏幕，选中项不变，这个锚点的草稿删掉。
+  - Esc：文本框的 `on_cancel` 派发 `review::CancelNote`：编辑框收起，焦点回到屏幕。新意见有文字时存为这个锚点的草稿（`drafts`，至多 20 条，超出时丢最早的；屏幕 drop 时丢弃），之后在同一行按 C 时带回，打出的文字不会因为一次 Esc 丢失；改已有的意见时丢弃这次的改动，意见本身不变。输入法组字时 Esc 先给输入法。
+  - 编辑框开着时快照换代：锚点行还在时编辑框跟着它（按 `ItemKey::NoteEditor` 找回）；锚点行没了（文件变了）时编辑框跟在这个文件的标题之后，保存照常发出：锚点带着写下时的 OID，`review` 把意见放成 `Drifted`。改已有的意见时，这条意见变成发送中或被删掉，编辑框关闭、改动丢弃。
+- 意见（`Item::Note`）：锚点行之下、与代码左对齐的一块（`fill` 底、圆角，没有描边）。第一行是状态（Caption 层级、次要色：待发送 `review-note-pending`，发送中 `review-notes-sending`，已发送 `review-note-sent` 或 `review-note-copied`，`$when` 是 `relative_time`）和右端的编辑、删除（朴素按钮；待发送时两个都有，已发送时只有删除，发送中都没有）；下面是原文（Body 层级，`Text::verbatim`，保留换行）。锚点行的行号栏里画一个 6pt 圆点：待发送的 `accent`，已发送的 `tertiary_label`。点一下意见选中它（`ItemKey::Note`），编辑、删除也作用在选中的意见上。
+  - `Drifted`：画在文件标题之后，第一行加 `review-note-drifted`（警示色，`$line` 是锚点的行号加一），原文上面是摘录（`TextRole::Code`、次要色，锚点那一行是主文字色）。`Elsewhere`：同样的画法，加上路径（`Text::verbatim`），在 `NotesElsewhere` 块里，标题 `review-notes-elsewhere`。
+  - 删除不确认：删的是一条，代价小；放弃全部要确认（下面）。
+- 浮条（从左到右，会话审阅和规则分组视图相同）：
+  1. 计数位置：发送中为 `review-notes-sending`；上一次发送失败（`last` 是 `Failed`）为 `review-notes-not-sent`（警示色，`$reason` 是 `review-notes-error-*` 的文字）；上一次发送成功（`last` 是 `Sent`）时按 `via` 为 `review-notes-copied`、`review-notes-pasted` 或 `review-notes-sent`；再次复制之后（`last` 是 `CopiedAgain`）成功为 `review-notes-copied`，失败为 `review-notes-not-copied`（警示色，`$reason` 是 `review-notes-error-clipboard` 或 `-timed-out`）；其余是 `review-comments`（待发送的条数）。`last` 在下一次 `AddNote`、`SendNotes`、`DiscardNotes` 时清除，所以结果显示到用户下一次加意见、发送或放弃为止，之后回到条数。按了 C 而还没发出的意见已满时为 `review-notes-full`，到下一次命令为止。
+  2. 再次复制（朴素按钮，`review-notes-copy-again`）：最近一批（`batches` 的最后一项）还没有回应（`answered_by` 为 None）、`notes` 里还有这一批的意见、没有发送中时出现。点击发 `CopyBatch(这一批的 ID)`（`review::CopyNotesAgain`）：`review` 用同一个标记重新拼出这一批还在的意见、写进剪贴板，意见仍是已发送。用于复制之后没有粘贴成功（剪贴板被别的文字覆盖、粘贴到了别处），不必重写意见。会话审阅里回应它的那一轮出现后，或有了更新的一批后，这个按钮随之消失或改指新的一批。
+  3. 放弃（朴素按钮，`review-notes-discard`）：有待发送的意见、没有发送中时出现。点击后弹系统确认框（`Window::prompt`，`PromptLevel::Warning`，文字 `review-notes-discard-confirm` 与它的 `.detail`，按钮 `review-notes-discard` 与 `common-cancel`），选放弃才发 `DiscardNotes`。
+  4. Looks Good（次要按钮），不变。
+  5. 发送（主按钮，键提示 ⌘↩）：`routes[0]` 是会话途径时标签 `review-send-to`（`$agent` 是 `sessions[0].agent` 的产品名）或 `review-send`（没有 agent 名时）；是剪贴板时 `review-copy-prompt`。没有待发送的意见或正在发送时不可用。点击和 ⌘↩ 都发 `SendNotes { route: routes[0].id }`。
+  6. 上一次经会话途径发送失败时，发送按钮左边多一个朴素按钮 `review-copy-prompt`（`review::CopyNotesAsPrompt`），下一次命令后消失。它复制的是待发送的意见；第 2 项的再次复制复制的是已经发出的最近一批，两者可以同时出现，标签不同。一个区域只有一个主按钮。
+- 发送之后：`last` 是 `Sent` 且 `via` 是 `TerminalPaste` 或 `Acp` 时，`dispatch(SelectInspectorTab("conversation"))`，每一批只切换一次（`switched_for`）：用户接着在 Conversation 页或终端里看 agent 的回应。剪贴板途径不切换。
+- 轮次标题：`TurnEntry::answers` 为 Some 时，标题行的次要文字后面加 `review-turn-answers`（`$count` 取 `batches` 里这一批的 `count`）；折叠成一行的轮次同样。这就是交互规范「核心闭环」第 5 步的「agent 的修改作为新一轮出现」。
+
 ## 数据流与线程
 
 ```
@@ -288,6 +338,9 @@ review（executor）─▶ ReviewEvent::Prepared ─▶ Job ─▶ [主线程] r
 V / 勾选 ─▶ command(MarkSeen)（review 在返回前换出 seen）─▶ 本 crate 立即按新快照重画、播放勾选动画 ─▶ 动画结束后滚到下一个未看文件
 usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线程] Usage::snapshot ─▶ 简报用量行、轮次 token
 ⇧⌘O ─▶ Reader::open(ReadTarget)；Space ─▶ CodeIntel::set_focus(Current) + dispatch(OpenPanel("context"))
+C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command(AddNote / EditNote)（review 在返回前换出 notes）─▶ 收起编辑框、重画
+⌘↩ / 发送按钮 ─▶ command(SendNotes)（返回前标为发送中）─▶ review 后台拼 prompt、经途径送出 ─▶ ReviewEvent::Changed ─▶ 浮条显示结果；会话途径时 dispatch(SelectInspectorTab("conversation"))
+再次复制 ─▶ command(CopyBatch)（快照不变）─▶ review 后台拼同一批的 prompt、写剪贴板 ─▶ ReviewEvent::Changed（只有 last 变了）─▶ 浮条显示结果
 ```
 
 - 主线程上只有：读快照与行（复制 `Arc`）、`items::build`、显示行的配对、锚点与可见范围的计算、发命令、渲染。没有 IO、解析和 git 操作（架构规则 4）。
@@ -306,6 +359,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 | 打开一个会话的 Diff < 50 ms（`app/open_diff`：项目主页 ↵ 到第一个文件的 diff 行画出，终点 `Milestone::DiffShown`） | review 的份额 < 35 ms（冷）加第一个文件的行 < 3 ms（review 设计「性能」）。本 crate ≤ 11 ms：工厂建模型与 `open` < 1 ms；`Changed` 投递到主线程 < 1 ms；`snapshot()` 加 `items::build`（50 个文件、20 轮、第一个文件 300 行）< 2 ms；`Prepare` 的发出在同一次更新里；`Prepared` 到达后 `rows()` 与 `splice` < 0.5 ms；画出第一屏（约 60 行等宽文本，纯文本）≤ 6 ms。高亮不在这条路径上：行先按纯文本画出并报告里程碑，区间之后到达 |
 | 滚动与输入 120 fps（5000 行的 diff） | `list` 只排版可见的项（约 60 行）；每项的元素构造是常数：`NodeId` 克隆、`Token` 切片、固定行高。每帧 ≤ 8.3 ms（`review_view/scroll_5000`）。滚动期间 `Prepare` 每帧至多一次，命令立即返回 |
 | 勾选 | `command(MarkSeen)` 返回前 review 已换出 `seen`（< 0.2 ms）；本 crate 只重画 Progress 行和步标题，勾选动画只改透明度与描边进度（`CHECK_FILL`、`CHECK_STROKE`） |
+| 审阅意见（#22） | C 到编辑框画出在下一帧（插入一项，`ListState::splice`）；`command(AddNote)` 返回前 review 已换出 `notes`（< 0.2 ms）；`items::build` 多 O(意见数) 的建表；滚动时每项的元素构造不变，意见块按项排版。prompt 不经过本 crate |
 | 刷新 | `Changed` 到新画面：`items::build` < 2 ms（5000 行时 < 4 ms），锚点找回 O(1)；不等 `Prepared` |
 | 空闲内存（采样状态，没有打开审阅） | 本 crate 没有屏幕时 < 16 KiB（`Shared` 与注册的工厂）。屏幕在 `Pop` 时 drop，不保留 |
 | 审阅打开时的内存 | 展示行由 review 保留（≤ 8 MiB，只为 `Prepare` 的范围）；本 crate 另有：`items`（5000 行约 5000 × 40 B = 200 KiB）、显示行的配对（双栏时同量级）、高亮区间 ≤ 2 MiB（LRU）、`texts` 的引用（内容由 review 持有）。合计 ≤ 3 MiB 之外不持有两侧文本的副本（`ArcSource` 只借 review 给的 `Arc<[u8]>`） |
@@ -328,16 +382,16 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   - Mark Reviewed 按钮（次要样式，标签 `review-mark-reviewed`，后面跟次要色的键提示 V）：触发 `review::MarkSeenAndNext`。
   - 原来在这里的统一 / 双栏分段控件和 Refresh 不再占工具栏：Action（`review::ToggleDiffMode`、`review::Refresh`）和键值保留，入口改到应用菜单栏的 View 菜单（`app` 设计的应用菜单现在只有四项，加 View 菜单是 `app` 的要求，见「对其他 crate 的要求」G）；在那之前只能经 Action 触发。画布没有给这两个操作留位置，这是需要产品确认的取舍（见「未决问题」5）。
 - `ui` 的控件与动效原语：颜色经 `colors(window, cx)`，文字经 `Text` 与 `TextRole`（层级见[交互规范「视觉」](interaction.md#视觉)的文字样式表，下文只写层级名），代码行 `TextRole::Code` 加 `mono_metrics` 的格宽与行高，`code_style` 着色；`CircleCheck`（文件卡片头与 Files 页的行）、`Progress`（Files 页的进度条，`ProgressShape::Bar`）、`Button`、`AgentDot`（子 agent 行）、`GroupedList` 与 `Row`（文件卡片、折叠的文件行）、`Skeleton`、`Expander`（展开 `Fold` 时下方内容下移）；浮条的胶囊容器、分段控件（检查器的页签）、开关来自 `ui`（见「对其他 crate 的要求」I）；动效：`CHECK_FILL`、`CHECK_STROKE`、`PROGRESS`、`SCROLL_NEXT`（V 之后的滚动，`ListState::scroll_to` 的目标由 `Transition` 逐帧给出）、`ARRIVE`（新一轮到达时 `Turn` 项从下方 8pt 淡入）、`SEGMENT`、`HOVER_IN` / `HOVER_OUT`、`EXPAND_HEIGHT` / `EXPAND_FADE`；减弱动态效果由 `Motion::effective` 处理。进入会话的 `ENTER_SESSION` 弹簧动画由 `project_home` 的行标题在 `Push` 前后完成（它拥有那段文字），本 crate 的内容按 `ARRIVE` 淡入。本 crate 不写任何颜色值、字体和时长（验收用 `rg` 检查）。
-- diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），符号栏里 `+` 用绿色、`−` 用红色；两个行号栏右对齐、用三级次要色，和符号栏、代码各占固定宽度；行高比字号高（画布是 12pt 的字配 20pt 的行高，由 `mono_metrics` 给出，不在这里写数值）；词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。选中的行保留增删的淡底色，左边加一条 2pt 的强调色竖条，行号换成强调色；行尾出现一个圆形的 + 按钮（加审阅意见，归 [#22](https://github.com/SoloJiang/lectern-app/issues/22)，那之前不画）。
+- diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），符号栏里 `+` 用绿色、`−` 用红色；两个行号栏右对齐、用三级次要色，和符号栏、代码各占固定宽度；行高比字号高（画布是 12pt 的字配 20pt 的行高，由 `mono_metrics` 给出，不在这里写数值）；词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。选中的行保留增删的淡底色，左边加一条 2pt 的强调色竖条，行号换成强调色；行尾出现一个圆形的 + 按钮（`Button::icon_only(Icon::Plus)`，悬停说明 `review-note-add-here`；点击同 C，「审阅意见（#22）」）。有意见的行，行号栏里画一个 6pt 圆点。
 - 阅读栏（背景是页面底色，卡片带描边，[交互规范「视觉」](interaction.md#视觉)；宽度 760pt）从上到下，每一块是 `Item` 的一种：
   - 标题区（新的 `Item::Header`，会话审阅和规则分组视图都有）：标题（Title 1 层级，粗体；文字同工具栏标题），下面一行统计（Body 层级，次要色），用 ` · ` 连接：轮数（`review-stats-turns`，规则分组视图没有）、文件数（`review-stats-files`；有包数时用 `review-stats-files-packages`）、增删行数（`review-added` 绿色、`review-removed` 红色，取 `ChangeTotals::added` / `removed`）。包数（涉及几个子项目）要 `review` 的快照提供（「对其他 crate 的要求」H），没有时只写文件数。
   - 简报（没有卡片）：标题行 `review-brief-title`，旁边次要文字 `review-brief-source`，右边是 Analyze 的按钮（`review-analyze-with`，点名分析用的 agent）或进行中 / 重新分析的状态（下面「简报」一节写了状态）；条目前的标记是 8pt 圆点，不用画布 Review 画板里的 16pt 图标（[交互规范「视觉」](interaction.md#视觉)：状态用圆点）；条目末尾的 See impact 链接打开上下文面板，要 `context_drawer`（[#20](https://github.com/SoloJiang/lectern-app/issues/20)），没有它时不画；分支用量行前有分支图标。Analyze 进行中的说明和进度条、结果卡片的内容归 [#66](https://github.com/SoloJiang/lectern-app/issues/66)，这里只留出位置：说明在条目列表下面，结果卡片在同一位置。
   - 轮次：每轮之间一条 0.5pt 分隔线。展开的轮次：标题行是 `Turn N`（Headline 层级，次要色）和一段次要文字（Callout 层级）「开始时间（时:分）· 文件数 · token」，用 ` · ` 连接（`review-turn-files`、`review-turn-tokens`；token 要交接插件，没有时省略）；没有 agent 圆点。prompt 用 Title 2 层级、主文字色，没有引用块的左边线；agent 说明用 Body 层级、次要文字色，保留换行。折叠的轮次是一行：展开箭头、`Turn N`（半粗）、prompt 的预览、右端次要文字（没有改动是 `review-turn-none`，否则是 `review-turn-files`）；点一下展开，再点收起。哪些轮次默认折叠见「未决问题」3。
   - 文件卡片：一个文件（会话审阅里是一轮里的一步，规则分组视图里是最终改动的一个文件）一张卡片，头部和 diff 在同一个圆角卡片里，头部与 diff 之间一条 0.5pt 分隔线。头部：`CircleCheck`、路径（`Code` 层级的等宽字）、增删行数（`review-added` / `review-removed`）、右端一个朴素的 Open File 文字按钮（`review-open-file`，后面跟次要色的键提示 ⇧⌘O；没有交接插件时置灰）。diff 里的折叠行（`Fold`）与代码文字左对齐，次要色。文件卡片一直展开，没有折叠成一行的文件行，也没有收起卡片的控件。画布把后面两个文件画成折叠行，这是原型的状态；产品已决定不做文件卡片的折叠（「未决问题」6）。
   - Drifted 提示：diff 里无法对齐的改动块之前画一行警示色（橙）的字，带图标：`review-drift-note`（「Drifted — you edited these lines at 14:02, after the session.」）和一个 Compare 链接（`review-compare`）。编辑时间要 `review` 提供；没有时用 `review-drift-note-untimed`。Compare 的界面还没有设计，没有它时不画链接。原来的 2pt 竖条和「Drifted」标签去掉。规则分组视图的 hunk 标题（`review-hunk-turn`、`review-hunk-other-session`）保留：那里一个文件的改动可能来自几轮、几个会话。会话审阅的每一步已经在某一轮之下，hunk 不再画归因标题（是否保留见「未决问题」7）。
-  - 审阅意见的输入框（点行尾的 + 展开）、行内的意见：归 [#22](https://github.com/SoloJiang/lectern-app/issues/22)；展开动画 `EXPAND_HEIGHT` / `EXPAND_FADE` 已有。
+  - 审阅意见（#22）：编辑框（C 或行尾的 + 展开，`EXPAND_HEIGHT` / `EXPAND_FADE`）和行内的意见块画在锚点行之下；`Drifted` 的意见在文件标题之后；不在审阅里的文件上的意见在叙事末尾一块。画法见「审阅意见（#22）」。
 - 检查器：页签是撑满宽度的分段控件（`Segmented`），画布是 Files / Conversation 两项；本 crate 登记 Files 页（`InspectorTab`，标签 `review-progress-title`，值改成 Files），Conversation 页归 `conversation`（[#23](https://github.com/SoloJiang/lectern-app/issues/23)）。Files 页：顶上一行「已看 2/6」（`review-files-reviewed`）和右端的百分比（`review-files-percent`），下面一条细进度条（`Progress::Bar`，增长动画 `PROGRESS`）；再下面是文件列表，每行：`CircleCheck`、短名（路径的最后一段，列表里有重名时加上上一级目录）、右端次要色的 `Turn N`（该文件最早被改动的那一轮，规则分组视图里没有）；选中的行用淡灰填充（不是强调色），两侧内缩、圆角，没有分隔线；噪声组和折叠的文件不变。选中行的辅助文字 `review-reviewing` 去掉（画布没有）。
-- 浮条：贴底居中的胶囊，宽度由内容决定。从左到右：审阅意见数（`review-comments`，半粗）、Looks Good（次要按钮）、发送（强调色按钮，`review-send-to`，后面跟键提示 ⌘↩）。#22 之前意见数总是 0，发送置灰；全部已看（`progress.seen == total`）时 Looks Good 换成不可点的 `review-all-reviewed`。已看进度不在浮条里（在检查器的 Files 页），原来浮条上的进度条和「n/m reviewed」去掉。胶囊容器（材质、阴影、半径）由 `ui` 的浮条容器给出，位置由 `workspace` 留出（[workspace 设计「界面」](workspace.md#界面)），内容由本 crate 画。
+- 浮条：贴底居中的胶囊，宽度由内容决定。从左到右：审阅意见数或发送状态（`review-comments` 等，半粗）、Copy Again（朴素按钮，最近一批还没有回应时）、放弃（朴素按钮，有待发送的意见时）、Looks Good（次要按钮）、发送失败后的 Copy as Prompt（朴素按钮）、发送（强调色按钮，`review-send-to` 或只有剪贴板途径时的 `review-copy-prompt`，后面跟键提示 ⌘↩）；规则见「审阅意见（#22）」。#22 实现之前意见数总是 0，发送置灰；全部已看（`progress.seen == total`）时 Looks Good 换成不可点的 `review-all-reviewed`。已看进度不在浮条里（在检查器的 Files 页），原来浮条上的进度条和「n/m reviewed」去掉。胶囊容器（材质、阴影、半径）由 `ui` 的浮条容器给出，位置由 `workspace` 留出（[workspace 设计「界面」](workspace.md#界面)），内容由本 crate 画。
 - 加载：`ui::loading_phase(now - opened_at)`：`Nothing` 时内容区空白（工具栏已显示标题）；`Skeleton` 时简报与前两轮的位置各一块 `Skeleton`；`Progress` 时一行 `review-loading` 加取消（`dispatch(Pop)`）。
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/review.ftl`，前 5 个已存在）：
 
@@ -348,13 +402,13 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review-files-reviewed` | { $reviewed } of { $total } reviewed | 已看 { $reviewed }/{ $total } | Files 页顶上一行 |
   | `review-files-percent` | { $percent }% | { $percent }% | Files 页右端的百分比 |
   | `review-files-changed` | { $count } file(s) changed | { $count } 个文件有改动 | 规则分组视图的标题 |
-  | `review-comments` | { $count -> [0] No review notes [one] { $count } review note *[other] { $count } review notes } | { $count -> [0] 没有审阅意见 *[other] { $count } 条审阅意见 } | 浮条（#22 之前总是 0；键名不变，值从「comment」改成「review note」） |
+  | `review-comments` | { $count -> [0] No review notes [one] { $count } review note *[other] { $count } review notes } | { $count -> [0] 没有审阅意见 *[other] { $count } 条审阅意见 } | 浮条：待发送的意见数（`NotesState::pending`；键名不变，值从「comment」改成「review note」） |
   | `review-reviewing` | Reviewing { $path } | 正在审阅 { $path } | Progress 列表选中行的辅助文字 |
   | `review-title-untitled` | Untitled session | 未命名会话 | 工具栏标题 |
   | `review-title-outside` | Outside any session | 会话外的改动 | 工具栏标题 |
   | `review-title-range` | Changes against { $base } | 相对 { $base } 的改动 | 工具栏标题（`$base` 是引用名或提交，原样） |
-  | `review-send` | Send | 发送 | 没有 agent 名时的发送按钮（#22 之前不可用） |
-  | `review-send-to` | Send to { $agent } | 发送给 { $agent } | 浮条的发送按钮（`$agent` 是产品名，原样；#22 之前不可用） |
+  | `review-send` | Send | 发送 | 会话途径、没有 agent 名时的发送按钮（#22 实现之前不可用） |
+  | `review-send-to` | Send to { $agent } | 发送给 { $agent } | 会话途径的发送按钮（`$agent` 是产品名，原样；#22 实现之前不可用） |
   | `review-mark-reviewed` | Mark Reviewed | 标记为已看 | 工具栏按钮 |
   | `review-hide-formatting` | Hide formatting | 隐藏格式改动 | 工具栏开关的标签（#21 之后） |
   | `review-formatting-hidden` | { $count } formatting-only lines hidden | 已隐藏 { $count } 行纯格式改动 | 文件行 / 卡片头的次要文字（#21 之后） |
@@ -441,6 +495,29 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review-turn-files` | { $count -> [one] { $count } file *[other] { $count } files } | { $count } 个文件 | 轮次标题与折叠行的次要文字 |
   | `review-turn-none` | no changes | 没有改动 | 折叠行的次要文字 |
   | `review-back` | Back | 返回 | 失败态的按钮 |
+  | `review-copy-prompt`（`.tooltip`） | Copy as Prompt（Copy the review notes as a prompt, then paste it into the session） | 复制为 prompt（复制审阅意见，再粘贴到会话里） | #22：只有剪贴板途径时的发送按钮；会话途径失败后浮条上的备用按钮 |
+  | `review-notes-discard` | Discard | 放弃 | #22：浮条按钮、确认框的确认按钮 |
+  | `review-notes-discard-confirm`（`.detail`） | Discard { $count } review note(s)?（They haven't been sent. This can't be undone.） | 放弃 { $count } 条审阅意见？（这些意见还没有发送，放弃后无法恢复。） | #22：确认框 |
+  | `review-notes-sending` | Sending… | 正在发送… | #22：浮条的计数位置、意见的状态 |
+  | `review-notes-copied` | Copied { $count } review note(s). Paste them into the session. | 已复制 { $count } 条审阅意见，请粘贴到会话里。 | #22：`SentVia::Clipboard` |
+  | `review-notes-pasted` | Pasted { $count } review note(s) into the terminal. Press Return there to send. | 已把 { $count } 条审阅意见粘贴到终端，在终端里按 ↵ 发送。 | #22：`SentVia::TerminalPaste`（终端途径不追加回车） |
+  | `review-notes-sent` | Sent { $count } review note(s) | 已发送 { $count } 条审阅意见 | #22：`SentVia::Acp` |
+  | `review-notes-not-sent` | Not sent: { $reason } | 没有发出：{ $reason } | #22：`last` 是 `Failed`（`$reason` 是下一行某个键的文字） |
+  | `review-notes-error-starting` / `-busy` / `-no-session` / `-timed-out` / `-clipboard` / `-failed` | the terminal is still starting / the agent is working / no session can receive them / no answer in 10 seconds / the clipboard couldn't be written / the session didn't take them | 终端还在启动 / agent 正在工作 / 没有能接收的会话 / 10 秒内没有回应 / 无法写入剪贴板 / 会话没有接收 | #22：`SendFailure` 的种类（剪贴板途径的 `Failed` 用 `-clipboard`） |
+  | `review-notes-full` | Up to { $count } notes can be unsent at a time. Send or discard some first. | 还没发出的意见最多 { $count } 条，请先发送或放弃一些。 | #22：还没发出的意见（待发送加发送中）已满时按 C |
+  | `review-notes-copy-again`（`.tooltip`） | Copy Again（Copy the { $count } review note(s) you sent last, with the same marker） | 再次复制（再复制一次上一批发出的 { $count } 条审阅意见，标记不变） | #22：浮条上最近一批的再次复制 |
+  | `review-notes-not-copied` | Not copied: { $reason } | 没有复制：{ $reason } | #22：`last` 是 `CopiedAgain` 且 `failed` 为 Some（`$reason` 是 `review-notes-error-clipboard` 或 `-timed-out` 的文字） |
+  | `review-notes-elsewhere` | Notes on files no longer in this review | 不在本次审阅里的文件上的意见 | #22：`NotesElsewhere` 的标题 |
+  | `review-note-placeholder` | Write a note for the agent | 写给 agent 的审阅意见 | #22：编辑框的占位文字 |
+  | `review-note-add` | Add Note | 添加意见 | #22：编辑框的保存按钮（新意见；键提示 ⌘↩ 由键绑定给出） |
+  | `review-note-save` | Save | 保存 | #22：编辑框的保存按钮（改已有的意见） |
+  | `review-note-too-long` | This note is too long. | 这条意见太长。 | #22：超过 `limits::NOTE_BYTES` |
+  | `review-note-add-here`（`.tooltip`） | Add a review note (C) | 添加审阅意见（C） | #22：行尾的 + 按钮 |
+  | `review-note-edit` / `review-note-delete` | Edit / Delete | 编辑 / 删除 | #22：意见上的按钮 |
+  | `review-note-pending` | Not sent | 未发送 | #22：意见的状态 |
+  | `review-note-sent` / `review-note-copied` | Sent { $when } / Copied { $when } | { $when }已发送 / { $when }已复制 | #22：已发送的意见（`$when` 是 `relative_time`） |
+  | `review-note-drifted` | Line { $line } changed after this note was written | 第 { $line } 行在写下这条意见之后变了 | #22：`NotePlace::Drifted` |
+  | `review-turn-answers` | answers { $count } review note(s) | 回应 { $count } 条审阅意见 | #22：轮次标题的次要文字（`TurnEntry::answers`） |
 
   路径、命令、工具名、分支名、会话标题、prompt 与说明都经 `Text::verbatim` 或 `Args::str` 原样显示，不翻译（ADR 0013）。复数的 en 写法在 .ftl 里用 `{ $count -> [one] … *[other] … }`，表里简写为 `(s)`。
 
@@ -458,7 +535,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review.header` | `Group` | 标题区；`attrs`：`turns`、`files`、`packages`、`added`、`removed`（没有轮次时没有 `turns`；包数没有来源时没有 `packages`） |
   | `review.narrative` | `List` | `attrs`：`items`（总数）、`visible`（可见范围）、`mode` |
   | `review.earlier` | `Group` | `expanded` |
-  | `review.turn[<session>:<ordinal>]` | `Group` | `Label::text` 是轮次标题；`State::expanded`（折叠成一行时为 false）；`attrs`：`tokens`、`after_last_seen`、`running` |
+  | `review.turn[<session>:<ordinal>]` | `Group` | `Label::text` 是轮次标题；`State::expanded`（折叠成一行时为 false）；`attrs`：`tokens`、`after_last_seen`、`running`、`answers`（回应的意见数，#22） |
   | `review.turn[…].prompt`、`.text[<pos>]`、`.injected[<pos>]` | `Text` | `Label::text` 是正文（探针关闭时不构造） |
   | `review.step[<id>]` | `Group` | `Label::text` 是路径；`attrs`：`added`、`removed`、`alignment`、`survival`、`seen` |
   | `review.step[<id>].check`、`review.file[<path>].check` | `Toggle` | `checked` = 已看 |
@@ -467,7 +544,8 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review.noise` | `Group` | `expanded`；`attrs`：`count` |
   | `review.diff[<rows-key>]` | `Diff` | `attrs`：`rows`、`context`、`prepared`、`highlighted`（两侧各 `plain` / `spans`） |
   | `review.diff[…].hunk[<old>:<new>]` | `DiffHunk` | `attrs`：`turns`、`others`、`drifted` |
-  | `review.diff[…].row[<old>:<new>]`（只导出可见的） | `DiffLine` | `attrs`：`kind`、`drifted`；`selected` |
+  | `review.diff[…].row[<old>:<new>]`（只导出可见的） | `DiffLine` | `attrs`：`kind`、`drifted`、`notes`（这一行的意见数，#22）；`selected` |
+  | `review.diff[…].row[…].add-note` | `Button` | #22：行尾的 +，只在选中或悬停时出现 |
   | `review.diff[…].fold[<old>]` | `Button` | `Label::key` = `review-fold` |
   | `review.diff[…].placeholder` | `Group` | `attrs`：`lines` |
   | `review.call[<id>]` | `Text` | `attrs`：`kind`（`command` / `subagent` / `tool`）、`files`、`status` |
@@ -476,12 +554,19 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review.progress.item[<path>]` | `ListItem` | `Label::text` 是路径；`selected`；`attrs`：`seen`（`unseen` / `seen` / `changed`）、`group`、`noise` |
   | `review.progress.item[<path>].check` | `Toggle` | `checked` |
   | `review.bar` | `Group` | 浮条（在 `workspace.bar` 之下） |
-  | `review.bar.comments` | `Text` | `Label::key` = `review-comments` |
-  | `review.bar.looks-good`、`review.bar.send` | `Button` | `disabled` |
+  | `review.bar.comments` | `Text` | `Label::key` 是计数位置当前的键（`review-comments`、`review-notes-sending` 等）；`attrs`：`pending`、`sending`（#22） |
+  | `review.bar.looks-good`、`review.bar.send` | `Button` | `disabled`；`send` 的 `attrs`：`route`（`session` / `clipboard`，#22） |
+  | `review.bar.discard`、`review.bar.copy`、`review.bar.copy-again` | `Button` | #22：`disabled`；`discard` 只在有待发送的意见时出现，`copy` 只在会话途径失败后出现，`copy-again` 只在最近一批还没有回应时出现（`attrs`：`batch`，批次 ID 的 16 位十六进制） |
+  | `review.note[<id>]` | `Comment` | #22：`Label::text` 是意见原文（探针关闭时不构造）；`selected`；`attrs`：`state`（`pending` / `sending` / `sent`）、`place`（`rows` / `drifted` / `elsewhere`）、`side`、`line` |
+  | `review.note[<id>].edit`、`review.note[<id>].delete` | `Button` | #22：`disabled` |
+  | `review.note-editor` | `Group` | #22：`attrs`：`target`（`new` / `existing`）、`side`、`line`、`too_long` |
+  | `review.note-editor.text` | `TextField` | #22：`ui::TextArea` 的节点，不记录文字 |
+  | `review.note-editor.save`、`review.note-editor.cancel` | `Button` | #22：`disabled` |
+  | `review.notes-elsewhere` | `Group` | #22：`attrs`：`count` |
   | `review.failed` | `Text` | `Label::key` 是失败的键 |
   | `review.loading` | `Group` | `attrs`：`phase` |
 
-  `<rows-key>` 写成 `final:<path>` 或 `step:<id>`；`<path>` 是 `FileKey` 的新路径（删除时旧路径）。`NodeId` 随 `Item` 建一次放在项里，每帧只克隆。
+  `<rows-key>` 写成 `final:<path>` 或 `step:<id>`；`<path>` 是 `FileKey` 的新路径（删除时旧路径）；`review.note[<id>]` 的 `<id>` 是 `NoteId` 的 16 位十六进制。`NodeId` 随 `Item` 建一次放在项里，每帧只克隆。
 - Action 与快捷键（KeyContext：屏幕根元素 `review`，Progress 页 `review-progress`；`KeyBindings` 贡献的谓词写 `Content > review` 与 `Inspector > review-progress`）：
 
   | Action | 键 | 上下文 | 处理 |
@@ -502,8 +587,15 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review::Escape` | Esc | `review` | 面板或覆盖层开着时（`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里）不处理，Esc 冒泡到 `workspace` 先关面板；没有开着的层而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
   | `review::SelectNext` / `SelectPrevious` / `JumpToSelected` | ↓ / ↑ / ↵ | `review-progress` | Progress 列表的选择与跳转（跳到那个文件的步标题） |
   | `review::Back` | — | `review` | 失败态的返回按钮：`dispatch(Pop)` |
+  | `review::AddNote` | C | `review` | #22：在选中的行或 hunk 上打开编辑框（「审阅意见（#22）」）；行尾的 + 触发同一个 Action |
+  | `review::SendNotes` | ⌘↩ | `review` | #22：`SendNotes { route: routes[0].id }`；没有待发送的意见或正在发送时不处理。编辑框有焦点时 ⌘↩ 由文本框处理（保存），这个绑定收不到 |
+  | `review::CopyNotesAsPrompt` | — | `review` | #22：经剪贴板途径（`"clipboard"`）发 `SendNotes`；浮条的备用按钮 |
+  | `review::DiscardNotes` | — | `review` | #22：系统确认框，选放弃后发 `DiscardNotes` |
+  | `review::CopyNotesAgain` | — | `review` | #22：`CopyBatch(batches 的最后一项)`；浮条的再次复制。按钮不出现时不处理 |
+  | `review::SaveNote` / `review::CancelNote` | ⌘↩ / Esc（编辑框里，由 `TextArea` 的 `on_submit` / `on_cancel` 派发） | 编辑框 | #22：保存 / 关闭编辑框（新意见的文字存为草稿） |
+  | `review::EditNote` / `review::DeleteNote` | — | `review` | #22：选中的意见：打开编辑框 / 发 `RemoveNote`（意见上的两个按钮） |
 
-  C（加审阅意见）与 ⌘↩（发送）随 #22；⌥⌘I、⌘\、⌘[、⌘O、⌘W 由 `workspace` 处理。全部 Action 名稳定、可枚举（探针按名字触发）。
+  ⌥⌘I、⌘\、⌘[、⌘O、⌘W 由 `workspace` 处理。全部 Action 名稳定、可枚举（探针按名字触发）。
 
   `set_focus(project, worktree, focus)` 的 `project`、`worktree`：`ReviewTarget::Outside` / `Range` 取自己的字段；`Session` 取 `SessionSummary::place` 为 `Located` 时的项目与 worktree（`sessions()` 里查不到时不调用）。`Review(focus_review)`、`Touched(focus_touched)` 在 `Ready` 后发一次，之后快照里这两个 `Arc` 变了再发；`Current(Some(TextRef { worktree, path, oid: RowsSide::oid, origin: Worktree / Object }))` 在选中行变化时发；清空选中不发 `Current(None)`，只在屏幕 drop 时发一次，所以面板开着期间焦点不变。
 - 向 `workspace` 登记的贡献（[workspace 设计「接口」](workspace.md#接口)）：
@@ -540,6 +632,13 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 | 插件停用时屏幕正在显示 | `workspace` 按 `Pop` 处理；模型 drop 时 `close` 与 `CancelAnalyze` 照常发出（`ServiceRef::get` 取不到时跳过） |
 | 事件的 `generation` 低于已应用的 | 丢弃 |
 | 快照里的 `TurnRef::session` 超出 `sessions` 范围等不一致（不应发生） | 这一项显示为 `Tool` 行，记 warn，不 panic |
+| 审阅意见那一行之后被改过（`NotePlace::Drifted`，#22） | 意见画在文件标题之后，带 `review-note-drifted` 和摘录；不猜位置 |
+| 意见所在的文件不在审阅里（`Elsewhere`） | 意见列在叙事末尾的 `NotesElsewhere` 块里，带路径 |
+| 发送失败、超时，或剪贴板写不进（`last` 是 `Failed`） | 浮条的计数位置显示 `review-notes-not-sent` 和原因，意见回到待发送；会话途径失败时多一个 Copy as Prompt |
+| 只有剪贴板途径 | 发送按钮是 Copy as Prompt；送出后浮条显示 `review-notes-copied`，不切到 Conversation 页 |
+| 还没发出的意见已满（`unsent` 达到 `limits::PENDING_NOTES`） | C 不打开编辑框，浮条显示 `review-notes-full` |
+| 复制之后没有粘贴成功（剪贴板被覆盖、粘贴到了别处） | 最近一批还没有回应时浮条有 Copy Again：按下后重新复制同一批，意见仍是已发送；结果显示 `review-notes-copied` 或 `review-notes-not-copied` |
+| 编辑框开着时锚点行消失 | 编辑框跟在文件标题之后，保存照常（`review` 放成 `Drifted`） |
 
 ## 日志与诊断
 
@@ -558,10 +657,12 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | 工厂收到的 `Target` 不是 `Review` | warn | `screen built without a review target` | `target`（判别名） |
   | 高亮任务 `Unavailable` | warn | `highlight unavailable` | `id`、`bytes`（本次运行每种语言只记一次） |
   | `Handoff` 不在而用户触发交接 | info | `handoff unavailable` | `id`、`what`（`open_file` / `focus` / `share` / `usage`） |
-- 详细级别（debug）：`snapshot applied`（`id`、`generation`、`state`、`items`、`files`、`turns`、`anchor_found`（bool）、`took_us`）；`prepare sent`（`id`、`rows`、`texts`、`visible`（范围长度））；`prepared applied`（`id`、`rows`、`texts`、`spliced`（换掉的项数））；`highlight`（`id`、`bytes`、`outcome`（`done` / `timed_out` / `cancelled`）、`took_us`）；`focus set`（`id`、`kind`、`paths`）；`usage applied`（`id`、`rows`、`turns`）；`command`（`id`、`kind`：`ReviewCommand` 的判别名）。trace 不另记；渲染路径（每帧的 `render`、滚动事件）上不加记录。
+
+  `review screen closed` 另带 `notes_added`（本次打开发出的 `AddNote` 数，#22）。发送和再次复制的结果由 `review` 记（`review notes sent`、`review notes not sent`、`review notes copied again`、`review notes not copied again`，[review 设计「日志与诊断」](review.md#日志与诊断)），本 crate 不重复。
+- 详细级别（debug）：`snapshot applied`（`id`、`generation`、`state`、`items`、`files`、`turns`、`anchor_found`（bool）、`took_us`）；`prepare sent`（`id`、`rows`、`texts`、`visible`（范围长度））；`prepared applied`（`id`、`rows`、`texts`、`spliced`（换掉的项数））；`highlight`（`id`、`bytes`、`outcome`（`done` / `timed_out` / `cancelled`）、`took_us`）；`focus set`（`id`、`kind`、`paths`）；`usage applied`（`id`、`rows`、`turns`）；`command`（`id`、`kind`：`ReviewCommand` 的判别名）；#22 的 `note editor`（`id`、`target`（`new` / `existing`）、`how`（`opened` / `saved` / `cancelled` / `drafted` / `closed_by_change`））和 `notes discard`（`id`、`confirmed`（bool）、`notes`）。trace 不另记；渲染路径（每帧的 `render`、滚动事件）上不加记录。
 - 关联 ID：`plugin`、`act` 由 `workspace` 在调用工厂和 Action 处理时恢复，`task` 由 executor 填。本 crate 不设 `review`、`session` 作用域（`review` 的哈希由 `review` crate 定义和计算，会话标识由它的记录带，本 crate 不重复），用 `id` 字段对应。
-- 不记录：文件路径与 `FileKey`、会话标题、prompt 与 agent 说明、注入内容、命令文本、工具名、分支名、diff 的行与两侧文本、简报条目的文字与 `Provided` 的 `args`、`Analyze` 的原因文字、`Reader` 的目标路径、`NodeId` 的业务键。用计数、下标、`ReviewId`、`generation`、判别名和耗时代替。
-- 金丝雀测试：`logs_hold_no_contents`（`src/tests/logs.rs`，`lectern_logging::testing::capture()` 在 trace 级别）：用含金丝雀的路径、会话标题、prompt、说明、命令、工具名、分支名、两侧文本、`Provided` 的 `args`、`Unavailable` 的原因构造快照与行，经 `FakeReview` 打开屏幕、应用快照、`Prepare`、`Prepared`、V、失败态（第 1 步的流程），第 2 步再加上高亮、⇧⌘O（假 `Reader`）、Space 和用量行，`assert_absent(金丝雀)`，并检查 `review screen opened`、`diff shown`、`review screen closed` 的字段。
+- 不记录：文件路径与 `FileKey`、会话标题、prompt 与 agent 说明、注入内容、命令文本、工具名、分支名、diff 的行与两侧文本、简报条目的文字与 `Provided` 的 `args`、`Analyze` 的原因文字、`Reader` 的目标路径、`NodeId` 的业务键；审阅意见的文字、草稿、摘录和锚点的行号（#22）。用计数、下标、`ReviewId`、`generation`、判别名和耗时代替。
+- 金丝雀测试：`logs_hold_no_contents`（`src/tests/logs.rs`，`lectern_logging::testing::capture()` 在 trace 级别）：用含金丝雀的路径、会话标题、prompt、说明、命令、工具名、分支名、两侧文本、`Provided` 的 `args`、`Unavailable` 的原因构造快照与行，经 `FakeReview` 打开屏幕、应用快照、`Prepare`、`Prepared`、V、失败态（第 1 步的流程），第 2 步再加上高亮、⇧⌘O（假 `Reader`）、Space 和用量行，`assert_absent(金丝雀)`，并检查 `review screen opened`、`diff shown`、`review screen closed` 的字段。#22 加 `logs_hold_no_note_contents`：金丝雀放在意见的文字、草稿、摘录和 `Elsewhere` 意见的路径里，走完 C、输入、Esc 存草稿、再 C、⌘↩、编辑、删除、放弃（确认框选放弃）、发送；没有记录含金丝雀，`review screen closed` 的 `notes_added` 正确。
 
 ## 测试
 
@@ -598,7 +699,22 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   - `milestone_is_reported_once`：第一次画出行后 `report_milestone(DiffShown)` 一次，之后的 `Prepared` 不再报。
   - `plugins_register_and_deactivate_cleanly`（第 1 步）：`TestKernel` 激活后假 `Contributions` 收到 `Screen`、`InspectorTab`、`KeyBindings` 三项；`review-view` 停用后登记 drop。`handoff_plugin_deactivates_on_its_own`（第 2 步）：`review-view-handoff` 单独停用后屏幕照常、交接按钮置灰。
   - `escape_goes_to_the_panel_first`：面板开着（假 `Contributions` 发 `LayerChanged { open: true }`）且有选中项时 Esc 不清空选中、冒泡到 `workspace`；面板关了之后 Esc 清空选中。
-- 语义树：`review_tree_session`、`review_tree_groups`、`review_tree_progress`、`review_tree_failed` 的 insta 快照（`ui_probe` 的 `tree::snapshot`，[#6](https://github.com/SoloJiang/lectern-app/issues/6) 合并后接入；之前用 `Recorder::finish` 的记录去掉 `bounds` 后快照）。
+- 审阅意见（#22，`src/tests/notes.rs`；`FakeReview` 按命令换出 `notes`、`notes_state`）：
+  - 纯函数 `items_notes_*`：意见项跟在锚点行之后（`Rows([Step])` 在会话审阅、`Rows([Final])` 在规则分组视图）、同一行几条按时刻、锚点行在折叠段里时跟在 `Fold` 之后、`Drifted` 跟在文件标题之后、`Elsewhere` 进 `NotesElsewhere`、编辑框的位置。
+  - `c_opens_the_editor_on_the_selected_row`：选中增加行、删除行、上下文行、双栏的一对行、hunk 时锚点的一侧、行号和 OID 正确；没有选中或选中步标题时不做事；那一侧没有 OID 时不可用；有草稿时带回文字。
+  - `cmd_return_in_the_editor_saves_the_note`：⌘↩ 发 `AddNote`（`rows`、`anchor`、文字原样），编辑框收起、焦点回到屏幕；只有空白、超过上限时保存不可用、⌘↩ 不发命令，超过上限时有 `review-note-too-long`。
+  - `escape_in_the_editor_keeps_a_draft`：Esc 后编辑框收起，同一行再按 C 带回文字；改已有的意见时 Esc 丢弃改动；草稿至多 20 条。
+  - `cmd_return_outside_the_editor_sends`：没有编辑框时 ⌘↩ 发 `SendNotes { route: routes[0].id }`；没有待发送的意见或正在发送时不发。
+  - `notes_are_drawn_under_their_rows`：各种 `NotePlace` 的画法和行号栏的圆点；`Drifted` 带摘录。
+  - `the_bar_follows_the_notes_state`：待发送数、发送中、三种 `SentVia` 的文字、`Failed` 的每种原因；只有剪贴板途径时发送按钮是 Copy as Prompt；会话途径失败后多一个 Copy as Prompt，点它发 `SendNotes { route: "clipboard" }`，与 Copy Again 同时出现时两个按钮的顺序按「审阅意见（#22）」的浮条。
+  - `discard_asks_first`：确认框选取消不发命令，选放弃发 `DiscardNotes`（测试台回答 `Window::prompt`）。
+  - `a_full_batch_blocks_c`：还没发出的 40 条时（全部待发送，或 30 条发送中加 10 条待发送）C 不打开编辑框，浮条显示 `review-notes-full`。
+  - `copy_again_follows_the_latest_batch`：`batches` 有两批时 Copy Again 指最近一批（`review.bar.copy-again` 的 `batch`），点击发 `CopyBatch(那一批)`；那一批有 `answered_by`、它的意见都删掉了、或有一批在发送中时不出现；`last` 是 `CopiedAgain` 时计数位置是 `review-notes-copied`（有待发送的意见时也是），`failed` 为 Some 时是 `review-notes-not-copied`；下一次 `AddNote` 之后回到条数。
+  - `a_session_route_switches_to_the_conversation_once`：`Sent { via: TerminalPaste }` 之后 `SelectInspectorTab("conversation")` 一次，同一批的快照再换代不再发；剪贴板途径不发。
+  - `edit_and_delete_act_on_the_note`：编辑打开带原文的编辑框，保存发 `EditNote`；删除发 `RemoveNote`；已发送的意见只有删除，发送中的都没有。
+  - `the_editor_follows_its_line_across_a_refresh`：快照换代后编辑框仍在锚点行之后；锚点行没了时跟在文件标题之后，保存照常发出。
+  - `the_turn_title_shows_the_answered_notes`：`TurnEntry::answers` 的轮次标题有 `review-turn-answers`，折叠成一行时也有。
+- 语义树：`review_tree_session`、`review_tree_groups`、`review_tree_progress`、`review_tree_failed` 的 insta 快照；#22 加 `review_tree_notes`（意见、编辑框、`NotesElsewhere`、浮条的再次复制、放弃与发送）（`ui_probe` 的 `tree::snapshot`，[#6](https://github.com/SoloJiang/lectern-app/issues/6) 合并后接入；之前用 `Recorder::finish` 的记录去掉 `bounds` 后快照）。
 - 日志：`logs_hold_no_contents`。
 - fixtures：没有外部格式；`testing::snapshot_fixture` 在代码里合成。
 
@@ -626,6 +742,12 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **H. `review`**（同上，不阻塞）：`ReviewSnapshot` 带涉及的子项目数（标题区「in 2 packages」）、每个无法对齐的改动块的编辑时间（Drifted 提示）。没有时标题区只写文件数，Drifted 提示用 `review-drift-note-untimed`。
 - **I. `ui`**（为 #283 新增）：撑满宽度的分段控件（检查器页签）、胶囊形的浮条容器、开关（#21 之后）、轮次折叠行用的展开箭头；名字和接口见 [ui 设计「第二批控件」](ui.md#第二批控件283)：`Segmented::fill`、`Capsule` 加 `Button::pill`、`Switch`、`Disclosure`。
 
+以下各项是审阅意见（#22）的前置条件，写 `Refs #22`：
+
+- **J. `ui`**：多行文本框 `TextArea`。接口按 [conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求) F，两处共用，先需要它的 PR 实现。本文要的两项已写进 F：`on_cancel`（Esc 由文本框自己处理，输入法组字时先给输入法）；`TextAreaState` 的文字变化时 `cx.notify()`（保存按钮的可用状态要跟着文字变）。
+- **K. `i18n`**：`locales/{en,zh-CN}/review.ftl` 加上「界面」表里标了 #22 的键。
+- **L. `review`**：[review 设计「验收」](review.md#验收)第 6、7 步（审阅意见的命令、位置、日志、发送与剪贴板途径）。
+
 ## 未决问题
 
 1. **默认用统一视图还是双栏。** 阅读栏 760pt 放不下双栏（每侧约 45 格），双栏要离开阅读栏（「对其他 crate 的要求」A）。选项：(a) 默认统一，双栏是 View 菜单里的切换，切换时内容区变宽；(b) 默认双栏。默认 (a)：审阅按轮次从上往下读，统一视图与叙事同宽；切换后本次运行记住（不跨次保存）。
@@ -647,6 +769,10 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - `review-view-handoff` 三个依赖里任一个失败，三项交接一起不可用。
 - 别的 worktree 里的子 agent 不在这个审阅里，它的派出在叙事里只是一行 `Tool`（review 设计「未决问题」1 的 (a)），不能从这里进入它的审阅；同一 worktree 里的子 agent 的 `Subagent` 行点开只滚到它的第一轮。
 - `Provided` 规则的文案只覆盖静态表里的（provider, rule）；新的提供者要改表。
+- 审阅意见的草稿（Esc 关掉的新意见的文字）只在屏幕存在期间保留，离开审阅页后丢失；不写盘。
+- 已发送的意见不能改，只能删掉再写（`review` 的规则）。复制之后没有粘贴成功时用 Copy Again 重新复制；浮条只给最近一批这个按钮，更早的批次不能再复制。
+- 会话外的改动和比较范围没有回应的那一轮（`answered_by` 总是 None），所以那里的 Copy Again 一直留到发出下一批或删掉这一批的意见为止。
+- 只有剪贴板途径时，用户要自己把 prompt 粘贴进会话；Lectern 只能按 prompt 第一行的标记找出回应的那一轮，粘贴到别处时找不到（review 设计「审阅意见」的「已知限制」）。
 
 ## 验收
 
@@ -680,6 +806,14 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - `just bench review_view/scroll_5000`：每帧 ≤ 8.3 ms（p95）。
 - 手动在 macOS 上运行发布构建：打开一个有 Claude Code 会话的仓库，项目主页 ↵ 进入审阅：简报、轮次、diff 行显示；V 勾选并滚到下一个文件；⌥⌘I 打开 Progress；⇧⌘O 打开完整文件；⌘[ 返回；切换双栏时内容区变宽。
 - `app/cold_start`、`app/idle_empty` 与改动前相比不变。
+
+**第 4 步：审阅意见（`Closes #22`；前置 J、K、L）。**
+
+- 「测试」里审阅意见的测试（`items_notes_*`、`c_opens_*`、`cmd_return_*`、`escape_in_the_editor_*`、`notes_are_drawn_*`、`the_bar_follows_*`、`discard_asks_first`、`a_full_batch_blocks_c`、`copy_again_*`、`a_session_route_switches_*`、`edit_and_delete_*`、`the_editor_follows_*`、`the_turn_title_shows_*`）、`logs_hold_no_note_contents` 和 `review_tree_notes` 快照通过；之前的测试和语义树快照照常通过（浮条的节点按本步更新）。
+- 开头的五条 `rg` 检查仍没有结果；`rg -i 'pasteboard|platform::clipboard|write_text|ClipboardItem|write_to_clipboard' crates/review_view/src` 没有结果：本 crate 不碰剪贴板（Copy as Prompt 与 Copy Again 都只发命令），复制由 `review` 的剪贴板途径完成。
+- `rg 'lectern_terminal|lectern_conversation|lectern-terminal|lectern-conversation' crates/review_view` 没有结果。
+- `review_view/items_5000` 在预算内（夹具加 40 条意见）。
+- 手动在 macOS 上运行发布构建：在一行上按 C、输入、⌘↩，再在另一个 hunk 上加一条；Esc 关掉一个写了字的编辑框，再按 C 带回文字；按 Copy as Prompt 后在文本编辑器里粘贴，文字与 [review 设计「审阅意见」](review.md#审阅意见)的模板一致（这一步同时检查 `platform::clipboard` 排到主线程的写入）；在文本编辑器里复制别的文字，再按浮条的 Copy Again，粘贴出的文字与第一次相同（同一个 `[lectern-notes …]` 标记），意见仍显示为已复制；把它粘贴进这个会话、agent 回应之后，那一轮的标题上有 `review-turn-answers`；放弃会先弹出确认框。
 
 ## 实际验证
 

@@ -165,3 +165,43 @@ review-error-no-merge-base = 没有 merge-base
 review-error-too-many-entries = 条目过多
 review-error-io = 读取出错
 review-error-cancelled = 已取消
+
+## 审阅意见（#22）。prompt 本身是英文，不翻译（读者是 agent）。
+
+review-copy-prompt = 复制为 prompt
+    .tooltip = 复制审阅意见，再粘贴到会话里
+review-notes-discard = 放弃
+review-notes-discard-confirm = 放弃 { $count } 条审阅意见？
+    .detail = 这些意见还没有发送，放弃后无法恢复。
+review-notes-sending = 正在发送…
+review-notes-copied = 已复制 { $count } 条审阅意见，请粘贴到会话里。
+review-notes-pasted = 已把 { $count } 条审阅意见粘贴到终端，在终端里按 ↵ 发送。
+review-notes-sent = 已发送 { $count } 条审阅意见
+# $reason 是某个 review-notes-error-* 的文字。
+review-notes-not-sent = 没有发出：{ $reason }
+review-notes-error-starting = 终端还在启动
+review-notes-error-busy = agent 正在工作
+review-notes-error-no-session = 没有能接收的会话
+review-notes-error-timed-out = 10 秒内没有回应
+review-notes-error-clipboard = 无法写入剪贴板
+review-notes-error-failed = 会话没有接收
+review-notes-full = 还没发出的意见最多 { $count } 条，请先发送或放弃一些。
+review-notes-copy-again = 再次复制
+    .tooltip = 再复制一次上一批发出的 { $count } 条审阅意见，标记不变
+review-notes-not-copied = 没有复制：{ $reason }
+review-notes-elsewhere = 不在本次审阅里的文件上的意见
+review-note-placeholder = 写给 agent 的审阅意见
+review-note-add = 添加意见
+review-note-save = 保存
+review-note-too-long = 这条意见太长。
+review-note-add-here = 添加意见
+    .tooltip = 添加审阅意见（C）
+review-note-edit = 编辑
+review-note-delete = 删除
+review-note-pending = 未发送
+# $when 是相对时间，如「2 分钟前」。
+review-note-sent = { $when }已发送
+review-note-copied = { $when }已复制
+# $line 从 1 起。
+review-note-drifted = 第 { $line } 行在写下这条意见之后变了
+review-turn-answers = 回应 { $count } 条审阅意见

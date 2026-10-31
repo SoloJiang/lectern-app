@@ -1,0 +1,27 @@
+---
+source: crates/review/src/notes/prompt/tests.rs
+expression: text
+---
+Review notes from Lectern [lectern-notes 0190f3a2c4b60401]: 2 notes on your changes.
+Please address each note.
+
+1. src/engine/mod.rs:42
+   ```
+     40 |     let rows = prepare(&key);
+     41 |     let hunks = rows.hunks();
+   > 42 |     let first = hunks[0];
+     43 |     emit(first);
+     44 | }
+   ```
+   Note:
+   This panics when there are no hunks.
+
+2. src/log.rs (line 17 when this note was written; the code may have changed since)
+   ```
+     15 | fn append(&mut self) {
+     16 |     self.flush();
+   > 17 |     self.sync()?;
+     18 | }
+   ```
+   Note:
+   Keep the sync here.

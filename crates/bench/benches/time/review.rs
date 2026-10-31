@@ -15,13 +15,17 @@ use std::time::{Duration, Instant};
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_project::testing::Shape;
+use lectern_review::notes::prompt::{PromptNote, Where, prompt};
 use lectern_review::testing::{
     BriefFixture, ChainRun, CutoffRun, Driven, LogLoad, MarkSeenFixture, SessionFixture,
     chain_fixture, load_log, write_log,
 };
+use lectern_services::changes::ChangePath;
+use lectern_services::project::BlobId;
 use lectern_services::project::ProjectKey;
 use lectern_services::review::{
-    AttributionState, LoadState, Need, ReviewCommand, ReviewEvent, ReviewId, RowsKey,
+    AttributionState, BatchId, DiffSide, Excerpt, LoadState, Need, NoteAnchor, NoteId, NoteState,
+    ReviewCommand, ReviewEvent, ReviewId, RowsKey,
 };
 
 use crate::review_repo;
@@ -79,6 +83,23 @@ pub const ROWS_FIRST: Bench = Bench {
 pub const MARK_SEEN_5000: Bench = Bench {
     id: "review/mark_seen_5000",
     run: mark_seen_5000,
+};
+
+/// (step 6) `command(AddNote)` to the replaced snapshot on a review with 39
+/// notes not sent and 240 sent: the place of every note is worked out again
+/// and the two `Arc`s are swapped. The text is not scanned and nothing is
+/// written on the calling thread.
+pub const NOTE_ADD: Bench = Bench {
+    id: "review/note_add",
+    run: note_add,
+};
+
+/// (step 7) `notes::prompt` of a full batch: 40 notes, each with 4 KiB of
+/// text, a five-line excerpt and a path. Pure text work, as the `Background`
+/// task of a send does it before it calls the route.
+pub const NOTES_PROMPT_40: Bench = Bench {
+    id: "review/notes_prompt_40",
+    run: notes_prompt_40,
 };
 
 /// (step 5) The rule brief of 5000 files, every rule represented, no
@@ -441,6 +462,128 @@ fn mark_seen_5000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![
         Measured::new("review/mark_seen_5000", Value::Time(time))
             .with_note(Some(format!("{files} files, the seen array replaced"))),
+    ])
+}
+
+fn note_add(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let files = ctx.scale(500, 100);
+    let fixture = MarkSeenFixture::new(files);
+    let dir = ctx.scratch().join("notes");
+    // One short of the limit of 40: the measured command is accepted.
+    fixture.seed_notes(&dir, 39, 240)?;
+    let driven = fixture.driven(&dir);
+    let id = driven.open(driven.outside());
+    driven.run();
+    let snapshot = driven
+        .snapshot(id)
+        .ok_or_else(|| BenchError::new("closed"))?;
+    if snapshot.files.len() != files || snapshot.notes.len() != 279 {
+        return Err(BenchError::debug(
+            "files and notes",
+            (snapshot.files.len(), snapshot.notes.len()),
+        ));
+    }
+    let anchor = NoteAnchor {
+        file: snapshot.files[0].key.clone(),
+        side: DiffSide::New,
+        line: 3,
+        oid: BlobId::Sha1([7; 20]),
+    };
+    let excerpt = Excerpt {
+        first: 1,
+        lines: ["fn a() {", "    b();", "    c();", "    d();", "}"]
+            .into_iter()
+            .map(Arc::from)
+            .collect(),
+    };
+    let text: Arc<str> = Arc::from("Does this still hold after the rename?");
+    let mut rejected = 0;
+    let time = ctx.time_with_setup(
+        || {
+            // Back to 39 not sent: the note the last sample added goes, and
+            // the log's appends are made (neither is timed).
+            let newest: Option<NoteId> = driven.snapshot(id).and_then(|s| {
+                s.notes
+                    .iter()
+                    .filter(|n| n.state == NoteState::Pending)
+                    .map(|n| n.id)
+                    .max()
+            });
+            if driven
+                .snapshot(id)
+                .is_some_and(|s| s.notes_state.unsent > 39)
+                && let Some(newest) = newest
+            {
+                driven.command(id, ReviewCommand::RemoveNote(newest));
+            }
+            driven.run();
+        },
+        |()| {
+            driven.command(
+                id,
+                ReviewCommand::AddNote {
+                    rows: None,
+                    anchor: anchor.clone(),
+                    text: Arc::clone(&text),
+                    excerpt: Some(excerpt.clone()),
+                },
+            );
+            if driven
+                .snapshot(id)
+                .is_none_or(|s| s.notes_state.unsent != 40)
+            {
+                rejected += 1;
+            }
+        },
+    );
+    if rejected > 0 {
+        return Err(BenchError::new(format!("{rejected} commands were refused")));
+    }
+    driven.run();
+    Ok(vec![
+        Measured::new("review/note_add", Value::Time(time)).with_note(Some(format!(
+            "{files} files, 39 notes not sent and 240 sent"
+        ))),
+    ])
+}
+
+fn notes_prompt_40(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let notes: Vec<PromptNote> = (0..40u32)
+        .map(|i| {
+            let words = format!("Why does this {i} hold after the rename, and what about the callers? ");
+            let text: String = words.chars().cycle().take(4096).collect();
+            PromptNote {
+                path: ChangePath(Arc::from(format!("crates/review/src/engine/m{i}.rs").as_bytes())),
+                line: 100 + i,
+                place: match i % 3 {
+                    0 => Where::Current,
+                    1 => Where::Base,
+                    _ => Where::Earlier,
+                },
+                excerpt: Some(Excerpt {
+                    first: 98 + i,
+                    lines: (0..5)
+                        .map(|k| {
+                            Arc::from(format!(
+                                "    let value_{k} = compute({i}, \"fixture line of a hundred bytes or so, 0123456789\");"
+                            ))
+                        })
+                        .collect(),
+                }),
+                text: Arc::from(text),
+            }
+        })
+        .collect();
+    let batch = BatchId(0x0190_f3a2_c4b6_0401);
+    // The prompt of a full batch is within the 256 KiB the routes take.
+    let size = prompt(batch, &notes).len();
+    if !(40 * 4096..=256 * 1024).contains(&size) {
+        return Err(BenchError::debug("prompt bytes", size));
+    }
+    let time = ctx.time(|| prompt(batch, &notes));
+    Ok(vec![
+        Measured::new("review/notes_prompt_40", Value::Time(time))
+            .with_note(Some(format!("40 notes, {} KiB", size / 1024))),
     ])
 }
 

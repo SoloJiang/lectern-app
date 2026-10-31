@@ -4,16 +4,25 @@
 //! change chain fixture of `review/chain_3000_lines` (step 2), and for the
 //! review engine (step 3) `FakeSessions`, `FakeProjects`, `Driven`, a HEAD
 //! reflog writer and the fixture of the `review/open_session_*` benches.
+//! For review notes (step 6): the log of `review/resident_notes_bytes`
+//! ([`write_notes_log`], [`load_notes_log`]) and the notes seeded for
+//! `review/note_add` ([`MarkSeenFixture::seed_notes`]). For sending them
+//! (step 7): [`FakeClipboard`] and [`FakeRoute`], the clipboard's write and
+//! a session route; the tests never write the real clipboard.
 
 mod driven;
 mod fake;
 mod fixture;
 mod host;
+mod send;
 
 pub use driven::{Driven, ReflogLine, write_reflog};
 pub use fake::{Calls, FakeProjects, FakeSessions};
 pub use fixture::{BriefFixture, CutoffRun, MarkSeenFixture, SessionFixture};
 pub use host::{TestHost, host};
+pub use send::{ClipMode, FakeClipboard, FakeRoute, RouteMode};
+
+pub use crate::clipboard_route::{Done, WriteError, Writer};
 
 use std::io;
 use std::path::Path;
@@ -22,11 +31,11 @@ use std::sync::Arc;
 use lectern_git::HashKind;
 use lectern_services::changes::{ChangePath, FileMode, SideIdentity};
 use lectern_services::project::BlobId;
-use lectern_services::review::FileKey;
+use lectern_services::review::{BatchId, DiffSide, Excerpt, FileKey, NoteAnchor, NoteId, SentVia};
 use lectern_services::session::Timestamp;
 
 use crate::chain::{self, ChainInput, Detail, Edit, Op, Outcome, Side, StepInput};
-use crate::log::{BaseRecord, LogFile, Record, SessionId};
+use crate::log::{BaseRecord, Index, LogFile, NoteRecord, Record, SentRecord, SessionId};
 use crate::seen::{SeenKey, StatusKind, TargetKey};
 
 /// A file's change chain with its edits already loaded: `lines` lines,
@@ -144,6 +153,118 @@ pub fn load_log(data_dir: &Path, common_dir: &Path) -> LogLoad {
         bad_lines: report.bad_lines,
         complete: report.complete,
     }
+}
+
+/// The notes of the shape of `review/resident_notes_bytes`: `pending` notes
+/// not sent and `sent` notes sent in batches of 40, each with 200 bytes of
+/// text and a five-line excerpt, spread over `path(i)` files. Written at
+/// an hour before the time `load_log` reads at, so that none has expired.
+pub(crate) fn note_records(
+    target: &TargetKey,
+    pending: usize,
+    sent: usize,
+    path: impl Fn(usize) -> ChangePath,
+) -> Vec<Record> {
+    // An hour before the clocks of the benches and `load_log`: the notes'
+    // IDs are older than any a command makes.
+    let start = 1_760_000_000_000i64 - 3_600_000;
+    let mut out = Vec::new();
+    let mut ids = Vec::new();
+    for i in 0..pending + sent {
+        let at = Timestamp(start + i as i64 * 1000);
+        let id = NoteId(((start as u64) << 10) + i as u64);
+        let p = path(i);
+        let text: String = format!("Note {i}: why is this here, and does it still hold? ")
+            .chars()
+            .cycle()
+            .take(200)
+            .collect();
+        let lines: Vec<Arc<str>> = (0..5)
+            .map(|k| {
+                Arc::from(format!("    let value_{} = compute({i}, \"fixture\");", i + k).as_str())
+            })
+            .collect();
+        out.push(Record::Note(NoteRecord {
+            at,
+            target: target.clone(),
+            id,
+            anchor: NoteAnchor {
+                file: FileKey {
+                    old: None,
+                    new: Some(p),
+                },
+                side: DiffSide::New,
+                line: 10 + i as u32,
+                oid: oid(i, 3),
+            },
+            excerpt: Some(Excerpt {
+                first: 8 + i as u32,
+                lines: lines.into(),
+            }),
+            text: Arc::from(text.as_str()),
+            created: at,
+        }));
+        // The first `sent` notes are the sent ones; a batch each 40.
+        if i < sent {
+            ids.push(id);
+            if ids.len() == 40 || i + 1 == sent {
+                out.push(Record::NotesSent(SentRecord {
+                    at,
+                    target: target.clone(),
+                    batch: BatchId(((start as u64) << 10) + 1_000_000 + i as u64),
+                    notes: std::mem::take(&mut ids),
+                    via: SentVia::Clipboard,
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// What [`load_notes_log`] holds: the index of a log with review notes.
+pub struct NotesLog {
+    index: Index,
+}
+
+impl NotesLog {
+    /// The notes and batches in the index.
+    pub fn records(&self) -> usize {
+        self.index.len()
+    }
+}
+
+/// Writes the annotation log of `common_dir` in `data_dir` with `pending`
+/// notes and `sent` notes sent (`review/resident_notes_bytes`: 40 and 240),
+/// all of one session's review.
+pub fn write_notes_log(
+    data_dir: &Path,
+    common_dir: &Path,
+    pending: usize,
+    sent: usize,
+) -> io::Result<()> {
+    let target = TargetKey::Session {
+        source: Arc::from("session-claude-code"),
+        id: Arc::from("8f2c1a64-5b7e-4d3a-9c10-000000000001"),
+    };
+    let path = |i: usize| {
+        ChangePath(Arc::from(
+            format!("src/c{}/m{}.rs", i % 7, i % 40).as_bytes(),
+        ))
+    };
+    let mut file = LogFile::new(data_dir, common_dir);
+    let (_, report) = file.load(Timestamp(0));
+    if let Some(error) = report.error {
+        return Err(error);
+    }
+    file.append(&note_records(&target, pending, sent, path))
+}
+
+/// Reads the log of `common_dir` in `data_dir` and keeps its index, as an
+/// open project does while any review of it is open or any overview watched.
+pub fn load_notes_log(data_dir: &Path, common_dir: &Path) -> NotesLog {
+    let mut file = LogFile::new(data_dir, common_dir);
+    let (index, _) = file.load(Timestamp(1_760_000_000_000));
+    NotesLog { index }
 }
 
 fn fixture_record(i: usize) -> Record {

@@ -174,6 +174,9 @@ pub(crate) struct Work {
     pub command_files: HashMap<(u16, ToolCallId), Vec<u32>>,
     pub steps: HashMap<StepId, StepWork>,
     pub step_of: HashMap<(u16, u32, u32), StepId>,
+    /// The narrative steps of each file (its snapshot index), by ID: where
+    /// a review note on a step's version is looked for.
+    pub steps_of: HashMap<u32, Vec<StepId>>,
     /// What is left for the background: cutoff records not computed yet,
     /// sessions whose claims are missing, sources whose adapter version
     /// this run has not seen.
@@ -960,6 +963,7 @@ pub(crate) fn prepare(
     let mut command_files: HashMap<(u16, ToolCallId), Vec<u32>> = HashMap::new();
     let mut steps: HashMap<StepId, StepWork> = HashMap::new();
     let mut step_of: HashMap<(u16, u32, u32), StepId> = HashMap::new();
+    let mut steps_of: HashMap<u32, Vec<StepId>> = HashMap::new();
     {
         let mut ids = step_ids
             .lock()
@@ -977,6 +981,10 @@ pub(crate) fn prepare(
                 }
                 let id = ids.id(&who.key, &call.turn.0, &f.key);
                 step_of.insert((s, call.ordinal, n as u32), id);
+                let of_file = steps_of.entry(n as u32).or_default();
+                if !of_file.contains(&id) {
+                    of_file.push(id);
+                }
                 steps.insert(
                     id,
                     StepWork {
@@ -1055,6 +1063,7 @@ pub(crate) fn prepare(
         command_files,
         steps,
         step_of,
+        steps_of,
         pending,
         results,
         ctx,

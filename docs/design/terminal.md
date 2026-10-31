@@ -1,6 +1,6 @@
 # terminal 设计
 
-状态：已接受，尚未实现。
+状态：已接受；「验收」第 1 步（`services::terminal`）已实现，第 2–4 步尚未实现。
 
 对应 issue [#12](https://github.com/SoloJiang/lectern-app/issues/12)（终端：portable-pty + libghostty-vt，会话 resume）与 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 的内核部分（libghostty-vt 接入）。`terminal` 启动 PTY 和其中的程序（`claude --resume`、`codex resume`、新会话、登录 shell），把输出交给 libghostty-vt 解析，生成视口的网格快照交给视图；视图发来的按键、粘贴、鼠标和尺寸变化经 libghostty-vt 编码后写回 PTY（[技术调研「终端：接入 libghostty-vt 内核」](tech-research.md#终端接入-libghostty-vt-内核)、[ADR 0002](../adr/0002.md)）。终端在界面的「收起」一层，是 Conversation 的 Terminal 页（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）；网格的绘制在 `terminal_view`，页面在 `conversation`。
 
@@ -475,6 +475,12 @@ pub struct CellStyle {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
 pub struct StyleFlags(pub u8);
 
+impl StyleFlags {
+    /// 依次是第 0 到第 5 位。
+    pub const BOLD: u8; pub const ITALIC: u8; pub const FAINT: u8;
+    pub const STRIKETHROUGH: u8; pub const OVERLINE: u8; pub const INVISIBLE: u8;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Underline { None, Single, Double, Curly, Dotted, Dashed }
 
@@ -761,7 +767,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 5. `terminal_view`：非插件的视图库。把 GPUI 的按键、IME 文字、粘贴、鼠标、滚动、焦点、尺寸转成 `Input`；从 `ui` 的 `Palette` 推出 `Theme`，外观变化时发 `SetTheme`；按 `Frame` 绘制；拥有 `app/input_frames`（另写设计文档，按 conversation 设计「对其他 crate 的要求」E）。
 6. `app`：装配 `TerminalPlugin::new(TerminalDeps { executor })`，排在 `project` 与 `agents` 之后（第 4 步）；`app/bundle_size` 记录静态库的增量。
 7. `bench`：预算表加入「性能」里的条目。`app/input_frames` 在 Conversation 的 Terminal 页里恢复夹具会话（`Launch::Resume`），所以它的 profile 用 `with_login_env` 给出一个 `PATH`，其中的 `claude`、`codex` 是回显程序（本 crate 的假程序，或 bench 自带的同类程序，由 bench 的实现决定）；不运行用户的 shell 和它的配置，也不运行真实的 agent。
-8. `review_view` / `conversation`（#22 发回会话）：驱动会话的终端是 `Running` 时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。终端还是 `Starting` 时不发送：这期间的输入和粘贴被丢弃（`input`），所以调用方等 `Listed` 报告 `Running` 之后再发，或提示用户稍后再发。
+8. `conversation` 的审阅意见会话途径（#22 发回会话，实现 `review` 的 `NoteRoute`；`review_view` 不直接调用本 crate）：驱动会话的终端是 `Running` 时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。终端还是 `Starting` 时不发送：这期间的输入和粘贴被丢弃（`input`），所以途径答复「现在送不了（终端正在启动）」，审阅屏幕提示用户稍后再发或改用剪贴板（[review 设计「审阅意见的发送途径」](review.md#审阅意见的发送途径noteroute)）。
 9. `project_home`：空状态的 New session 调用 `Launch::NewSession`（本 issue 之外）。
 
 ## 未决问题

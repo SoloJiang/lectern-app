@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现；没有保存过 frame 时设默认尺寸并居中的 `window::set_frame_autosave_name_or_center`（同一节）已实现，真实窗口上的检查见「实际验证」。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；drawable 没有 `presentedTime` 时首帧取显示回调运行的时刻、结果注明来源（`PresentedAt`、`TimeSource`，[ADR 0052](../adr/0052.md)）已实现；`frame::record` 及其类型（B2，见「逐帧记录」）已实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。登录 shell 的环境 `login_env`（[terminal 设计](terminal.md)「对其他 crate 的要求」第 2 项，[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「登录 shell 的环境」）已接受，尚未实现。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现；没有保存过 frame 时设默认尺寸并居中的 `window::set_frame_autosave_name_or_center`（同一节）已实现，真实窗口上的检查见「实际验证」。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；drawable 没有 `presentedTime` 时首帧取显示回调运行的时刻、结果注明来源（`PresentedAt`、`TimeSource`，[ADR 0052](../adr/0052.md)）已实现；`frame::record` 及其类型（B2，见「逐帧记录」）已实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。剪贴板的写入 `clipboard::write_text`（[review 设计](review.md#对其他-crate-的要求)的前置条件 I，[#22](https://github.com/SoloJiang/lectern-app/issues/22)，见「剪贴板」）已实现。登录 shell 的环境 `login_env`（[terminal 设计](terminal.md)「对其他 crate 的要求」第 2 项，[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「登录 shell 的环境」）已接受，尚未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -24,6 +24,7 @@
   - 语言偏好（`system::{system_languages, language_override, set_language_override}`）：`welcome` 的语言选择读写应用域里的 `AppleLanguages`（[ADR 0013](../adr/0013.md)、[i18n 设计「数据流与线程」](i18n.md#数据流与线程)，见「系统首选语言」的「语言偏好」），首帧之前不调用。
   - 窗口 frame 的 autosave（`window::set_frame_autosave_name`）：窗口位置与大小由 AppKit 的 frame autosave 保存和恢复（[ADR 0017](../adr/0017.md)），`app` 按 [workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求)的 D 调用（见「窗口 frame 的 autosave」）。
   - 系统外观（`appearance`）：在浅色、深色两个外观下解析 AppKit 的语义色，读减弱动态效果，登记强调色与辅助功能设置的变化通知；`ui` 的 `Palette` 从它取系统色（[ADR 0015](../adr/0015.md)，见「系统外观」）。
+  - 剪贴板的写入（`clipboard::write_text`）：审阅意见的剪贴板途径把拼好的 prompt 写进系统剪贴板，`review` 经它完成发送（#22，见「剪贴板」）。
   - 主机信息（`host::describe`）与线程 QoS（`thread::set_user_interactive`）：bench 报告里的机器信息和基准线程的 QoS（见「主机信息与线程 QoS」）。
   - 登录 shell 的环境（`login_env`）：用户的登录 shell、登录 shell 设置之后的环境变量、在 `PATH` 里找程序；Terminal 页启动 agent 和 `agents` 的 ACP 客户端共用（[ADR 0050](../adr/0050.md)，见「登录 shell 的环境」）。
   - 帧的时刻（`frame`）：测量构建用 Objective-C 运行时的方法替换取得首帧的显示时刻和逐帧的四个时刻，只在 `bench-hooks` feature 里，发布构建不含（[ADR 0048](../adr/0048.md)，见「测量构建的方法替换」「帧的时刻」）。
@@ -52,6 +53,7 @@
 | `lectern-logging`（只在 macOS） | kqueue 线程停止、frame autosave 名设置失败、外观回调 panic、语言偏好写入失败和登录环境的获取结果的记录（「日志与诊断」）；dev 依赖开启 `test-support`，测试用 `testing::capture()` 检查这些记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；本 crate 只有这五处记录，都只在 macOS 上编译 |
 | `raw-window-handle` 0.6 | `window::set_frame_autosave_name` 的参数是 `impl HasWindowHandle`，GPUI 的 `Window` 实现它（`gpui-pre-macos` 给出 `AppKitWindowHandle`，里面是 `NSView` 指针） | 已在 Cargo.lock（0.6.2，经 GPUI），发布构建不新增 crate；许可证 `MIT OR Apache-2.0 OR Zlib`，在允许列表里。与 rustix 不同，它进入本 crate 的公开接口：这个签名由已合并的 [workspace 设计](workspace.md)的前置条件 D 规定，依赖方向不变（它不依赖任何东西），所以不写 ADR。所有平台都依赖（签名在所有平台上相同）。`frame::record` 的参数同样用它 |
 | 系统框架 Metal、QuartzCore、CoreVideo 和 Objective-C 运行时（只在 macOS 加 `bench-hooks`） | `frame` 的方法替换：`CAMetalLayer`、`MTLDrawable`、`MTLCommandBuffer` 的方法，CVDisplayLink | 符号手写声明，与 `window`、`appearance` 相同，不引入 `objc2`、`block2`、`metal`（它们经 GPUI 在 Cargo.lock 里）；这几个框架 GPUI 本来就链接。没有 `bench-hooks` 时不编译。见「测量构建的方法替换」 |
+| 系统框架 AppKit 和 libdispatch（只在 macOS） | `clipboard`：`NSPasteboard`、`NSString` 的方法、`NSPasteboardTypeString`，以及把写入排到主队列的 `dispatch_async_f` | 符号手写声明，与 `appearance` 相同，不引入绑定 crate；AppKit 本来由 GPUI 链接，`Cargo.lock` 不变 |
 
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
 
@@ -385,7 +387,7 @@ pub enum FileKind {
 
 本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
 
-- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`host`、`thread`、`frame`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有五处：`fs_events` 的 kqueue 线程停止、`window` 的 frame autosave 名设置失败、`appearance` 的变化回调 panic、`system` 的语言偏好写入失败和 `login_env` 取登录环境的结果，都经 `lectern-logging` 的宏写出，target 为 `platform`；`fs_events` 订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
+- 默认记录：`safe_read`、`dirs`、`system`、`time`、`clipboard`、`process`、`host`、`thread`、`frame`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有五处：`fs_events` 的 kqueue 线程停止、`window` 的 frame autosave 名设置失败、`appearance` 的变化回调 panic、`system` 的语言偏好写入失败和 `login_env` 取登录环境的结果，都经 `lectern-logging` 的宏写出，target 为 `platform`；`fs_events` 订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
 
   | 事件 | 级别 | `msg` | 字段 |
   |---|---|---|---|
@@ -402,7 +404,7 @@ pub enum FileKind {
   - `frame` 的替换实现和 block 在 Metal、Core Animation、CoreVideo 的线程上运行，不分配、不加锁，所以也不记日志：安装的错误作为 `HookError` 返回（探针报告给运行器后退出），记录中的问题经 `FrameProblems` 交回（「测量构建的方法替换」）。它们只在测量构建里有。
 - 详细级别：不多记。kqueue 线程每次唤醒、FSEvents 的每个回调都是热路径，不加 debug、trace 记录。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
-- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。frame autosave 的记录不写传入的名字和窗口的任何信息，只写错误的种类。语言偏好的记录不写语言标签，只写错误的种类。`appearance` 不记颜色的数值、减弱动态效果的值和 panic 的 payload，回调 panic 的记录只写 `change`。`host` 的机器信息只返回给 bench，写进它的报告，不进日志。`HookError::Mismatch` 的 `what` 只有类名和选择器。`login_env` 不记 shell 的路径（路径里有用户名）、环境变量的名字和值（名字也可能透露用了哪些服务，值里常有 API key 和代理的凭据）、shell 的 stdout 与 stderr、标记和打印环境的命令；只记错误的种类、`Value::io`、变量个数和耗时。
+- 不记录：`clipboard` 写入的文字（prompt，含文件内容和意见；`ClipboardError` 没有负载）；`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。frame autosave 的记录不写传入的名字和窗口的任何信息，只写错误的种类。语言偏好的记录不写语言标签，只写错误的种类。`appearance` 不记颜色的数值、减弱动态效果的值和 panic 的 payload，回调 panic 的记录只写 `change`。`host` 的机器信息只返回给 bench，写进它的报告，不进日志。`HookError::Mismatch` 的 `what` 只有类名和选择器。`login_env` 不记 shell 的路径（路径里有用户名）、环境变量的名字和值（名字也可能透露用了哪些服务，值里常有 API key 和代理的凭据）、shell 的 stdout 与 stderr、标记和打印环境的命令；只记错误的种类、`Value::io`、变量个数和耗时。
 - 金丝雀测试：`kqueue_stop_is_logged_without_paths`（只在 macOS 上编译和运行，在 `fs_events/tests/kqueue.rs`）：在 `testing::capture()` 下，金丝雀放在监听目录的名字、具名条目的名字和它的内容里，kqueue 线程交付这个条目的修改之后，以 `EBADF` 调用 `Kqueue::fail`（`kevent` 无法按需出错，线程的 `run` 在出错时调用的就是它）；检查记录只有一条，级别为 error、target 为 `platform`、`watches` 为 1、`io` 带 `EBADF` 的错误码，线程停止、`flush` 返回错误，之后 `assert_absent`。`set_frame_autosave_name_off_the_main_thread_is_an_error_and_logs_the_kind_only`（只在 macOS 上，在 `window/tests.rs`）：金丝雀作为名字传入，检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `not_main_thread`，之后 `assert_absent`。`appearance_watch_contains_a_panicking_callback_and_logs_no_payload`（只在 macOS 上，在 `appearance/tests.rs`）：回调以金丝雀为消息 panic，检查记录只有一条，级别为 error、target 为 `platform`、`change` 为 `system_colors`，之后的通知不再送达，`assert_absent` 确认金丝雀不在记录里。`set_language_override_reports_a_bad_tag_and_logs_the_kind_only`（只在 macOS 上，在 `system/language/tests.rs`）：含金丝雀的非法标签传入，`done` 收到 `Err(WriteFailed)`（在碰任何偏好之前被拒绝），检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `write_failed`，之后 `assert_absent`。`login_env_failure_logs_the_kind_only`（只在 macOS 上，在 `login_env/tests.rs`）：金丝雀放在假 shell 的路径、它打印的一个变量名和一个值、它写到 stderr 的内容里，假 shell 只打印杂项就退出；经 `cached` 加记录的入口（与 `login_env` 同一段代码，用本地的 `OnceLock`）调用，检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `unparsable`，之后 `assert_absent`。`login_env_success_logs_counts_only`（同上）：打开 debug，假 shell 回放含金丝雀名字和值的环境，检查记录只有一条 debug，带 `vars` 和 `took`，之后 `assert_absent`。Linux 上没有 kqueue，不记录 frame autosave 的失败，也不登记 AppKit 的通知，这些记录和测试都不编译；`dirs`、`system`、`process`、`host`、`thread`、`frame`、`metal` 不经日志器输出，不需要金丝雀测试。
 
 ## 测试
@@ -1311,6 +1313,61 @@ release 构建，Apple 芯片，macOS 27.0.1：
 - 其他平台：`appearance_is_none_elsewhere`、`appearance_watch_is_inert_elsewhere`。
 - 第一次读取的耗时在 `crates/platform/examples/appearance_first_read.rs`：手工运行 `cargo run --release -p lectern-platform --example appearance_first_read`（`cargo clippy --all-targets` 编译它，CI 不运行）。它以自己为子进程分四个阶段各运行一次：什么都不做、先建 `NSApplication` 并 `finishLaunching`（`ui::init` 的情形）、再建一个不显示的 `NSWindow`、再把窗口显示一次（这一阶段需要窗口服务器会话），每个阶段打印第一次浅色、第一次深色和一次热读取的微秒数；`NSApplication` 和窗口只能在主线程上建，Rust 的测试线程不是主线程，所以是 example 不是测试。全部读取都返回表时退出码为 0。
 
+## 剪贴板
+
+[review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)的前置条件 I（[#22](https://github.com/SoloJiang/lectern-app/issues/22)）：审阅意见的剪贴板途径把一批意见拼成的 prompt 写进系统剪贴板。写入放在本 crate，不由视图经 GPUI 完成：发送流程在 `review`（领域层，不依赖 GPUI），macOS 的系统调用只能在 `platform` 里（架构规则 6）；视图不经手 prompt 的文字。
+
+首帧之前不做事：`write_text` 只在用户触发发送之后调用，本模块没有初始化，没有常驻状态，不建线程，不读 Lectern 自己的文件（ADR 0017「新增功能必须说明」）。
+
+### 接口
+
+模块 `lectern_platform::clipboard`（`clipboard.rs`）。
+
+```rust
+pub mod clipboard {
+    /// 把一段文字写进系统的通用剪贴板，替换原有内容，类型是纯文本（`NSPasteboardTypeString`）。任何线程，不阻塞：
+    /// macOS 上把写入排到主线程的 dispatch 队列（AppKit 对象只在主线程上使用），
+    /// 写完在主线程上调用 `done`，`done` 不得阻塞。其他平台立即以 `Unsupported` 调用 `done`。
+    /// 不读剪贴板，不记录文字。Objective-C 运行时与 AppKit 的符号手写，不引入绑定 crate（与 `appearance` 相同）。
+    pub fn write_text(text: Arc<str>, done: Box<dyn FnOnce(Result<(), ClipboardError>) + Send>);
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub enum ClipboardError {
+        Unsupported,
+        /// `setString:forType:` 返回 NO（或无法由文字建出 `NSString`）。
+        Rejected,
+    }
+}
+```
+
+`ClipboardError` 实现 `Display` 和 `std::error::Error`。代码里 `done` 的类型有别名 `Done`，与上面的写法相同。
+
+### 规则
+
+- 排队：`write_text` 把 `text` 和 `done` 装进一个 `Box`，用 `dispatch_async_f` 排到主队列（`_dispatch_main_q`），立即返回。调用线程是不是主线程都一样：在主线程上调用时也排队，不同步执行，所以 `done` 不会在 `write_text` 返回之前运行（调用方持有锁时调用也不会重入）。
+- 写入：在主线程上、一个自动释放池里，`[NSPasteboard generalPasteboard]` 先 `clearContents`，再用 `[[NSString alloc] initWithBytes:length:encoding:]`（UTF-8，嵌入的 NUL 也接受，所以不用 `stringWithUTF8String:`）建字符串，`setString:forType:`（类型 `NSPasteboardTypeString`）写入，然后释放字符串。`setString:forType:` 返回 NO、或建不出字符串、或没有通用剪贴板对象，结果是 `Rejected`。写入的函数（`write_to`）带剪贴板对象作参数，测试用它写一个私有的具名剪贴板。
+- 回调：`done` 在写入的同一次主队列任务里、池弹出之后调用。`done` 的 panic 被 `catch_unwind` 截住并丢弃（panic 本身由 `logging` 的 panic 钩子记录），不让它越过 libdispatch 的边界造成进程中止。
+- 不读：本模块不读剪贴板（既不读通用剪贴板，也不为核对写入而读回）。
+- 手写的符号：Objective-C 运行时（`objc_getClass`、`sel_registerName`、`objc_msgSend`、自动释放池）、AppKit 的 `NSPasteboardTypeString`（`extern` 块带 `#[link(name = "AppKit", kind = "framework")]`，测试二进制因此也加载 AppKit）、libdispatch 的 `_dispatch_main_q` 与 `dispatch_async_f`，不引入绑定 crate，`Cargo.lock` 不变。
+- 其他平台：`write_text` 立即以 `Unsupported` 调用 `done`，不保存文字。
+
+### 日志与诊断
+
+不记日志：结果经 `done` 交给调用方，由 `review` 按它的设计文档的「日志与诊断」处理。文字是 prompt，含文件内容和意见，永远不进日志，本模块也不把它放进错误（`ClipboardError` 没有负载）。
+
+### 已知限制
+
+- `done` 只在主线程有运行的主队列时才会运行。`app` 的 GPUI 主线程满足这一点；没有主线程事件循环的进程（如测试进程）里，排队的任务不会执行，`done` 不会被调用。
+- 写入与读取之间没有原子性：别的程序可以在写入之后随时改写剪贴板，`Ok` 只说明 AppKit 接受了这段文字。
+
+### 测试
+
+`crates/platform/src/clipboard/tests.rs`。不碰用户的通用剪贴板。
+
+- `clipboard_round_trip_on_a_private_pasteboard`（只在 macOS 上）：在测试线程上，用模块内部的写入函数写进 `[NSPasteboard pasteboardWithUniqueName]` 建出的私有剪贴板，`stringForType:` 读回相同的文字（含换行、中文、重音字符和 emoji）；第二次写入替换第一次；最后 `releaseGlobally`。
+- `clipboard_is_unsupported_elsewhere`（只在其他平台上）：`done` 在 `write_text` 返回之前已经以 `Unsupported` 调用。
+- 排到主队列的那一步要有运行中的主线程队列，测试进程里没有，不在单元测试里覆盖：由 [review_view 设计「验收」](review_view.md#验收)第 4 步的手动检查覆盖（发送一批意见，粘贴到别处核对文字）。
+
 ## 主机信息与线程 QoS
 
 bench 第 2 步的另外两项（[bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)）：报告里的机器信息，和基准线程的 QoS。两者都是普通接口，不在 `bench-hooks` 后面；发布构建里没有调用方。线程 QoS 只覆盖 bench 要的这一项；executor 的线程启动钩子要的 QoS 设置另行设计（「范围」）。
@@ -1829,6 +1886,14 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
 - `cargo run --release -p lectern-platform --example appearance_first_read` 在 macOS 上退出码为 0，四个阶段的耗时写进「性能」和「实际验证」。
 - 本文的状态行、「实际验证」写明已实现；「性能」写明 ui 对第一次读取的耗时的决定。
 
+剪贴板（review 的前置条件 I）一个实现 PR，写 `Refs #22`，在 review 的发送流程（#22 的 `review` 部分）之前合并：
+
+- `just test -p lectern-platform` 在 macOS CI 上通过，其中有 `clipboard_round_trip_on_a_private_pasteboard`；在 Linux CI 上有 `clipboard_is_unsupported_elsewhere`。测试不碰通用剪贴板。
+- `git diff origin/main -- Cargo.lock` 为空（符号手写声明）；`rg -n 'NSPasteboard|dispatch_async_f' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
+- `rg -n 'lectern_logging|info!|warn!|error!' crates/platform/src/clipboard.rs` 没有结果（本模块不记日志）。
+- `just check`、`just deny` 通过。
+- 本文的状态行、「实际验证」写明已实现；`crates/platform/AGENTS.md` 的模块列表有 `clipboard`。
+
 bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）分 A、B1、B2、C 四个实现 PR，都写 `Refs #7`（#7 由 bench 第 5 步关闭）：
 
 A. 进程、主机信息与线程 QoS（[bench 设计「验收」](bench.md#验收)第 2 步）：
@@ -1989,6 +2054,10 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks` 连续三次通过（没有 panic）：先不记录、由示例自己的 CVDisplayLink 驱动 120 帧，再记录 120 帧。`refresh` 为 8.333 ms；`problems` 干净，120 帧都在结果里；相邻 `started` 的间隔中位数 8.327、8.331、8.337 ms（与 `refresh` 相差不到 0.1%）；`without_tick` 28、23、29。每帧的开销：`frame_started` 中位数 0.08–0.12 µs；`commit` 一段（建命令缓冲到 `commit`）不记录时 12.8–27.8 µs、记录时 25.4 µs，`nextDrawable`（含等空闲的 drawable）不记录时 1291.8–1313.1 µs、记录时 1310.4–1315.8 µs，两者的差都在运行之间的波动以内。各段的中位数：`requested` 到 `started` 20.1–147.1 µs，`started` 到 `completed` 1368–1381 µs，`completed` 到显示回调 79.7–87.5 µs。屏幕锁定，所有显示回调的 `presentedTime` 都是 0，来源都为 `handler`。`on_first_presented` 的耗时（11 个冷进程的中位数）15.9–21.8 µs。
   - `git diff origin/main -- Cargo.lock` 为空。
   - 没有验证的：没有在 CI 的虚拟机上运行离屏测试（由 macOS CI 给出）；没有在不锁屏的实体 Mac 上看到 `Presented` 的逐帧来源；没有经真实 GPUI 的窗口（`workspace` 在 `on_next_frame` 里调用 `frame_started` 属于 `workspace` 自己的 PR，帧基准随帧时间预算改为生效时加入）。
+- 剪贴板的写入（review 的前置条件 I，[#22](https://github.com/SoloJiang/lectern-app/issues/22)）在 macOS（Apple 芯片）上：
+  - `just test -p lectern-platform`：220 个测试通过，其中新增 `clipboard_round_trip_on_a_private_pasteboard`（私有的具名剪贴板，写入、读回、替换、`releaseGlobally`）；原有的结果不变。
+  - `just check`、`just deny` 通过；`git diff origin/main -- Cargo.lock` 为空。
+  - 没有验证的：排到主队列的那一步和写入通用剪贴板没有在任何测试里运行（测试进程没有运行中的主线程队列，也不能碰用户的剪贴板）；由 [review_view 设计「验收」](review_view.md#验收)第 4 步在真实应用里手动检查。`clipboard_is_unsupported_elsewhere` 只由 Linux CI 编译和运行，本机没有 Linux 目标。
 
 ## 与设计的差异
 
@@ -2041,3 +2110,4 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - 配对放进不依赖 Objective-C 的 `frame/pairing.rs`（`Store`、`Clock`），在所有平台上编译和测试。`frame_pairing_*` 直接驱动钩子调用的同一组方法（`frame_started`、`drawable`、`commit`、`tick`、`completed`、`presented`），不另写一个只给测试用的纯函数。
   - `mach_absolute_time`、`mach_timebase_info` 在模块里手写声明：`libc` 把它们标为弃用，推荐的 `clock_gettime_nsec_np` 不是 `CVTimeStamp.hostTime` 用的刻度。
   - 只替换第一次找到的命令缓冲类的 `commit`：之后的 `record` 在另一个类的设备上不再替换，那里的帧都计入 `incomplete`（「逐帧记录」已写的「类不同时钩子不生效」）。`FrameRecorder` 不调用 `stop` 就被丢弃时，同样停止记录、释放「同一时刻最多一个记录器」，结果丢弃。
+- 剪贴板（#22，「剪贴板」）：接口按 review 设计的前置条件 I 实现，补充四点。`ClipboardError` 实现 `Display` 和 `Error`（与 `WindowError` 相同）；`done` 的类型有别名 `Done`；`Rejected` 也用于建不出 `NSString` 或没有通用剪贴板对象；`done` 的 panic 被 `catch_unwind` 截住并丢弃，避免它越过 libdispatch 的边界使进程中止。
