@@ -4662,6 +4662,7 @@ dependencies = [
  "lectern-services",
  "lectern-syntax",
  "lectern-terminal",
+ "lectern-terminal-view",
  "lectern-ui",
  "lectern-usage",
  "lectern-worktrees",
@@ -4943,6 +4944,16 @@ dependencies = [
 [[package]]
 name = "lectern-terminal-view"
 version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-pre",
+ "insta",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-ui",
+]
 
 [[package]]
 name = "lectern-ui"

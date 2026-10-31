@@ -506,7 +506,7 @@ target 为 `app`。
 - 放在 `PluginSet` 的最后，在 `worktrees-usage` 之后；它依赖的 `project` 与 `agents` 的两个会话来源排在最前面。顺序不影响图校验，kernel 按依赖决定激活顺序。
 - `TerminalPlugin::new` 只拿着 `executor`，不做 IO、不建线程，在 `release` 里、屏障放开之后运行；`activate` 在首帧之后，只建空的终端表、取服务引用，不取登录环境、不开 PTY（terminal 设计「性能」）。第一个 `open` 才启动 `terminal-<id>` 线程，所以没有打开终端时 `ps -M <pid>` 里没有 `terminal-` 开头的线程。
 - `app` 的 `Cargo.toml` 只依赖 `lectern-terminal` 本身，不打开它的 `test-support`（假程序 `lectern-terminal-fake`、`with_shell`、`with_login_env` 只给测试和基准）。测量构建里 `lectern-bench` 依赖会打开它，发布构建没有（`cargo tree -p lectern-app -e features` 核对）。
-- 不装配 `terminal_view`、`conversation` 的 Terminal 页：它们还没有实现，所以现在没有消费方；`dyn Terminals` 只有提供者。
+- 不装配 `terminal_view`、`conversation` 的 Terminal 页：`terminal_view` 是非插件的视图库，`TerminalPane` 已实现，但没有东西要装配，也没有人创建它；`conversation` 的 Terminal 页还没有实现，所以现在没有消费方；`dyn Terminals` 只有提供者。
 - 冷启动：首帧之前没有 `terminal` 的代码运行（`tests/startup.rs` 检查 `first frame drawn` 之前没有 target 为 `terminal` 的记录）。静态库 `libghostty-vt.a` 只增加二进制的代码段，没有启动时的初始化。
 - 日志：`plugins assembled` 的 `plugins` 为 15。其余记录由 `terminal` 写（target `terminal`）。
 - 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 15；`tests/startup.rs` 的 `plugins` 为 15，`tests/bench_probe.rs` 的 `Plugins` 应答为 15 个（都需要图形会话）。

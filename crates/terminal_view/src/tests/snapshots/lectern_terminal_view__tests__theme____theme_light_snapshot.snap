@@ -1,0 +1,104 @@
+---
+source: crates/terminal_view/src/tests/theme.rs
+expression: "palette_theme(Appearance :: Light, cx)"
+---
+Theme {
+    foreground: Rgb {
+        r: 39,
+        g: 39,
+        b: 39,
+    },
+    background: Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    },
+    cursor: Rgb {
+        r: 39,
+        g: 39,
+        b: 39,
+    },
+    ansi: [
+        Rgb {
+            r: 39,
+            g: 39,
+            b: 39,
+        },
+        Rgb {
+            r: 255,
+            g: 56,
+            b: 60,
+        },
+        Rgb {
+            r: 50,
+            g: 169,
+            b: 80,
+        },
+        Rgb {
+            r: 175,
+            g: 143,
+            b: 14,
+        },
+        Rgb {
+            r: 0,
+            g: 136,
+            b: 255,
+        },
+        Rgb {
+            r: 203,
+            g: 48,
+            b: 224,
+        },
+        Rgb {
+            r: 9,
+            g: 157,
+            b: 188,
+        },
+        Rgb {
+            r: 189,
+            g: 189,
+            b: 189,
+        },
+        Rgb {
+            r: 128,
+            g: 128,
+            b: 128,
+        },
+        Rgb {
+            r: 255,
+            g: 56,
+            b: 60,
+        },
+        Rgb {
+            r: 50,
+            g: 169,
+            b: 80,
+        },
+        Rgb {
+            r: 175,
+            g: 143,
+            b: 14,
+        },
+        Rgb {
+            r: 0,
+            g: 136,
+            b: 255,
+        },
+        Rgb {
+            r: 203,
+            g: 48,
+            b: 224,
+        },
+        Rgb {
+            r: 9,
+            g: 157,
+            b: 188,
+        },
+        Rgb {
+            r: 189,
+            g: 189,
+            b: 189,
+        },
+    ],
+    scheme: Light,
+}

@@ -86,6 +86,10 @@ lectern-project-home = { path = "../project_home", features = ["test-support"] }
 # (docs/design/worktrees.md「性能」): the composing is pure, but the crate
 # depends on GPUI. A plugin crate, as above.
 lectern-worktrees = { path = "../worktrees", features = ["test-support"] }
+# `terminal_view/snap_full` (docs/design/terminal_view.md「性能」): the placing
+# of glyphs and the draw list are pure, but the crate depends on GPUI. A
+# non-plugin view library, which a tool crate may depend on (ADR 0025).
+lectern-terminal-view = { path = "../terminal_view", features = ["test-support"] }
 # The `empty_window` example: the GPUI platform.
 gpui_platform.workspace = true
 
