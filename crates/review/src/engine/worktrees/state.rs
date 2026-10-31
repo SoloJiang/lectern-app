@@ -325,8 +325,9 @@ impl Engine {
         });
     }
 
-    /// The overview's last interest went: the current worktree's
-    /// uncommitted count is made again here, whatever it waited for.
+    /// The overview's last interest went, or a round published no set: the
+    /// current worktree's uncommitted count is made again here, whatever it
+    /// waited for.
     pub(in crate::engine) fn worktrees_current_unsettled(&self, project: &ProjectKey) {
         self.worktrees_mark(project, |m| m.active = true);
     }

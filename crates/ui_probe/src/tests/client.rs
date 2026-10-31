@@ -111,8 +111,16 @@ fn a_closed_connection_is_an_error_and_a_missing_probe_cannot_connect() {
     assert!(Client::connect(tmp.path(), Duration::from_secs(1)).is_err());
 
     let listener = UnixListener::bind(tmp.path().join(SOCKET)).unwrap();
-    let hang_up = std::thread::spawn(move || drop(listener.accept().unwrap()));
+    // Hang up only after `connect` returns: on macOS, setting a timeout on a
+    // socket whose peer has closed fails with EINVAL.
+    let (connected, wait) = std::sync::mpsc::channel();
+    let hang_up = std::thread::spawn(move || {
+        let stream = listener.accept().unwrap();
+        wait.recv().unwrap();
+        drop(stream);
+    });
     let mut client = Client::connect(tmp.path(), Duration::from_secs(10)).unwrap();
+    connected.send(()).unwrap();
     hang_up.join().unwrap();
     assert!(client.call("hello", json!({})).is_err());
 }

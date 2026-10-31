@@ -351,6 +351,38 @@ fn worktrees_current_is_compared_again_when_the_overview_interest_goes() {
 }
 
 #[test]
+fn worktrees_current_is_compared_here_when_the_overview_first_round_fails() {
+    let t = trio();
+    // The current worktree opens, but its index is damaged: the overview's
+    // first round fails and publishes nothing for it.
+    t.fx.projects.set_active(Some(t.feat.key.clone()));
+    std::fs::write(t.feat.key.0.join("index"), b"not an index").unwrap();
+    let d = t.timed(vec![t.fx.sessions(Vec::new())]);
+    let project = d.project();
+    // The worktrees round runs first and finds the overview's count
+    // pending; the overview round then fails.
+    let _interest = d.watch_worktrees(&project);
+    let _overview = d.watch_overview(&project);
+    d.run();
+    // The failed round marks the current worktree, which follows the
+    // throttle like any comparison of its own.
+    d.set_now(Timestamp(NOW.0 + 60_000));
+    d.advance(Duration::from_secs(60));
+    d.run();
+    let o = d.worktrees(&project).expect("counts after the rounds");
+    assert_eq!(
+        counts(row(&o, &t.feat.key)),
+        (ChangeCount::Unavailable, files(2), ChangeCount::Unavailable),
+        "the current worktree is compared here, not left pending"
+    );
+    // The rest is counted.
+    assert_eq!(
+        counts(row(&o, &t.other.key)),
+        (files(1), files(0), files(1))
+    );
+}
+
+#[test]
 fn worktrees_overview_capped_makes_the_current_worktree_capped() {
     let fx = Fx::new();
     let c1 = fx.commit(&BASE, None, T - 1000);
