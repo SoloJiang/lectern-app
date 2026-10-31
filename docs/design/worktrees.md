@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（PR 号待定）已实现；「验收」的三步尚未实现。
+状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）已实现；「验收」的三步尚未实现。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -511,7 +511,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 每一项是一个 PR，写 `Refs #16`，在「验收」里列为前置条件。`project`、`agents`、`usage` 不新增要求：`ProjectSnapshot::worktrees`、`SessionSummary::place` / `open_turn`、`UsageQuery::Worktree` / `Mr` 都已在它们的设计里。
 
-- **A. `review`（含 `services` 的 `review` 模块）：每个 worktree 的改动计数与文件重叠。** `services` 部分（类型、带默认实现的三个方法、事件变体、第 8 条的匹配分支）已实现（#334）；`review` 部分（第 1 至 7 条的计算，`review.md` 的「接口」「概览」「性能」和调用方一节同时更新）已实现（PR 号待定），与本文的差异见「与设计的差异」。 `Overview` 只含当前 worktree（[review 设计「概览」](review.md#概览)），`ProjectSnapshot` 对非当前 worktree 只有元数据，而技术调研要求总览列出每个 worktree 的未提交改动量。所以由 `review` 补一份按 worktree 的计数，`review` 的设计文档同时更新「接口」「概览」「性能」和调用方一节：
+- **A. `review`（含 `services` 的 `review` 模块）：每个 worktree 的改动计数与文件重叠。** `services` 部分（类型、带默认实现的三个方法、事件变体、第 8 条的匹配分支）已实现（#334）；`review` 部分（第 1 至 7 条的计算，`review.md` 的「接口」「概览」「性能」和调用方一节同时更新）已实现（#337），与本文的差异见「与设计的差异」。 `Overview` 只含当前 worktree（[review 设计「概览」](review.md#概览)），`ProjectSnapshot` 对非当前 worktree 只有元数据，而技术调研要求总览列出每个 worktree 的未提交改动量。所以由 `review` 补一份按 worktree 的计数，`review` 的设计文档同时更新「接口」「概览」「性能」和调用方一节：
 
   ```rust
   pub trait Review: Send + Sync {
@@ -655,7 +655,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 ### 前置条件 A 的 `review` 部分
 
-PR 号待定，在 macOS（arm64）上运行：`just check`（含整个工作区的 clippy，这台机器已装 Metal 工具链）、`just test -p lectern-review -p lectern-services`（399 个测试）通过。依赖没有改，没有运行 `just deny`。基准只跑不开窗口的两个目标：`review/worktrees_cloudprint` 中位数 686 ms（11 个 worktree、728 个文件、冷缓存，只记录），`review/resident_cloudprint_bytes` 84.8 KB、`review/resident_100k_bytes` 8.86 KB（含关注再放下之后保留的 worktree 数据，预算 < 1 MB，第 3 步复查）。测试覆盖第 7 条列的各项：未提交与已提交的计数、当前 worktree 复用概览的改动集（含概览为 `Capped`、第一轮未发布）、两个 worktree 的重叠和每个方向共用一个 `Arc`、`Capped` 没有重叠且不在别人的列表里、节流、没有关注者时不比较、放下关注后保留到项目关闭、没有主干，另有主干移动、HEAD 变化、rescan、会话事件、新增 worktree、路径哈希的释放和日志的金丝雀。没有验证：真实 fs_watch 批次到标记的整条路径（`Driven` 没有 watcher，批次直接交给引擎）；第 5 条估算的 17 个 worktree、每个 4000 个改动路径的内存（约 650 KB）没有基准；真实仓库上的耗时（见「与设计的差异」）；屏幕上的实际显示（第 2、3 步）。
+#337，在 macOS（arm64）上运行：`just check`（含整个工作区的 clippy，这台机器已装 Metal 工具链）、`just test -p lectern-review -p lectern-services`（399 个测试）通过。依赖没有改，没有运行 `just deny`。基准只跑不开窗口的两个目标：`review/worktrees_cloudprint` 中位数 686 ms（11 个 worktree、728 个文件、冷缓存，只记录），`review/resident_cloudprint_bytes` 84.8 KB、`review/resident_100k_bytes` 8.86 KB（含关注再放下之后保留的 worktree 数据，预算 < 1 MB，第 3 步复查）。测试覆盖第 7 条列的各项：未提交与已提交的计数、当前 worktree 复用概览的改动集（含概览为 `Capped`、第一轮未发布）、两个 worktree 的重叠和每个方向共用一个 `Arc`、`Capped` 没有重叠且不在别人的列表里、节流、没有关注者时不比较、放下关注后保留到项目关闭、没有主干，另有主干移动、HEAD 变化、rescan、会话事件、新增 worktree、路径哈希的释放和日志的金丝雀。没有验证：真实 fs_watch 批次到标记的整条路径（`Driven` 没有 watcher，批次直接交给引擎）；第 5 条估算的 17 个 worktree、每个 4000 个改动路径的内存（约 650 KB）没有基准；真实仓库上的耗时（见「与设计的差异」）；屏幕上的实际显示（第 2、3 步）。
 
 ## 与设计的差异
 
