@@ -187,6 +187,7 @@ const UI: &str = "docs/design/ui.md#性能";
 const REVIEW_VIEW: &str = "docs/design/review_view.md#性能";
 const PROJECT_HOME: &str = "docs/design/project_home.md#性能";
 const WORKTREES: &str = "docs/design/worktrees.md#性能";
+const TERMINAL_VIEW: &str = "docs/design/terminal_view.md#性能";
 /// The frame-time budgets of the screens wait for `workspace` to record
 /// frames (`FrameRecord::frames` is always empty, workspace design
 /// 「已知限制」) and for `app` to hand the records to the probe.
@@ -487,6 +488,16 @@ pub static BUDGETS: &[Budget] = &[
         FRAMES,
         TECH,
         State::Planned("terminal_view"),
+        Process,
+    ),
+    // The same budget with a fake agent printing at full speed for 2 seconds
+    // (docs/design/terminal_view.md「性能」); the scenario comes with the
+    // assembly in `app` (terminal_view design, step 3).
+    top(
+        "app/terminal_output_frames",
+        FRAMES,
+        TECH,
+        State::Planned("terminal_view 第 3 步（app 的基准场景）"),
         Process,
     ),
     top(
@@ -2222,6 +2233,15 @@ pub static BUDGETS: &[Budget] = &[
         WORKTREES,
         ACTIVE,
         Memory,
+    ),
+    // `terminal_view/*` (docs/design/terminal_view.md「性能」): GPUI, so macOS
+    // alone. Placing the glyphs of 120 by 40 cells and building the draw list.
+    share_macos(
+        "terminal_view/snap_full",
+        &[median(Limit::TimeAtMost(us(300)))],
+        TERMINAL_VIEW,
+        ACTIVE,
+        Time,
     ),
 ];
 

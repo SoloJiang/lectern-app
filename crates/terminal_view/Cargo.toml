@@ -10,5 +10,42 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "view"
 
+[dependencies]
+# Views, the self-drawn grid element (`layout_line`, `paint_glyph`,
+# `paint_quad`, `paint_path`, `paint_underline`), the input handler,
+# the clipboard and Actions (docs/design/terminal_view.md「依赖」).
+gpui.workspace = true
+# The copied text from the terminal thread to the main thread:
+# `channel::oneshot`.
+futures.workspace = true
+# `keys::terminal::*` (ADR 0013).
+lectern-i18n = { path = "../i18n" }
+# `ServiceRef`, `ActivationToken`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging at the verbose level (docs/design/terminal_view.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Terminals`, `Frame`, `Input`, `Theme`, `GridSize` and their data types.
+# Not `lectern-terminal`: the view only knows the service (architecture rule 7).
+lectern-services = { path = "../services" }
+# `Palette`, the terminal colours, `mono_metrics`, `TextRole::Code` and the
+# probe's semantic nodes (ADR 0015).
+lectern-ui = { path = "../ui" }
+
+[features]
+# `testing`: the fake `dyn Terminals`, the frame builder and the synthetic
+# frame of the `terminal_view/snap_full` benchmark (docs/design/terminal_view.md「测试」).
+test-support = []
+
+[dev-dependencies]
+# `TestAppContext`, `VisualTestContext`, `#[gpui::test]`.
+gpui = { workspace = true, features = ["test-support"] }
+# The snapshots of `theme_of`, `box_glyph` and the semantic tree (AGENTS.md).
+insta.workspace = true
+# `TestKernel`: the test plugin takes the `ServiceRef` and the token from a real kernel.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
+lectern-ui = { path = "../ui", features = ["test-support"] }
+
 [lints]
 workspace = true

@@ -1,6 +1,6 @@
 # terminal_view 设计
 
-状态：实现中。第 1 步（`ui::terminal_colors` 与 `terminal.ftl`）已实现（本 PR）；第 2 步（`TerminalPane`）和第 3 步（装配与真机验证）尚未实现。
+状态：实现中。第 1 步（`ui::terminal_colors` 与 `terminal.ftl`）已实现；第 2 步（`TerminalPane`、字形与方框绘制、键盘、输入法、鼠标、复制粘贴、`testing`、基准 `terminal_view/snap_full`）已实现（本 PR），窗口里的真实显示与输入法还没有验证；第 3 步（装配与真机验证）尚未实现。
 
 对应 issue [#5](https://github.com/SoloJiang/lectern-app/issues/5)（libghostty-vt 接入与 GPUI 网格绘制）的视图部分和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的终端视图。`terminal_view` 把 `terminal` 给出的网格快照（[terminal 设计「帧」](terminal.md#帧)）画在 GPUI 里，把键盘、输入法、鼠标、滚轮、焦点、剪贴板和尺寸变化转成 `Input` 发回 `terminal`。它是 Conversation 的 Terminal 页里的终端视图，在界面的「收起」一层（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。
 
@@ -103,7 +103,7 @@ let spec = OpenSpec { launch: Launch::Resume(key), size: Some(size), theme: term
 let id = terminals.get()?.open(spec)?;
 let interest = terminals.get()?.watch(id);      // 页可见期间持有，隐藏时 drop
 let pane = cx.new(|cx| TerminalPane::new(terminals.clone(), token.clone(), id, window, cx));
-pane.read(cx).focus_handle().focus(window);
+pane.read(cx).focus_handle().focus(window, cx);
 ```
 
 `page_area` 不知道时传 `size: None`，视图第一次布局后发 `Input::Resize`。`terminal` 在启动线程上准备环境和进程，`Resize` 通常在进程启动之前到达。
@@ -406,9 +406,35 @@ macOS（Apple 芯片）上运行，`Refs #5`：
 - `just test -p lectern-terminal-view`：0 个测试（本 crate 还没有代码）。`rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 没有结果。
 - 没有验证：键在界面里的实际显示和终端配色在窗口里的观感（视图在第 2 步，真机在第 3 步）。第 2、3 步的验收条件都没有运行。
 
+### 第 2 步：`TerminalPane`
+
+macOS（Apple 芯片）上运行，`Refs #5`、`Refs #12`。测试都是无窗口的 `#[gpui::test]`（GPUI 的测试平台），没有打开真实窗口，没有运行 startup、探针、`bench_probe` 的测试或 `app/*` 基准：
+
+- `just check`（格式、架构规则、文档链接、整个工作区的 clippy，`--all-targets --all-features`，警告即失败）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过；`tools/automation/Cargo.lock` 的 `cargo metadata` 之后没有改动；`Cargo.lock` 只加了 `lectern-terminal-view` 的依赖项和 `lectern-bench` 对它的依赖。
+- `just test -p lectern-terminal-view`：87 个测试通过，覆盖验收里的 `keys_*`、`escape_reaches_the_terminal`、`cmd_keys_bubble`、`ime_*`、`copy_*`、`paste_*`、`grid_size_*`、`resize_*`、`theme_*`、`mouse_*`、`wheel_*`、`focus_*`、`snap_*`、`box_*`、`semantic_tree`、`logs_and_nodes_hold_no_terminal_content`，另有 `refresh_*`（重画条件、不调用 `watch`、关闭、服务不在）、行缓存（两代、不随滚动缓冲增长）。`escape_reaches_the_terminal` 去掉 `key_bindings()` 里 Esc 的 `NoAction` 之后失败（试过），所以它真的在测这条绑定。
+- `box_*` 的快照逐个看过：145 个字符各画成 16×16 的点阵放进快照；细线、粗线、混合粗细的 T 形和十字、双线的角（外角齐平、内角在内线的中心相接）、`╬` 的四个角中间留空、`╩`、`╦` 的断口、单双线混合（`╒ ╓ ╞ ╫ ╪`）、半段线、八分之一块、四分块、三种阴影都符合 Unicode 的名字。圆角的曲线只在点阵里近似，笔画的粗细和端点要在真实显示里看（第 3 步）。
+- `python3 scripts/check_architecture.py` 通过；`Cargo.toml` 没有 `plugin = true`；`cargo tree -p lectern-terminal-view --edges normal` 里没有 `lectern-terminal`；`rg 'force_width: Some|Hsla::from|rgb\(|hsla\(' crates/terminal_view/src` 没有结果。
+- `just test -p lectern-bench`：181 个通过，跳过 6 个（预算表加了 `terminal_view/snap_full` 和计划中的 `app/terminal_output_frames`）。
+- `cargo bench --locked -p lectern-bench --all-features --bench time -- terminal_view/`（只运行 `time` 目标，进程内，不开窗口）：`terminal_view/snap_full` 中位数 75.4 µs（预算 ≤ 300 µs），`ok`。没有运行 `just bench terminal_view/`：它还会构建发布版 `lectern` 和 `empty_window`，并启动 `process` 目标，而这一项只需要 `time` 目标。
+- 没有验证：窗口里的真实显示（字体、方框字符在真机上的接缝、圆角曲线的粗细、选区与光标的颜色）、真实输入法（拼音候选窗口的位置）、真实剪贴板，以及 `app/input_frames`、`app/terminal_output_frames`（要窗口，随第 3 步）。第 3 步的验收条件都没有运行。
+
 ## 与设计的差异
 
 ### 第 1 步
 
 - 设计表里的 ANSI 1–6 不需要换系统色。
 - 派生规则「向 `label` 混合直到不低于 3:1」加了 40 步的上限（`MAX_STEPS`），让循环在任何调色板上都会结束；内置表远用不到这个上限。
+
+### 第 2 步
+
+- **绘制顺序按类别排。**「绘制的顺序」逐行画 1–6；实现按整个网格分六段：所有底色，所有选区，块光标的底，所有字形和方框图元，所有装饰，光标（输入法的组字在最后）。GPUI 把相邻的同类图元合成一批，逐行画每行要多出几批；按类别排整屏是六批，而且上一行字形的下伸部分不会被下一行的底色盖住。各类之间的先后与设计一致。
+- **方框图元的坐标。**`box_glyph(ch)` 的图元不是纯「以格子为单位」：`Coord` 是「格子边长的几分之几（八分之几）」加「细线宽的几个半宽」，因为双线、角的补齐和粗线的宽度取决于设备像素，只用格子单位写不出来；`Prim` 有 `Rect`、`Shade`、`Curve` 三种。细线宽、粗线和双线的间距按设计（粗线是细线的两倍）；双线的两条中心线各离轴一个细线宽。`box_glyph` 和 `Prim` 不是 crate 的公开接口，测试在 crate 内。
+- **`Input::Key` 的 `text` 总是 `None`。**设计只写了 ⌃ 组合键的 `text` 为 None；其他由 `on_key_down` 处理的键（Enter、Tab、方向键……）也是 None，按键和修饰键就是全部信息，可打印字符经输入法以 `Text` 送达。
+- **焦点要窗口也激活。**「焦点」一节写窗口失去激活时按失去焦点处理；实现用 `has_focus = 取得键盘焦点 && 窗口激活` 一个判断，聚焦、失焦、窗口激活变化都走它，重复的状态不重发 `Focus`。语义节点的 `State::focused` 只看键盘焦点。
+- **输入法。**`text_for_range` 返回 `None`（设计写「返回空」）；`selected_text_range` 在没有组字时是 `0..0`，组字时是组字文字里的选中范围；平台发起的粘贴（`EntityInputHandler::paste`）也发 `Input::Paste`，与 ⌘V 相同，不经 `Text`。组字的文字另排成一行、按排版给出的位置画，不对齐到网格的列（设计只说画在光标格子处）。
+- **`FocusHandle::focus` 要 `cx`。**「接口」里宿主的用法原来写 `focus_handle().focus(window)`；在锁定的 GPUI 版本里是 `focus(window, cx)`，已改正。
+- **鼠标。**按下只有指针在网格的命中框上时才处理（浮在上面的面板先收到）；`Navigate` 之类的按钮忽略；松开和拖动的移动不看命中框。夹进网格用的是上一次发出的 `Resize` 的列数和行数，不是帧的。自动滚动那一下的 `Drag` 的像素位置取边缘行、所在列的中点。
+- **`refresh`。**`dyn Terminals` 不在时直接返回（保留最后一帧和状态），不 `notify`。
+- **详细日志。**`terminal view frames` 的 `glyphs` 是这一秒里一帧最多的字形数，不是总和；它在 paint 之后记，每秒最多一条。
+- **`testing` 和基准。**`test-support` feature 下的 `testing` 有 `FakeTerminals`（另有 `set_state`、`set_copy_text`、`drop_copy_replies`，`close` 之后 `frame` 与 `info` 返回 None）、`frame()` 的构建器（宽字符、组合符号和 ZWJ 序列只认测试用到的那些区间）、`synthetic_line`、`test_metrics` 和基准夹具 `SnapFull`。`terminal_view/snap_full` 在预算表里是 `share_macos`，同时加了 `app/terminal_output_frames`（`Planned`，场景随第 3 步的 `app` 装配）。
+- **相关文档。**`app.md`「terminal 的装配」和 `terminal.md` 的状态行里「`terminal_view` 还没有实现」改成现状；`bench.md` 的预算表加了两行。

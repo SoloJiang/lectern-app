@@ -701,6 +701,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `app/scroll_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期；场景另有 64 MiB 的合成源码、压缩成一行的文件和编辑模式下 1 MiB 的文件（[ADR 0034](../adr/0034.md)） | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `file_reader` |
 | `app/scroll_frames_indexing` | 同 `app/scroll_frames`，在批量层有工作（打开 10 万文件的夹具后立即滚动）时测量；不让路就超标时启用 kernel 的让路开关，并以这个基准校准它（[ADR 0033](../adr/0033.md)） | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `file_reader`、`code_intel`（#17） |
 | `app/input_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `terminal_view` |
+| `app/terminal_output_frames` | 同 `app/input_frames`；场景：假的 agent 连续 2 秒全速输出每行 120 字符、每 8 个字符换一次 24 位色的文本，Terminal 页可见，记录这期间的帧（[terminal_view 设计「性能」](terminal_view.md#性能)）。计划中：场景随 `app` 的装配（terminal_view 第 3 步）加入 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `terminal_view` 第 3 步 |
 | `app/animation_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期 | [ADR 0015](../adr/0015.md) | `ui` |
 | `app/bundle_size` | ≤ 80 MB（目标 50 MB 只显示）；`Package` | [ADR 0018](../adr/0018.md#决策) | [#38](https://github.com/SoloJiang/lectern-app/issues/38) |
 | `app/dmg_size` | ≤ 40 MB；`Package` | [ADR 0018](../adr/0018.md#决策) | [#38](https://github.com/SoloJiang/lectern-app/issues/38) |
@@ -810,6 +811,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `project_home/resident_bytes` | 存活字节 < 1 MB（同一夹具的 `HomeSnapshot` 与两个视图的状态；`Memory`）。计划中：视图的状态要在窗口里建 | [project_home](project_home.md#性能) | 视图的内存测量 |
 | `worktrees/build_1000` | 中位数 < 2 ms（`snapshot::build` 对 `lectern_worktrees::fixture::fixture_1000`：17 个 worktree、1000 个会话、每个 worktree 8 个重叠项和一份分支用量；进程内，不开窗口，只在 macOS 编译） | [worktrees](worktrees.md#性能) | `worktrees` 第 3 步 |
 | `worktrees/resident_bytes` | 存活字节 < 256 KiB（同一夹具合成出的 `WorktreesSnapshot`：行、会话、重叠项和每个 `NodeId`；夹具输入在计数之前建好并保持存活；`Memory`，只在 macOS 编译）。视图的状态要在窗口里建，不在计数里（[worktrees 设计「与设计的差异」](worktrees.md#与设计的差异)第 3 步） | [worktrees](worktrees.md#性能) | `worktrees` 第 3 步 |
+| `terminal_view/snap_full` | 中位数 ≤ 300 µs（`lectern_terminal_view::testing::SnapFull`：120×40 的帧，每行的字形按合成的 `LineLayout` 放到格子上（行缓存里什么也没有），再生成绘制列表：底色、选区、光标、装饰、方框图元；进程内，不开窗口，只在 macOS 编译） | [terminal_view](terminal_view.md#性能) | `terminal_view` 第 2 步 |
 | `app/home_frames` | 每帧工作时间最大值 ≤ 8.3 ms、相邻帧间隔 ≤ 1.5 个刷新周期（项目主页的概览到达与侧栏滚动；`Process`）。计划中：同 `review_view/scroll_5000` | [project_home](project_home.md#性能) | `workspace` 的帧记录 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/note_add` | 中位数 < 0.2 ms（`testing::MarkSeenFixture::seed_notes` 写好 39 条待发送、240 条已发送的会话外改动审阅上 `command(AddNote)` 到快照替换；每个样本之前删掉上一个样本加的那条，不计时） | [review](review.md#性能) | `review` 第 6 步 |

@@ -59,6 +59,9 @@ mod syntax_engine;
 #[path = "time/terminal.rs"]
 mod terminal;
 #[cfg(target_os = "macos")]
+#[path = "time/terminal_view.rs"]
+mod terminal_view;
+#[cfg(target_os = "macos")]
 #[path = "time/ui.rs"]
 mod ui;
 #[path = "time/usage.rs"]
@@ -200,8 +203,9 @@ const BENCHES: &[Bench] = &[
 ];
 
 fn main() -> ExitCode {
-    // `ui/*`, `review_view/*`, `project_home/*` and `worktrees/*` need GPUI, which only builds
-    // on macOS in this workspace.
+    // `ui/*`, `review_view/*`, `project_home/*`, `worktrees/*` and
+    // `terminal_view/*` need GPUI, which only builds on macOS in this
+    // workspace.
     #[cfg(target_os = "macos")]
     let benches: Vec<Bench> = {
         let mut all = BENCHES.to_vec();
@@ -209,6 +213,7 @@ fn main() -> ExitCode {
         all.extend_from_slice(review_view::BENCHES);
         all.extend_from_slice(project_home::BENCHES);
         all.extend_from_slice(worktrees::BENCHES);
+        all.extend_from_slice(terminal_view::BENCHES);
         all
     };
     #[cfg(not(target_os = "macos"))]

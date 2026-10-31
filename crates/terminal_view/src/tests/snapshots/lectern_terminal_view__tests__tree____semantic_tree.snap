@@ -1,0 +1,18 @@
+---
+source: crates/terminal_view/src/tests/tree.rs
+expression: snapshot
+---
+running, focused
+terminal.grid Group <terminal-grid> "Terminal" [focused] cols=80 rows=24 state=running alt=false scrolled=false
+
+exited, alternate screen, scrolled
+terminal.grid Group <terminal-grid> "Terminal" [focused] cols=100 rows=30 state=exited alt=true scrolled=true
+
+failed
+terminal.grid Group <terminal-grid> "Terminal" [focused] cols=100 rows=30 state=failed alt=true scrolled=true
+
+starting
+terminal.grid Group <terminal-grid> "Terminal" [focused] cols=100 rows=30 state=starting alt=true scrolled=true
+
+starting, no focus
+terminal.grid Group <terminal-grid> "Terminal" cols=100 rows=30 state=starting alt=true scrolled=true
