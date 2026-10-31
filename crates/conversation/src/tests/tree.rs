@@ -8,11 +8,13 @@ use std::sync::Arc;
 use gpui::TestAppContext;
 use lectern_kernel::Name;
 use lectern_services::conversation::{
-    CallKind, CallState, ContextUsage, EndReason, Entry, EntryBody, Link, NoteLocation, Passage,
-    PlanStep, PromptOrigin, StepState,
+    CallKind, CallState, ContextUsage, EditPreview, EndReason, Entry, EntryBody, Link,
+    NoteLocation, OptionId, OptionKind, Passage, PermissionDetail, PermissionId, PermissionOption,
+    PermissionRequest, PlanStep, PreviewRow, PromptOrigin, RowKind, StepState, Unavailable,
 };
 use lectern_services::project::{ProjectKey, WorktreeKey};
 use lectern_services::review::ReviewTarget;
+use lectern_services::session::Timestamp;
 use lectern_services::workspace::{Route, Target, screens};
 
 use crate::testing::{agent_text, entry_key, passage, prompt, session, tool, with_entries};
@@ -86,6 +88,78 @@ fn conversation_tree_history(cx: &mut TestAppContext) {
     ]));
     rig.conversations.set(snap);
     let (_host, vcx) = open(cx, &rig, &key);
+    insta::assert_snapshot!(tree(vcx, all));
+}
+
+/// A working session that waits for two answers, the second one shown too:
+/// the status line, the list, the first request whole, the line and the second
+/// request under it, and the Stop button in the place of Send.
+#[gpui::test]
+fn conversation_tree_live_with_permission(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let key = session(1);
+    let options = |name: &str| {
+        [
+            ("allow-always", OptionKind::AllowAlways),
+            ("reject-once", OptionKind::RejectOnce),
+            ("allow-once", OptionKind::AllowOnce),
+        ]
+        .map(|(id, kind)| PermissionOption {
+            id: OptionId(Arc::from(format!("{name}-{id}"))),
+            kind,
+        })
+    };
+    let mut snap = with_entries(
+        &key,
+        4,
+        vec![
+            prompt("h:0:0", "fix the redirect"),
+            tool("l:1:0", CallKind::Execute, "cargo test", CallState::Pending),
+        ],
+    );
+    snap.link = Link::Working;
+    snap.can_prompt = Err(Unavailable::Busy);
+    snap.permissions = Arc::from(vec![
+        PermissionRequest {
+            id: PermissionId(7),
+            kind: CallKind::Execute,
+            title: Arc::from("Run cargo test"),
+            detail: PermissionDetail::Command {
+                text: Arc::from("cargo test -p router\ncargo clippy"),
+                workdir: Some(Arc::from(std::path::Path::new("/work/app/crates/router"))),
+            },
+            options: Arc::from(options("first")),
+            asked_at: Timestamp(1),
+        },
+        PermissionRequest {
+            id: PermissionId(8),
+            kind: CallKind::Edit,
+            title: Arc::from("Edit router.rs"),
+            detail: PermissionDetail::Edits(Arc::from(vec![EditPreview {
+                path: Arc::from(std::path::Path::new("/work/app/src/router.rs")),
+                new_file: false,
+                added: 1,
+                removed: 1,
+                rows: Arc::from(vec![
+                    PreviewRow {
+                        kind: RowKind::Removed,
+                        text: Arc::from("    redirect(old)"),
+                    },
+                    PreviewRow {
+                        kind: RowKind::Added,
+                        text: Arc::from("    redirect(new)"),
+                    },
+                ]),
+                omitted: 0,
+            }])),
+            options: Arc::from(options("second")),
+            asked_at: Timestamp(2),
+        },
+    ]);
+    rig.conversations.set(snap);
+    let (_host, vcx) = open(cx, &rig, &key);
+    click(vcx, "conversation.permission.more");
+    frame(vcx);
     insta::assert_snapshot!(tree(vcx, all));
 }
 

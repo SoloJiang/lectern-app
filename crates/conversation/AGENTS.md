@@ -2,19 +2,23 @@
 
 检查器的 Conversation 页（⌘\）：与 agent 的对话、审阅意见回传后的新一轮、权限请求，以及 Terminal 页的入口。
 
-- 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "conversation"（依赖 `dyn Contributions`、`dyn SessionSource`）和 "conversation-live"（依赖 `dyn Conversations`），都是 `AfterFirstFrame`；第三个 "conversation-terminal" 随第 3 步。只依赖 kernel 层和非插件的库 crate（`ui`、`i18n`、`logging`），不依赖 `agents`、`terminal`、`workspace`、`review_view`、`project_home` 这些插件 crate（dev-dependencies 也不行，架构检查第 6 条）；只有 `app` 依赖本 crate。
+- 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "conversation"（依赖 `dyn Contributions`、`dyn SessionSource`）和 "conversation-live"（依赖 `dyn Conversations`），都是 `AfterFirstFrame`；第三个 "conversation-terminal"（依赖 `dyn Terminals`）第 2 步起只把服务放进共享状态、监听 `TerminalEvent::Listed`，终端快捷键和离开守卫随第 3 步。只依赖 kernel 层和非插件的库 crate（`ui`、`i18n`、`logging`），不依赖 `agents`、`terminal`、`workspace`、`review_view`、`project_home` 这些插件 crate（dev-dependencies 也不行，架构检查第 6 条）；只有 `app` 依赖本 crate。
 - 设计文档：[docs/design/conversation.md](../../docs/design/conversation.md)（已接受）。实现按它的「验收」分四步；ACP agent 的启动方式与信任边界见 ADR 0050。
-- 进度（设计文档「验收」）：第 1 步已实现，不开真实窗口：两个插件、检查器页（页内分段控件，Terminal 页是占位）、Messages 页的显示（状态行、列表、计划、链路失败的提示、更早的轮次）、探针节点、⌘. 的 `Stop`。回复框、权限请求、草稿（第 2 步）、真正的 Terminal 页与离开守卫（第 3 步）、`app` 装配与基准（第 4 步）还没有做。
+- 进度（设计文档「验收」）：第 1 步已实现，不开真实窗口：两个插件、检查器页（页内分段控件，Terminal 页是占位）、Messages 页的显示（状态行、列表、计划、链路失败的提示、更早的轮次）、探针节点、⌘. 的 `Stop`。第 2 步已实现，也不开真实窗口：回复框（⌘↩ 发送、进行中停止、不能发送的原因、「可能在别处运行」的提示、终端在驱动时换成说明）、权限请求卡片（命令与改动预览、四种答案、「另有 n 个请求」、新请求时切到这一页）、草稿与上次停留的页（`memory.rs`），以及第三个插件 `conversation-terminal` 的雏形。真正的 Terminal 页与离开守卫（第 3 步）、`app` 装配与基准（第 4 步）还没有做。
 
 ## 模块
 
 | 文件 | 内容 |
 |---|---|
-| `plugin.rs` | `ConversationPlugin`、`LivePlugin`、`plugins()`；`Shared`（服务引用、当前会话 `Current`、活着的页的通道）、`Job`；`ScreenChanged` 与 `ConversationEvent` 的监听只转发 |
+| `plugin.rs` | `ConversationPlugin`、`LivePlugin`、`TerminalPagePlugin`、`plugins()`；`Shared`（服务引用、当前会话 `Current`、活着的页的通道）、`Job`；`ScreenChanged` 与 `ConversationEvent` 的监听只转发 |
 | `items.rs` | 纯函数：`build(&ConversationSnapshot)` 算列表的项，`diff` 找出变化的一段，`arrivals` 找出到达的项；不读服务 |
 | `present.rs` | 纯函数：快照里的值变成界面文字（状态行、工具调用行、审阅意见行、链路失败的原因） |
 | `view/tab.rs` | `ConversationTab`：检查器页，跟随 `Shared::current`，持有 `MessagesModel`，在主线程上取通道里的 `Job` |
-| `view/messages.rs` | `MessagesModel`：一个会话的 Messages 页（关注、快照、列表、计划、命令） |
+| `view/messages.rs` | `MessagesModel`：一个会话的 Messages 页（关注、快照、列表、计划、命令、草稿、回答请求） |
+| `view/messages/composer.rs` | 回复框：输入框与 Send / Stop、不能发送的原因、「可能在别处运行」一行、发送 |
+| `view/messages/permission.rs` | 权限请求卡片：命令文本与目录、改动预览、答案按钮、「另有 n 个请求」 |
+| `drive.rs` | 纯函数（`now()` 读系统时钟）：谁在驱动会话（终端或提供方）、回复框能否发送、「可能在别处运行」的判断、请求等待的毫秒数；不读服务 |
+| `memory.rs` | 纯数据：每个会话的草稿与上次停留的页（至多 16 个会话、每份草稿至多 256 KiB）；只在主线程上读写 |
 | `actions.rs`、`nodes.rs`、`diag.rs` | Action 与快捷键；探针 ID；日志字段的辅助（只有计数和判别名） |
 | `testing.rs`（测试） | `services` trait 的假实现（`FakeSessions`、`FakeConversations`、`FakeContributions`）和 `Rig`（真实的 kernel） |
 - issue：[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#24](https://github.com/SoloJiang/lectern-app/issues/24)、[#12](https://github.com/SoloJiang/lectern-app/issues/12)

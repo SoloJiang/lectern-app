@@ -21,17 +21,24 @@ use lectern_services::conversation::{
     ConversationSnapshot, Conversations, Entry, EntryBody, EntryKey, Link, Load, Passage,
     PromptOrigin, ToolEntry,
 };
+use lectern_services::project::ProjectKey;
 use lectern_services::review::ReviewTarget;
 use lectern_services::session::{
     Agent, Batch, Content, ContentRef, Cursor, Format, ResumeCommand, SessionError, SessionKey,
     SessionList, SessionSource, SessionSummary, SourceId, Timestamp, TurnIndex,
+};
+use lectern_services::terminal::{
+    FrameInterest, Input, LaunchError, LaunchKind, OpenSpec, RunState, TerminalEvent, TerminalId,
+    TerminalInfo, TerminalList, Terminals,
 };
 use lectern_services::workspace::{
     CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone, Payload,
     Registration, Route, SidebarEntry, Target, WindowId, WorkspaceCommand, WorkspaceEvent, screens,
 };
 
-use crate::plugin::{ConversationPlugin, LIVE_ID, LivePlugin, PLUGIN_ID, plugins};
+use crate::plugin::{
+    ConversationPlugin, LIVE_ID, LivePlugin, PLUGIN_ID, TERMINAL_ID, TerminalPagePlugin, plugins,
+};
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -209,6 +216,7 @@ pub(crate) struct FakeConversations {
     released: Arc<AtomicUsize>,
     commands: Mutex<Vec<(SessionKey, ConversationCommand)>>,
     responder: Mutex<Option<Responder>>,
+    waiting: Mutex<Arc<[SessionKey]>>,
 }
 
 impl FakeConversations {
@@ -240,6 +248,11 @@ impl FakeConversations {
         lock(&self.commands).clone()
     }
 
+    /// What `waiting()` answers from now on (no event: the test sends it).
+    pub fn set_waiting(&self, sessions: Vec<SessionKey>) {
+        *lock(&self.waiting) = Arc::from(sessions);
+    }
+
     pub fn respond(
         &self,
         responder: impl Fn(&FakeConversations, &SessionKey, &ConversationCommand) + Send + 'static,
@@ -266,7 +279,87 @@ impl Conversations for FakeConversations {
         }
     }
     fn waiting(&self) -> Arc<[SessionKey]> {
-        Arc::from([])
+        lock(&self.waiting).clone()
+    }
+}
+
+/// The provider of `dyn Terminals`: the terminals a test sets, by session.
+/// Only what the reply box reads is there (`for_session`, `info`, `list`).
+#[derive(Default)]
+pub(crate) struct FakeTerminals {
+    terminals: Mutex<Vec<TerminalInfo>>,
+    next: AtomicUsize,
+}
+
+impl FakeTerminals {
+    /// Gives the session a terminal in `state`, or changes the state of the
+    /// one it has (no event: the test sends `Listed`).
+    pub fn set(&self, session: &SessionKey, state: RunState) {
+        let mut terminals = lock(&self.terminals);
+        let launch = LaunchKind::Resume(session.clone());
+        if let Some(info) = terminals.iter_mut().find(|info| info.launch == launch) {
+            info.state = state;
+            return;
+        }
+        let id = TerminalId(self.next.fetch_add(1, Ordering::SeqCst) as u64 + 1);
+        terminals.push(TerminalInfo {
+            id,
+            launch,
+            project: ProjectKey::Folder {
+                root: Arc::from(Path::new(CWD)),
+            },
+            cwd: Arc::from(Path::new(CWD)),
+            state,
+            title: None,
+            opened_at: Timestamp(1_000),
+            bells: 0,
+            dropped_inputs: 0,
+        });
+    }
+}
+
+impl Terminals for FakeTerminals {
+    fn open(&self, _: OpenSpec) -> Result<TerminalId, LaunchError> {
+        unreachable!("the reply box never opens a terminal")
+    }
+    fn list(&self) -> Arc<TerminalList> {
+        Arc::new(TerminalList {
+            generation: 1,
+            terminals: Arc::from(lock(&self.terminals).clone()),
+        })
+    }
+    fn info(&self, id: TerminalId) -> Option<TerminalInfo> {
+        lock(&self.terminals)
+            .iter()
+            .find(|info| info.id == id)
+            .cloned()
+    }
+    fn for_session(&self, session: &SessionKey) -> Option<TerminalId> {
+        let launch = LaunchKind::Resume(session.clone());
+        lock(&self.terminals)
+            .iter()
+            .find(|info| info.launch == launch)
+            .map(|info| info.id)
+    }
+    fn frame(&self, _: TerminalId) -> Option<Arc<lectern_services::terminal::Frame>> {
+        unreachable!("the reply box never reads a frame")
+    }
+    fn watch(&self, _: TerminalId) -> Option<FrameInterest> {
+        unreachable!("the reply box never watches a terminal")
+    }
+    fn input(&self, _: TerminalId, _: Input) {
+        unreachable!("the reply box never sends terminal input")
+    }
+    fn copy_selection(
+        &self,
+        _: TerminalId,
+        _: lectern_kernel::ActivationToken,
+        _: Box<dyn FnOnce(Option<String>) + Send>,
+    ) {
+        unreachable!("the reply box never copies from a terminal")
+    }
+    fn close(&self, _: TerminalId) {
+        unreachable!("the reply box never closes a terminal")
     }
 }
 
@@ -279,12 +372,18 @@ pub(crate) struct FakeContributions {
     released: Arc<AtomicUsize>,
     tokens_given: Mutex<Vec<bool>>,
     route: Mutex<Option<Route>>,
+    dispatched: Mutex<Vec<WorkspaceCommand>>,
 }
 
 impl FakeContributions {
     /// The route `current_route` answers with from now on.
     pub fn set_route(&self, route: Option<Route>) {
         *lock(&self.route) = route;
+    }
+
+    /// The commands the plugins dispatched, in order.
+    pub fn dispatched(&self) -> Vec<WorkspaceCommand> {
+        lock(&self.dispatched).clone()
     }
 
     /// The kinds and IDs of the contributions, in registration order.
@@ -391,8 +490,8 @@ impl Contributions for FakeContributions {
     ) -> Registration {
         unreachable!("conversation registers no leave guard before the Terminal page")
     }
-    fn dispatch(&self, _: WorkspaceCommand) {
-        unreachable!("conversation dispatches no workspace command before the reply box")
+    fn dispatch(&self, command: WorkspaceCommand) {
+        lock(&self.dispatched).push(command);
     }
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         unreachable!("conversation never lists the sidebar entries")
@@ -446,12 +545,13 @@ impl<P: Plugin> Plugin for Manual<P> {
     }
 }
 
-/// A kernel with fake services and the two plugins under test (not activated
-/// yet).
+/// A kernel with fake services and the three plugins under test (not
+/// activated yet).
 pub(crate) struct Rig {
     pub kernel: Arc<Kernel>,
     pub conversations: Arc<FakeConversations>,
     pub contributions: Arc<FakeContributions>,
+    pub terminals: Arc<FakeTerminals>,
 }
 
 impl Rig {
@@ -465,7 +565,9 @@ impl Rig {
         let sessions = Arc::new(FakeSessions::new(sessions));
         let conversations = Arc::new(FakeConversations::default());
         let contributions = Arc::new(FakeContributions::default());
-        let (main, live): (ConversationPlugin, LivePlugin) = plugins();
+        let terminals = Arc::new(FakeTerminals::default());
+        let (main, live, terminal): (ConversationPlugin, LivePlugin, TerminalPagePlugin) =
+            plugins();
         let set = PluginSet::new()
             .with(
                 "mock-sessions",
@@ -479,14 +581,20 @@ impl Rig {
                 "mock-contributions",
                 Provide::<dyn Contributions>(contributions.clone()),
             )
+            .with(
+                "mock-terminals",
+                Provide::<dyn Terminals>(terminals.clone()),
+            )
             .with(PLUGIN_ID, Manual(main))
-            .with(LIVE_ID, Manual(live));
+            .with(LIVE_ID, Manual(live))
+            .with(TERMINAL_ID, Manual(terminal));
         let kernel = Kernel::start(set);
         kernel.barrier();
         Rig {
             kernel,
             conversations,
             contributions,
+            terminals,
         }
     }
 
@@ -497,6 +605,16 @@ impl Rig {
 
     pub fn activate_live(&self) {
         self.kernel.activate(LIVE_ID);
+        self.kernel.barrier();
+    }
+
+    pub fn activate_terminal(&self) {
+        self.kernel.activate(TERMINAL_ID);
+        self.kernel.barrier();
+    }
+
+    pub fn deactivate_terminal(&self) {
+        self.kernel.set_enabled(TERMINAL_ID, false);
         self.kernel.barrier();
     }
 
@@ -539,6 +657,22 @@ impl Rig {
             screen: Name::Borrowed(screens::PROJECT_HOME),
             target: Target::None,
         });
+    }
+
+    /// `WaitingChanged`, as the provider emits it.
+    pub fn waiting_changed(&self) {
+        self.kernel
+            .emitter()
+            .emit(ConversationEvent::WaitingChanged);
+        self.kernel.barrier();
+    }
+
+    /// `Listed`, as the terminal service emits it.
+    pub fn terminals_listed(&self) {
+        self.kernel
+            .emitter()
+            .emit(TerminalEvent::Listed { generation: 1 });
+        self.kernel.barrier();
     }
 
     /// `Changed` for `session`, as the provider emits it.

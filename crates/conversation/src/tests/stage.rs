@@ -79,7 +79,7 @@ pub(crate) fn window<'a>(
     (host, vcx)
 }
 
-/// Both plugins on, the review of `key` on the screen, a window.
+/// The three plugins on, the review of `key` on the screen, a window.
 pub(crate) fn open<'a>(
     cx: &'a mut TestAppContext,
     rig: &Rig,
@@ -87,6 +87,7 @@ pub(crate) fn open<'a>(
 ) -> (Entity<Host>, &'a mut VisualTestContext) {
     rig.activate_main();
     rig.activate_live();
+    rig.activate_terminal();
     rig.review(key);
     window(cx, rig)
 }

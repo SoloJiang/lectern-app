@@ -1,6 +1,6 @@
 # conversation 设计
 
-状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`。
+状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`；「验收」的第 2 步（回复框、停止、权限请求、草稿，以及只把 `dyn Terminals` 放进共享状态的插件 `conversation-terminal`）已实现，见「实际验证」「与设计的差异」，这一步没有真正的 Terminal 页、终端快捷键和离开守卫，issue 仍是 `Refs #23`、`Refs #24`。
 
 对应 issue [#23](https://github.com/SoloJiang/lectern-app/issues/23)（Conversation 面板：经 ACP 的结构化对话）、[#24](https://github.com/SoloJiang/lectern-app/issues/24)（权限请求的界面）和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的 Terminal 页。`conversation` 是检查器的 Conversation 页（⌘\）：Messages 页显示正在审阅的会话的对话（prompt、agent 说明、工具调用、发回的审阅意见），用户在这里回复 agent、批准或拒绝 agent 的权限请求；Terminal 页在内嵌终端里恢复这个会话（`claude --resume`、`codex resume`），显示原始输出（[交互规范「三层结构」](interaction.md#三层结构)、[「状态与异常」](interaction.md#状态与异常)的「Agent 请求权限」、[ADR 0012](../adr/0012.md)、[技术调研「Agent 原生面板」](tech-research.md#4-agent-原生面板第二阶段)）。ACP agent 的启动方式和信任边界见 [ADR 0050](../adr/0050.md)。
 
@@ -56,7 +56,7 @@ kernel 没有可选依赖：`requires` 里的服务都要有活着的提供者�
 
 ```rust
 /// `app` 装配时调用一次，三个插件都放进 `PluginSet`（ID 见上表）。不做 IO。
-/// 第 1 步只返回前两个，`TerminalPagePlugin` 随 Terminal 页（第 3 步）加上。
+/// 第 1 步只返回前两个；第 2 步起返回三个，`TerminalPagePlugin` 在第 3 步之前只做服务的引用。
 pub fn plugins() -> (ConversationPlugin, LivePlugin, TerminalPagePlugin);
 
 pub struct ConversationPlugin { /* Arc<Shared> */ }
@@ -920,6 +920,20 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 - `rg 'TextArea|ConversationCommand::Answer' crates/conversation/src/view` 没有结果；`crates/conversation/AGENTS.md` 的设计文档行指向本文。
 - 没有验证：真实的帧。`#[gpui::test]` 的窗口只做布局，不画真实的帧，所以 `ARRIVE`、计划的展开、页内分段控件的滑块随真实时间走的样子没有看；列表在真实窗口里的滚动跟随（`FollowMode::Tail`）只在测试窗口的布局里验证过；Conversation 页与真实的 `workspace` 检查器（300pt，与 Files 页的分段控件）的组合要等第 4 步 `app` 装配之后才能看；`conversation/stream_apply` 基准属第 4 步（前置 K）。
 
+### 第 2 步
+
+回复框、停止、权限请求、草稿，叠在第 1 步上，在 macOS（arm64）上运行。没有运行应用，没有打开真实窗口：下面全部是无窗口的 `#[gpui::test]`、纯函数测试和 `just` 入口。
+
+- `just check`（含 clippy `-D warnings`、文档链接和架构检查）、`just test -p lectern-conversation`（70 个测试，由 nextest 一个测试一个进程地跑）、`just deny` 通过；`cargo metadata --format-version 1 --locked --all-features` 通过；`Cargo.lock` 不变（没有新的外部 crate）。
+- 「验收」的四条 `rg` 检查没有结果；第五条（`python3 scripts/check_architecture.py`）在 `just check` 里通过。第 1 步的 `rg 'TextArea|ConversationCommand::Answer' crates/conversation/src/view` 从这一步起不再适用（回复框与权限在 `view/messages/composer.rs`、`view/messages/permission.rs`）。
+- 测试：
+  - 纯函数（`src/tests/pure.rs`，14 个）：`options_*`（按种类排序、只画给出的种类且每种取第一个、文字来自资源文件而不是选项）、`drive_*`（只有启动中或运行中的终端在驱动；回复框跟随提供方，除非终端在驱动；已结束的终端不拦；等待的毫秒数不为负）、`elsewhere_*`（要有未结束的一轮、最近的活动、链路为 `None`、没有终端；两分钟的边界含等号；`Failed` 不算 `None`）、`memory_*`（存取草稿、页与草稿分开记、至多 16 个并忘掉最久没用的、超过 256 KiB 不保存）。
+  - `#[gpui::test]`（`src/tests/reply.rs`，17 个）：`send_with_cmd_enter_sends_a_prompt`、`send_ignores_blank_text_and_keeps_text_the_provider_refused`、`the_send_action_sends_like_the_key`、`composer_shows_why_it_cannot_send`、`the_stop_button_replaces_send_while_a_turn_runs`、`composer_is_replaced_while_the_terminal_drives`、`a_terminal_that_drives_stops_the_send_key`、`the_page_hints_that_the_session_may_run_elsewhere`、`permission_card_uses_kind_labels`、`permission_command_and_edits_are_shown`、`answer_removes_the_card`、`answer_actions_answer_the_oldest_request`、`a_request_that_arrives_while_the_page_shows_blinks_and_is_whole`、`new_request_selects_the_tab`、`sessions_already_waiting_when_the_provider_starts_are_not_new`、`drafts_survive_hiding_the_inspector`、`the_page_opens_on_the_page_the_session_was_last_on`；`stop_sends_cancel` 在 `views.rs`（第 1 步）。
+  - 插件：`plugins_register_and_deactivate_cleanly` 仍是两个贡献；新的 `terminal_plugin_registers_nothing_and_deactivates_cleanly`（第三个插件不登记任何贡献，离开、回来、再离开都不留下东西）。
+  - 语义树：`conversation_tree_history` 的快照逐行看过，只多了回复框（`conversation.composer`、不可发送的 Send）；新的 `conversation_tree_live_with_permission`（两个请求，展开「另有 1 个请求」，停止按钮）。
+  - `logs_hold_no_contents` 加上第 2 步的流程：金丝雀经回复框（`simulate_input` 输入后发送）、选项 ID、请求的标题与命令与 `workdir`、改动预览的路径与行、对一个请求的回答、该会话的 `WaitingChanged`、一个终端经 `Starting`、`Running`、`Exited` 与 `Listed`、一份保存后又取回的草稿；没有记录含金丝雀；`prompt sent`（`bytes`、`connects`）、`permission answered`（`option`、`kind`、`waited_ms`，两个请求各一条）、`conversation tab selected for a request`（`pending`）、`waiting changed`（`sessions`、`new`）、`draft restored`（`bytes`）、`send skipped`（`reason` 为 `empty`）都在，并带 `session` 作用域。
+- 没有验证：真实的帧（`#[gpui::test]` 的窗口只做布局，不画真实的帧）：「另有 n 个请求」展开时 260pt 高度内的滚动、请求卡片出现时的闪动、回复框在 300pt 宽的检查器里的真实排版；回复框的输入法（组合输入）；真实的 ACP 适配器与真实的 `terminal` 服务（测试用假实现，Show Terminal 只切到占位页）；`conversation/stream_apply` 基准属第 4 步。
+
 ## 与设计的差异
 
 前置条件 B（`services` 的 `conversation` 模块）：
@@ -940,3 +954,14 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 10. **设计没规定的显示。** 注入内容用 `TextRole::Caption`；审阅意见行列出全部位置（至多 8 个），逗号分隔；`Think` 与 `Other` 的工具调用只显示 `summary`，调用没有顺利结束时在后面加「 · 失败 / 已拒绝 / 已取消」。
 11. **日志。** `conversation failed shown` 在链路变为 `Failed` 时写一次，不是每帧；另有 debug：`snapshot dropped`（事件比已显示的旧）、`route applied`。`snapshot applied` 的字段是 `generation`、`entries`、`items`、`spliced`、`anchor_kept`、`took_us`。`session` 作用域只在 `MessagesModel` 的记录里设置，`started` 里的 `route unavailable` 和 `route changed` 没有。
 12. **`ConversationTab::new(shared, cx)` 不取窗口。** 第 1 步没有需要 `Window` 的东西；`InspectorTab` 的工厂仍按 `ViewFactory<()>` 收到窗口，只是不用。
+
+第 2 步（回复框、停止、权限请求、草稿）：
+
+1. **`plugins()` 返回三个插件，`conversation-terminal` 从这一步就有。** 回复框要知道终端是否在驱动会话（「一处驱动」），所以插件 `conversation-terminal` 提前加上，只 `requires` `dyn Terminals`（不要 `dyn Contributions`）：把服务放进 `Shared`，监听 `TerminalEvent::Listed`。终端的快捷键、离开守卫和 Terminal 页仍在第 3 步；「显示终端」按钮切到第 1 步的占位页。`plugins_register_*` 因此仍是两个贡献（第三个插件不登记）。
+2. **没有 `Job::Waiting`，`Job::Terminal` 不带内容。** `WaitingChanged` 的监听在提供方的线程上直接读 `waiting()`、比较、给 `workspace` 发 `SelectInspectorTab`（该页不一定活着：检查器可能是收起的），不经主线程的通道；`Listed` 只通知页重读 `Terminals::for_session` 和 `info`，所以 `Job::Terminal` 没有字段。
+3. **草稿缓存在 `MessagesModel::draft`，页记在 `ConversationTab`，`ConversationTab::new` 取 `Window`。** 输入框内容经 `cx.observe` 更新 `MessagesModel::draft`，在 `Drop` 里写进 `Shared::memory`（至多 16 个会话、每份至多 256 KiB）；会话上次停在哪一页由 `ConversationTab` 在换会话和 `Drop` 时记下。新建 `MessagesModel` 要建输入框，所以 `ConversationTab::new` 现在取 `Window`，这取代第 1 步差异第 12 条。
+4. **探针节点。** 请求是 `conversation.permission.item[<id>]`，按钮是 `….option.item[<kind>]`（`allow-once`、`allow-always`、`reject-once`、`reject-always`）；回复框不可用时的说明是 `conversation.composer.notice`，其中的按钮是 `….notice.action`；输入框 `conversation.composer.field` 不带 `Label`（用户输入的内容不进语义树）；`conversation.permission.more` 带 `expanded` 属性。设计没写的节点：`conversation.elsewhere`（「可能在别处运行」一行）、`conversation.permission.item[<id>].command` 与 `.workdir`（带 `path` 属性，是相对会话目录的路径）、`.no-detail`、`.edit.item[<path>]`（`<path>` 是 agent 给的完整路径）与其下的 `.row.item[<n>]`、`conversation.permission.rest`（展开后的其余请求）。
+5. **「另有 n 个请求」是 `Expander`，高度固定 260pt，内部滚动。** 设计没有写展开后的高度；固定高度让展开不会把列表挤出检查器，内容多时在这一块里滚动。
+6. **`kind` 属性和日志字段用小写蛇形名。** `permission answered` 的 `option`（`allow_once` 等）和 `kind`（`execute`、`spawn_agent` 等）、请求节点的 `kind` 属性，都由 `diag` 的判别名函数给出，不用 `Debug` 输出。
+7. **「可能在别处运行」在恰好两分钟时成立。** 设计写「2 分钟之内」；实现的边界含等号（`elsewhere_the_two_minute_boundary_is_inclusive`）。
+8. **原因行只在 `can_prompt` 为 `Err` 且不是 `Busy` 时显示，终端驱动优先。** `Busy` 只让 Send 不可用（状态行已说明）；终端在驱动时回复框换成 `conversation-in-terminal`，不再写 `can_prompt` 的原因。
