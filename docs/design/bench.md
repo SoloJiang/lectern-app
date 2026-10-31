@@ -831,7 +831,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `executor/spawn_10k`、`executor/wake_1000x100` | 只记录 | [executor](executor.md#性能) | 第 1 步 |
 | `kernel/service_get`、`kernel/service_for_each/{1,4,16}`、`kernel/service_current/{1,4,16}`、`kernel/emit`、`kernel/emit_nested` | 只记录 | [kernel](kernel.md#性能) | 第 1 步 |
 | `i18n/frame_strings` | 只记录（en 资源里每条消息各取一次、带变量的用样例参数格式化） | [i18n](i18n.md#性能) | 第 1 步 |
-| `terminal/parse_plain`、`terminal/parse_sgr` | 中位数 ≤ 10 ms / ≤ 25 ms（`lectern_terminal::testing::Engine`，120×40，新终端里 `vt_write` 1 MiB：纯 ASCII、每行 119 列 / 每 8 个字符换一次 24 位色；夹具是 `testing::plain_output`、`testing::sgr_output`） | [terminal](terminal.md#性能) | `terminal` 第 2 步 |
+| `terminal/parse_plain`、`terminal/parse_sgr` | 中位数 ≤ 14 ms（[ADR 0055](../adr/0055.md)）/ ≤ 25 ms（`lectern_terminal::testing::Engine`，120×40，新终端里 `vt_write` 1 MiB：纯 ASCII、每行 119 列 / 每 8 个字符换一次 24 位色；夹具是 `testing::plain_output`、`testing::sgr_output`） | [terminal](terminal.md#性能) | `terminal` 第 2 步 |
 | `terminal/frame_full`、`terminal/frame_echo` | 中位数 ≤ 300 µs / ≤ 30 µs（同一引擎上整屏重画（`testing::full_screen`）/ 回显一个字符之后生成一帧） | [terminal](terminal.md#性能) | `terminal` 第 2 步 |
 | `terminal/idle_footprint`、`terminal/scrollback_footprint` | 中位数 ≤ 4 MB / ≤ 24 MB（子进程：一个 120×40 的终端，输出 4 KiB / 10,000 行 119 列的 24 位色文字（`testing::colored_lines`）之后生成一帧，常驻增量；libghostty-vt 的页面不经计数分配器；`Memory`） | [terminal](terminal.md#性能) | `terminal` 第 2 步 |
 | `log/disabled_call`、`log/filtered_call`、`log/enabled_call` | 中位数 ≤ 2 ns / ≤ 5 ns / ≤ 1 µs（调用线程上：低于全局级别的调用；全局级别放行、按 target 拒绝的调用；写出的 info 记录，4 个字段，每个样本是写盘线程清空缓冲后的 256 次调用） | [logging](logging.md#性能) | `logging` 第 1 步 |

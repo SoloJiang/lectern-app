@@ -18,6 +18,7 @@
 //! };
 //! ```
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use gpui::{Action, AnyElement, AnyView, App, Window};
@@ -69,6 +70,11 @@ pub struct SidebarItem {
 pub struct InspectorTab {
     pub label: Key,
     pub build: ViewFactory<()>,
+    /// The only screen that shows this page, a screen ID (the kernel's
+    /// `Name`, which is this `Cow`). `None`: every screen whose
+    /// layout has an inspector shows it, unless the current screen has pages
+    /// of its own (docs/design/workspace.md「检查器页的范围」).
+    pub screen: Option<Cow<'static, str>>,
 }
 
 /// A floating panel above the inspector (`ContributionKind::Panel`).

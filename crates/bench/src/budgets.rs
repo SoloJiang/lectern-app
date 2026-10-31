@@ -2036,7 +2036,7 @@ pub static BUDGETS: &[Budget] = &[
     // terminal; one frame with every row / one row (an echo) dirty.
     share(
         "terminal/parse_plain",
-        &[median(Limit::TimeAtMost(ms(10)))],
+        &[median(Limit::TimeAtMost(ms(14)))],
         TERMINAL,
         ACTIVE,
         Time,

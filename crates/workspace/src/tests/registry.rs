@@ -396,7 +396,11 @@ fn screens_can_be_pushed_twice() {
     rig.drain();
     rig.open("/repos/a", &project_key("/repos/a"));
     rig.dispatch(WorkspaceCommand::Push(review_route()));
-    rig.dispatch(WorkspaceCommand::Push(review_route()));
+    // Another target: the same route on top would be ignored.
+    rig.dispatch(WorkspaceCommand::Push(Route {
+        screen: name(screens::REVIEW),
+        target: Target::Project(project_key("/repos/a")),
+    }));
     assert_eq!(rig.driver.nav().nav().depth(), 2);
     // The factory stays in the registry: it is taken once per push.
     for _ in 0..2 {

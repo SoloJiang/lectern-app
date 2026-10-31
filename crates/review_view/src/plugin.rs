@@ -392,6 +392,7 @@ fn registrations(shared: &Arc<Shared>) -> Vec<Contribution> {
     let tab_payload = InspectorTab {
         label: lectern_i18n::keys::review::PROGRESS_TITLE,
         build: Arc::new(|_, _, cx: &mut App| cx.new(ProgressTab::new).into()),
+        screen: None,
     };
     vec![
         Contribution {
