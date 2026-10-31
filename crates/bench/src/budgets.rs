@@ -2033,8 +2033,10 @@ pub static BUDGETS: &[Budget] = &[
     // ---- terminal (terminal design, steps 2 and 3) ----
     // Step 3, the plugin with a real PTY (`/bin/cat` as the shell): the
     // calling thread's part of `open` (the terminal is closed again after
-    // each sample); one `input` on a running terminal whose thread sleeps;
-    // `Input::Text` to the echo in a new frame after 12 ms of quiet.
+    // each sample); one `input` on a running terminal whose thread sleeps
+    // (6 µs, not the 2 µs of the design: waking a sleeping thread costs
+    // 3 µs or more, ADR 0058); `Input::Text` to the echo in a new frame
+    // after 12 ms of quiet.
     share(
         "terminal/open",
         &[median(Limit::TimeAtMost(us(100)))],
@@ -2044,7 +2046,7 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share(
         "terminal/input",
-        &[median(Limit::TimeAtMost(us(2)))],
+        &[median(Limit::TimeAtMost(us(6)))],
         TERMINAL,
         ACTIVE,
         Time,

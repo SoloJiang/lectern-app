@@ -629,7 +629,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 |---|---|---|
 | 冷启动 20 ms（ADR 0017） | 首帧之前不做任何事 | `AfterFirstFrame` 激活；`activate` 只建空表，< 1 ms（kernel「性能」的 `plugin/*/activate`）。静态库只增加二进制的代码段，不在启动时做初始化 |
 | 空闲内存 60 MB（空窗口）、100 MB（monorepo） | 没有终端时不建线程、不打开 PTY、不取登录环境 | `plugin/terminal/resident` < 1 MB。空闲预算的采样里没有打开的终端 |
-| 滚动与输入 120 fps | 回显与输出不占主线程 | 解析、编码、建帧都在终端线程；主线程上的 `input` ≤ 2 µs、`frame` 只复制 `Arc`。整条路径由 `app/input_frames` 判定（负责的 crate 是 `terminal_view`） |
+| 滚动与输入 120 fps | 回显与输出不占主线程 | 解析、编码、建帧都在终端线程；主线程上的 `input` ≤ 6 µs（[ADR 0058](../adr/0058.md)）、`frame` 只复制 `Arc`。整条路径由 `app/input_frames` 判定（负责的 crate 是 `terminal_view`） |
 | 安装包 ≤ 80 MB（ADR 0018） | 静态链接的 `libghostty-vt.a` | 实现 PR 记录 `app/bundle_size` 的增量（预计几 MB），写进「实际验证」 |
 
 打开的终端不属于任何空闲预算，它的内存是新的份额（下表）。8 个终端都写满滚动缓冲时约 8 × 24 MB，与 Terminal.app 一类终端相当；份额以单个终端计，便于发现回退。第一次启动 agent 时取登录环境要运行一次用户的 shell（通常几百毫秒，上限 5 秒），只在用户点了恢复之后、在终端线程上，期间 Terminal 页显示 `Starting`。
@@ -639,7 +639,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 | ID | 预算 | 测量 |
 |---|---|---|
 | `terminal/open` | 中位数 ≤ 100 µs | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
-| `terminal/input` | 中位数 ≤ 2 µs | 主线程上的一次 `input`：入队与唤醒字节 |
+| `terminal/input` | 中位数 ≤ 6 µs（[ADR 0058](../adr/0058.md) 从 2 µs 改；CI 上要复核） | 主线程上的一次 `input`：入队与唤醒字节；终端线程睡在 `poll` 上时，写唤醒字节本身就要 3 µs 以上 |
 | `terminal/parse_plain` | 中位数 ≤ 10 ms | 1 MiB 纯 ASCII、每行 120 列，120×40，`vt_write` 到解析完成 |
 | `terminal/parse_sgr` | 中位数 ≤ 25 ms | 1 MiB、每 8 个字符换一次 24 位色的输出 |
 | `terminal/frame_full` | 中位数 ≤ 300 µs | 120×40 全部行脏，生成一帧 |
@@ -848,10 +848,10 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
   | 基准 | 实测中位数 | 预算 |
   |---|---|---|
   | `terminal/open` | 55–69 µs（6 次运行） | ≤ 100 µs |
-  | `terminal/input` | 3.6–3.9 µs（另有两次安静时 1.5、1.7 µs） | ≤ 2 µs，**超标** |
+  | `terminal/input` | 3.6–3.9 µs（另有两次安静时 1.5、1.7 µs） | ≤ 6 µs（原来 ≤ 2 µs，见 ADR 0058） |
   | `terminal/echo_latency` | 中位数 81–158 µs，p95 156–247 µs（另有一次 p95 1.24 ms） | 中位数 ≤ 1 ms，p95 ≤ 3 ms |
 
-  `terminal/input` 的 3.6–3.9 µs 是调用线程在终端线程睡在 `poll` 上时写唤醒字节的代价，不是本 crate 的其他工作：同机器上，一个线程睡在 `poll` 上时向 socketpair 写一个字节，中位数 3.1–3.8 µs，向 pipe 写 2.3–2.8 µs，用 `kqueue` 的 `EVFILT_USER` 触发 1.9–2.0 µs；没有线程在等时同一次写只要 0.33 µs。入队、查表和 `Arc` 克隆合起来不到 1 µs。所以 2 µs 在「终端线程睡着」时用 socket 和 `poll`（设计的做法）做不到，换成 pipe 或 `kqueue` 只能接近。这个 PR 引入了被测的代码，所以没有按 [ADR 0055](../adr/0055.md) 放宽预算，数字交给负责推进的 agent 决定（见「与设计的差异」第 11 条）。
+  `terminal/input` 的 3.6–3.9 µs 是调用线程在终端线程睡在 `poll` 上时写唤醒字节的代价，不是本 crate 的其他工作：同机器上，一个线程睡在 `poll` 上时向 socketpair 写一个字节，中位数 3.1–3.8 µs，向 pipe 写 2.3–2.8 µs，用 `kqueue` 的 `EVFILT_USER` 触发 1.9–2.0 µs；没有线程在等时同一次写只要 0.33 µs。入队、查表和 `Arc` 克隆合起来不到 1 µs。所以设计原来的 2 µs 在「终端线程睡着」时用 socket 和 `poll`（设计的做法）做不到。这个 PR 引入了被测的代码，所以不是 [ADR 0055](../adr/0055.md) 的放宽，而是 [ADR 0058](../adr/0058.md) 把预算改为 ≤ 6 µs，仍用 `poll`。这个数要在 CI 上复核（托管 runner 是虚拟机，唤醒可能更慢）。
 - `plugin/terminal/activate`：进程级基准要等第 4 步。`TestKernel` 里 kernel 记下的四段耗时（`manifest`、`activate`、提交、`started`）之和，30 次激活的中位数 3.7 µs，最大 47 µs，≪ 1 ms。
 - 没有验证的：`plugin/terminal/resident`、`app/bundle_size` 的增量、「启动后没有 `terminal-` 线程」（`ps -M`）都要等第 4 步；CI 的 Linux 任务没有在本机跑（`portable-pty`、`rustix` 的 `event` / `process` 和假程序都不含 macOS 专属调用，但没有验证）；`terminal/echo_latency` 在 Linux 上只做冒烟；`input_overflow_*` 里 PTY 输入队列的大小因系统而异，测试只断言「发出的输入多于 4 MiB 缓冲时有输入被丢弃」。
 
@@ -878,5 +878,5 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 8. `terminal/echo_latency` 用 `/bin/cat` 作 shell，不用假程序：`lectern-bench` 里没有 `CARGO_BIN_EXE_lectern-terminal-fake`。`cat` 在行模式下读终端，回显是内核行规程的，本 crate 这一侧的路径（唤醒、编码写、读、解析、建帧）都在里面。
 9. `plugin/terminal/activate` 在这个 PR 里没有基准条目：它由进程级的 `plugin/*/activate` 测量，要等第 4 步 `app` 装配。数字见「实际验证」（`TestKernel` 里 kernel 记下的四段耗时）。
 10. 终端表和唤醒 socket 的细节：`Slot` 是命令队列加唤醒 socket 的一对，只在队列由空变非空时写唤醒字节（`woken` 标志），所以连续的 `input` 只写一次。
-11. `terminal/input` 的预算（中位数 ≤ 2 µs）在本机实测 3.6–3.9 µs 时超标，原因和对照数字见「实际验证」。预算没有改：改性能预算要另写 ADR，由负责推进的 agent 决定；可选的做法是按 ADR 0055 的办法放宽到实测加余量（如 ≤ 6 µs），或把唤醒 socket 换成 `kqueue` 的 `EVFILT_USER`（约 1.9 µs，仍不保证 ≤ 2 µs，且要改设计里「数据流与线程」的 `poll`）。
+11. `terminal/input` 的预算由中位数 ≤ 2 µs 改为 ≤ 6 µs（[ADR 0058](../adr/0058.md)）：本机实测 3.6–3.9 µs，原因是唤醒一个睡在 `poll` 上的线程的系统调用本身要 3 µs 以上，对照数字见「实际验证」。保持 `poll` 循环；`kqueue` 只到约 1.9 µs，且要改「数据流与线程」。这个数要在 CI 上复核。
 12. 所有启动经一把进程内的锁（`src/pty.rs` 的 `SPAWN`），同一时刻只有一个线程 `fork`，设计没有写：原因见「已知限制」第 8 条。
