@@ -5,8 +5,10 @@
 //! index entry is racy. `large` is the 100 000-file shape of the
 //! `git/*_100k*` benchmarks.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, SystemTime};
 
 use lectern_bench::{BenchError, Ctx};
 use lectern_git::testing::{IndexEntry, IndexOptions, IndexStat, TestHead, TestRepo};
@@ -122,6 +124,12 @@ pub fn shaped(shape: &Shape) -> TestRepo {
 /// `shaped`, with the index entries it wrote, for a benchmark that writes
 /// another index (`git/filter_100k`).
 pub fn shaped_with_entries(shape: &Shape) -> (TestRepo, Vec<IndexEntry>) {
+    let (t, entries, _) = shaped_all(shape);
+    (t, entries)
+}
+
+/// `shaped_with_entries`, with the base commit `main` is at.
+fn shaped_all(shape: &Shape) -> (TestRepo, Vec<IndexEntry>, Oid) {
     let t = TestRepo::new();
     t.append_config("[core]\n\tignoreCase = true\n");
     let hash = t.hash();
@@ -158,7 +166,46 @@ pub fn shaped_with_entries(shape: &Shape) -> (TestRepo, Vec<IndexEntry>) {
         ..IndexOptions::default()
     };
     t.write_index_with(t.common_dir(), &entries, &options);
-    (t, entries)
+    (t, entries, commit)
+}
+
+/// `shaped`, with `linked` linked worktrees `wt<i>` besides the main one,
+/// each on its own branch at the base commit with every file of the shape
+/// written and backdated, and an index with their stat: clean, like the
+/// main worktree. Returns the repository and the canonical roots of the
+/// linked worktrees (`Worktree::root` in `project`'s snapshot is canonical).
+#[allow(dead_code, reason = "only the process target's app/switch_worktree")]
+pub fn shaped_linked(shape: &Shape, linked: usize) -> Result<(TestRepo, Vec<PathBuf>), BenchError> {
+    let (t, entries, commit) = shaped_all(shape);
+    let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    let mut roots = Vec::with_capacity(linked);
+    for i in 0..linked {
+        let name = format!("wt{i}");
+        let branch = format!("refs/heads/{name}");
+        t.set_ref(&branch, commit);
+        let root = t.base().join(&name);
+        let admin = t.add_worktree(&name, &root, TestHead::Branch(&branch));
+        let root = std::fs::canonicalize(&root)?;
+        let mut here = Vec::with_capacity(entries.len());
+        for (path, entry) in shape.paths.iter().zip(&entries) {
+            let file = root.join(path);
+            if let Some(dir) = file.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::copy(t.root().join(path), &file)?;
+            std::fs::File::options()
+                .write(true)
+                .open(&file)?
+                .set_modified(hour_ago)?;
+            here.push(IndexEntry {
+                stat: Some(IndexStat::of(&file)),
+                ..entry.clone()
+            });
+        }
+        t.write_index(&admin, &here);
+        roots.push(root);
+    }
+    Ok((t, roots))
 }
 
 /// A worktree with realistic changes: `modified` tracked files and

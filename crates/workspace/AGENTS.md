@@ -10,6 +10,8 @@
 
 ## 边界
 
+- `Hub::open_snapshots`（已打开项目的快照，只读，取锁复制 `Arc`）只给 `app` 的测量构建用，按根路径找 worktree（[worktrees 设计 D](../../docs/design/worktrees.md#对其他-crate-的要求)）；视图和插件经 `dyn Projects` 取快照，不用它。
+
 - 新增界面元素前对照[交互规范「三层结构」](../../docs/design/interaction.md#三层结构)和 [ADR 0012](../../docs/adr/0012.md)：不做活动栏、文件标签页、常驻文件树、状态栏、底部终端停靠。
 - 只提供容器与布局，具体内容由各视图 crate 经 `dyn Contributions` 填入（设计文档「接口」）。载荷的具体类型归 `ui::contrib`，本 crate 经 `registry::Payloads` 检查和取回。
 - 不做 IO：窗口状态文件由 `app` 读写，本 crate 只给出 `WindowState` 和变化回调；首帧之前没有本 crate 的代码运行（[ADR 0017](../../docs/adr/0017.md)）。

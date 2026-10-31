@@ -4608,6 +4608,7 @@ dependencies = [
  "lectern-usage",
  "lectern-welcome",
  "lectern-workspace",
+ "lectern-worktrees",
  "serde_json",
  "tempfile",
 ]
@@ -4639,6 +4640,7 @@ dependencies = [
  "lectern-terminal",
  "lectern-ui",
  "lectern-usage",
+ "lectern-worktrees",
  "libc",
  "serde_json",
  "tempfile",

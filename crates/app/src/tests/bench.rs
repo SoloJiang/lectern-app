@@ -3,7 +3,7 @@
 //! requests on their way to the main thread. The probe thread and the socket
 //! are in `lectern-bench`'s tests and in `tests/bench_probe.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,9 @@ use lectern_bench::wire::{self, OpenTarget};
 use lectern_i18n::{Locale, Strings};
 use lectern_kernel::Name;
 use lectern_logging::EarlyConfig;
+use lectern_services::project::{
+    ActiveTree, FileList, Head, ProjectKey, ProjectSnapshot, Scan, Worktree, WorktreeKey,
+};
 use lectern_services::review::ReviewTarget;
 use lectern_services::session::{SessionKey, SourceId};
 use lectern_services::workspace::{
@@ -23,7 +26,7 @@ use lectern_ui::Appearance;
 use lectern_workspace::registry::Payloads;
 use lectern_workspace::{Hub, Item, Queued};
 
-use crate::bench::{BenchDriver, BenchRequest, Reporter, handle, wire_milestone};
+use crate::bench::{BenchDriver, BenchRequest, Reporter, handle, switch_worktree, wire_milestone};
 use crate::profile::Profile;
 use crate::quit;
 use crate::startup::Startup;
@@ -95,7 +98,6 @@ fn open_is_reported_as_unsupported() {
     let driver = BenchDriver::new(requests, recorder.clone());
     for target in [
         OpenTarget::File(PathBuf::from("/f")),
-        OpenTarget::Worktree(PathBuf::from("/w")),
         OpenTarget::Scroll,
         OpenTarget::Animate,
         OpenTarget::Input {
@@ -109,7 +111,6 @@ fn open_is_reported_as_unsupported() {
         recorder.errors(),
         [
             "open file unsupported",
-            "open worktree unsupported",
             "open scroll unsupported",
             "open animate unsupported",
             "open input unsupported",
@@ -118,6 +119,19 @@ fn open_is_reported_as_unsupported() {
     // None of them reaches the main thread, and the path of an unsupported
     // kind is not in the message.
     assert!(incoming.try_recv().is_err());
+}
+
+#[test]
+fn a_worktree_is_forwarded_with_its_root() {
+    let (requests, mut incoming) = unbounded();
+    let recorder = Arc::new(Recorder::default());
+    let driver = BenchDriver::new(requests, recorder.clone());
+    driver.open(OpenTarget::Worktree(PathBuf::from("/repos/a-w1")));
+    assert_eq!(
+        incoming.try_recv().unwrap(),
+        BenchRequest::OpenWorktree(PathBuf::from("/repos/a-w1"))
+    );
+    assert!(recorder.errors().is_empty());
 }
 
 #[test]
@@ -196,6 +210,134 @@ fn open_diff_takes_the_session_row_path(cx: &mut TestAppContext) {
         other => panic!("{other:?}"),
     }
     assert_eq!(recorder.errors(), ["open diff without a workspace"]);
+}
+
+/// A git project `a` with the worktrees `main` (current), `w1`, `w2` and
+/// `gone` (prunable), roots at `/repos/a-<name>`.
+fn project() -> Arc<ProjectSnapshot> {
+    let tree = |name: &str, prunable: bool| Worktree {
+        key: WorktreeKey(Arc::from(Path::new(&format!(
+            "/repos/a/.git/worktrees/{name}"
+        )))),
+        root: Arc::from(Path::new(&format!("/repos/a-{name}"))),
+        is_main: false,
+        head: Head::Unknown,
+        locked: false,
+        prunable,
+    };
+    let worktrees = vec![
+        tree("main", false),
+        tree("w1", false),
+        tree("w2", false),
+        tree("gone", true),
+    ];
+    Arc::new(ProjectSnapshot {
+        key: ProjectKey::Git {
+            common_dir: Arc::from(Path::new("/repos/a/.git")),
+        },
+        generation: 1,
+        name: Arc::from("a"),
+        active: Some(ActiveTree {
+            root: worktrees[0].root.clone(),
+            worktree: Some(worktrees[0].key.clone()),
+            opened_at: Arc::from(""),
+            files: Scan::Ready(Arc::new(FileList::builder().build())),
+            packages: Scan::Ready(Arc::from(Vec::new())),
+            dirs: Scan::Pending,
+        }),
+        worktrees: Arc::from(worktrees),
+    })
+}
+
+fn queue_hub() -> (Arc<Hub>, Arc<Mutex<Vec<Queued>>>) {
+    let queued = Arc::new(Mutex::new(Vec::<Queued>::new()));
+    let sink = queued.clone();
+    let hub = Hub::new(
+        Box::new(NoPayloads),
+        Arc::new(move |item| sink.lock().unwrap().push(item)),
+    );
+    (hub, queued)
+}
+
+fn commands(queued: &Mutex<Vec<Queued>>) -> Vec<WorkspaceCommand> {
+    queued
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|queued| match &queued.item {
+            Item::Command(command) => command.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+/// The Worktrees screen's button: the screen is pushed, then the worktree
+/// with that root becomes the current one.
+#[test]
+fn a_worktree_switch_pushes_the_screen_and_sets_the_worktree() {
+    let (hub, queued) = queue_hub();
+    let recorder = Recorder::default();
+    switch_worktree(&*hub, &[project()], Path::new("/repos/a-w2"), &recorder);
+    assert_eq!(
+        commands(&queued),
+        [
+            WorkspaceCommand::Push(Route {
+                screen: Name::Borrowed(screens::WORKTREES),
+                target: Target::None,
+            }),
+            WorkspaceCommand::SetActiveWorktree(WorktreeKey(Arc::from(Path::new(
+                "/repos/a/.git/worktrees/w2"
+            )))),
+        ]
+    );
+    assert!(recorder.errors().is_empty());
+}
+
+#[test]
+fn a_worktree_switch_that_cannot_happen_is_an_error_without_the_path() {
+    let (hub, queued) = queue_hub();
+    let recorder = Recorder::default();
+    let open = [project()];
+    // The current worktree, a prunable one, one nobody has, and no project.
+    for root in ["/repos/a-main", "/repos/a-gone", "/repos/a-nobody"] {
+        switch_worktree(&*hub, &open, Path::new(root), &recorder);
+    }
+    switch_worktree(&*hub, &[], Path::new("/repos/a-w1"), &recorder);
+    assert_eq!(
+        recorder.errors(),
+        [
+            "open worktree is the current one",
+            "open worktree not found",
+            "open worktree not found",
+            "open worktree not found",
+        ]
+    );
+    assert!(commands(&queued).is_empty());
+}
+
+#[gpui::test]
+fn a_worktree_request_without_a_workspace_or_a_project_is_an_error(cx: &mut TestAppContext) {
+    let (hub, queued) = queue_hub();
+    let recorder = Recorder::default();
+    cx.update(|cx| {
+        let root = || PathBuf::from("/repos/a-w1");
+        handle(BenchRequest::OpenWorktree(root()), None, &recorder, cx);
+        // A workspace whose `dyn Projects` has not started has no project.
+        handle(
+            BenchRequest::OpenWorktree(root()),
+            Some(&*hub),
+            &recorder,
+            cx,
+        );
+    });
+    assert_eq!(
+        recorder.errors(),
+        [
+            "open worktree without a workspace",
+            "open worktree not found"
+        ]
+    );
+    assert!(commands(&queued).is_empty());
 }
 
 #[gpui::test]

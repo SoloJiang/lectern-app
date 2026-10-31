@@ -90,6 +90,9 @@ struct State {
     built_once: bool,
     /// How many times the current worktree changed, shown or not.
     switches: u64,
+    /// `switches` when the screen last became the current one: what the
+    /// milestone counts from.
+    shown_at: u64,
     /// Sessions `complete` was asked for; cleared when the project closes.
     completed: HashSet<SessionKey>,
     /// From `started`; the callback of the usage link schedules through it.
@@ -124,10 +127,18 @@ impl Hub {
 
     /// How many times the current worktree changed (`ProjectEvent::Changed`
     /// with `parts.active`), also while the screen is not the current one.
-    /// A model built when the screen is pushed takes the value from before
-    /// the switch that follows (「数据流与线程」).
     pub fn switches(&self) -> u64 {
         self.lock().switches
+    }
+
+    /// The value of [`switches`](Hub::switches) when the screen last became
+    /// the current one. A model takes it as what it has seen: the switch that
+    /// follows the push counts for the milestone even when it arrives before
+    /// `workspace` has built the model (the view is built in the frame after
+    /// the push), and a switch from before the push does not
+    /// (「数据流与线程」).
+    pub fn switches_when_shown(&self) -> u64 {
+        self.lock().shown_at
     }
 
     /// A view that was just built (`view` is `screen` or `detail`) registers
@@ -361,6 +372,7 @@ impl Hub {
             if std::mem::replace(&mut state.shown, true) {
                 return;
             }
+            state.shown_at = state.switches;
             state.built_once = false;
             (state.project.clone(), state.epoch)
         };

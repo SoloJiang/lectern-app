@@ -80,6 +80,7 @@ impl Active for WorkspaceActive {
     fn started(&mut self, handle: PluginHandle) {
         self.hub.started(&handle);
         if let Some(projects) = self.projects.take() {
+            self.hub.keep_projects(projects.clone());
             self.hub.enqueue(Item::Projects(projects));
         }
     }

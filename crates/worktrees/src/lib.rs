@@ -26,6 +26,8 @@ mod actions;
 mod contribute;
 mod detail;
 mod diag;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 mod hub;
 mod model;
 mod nodes;

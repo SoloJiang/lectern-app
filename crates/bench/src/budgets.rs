@@ -124,6 +124,8 @@ pub enum State {
 
 /// MB in this table are 2^20 bytes, as Activity Monitor and `du -k` count.
 pub const MB: u64 = 1 << 20;
+/// KiB, 2^10 bytes.
+pub const KIB: u64 = 1 << 10;
 
 const fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
@@ -184,6 +186,7 @@ const USAGE: &str = "docs/design/usage.md#性能";
 const UI: &str = "docs/design/ui.md#性能";
 const REVIEW_VIEW: &str = "docs/design/review_view.md#性能";
 const PROJECT_HOME: &str = "docs/design/project_home.md#性能";
+const WORKTREES: &str = "docs/design/worktrees.md#性能";
 /// The frame-time budgets of the screens wait for `workspace` to record
 /// frames (`FrameRecord::frames` is always empty, workspace design
 /// 「已知限制」) and for `app` to hand the records to the probe.
@@ -357,7 +360,7 @@ pub static BUDGETS: &[Budget] = &[
         "app/switch_worktree",
         &[median(Limit::TimeBelow(ms(100)))],
         TECH,
-        State::Planned("worktrees"),
+        ACTIVE,
         Process,
     ),
     // ---- code navigation (ADR 0030) ----
@@ -2165,6 +2168,23 @@ pub static BUDGETS: &[Budget] = &[
         PROJECT_HOME,
         FRAMES_RECORDED,
         Process,
+    ),
+    // `worktrees/*` (docs/design/worktrees.md「性能」): GPUI, so macOS alone.
+    share_macos(
+        "worktrees/build_1000",
+        &[median(Limit::TimeBelow(ms(2)))],
+        WORKTREES,
+        ACTIVE,
+        Time,
+    ),
+    // The composed snapshot; the views' state needs a window and is not in
+    // the count (worktrees design「与设计的差异」, step 3).
+    share_macos(
+        "worktrees/resident_bytes",
+        &[median(Limit::BytesBelow(256 * KIB))],
+        WORKTREES,
+        ACTIVE,
+        Memory,
     ),
 ];
 

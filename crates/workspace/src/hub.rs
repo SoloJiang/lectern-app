@@ -9,7 +9,7 @@ use lectern_kernel::{
     ActivationToken, Emitter, KernelControl, Name, PendingGuard, PluginHandle, ServiceRef,
 };
 use lectern_logging::debug;
-use lectern_services::project::{ProjectEvent, Projects};
+use lectern_services::project::{ProjectEvent, ProjectSnapshot, Projects};
 use lectern_services::workspace::{
     CommandHandler, Contribution, Contributions, LeaveGuard, LeaveScope, Milestone, Registration,
     SidebarEntry, WorkspaceCommand, WorkspaceEvent,
@@ -138,6 +138,8 @@ struct Plugin {
     token: Option<ActivationToken>,
     /// Emits `WorkspaceEvent`s.
     emitter: Option<Emitter>,
+    /// `dyn Projects`, kept for `open_snapshots`.
+    projects: Option<ServiceRef<dyn Projects>>,
 }
 
 /// The process-wide, thread-safe part of the workspace: the registry and the
@@ -177,6 +179,36 @@ impl Hub {
             control: handle.control(),
             token: handle.token(),
         });
+    }
+
+    /// Keeps `dyn Projects` for `open_snapshots`; `WorkspacePlugin::started`.
+    pub(crate) fn keep_projects(&self, projects: ServiceRef<dyn Projects>) {
+        self.plugin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .projects = Some(projects);
+    }
+
+    /// The snapshots of the open projects, in the order they were opened.
+    /// Empty before `started` and once `dyn Projects` is gone. Only copies
+    /// `Arc`s under locks (`Projects::snapshot`): no IO, fine on the main
+    /// thread. For `app`'s measurement build, which finds a worktree by its
+    /// root (docs/design/worktrees.md「对其他 crate 的要求」D).
+    pub fn open_snapshots(&self) -> Vec<Arc<ProjectSnapshot>> {
+        let projects = self
+            .plugin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .projects
+            .clone();
+        let Some(projects) = projects.as_ref().and_then(ServiceRef::get) else {
+            return Vec::new();
+        };
+        projects
+            .open_projects()
+            .iter()
+            .filter_map(|key| projects.snapshot(key))
+            .collect()
     }
 
     /// The workspace plugin's own token, from `started`.

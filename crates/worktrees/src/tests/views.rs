@@ -499,6 +499,31 @@ fn a_switch_before_the_screen_is_built_is_not_reported(cx: &mut TestAppContext) 
     assert!(rig.contributions.milestones().is_empty());
 }
 
+/// The measurement build pushes the screen and switches the worktree at
+/// once, and `workspace` builds the view in the frame after the push: the
+/// switch can arrive before the model exists. It counts, because the model
+/// takes the value from when the screen became the current one.
+#[gpui::test]
+fn a_switch_between_showing_and_building_is_reported(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    rig.hide();
+    rig.show();
+    let fx = project_fx().active_in("feat").generation(2);
+    rig.projects.set(fx.snapshot());
+    rig.changed_parts(&fx.key(), active_parts());
+    assert_eq!(rig.hub().switches(), 1);
+    assert_eq!(rig.hub().switches_when_shown(), 0);
+    rig.run();
+    let (_host, vcx) = window(cx, &rig);
+    frame(vcx);
+    assert_eq!(rig.snapshot().unwrap().active.as_ref(), Some(&world.feat));
+    assert_eq!(
+        rig.contributions.milestones(),
+        [Milestone::WorktreeSwitched]
+    );
+}
+
 #[gpui::test]
 fn timer_moves_an_expired_session_to_idle(cx: &mut TestAppContext) {
     let rig = rig(cx);

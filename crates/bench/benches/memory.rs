@@ -42,6 +42,9 @@ mod syntax_engine;
 mod terminal;
 #[path = "memory/usage.rs"]
 mod usage;
+#[cfg(target_os = "macos")]
+#[path = "memory/worktrees.rs"]
+mod worktrees;
 
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
@@ -322,5 +325,14 @@ fn main() -> ExitCode {
     // SAFETY: first thing in the process, before any tree-sitter call: the
     // counting allocator then sees syntax trees (`code_intel/batch_peak`).
     unsafe { lectern_code_intel::testing::route_tree_sitter_allocations() };
-    lectern_bench::main(Target::Memory, env!("CARGO_TARGET_TMPDIR"), BENCHES)
+    // `worktrees/*` needs GPUI, which only builds on macOS in this workspace.
+    #[cfg(target_os = "macos")]
+    let benches: Vec<Bench> = {
+        let mut all = BENCHES.to_vec();
+        all.push(worktrees::RESIDENT);
+        all
+    };
+    #[cfg(not(target_os = "macos"))]
+    let benches: Vec<Bench> = BENCHES.to_vec();
+    lectern_bench::main(Target::Memory, env!("CARGO_TARGET_TMPDIR"), &benches)
 }

@@ -2,12 +2,14 @@
 //! real activations, and the driver over it: what applies when, what is
 //! rejected, and how the leave guards are asked.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use lectern_kernel::{Activation, Plugin, service};
-use lectern_services::project::{ChangedParts, ProjectEvent, Projects};
+use lectern_services::project::{
+    ChangedParts, ProjectEvent, ProjectKey, ProjectSnapshot, Projects,
+};
 use lectern_services::workspace::{
     Contribution, ContributionKind, Contributions, LeaveScope, Payload, Route, SidebarSection,
     Target, WorkspaceCommand, WorkspaceEvent, screens,
@@ -42,6 +44,38 @@ fn plugin_manifest_matches_the_design() {
     assert_eq!(manifest.provides, vec![service::<dyn Contributions>()]);
     assert_eq!(manifest.requires, vec![service::<dyn Projects>()]);
     assert_eq!(manifest.activation, vec![Activation::AfterFirstFrame]);
+}
+
+/// `Hub::open_snapshots` (for the measurement build): nothing before the
+/// plugin has started, then the snapshots of the open projects in order.
+#[test]
+fn open_snapshots_follow_the_projects_service() {
+    let snapshot = |name: &str| {
+        Arc::new(ProjectSnapshot {
+            key: ProjectKey::Folder {
+                root: Arc::from(Path::new(&format!("/p/{name}"))),
+            },
+            generation: 1,
+            name: Arc::from(name),
+            worktrees: Arc::from(Vec::new()),
+            active: None,
+        })
+    };
+    let mut rig = Rig::prepared();
+    rig.projects.open.lock().unwrap().push(snapshot("a"));
+    assert!(rig.hub.open_snapshots().is_empty(), "not started yet");
+    rig.kernel
+        .activate()
+        .expect("the workspace plugin activates");
+    rig.drain();
+    rig.projects.open.lock().unwrap().push(snapshot("b"));
+    let names: Vec<_> = rig
+        .hub
+        .open_snapshots()
+        .iter()
+        .map(|s| s.name.to_string())
+        .collect();
+    assert_eq!(names, ["a", "b"]);
 }
 
 #[test]
