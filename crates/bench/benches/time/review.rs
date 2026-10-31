@@ -141,6 +141,60 @@ pub const OVERVIEW_CLOUDPRINT: Bench = Bench {
     run: overview_cloudprint,
 };
 
+/// (worktrees A) The parallel worktree overview of the cloudprint shape:
+/// 11 worktrees (the main one and 10 linked, each with 20 edited files
+/// that overlap), cold, from `watch_worktrees` to the last count. Record
+/// only.
+pub const WORKTREES_CLOUDPRINT: Bench = Bench {
+    id: "review/worktrees_cloudprint",
+    run: worktrees_cloudprint,
+};
+
+fn worktrees_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let sessions = ctx.scale(20, 4);
+    let linked = ctx.scale(10, 2);
+    let shape = Shape::cloudprint();
+    let repo = review_repo::build(&shape, true, sessions)?;
+    repo.add_linked(&shape, true, linked, 20)?;
+    let scratch = ctx.scratch().to_path_buf();
+    let time = sample(ctx, |n| {
+        let driven = Driven::new(
+            Arc::clone(&repo.projects),
+            vec![Arc::clone(&repo.sessions)],
+            &scratch.join(format!("worktrees-{n}")),
+            repo.now,
+        );
+        let project = driven.project();
+        let started = Instant::now();
+        let interest = driven.watch_worktrees(&project);
+        driven.run();
+        let last = driven
+            .take_events()
+            .into_iter()
+            .filter(|(e, _)| matches!(e, ReviewEvent::Worktrees { .. }))
+            .map(|(_, at)| at)
+            .max()
+            .ok_or_else(|| BenchError::new("no worktrees event"))?;
+        let overview = driven
+            .worktrees(&project)
+            .ok_or_else(|| BenchError::new("no worktrees overview"))?;
+        if overview.worktrees.len() != linked + 1 {
+            return Err(BenchError::debug("worktrees", overview.worktrees.len()));
+        }
+        drop(interest);
+        driven.run();
+        driven.close_cache();
+        Ok(last.duration_since(started))
+    })?;
+    Ok(vec![
+        Measured::new("review/worktrees_cloudprint", Value::Time(time)).with_note(Some(format!(
+            "{} worktrees, {} paths",
+            linked + 1,
+            shape.paths.len()
+        ))),
+    ])
+}
+
 /// The second round of a project's overview (a full trigger, as a batch
 /// with git metadata gives) to its `Overview` event, on `driven`.
 fn overview_round(

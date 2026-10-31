@@ -60,5 +60,7 @@ mod session;
 mod sink;
 mod state;
 
+pub(in crate::engine) use round::count_limits;
+pub(in crate::engine) use state::Counted;
 use state::{Known, Watching};
 pub(crate) use state::{Overviews, Trigger};

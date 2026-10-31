@@ -116,6 +116,17 @@ pub(super) struct Known {
     pub claims: Arc<Claims>,
 }
 
+/// The current worktree's count as the overview holds it.
+#[derive(Clone)]
+pub(in crate::engine) enum Counted {
+    /// No interest in the overview, or its round found nothing.
+    Absent,
+    /// The first round has not published yet.
+    Pending,
+    Set(WorktreeKey, Arc<ChangeSet>),
+    Capped(WorktreeKey),
+}
+
 /// The overview's two subscriptions. Dropping it unsubscribes.
 pub(super) struct Watching {
     pub _repo: RepoWatch,
@@ -130,6 +141,28 @@ impl Engine {
             .get(project)
             .filter(|s| s.interests > 0)
             .and_then(|s| s.snapshot.clone())
+    }
+
+    /// What the overview holds of the current worktree's count for the
+    /// worktrees overview (「并行 worktree 总览」 step 2): the kept set, the
+    /// capped count, "not yet" while the first round runs, or nothing
+    /// without an interest (or after a failed round).
+    pub(in crate::engine) fn overview_counted(&self, project: &ProjectKey) -> Counted {
+        let overviews = lock(&self.overviews);
+        let Some(state) = overviews.projects.get(project).filter(|s| s.interests > 0) else {
+            return Counted::Absent;
+        };
+        let Some(snapshot) = &state.snapshot else {
+            return Counted::Pending;
+        };
+        let Some(git) = &state.git else {
+            return Counted::Absent;
+        };
+        match (&state.count, snapshot.outside) {
+            (Some(set), _) => Counted::Set(git.key.clone(), Arc::clone(set)),
+            (None, OutsideCount::Capped(_)) => Counted::Capped(git.key.clone()),
+            (None, _) => Counted::Absent,
+        }
     }
 
     /// `Review::watch_overview`: the first interest starts a round at
@@ -173,12 +206,17 @@ impl Engine {
         };
         if let Some(state) = released {
             self.drop_overview_state(state);
+            // The worktrees overview may have been waiting for this
+            // overview's first count: it compares the current worktree
+            // itself from now on.
+            self.worktrees_current_unsettled(project);
         }
     }
 
     /// `ProjectEvent::Closed`: the state goes whatever the interests; a
     /// later release finds nothing.
     pub(crate) fn project_closed(&self, project: &ProjectKey) {
+        self.worktrees_closed(project);
         let released = lock(&self.overviews).projects.remove(project);
         if let Some(state) = released {
             self.drop_overview_state(state);
@@ -197,6 +235,7 @@ impl Engine {
     /// sub-project are made again from the count set; other changes ask
     /// for nothing (the watches see the files).
     pub(crate) fn project_changed(&self, project: &ProjectKey, parts: ChangedParts) {
+        self.worktrees_project_changed(project, parts);
         if parts.active {
             self.overview_request(project, Trigger::resolve());
         } else if parts.packages {

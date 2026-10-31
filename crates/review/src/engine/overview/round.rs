@@ -6,7 +6,7 @@ use super::*;
 
 /// `Limits` of the count comparison (「概览」 step 1, ADR 0035): nothing
 /// retained, every file listed.
-pub(super) fn count_limits() -> Limits {
+pub(in crate::engine) fn count_limits() -> Limits {
     Limits {
         retained_bytes: 0,
         total_patch_bytes: 0,
@@ -321,12 +321,22 @@ impl Engine {
                 outside,
                 packages,
             }));
-            ReviewEvent::Overview {
-                project: project.clone(),
-                generation: state.generation,
-            }
+            let current = state.git.as_ref().map(|g| g.key.clone());
+            (
+                ReviewEvent::Overview {
+                    project: project.clone(),
+                    generation: state.generation,
+                },
+                current,
+            )
         };
+        let (event, current) = event;
         (self.cfg.emit)(event);
+        // The worktrees overview takes the current worktree's
+        // uncommitted count from this set (「并行 worktree 总览」).
+        if let Some(current) = current {
+            self.worktrees_uncommitted_changed(project, current);
+        }
         self.overview_round_ended(project);
     }
 }

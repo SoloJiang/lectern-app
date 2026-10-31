@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（[#326](https://github.com/SoloJiang/lectern-app/pull/326)）；第 6 步（意见的存储、命令与位置：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`，`NotePlace`，摘录，标注日志的 `note`、`note_removed`、`notes_sent` 的读取、索引、保留与压缩，`review/note_add`、`review/resident_notes_bytes`）已实现（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）。第 7 步（发送、prompt 与回应的那一轮：`SendNotes`、`CopyBatch`，内置的剪贴板途径，`register_note_route`，`notes::prompt`，批次与回应的那一轮的对应，`notes_sent` 的写入，「日志与诊断」里 #22 的发送记录，`review/notes_prompt_40`）已实现（[#331](https://github.com/SoloJiang/lectern-app/pull/331)）。真实的 Claude Code 与 Codex 会话里粘贴 prompt 的手动检查还没做，随 `review_view` 的一步进行（见「实际验证」第 7 步的「没有验证的」）。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（[#326](https://github.com/SoloJiang/lectern-app/pull/326)）；第 6 步（意见的存储、命令与位置：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`，`NotePlace`，摘录，标注日志的 `note`、`note_removed`、`notes_sent` 的读取、索引、保留与压缩，`review/note_add`、`review/resident_notes_bytes`）已实现（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）。第 7 步（发送、prompt 与回应的那一轮：`SendNotes`、`CopyBatch`，内置的剪贴板途径，`register_note_route`，`notes::prompt`，批次与回应的那一轮的对应，`notes_sent` 的写入，「日志与诊断」里 #22 的发送记录，`review/notes_prompt_40`）已实现（[#331](https://github.com/SoloJiang/lectern-app/pull/331)）。真实的 Claude Code 与 Codex 会话里粘贴 prompt 的手动检查还没做，随 `review_view` 的一步进行（见「实际验证」第 7 步的「没有验证的」）。并行 worktree 总览（[worktrees 设计「对其他 crate 的要求」](worktrees.md#对其他-crate-的要求)的 A 的 `review` 部分：`Review::worktrees`、`watch_worktrees`、`refresh_worktrees`、`ReviewEvent::Worktrees`，`review/worktrees_cloudprint`）已实现（PR 号待定），见「概览」的「并行 worktree 总览」。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的领域部分（意见的存储、锚点与 Drifted、攒批、拼成 prompt、经发送途径送出、与回应它的那一轮对应）。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
@@ -25,6 +25,7 @@
   - 噪声文件（lockfile、生成文件、快照）的模式列表，同时决定默认折叠、规则分组和模型输入里的占位；会话日志认不出或没有会话时按规则分组。
   - 规则简报：只用本地已有的信息生成「值得先看」（ADR 0019），并接收其他插件经 `Review::register_brief_rules` 登记的 `BriefRules` 提供者补充的条目。
   - 项目主页的概览：每个会话的已看进度和信号、每个 worktree 不属于任何会话的改动数（[ADR 0035](../adr/0035.md) 的计数比较）。
+  - 并行 worktree 总览（worktrees 屏幕，[worktrees 设计](worktrees.md)）：项目每个 worktree 的未提交改动数、相对主干已提交的改动数、两者的并集，以及 worktree 之间共同改动的文件（「概览」的「并行 worktree 总览」）。
   - 展示行与正文：视图滚到哪个文件、哪一轮，本 crate 在后台准备好展示行、两侧文本和 prompt / 说明的正文。
   - 审阅意见（#22，「审阅意见」）：加、改、删一条意见；意见的锚点与 Drifted；攒成一批，按固定模板拼成给 agent 的 prompt，经发送途径送出（内置剪贴板途径，会话途径由其他插件经 `Review::register_note_route` 登记）；记进标注日志；找出回应一批意见的那一轮。
 - 不做：
@@ -388,6 +389,17 @@ pub trait Review: Send + Sync {
     /// 关注一个项目的概览：返回值持有期间本 crate 计算并保持它（含 ADR 0035 的计数比较），drop 后释放。立即返回。
     fn watch_overview(&self, project: &ProjectKey) -> OverviewInterest;
 
+    /// 并行 worktree 总览（worktrees 设计「对其他 crate 的要求」A；「概览」的「并行 worktree 总览」）。不阻塞，取锁复制 `Arc`；
+    /// 没有关注者、也没有保留的结果时为 None。关注放下后结果保留到项目关闭。带默认实现（返回 None）。
+    fn worktrees(&self, project: &ProjectKey) -> Option<Arc<WorktreesOverview>>;
+
+    /// 关注一个项目全部 worktree 的改动计数：返回值持有期间本 crate 计算并保持它，drop 后停止计算（结果保留）。立即返回。
+    /// 文件夹项目没有 worktree，返回什么也不做的关注。带默认实现。
+    fn watch_worktrees(&self, project: &ProjectKey) -> OverviewInterest;
+
+    /// 用户要求刷新（⌘R）：有关注者时把这个项目的全部 worktree 标为失效，按节流规则重算。立即返回。带默认实现（什么也不做）。
+    fn refresh_worktrees(&self, project: &ProjectKey);
+
     /// 登记一个简报规则的提供者（「简报规则的扩展点」）。立即返回，任何线程。本 crate 每次调用提供者之前
     /// `token.enter()`，取不到（提供者已停用）就当作没有登记。返回值 drop 时注销。
     fn register_brief_rules(&self, provider: Arc<dyn BriefRules>, token: ActivationToken) -> BriefRulesRegistration;
@@ -403,13 +415,37 @@ pub enum ReviewEvent {
     /// `Prepare` 请求的行或正文有一部分已就绪。
     Prepared { id: ReviewId, generation: u64 },
     Overview { project: ProjectKey, generation: u64 },
+    /// `Review::worktrees(project)` 换了一份新的（每比较完一个 worktree 一次）。
+    Worktrees { project: ProjectKey, generation: u64 },
 }
 
 pub struct ReviewId(pub u64);
 
-/// `watch_overview` 的关注，drop 时注销（任何线程，不阻塞）。不序列化。
+/// `watch_overview`、`watch_worktrees` 的关注，drop 时注销（任何线程，不阻塞）。不序列化。
 pub struct OverviewInterest { /* 实现方传入的注销回调 */ }
 impl OverviewInterest { pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self; }
+
+/// 项目全部 worktree 的改动计数与文件重叠（`lectern-services` 的 `review::worktrees`，类型逐字段见
+/// [worktrees 设计「对其他 crate 的要求」](worktrees.md#对其他-crate-的要求) A）。
+pub struct WorktreesOverview {
+    pub project: ProjectKey,
+    pub generation: u64,
+    /// 主干：`Repo::default_branch()` 的完整引用名，且它能解析到提交。没有时为 None。
+    pub base: Option<Arc<str>>,
+    /// `ProjectSnapshot::worktrees` 里不是 prunable 的 worktree，顺序相同。还没有算出的 worktree 三个计数都是 `Pending`。
+    pub worktrees: Arc<[WorktreeChanges]>,
+}
+pub struct WorktreeChanges {
+    pub worktree: WorktreeKey,
+    pub head: Option<BlobId>,              // 计数依据的 HEAD 提交；unborn 或读不出时 None
+    pub uncommitted: ChangeCount,          // 相对 HEAD（含未跟踪文件）
+    pub committed: ChangeCount,            // merge-base(主干, HEAD) 到 HEAD 之间改变的路径
+    pub vs_base: ChangeCount,              // 上两项路径的并集
+    pub overlaps: Option<Arc<[Overlap]>>,  // 至多 8 项；路径集合未知时 None
+    pub counted_at: Option<Timestamp>,     // 最近一次完整计算的时刻（`Config::clock`）
+}
+pub enum ChangeCount { Pending, Files(u32), Capped /* > 4000 个路径 */, Unavailable }
+pub struct Overlap { pub other: WorktreeKey, pub files: u32, pub paths: Arc<[RelPath]> /* 前 10 个，两个方向共用一个 Arc */ }
 
 pub enum ReviewTarget {
     /// 一个会话，含它在同一 worktree 里派出的子 agent 会话。
@@ -887,7 +923,7 @@ pub mod limits {
 
 - `review_view`：进入审阅时 `open`，收到 `Changed` 后 `snapshot`；滚动时发 `Prepare`（可见的文件与轮次，加上前后各一屏），收到 `Prepared` 后读 `rows` / `text`；勾选、V、Looks good 发对应命令；C 的编辑框保存时发 `AddNote` / `EditNote`，意见上的删除发 `RemoveNote`，浮条的发送（⌘↩）发 `SendNotes`、放弃发 `DiscardNotes`、再次复制发 `CopyBatch`（#22）；离开时 `close`。显示一个文件的 diff 时为 `FileRows` 两侧的 `SideText::Text` 各调一次 `Reader::share_object`（[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)），与这份 `FileRows` 一起放下。
 - `project_home`（[#30](https://github.com/SoloJiang/lectern-app/issues/30)）：显示主页时持有 `watch_overview` 的返回值，收到 `Overview` 后读 `overview`。
-- `worktrees`：「相对 main」打开 `ReviewTarget::Range`。
+- `worktrees`：「相对 main」打开 `ReviewTarget::Range`；Worktrees 屏幕是当前屏幕时持有 `watch_worktrees` 的返回值，收到 `ReviewEvent::Worktrees` 后读 `worktrees`，⌘R 调 `refresh_worktrees`，屏幕放下时放下关注（本 crate 保留计数，回到屏幕立即显示）。
 - `conversation`（#22 之后，前置条件 J）：实现 `NoteRoute`，requires `dyn Review` 并登记（「审阅意见的发送途径」）；不读审阅快照。
 - `context_drawer`（[#20](https://github.com/SoloJiang/lectern-app/issues/20) 之后）：在调用方的行上加意见时发 `AddNote`，带面板里那一行所在内容的 OID 和摘录（[context_drawer 设计「对其他 crate 的要求」](context_drawer.md#对其他-crate-的要求) K）；接入不在本文的验收里。
 
@@ -1403,7 +1439,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - 同一个审阅同时最多一个计算任务；运行期间来的事件只记下（路径并集、`Full`、会话变化），结束后再跑一轮。新一轮开始时置位上一轮的取消标志，结果按代数丢弃。
 - 监听：打开审阅时用自己的 `RepoWatch` 监听这个仓库，`watch_worktree` 监听被审阅的 worktree，来源是本 crate 的 `Worktree::watch_source()`；同一个 worktree 已被 `project` 监听时 fs_watch 共用那一份状态（[fs_watch 设计「监听器与句柄」](fs_watch.md#监听器与句柄)）。批次按 fs_watch 设计的约定处理：`paths` → `RefreshHint::Paths`；`rescan`、`meta` 的任一标志 → `Full`。`meta.head` 变化时，会话外的改动重新确定基准；会话的基准不变。
 - 释放：审阅关闭 30 秒后释放快照、`ChangeList`（连同 git 保留的工作区内容）、行与正文、`Worktree` 句柄和监听；中间版本的 LRU 在没有打开的审阅时清空。
-- UI 线程上只调用 `snapshot`、`rows`、`text`、`overview`（复制 `Arc`）和立即返回的 `open`、`command`、`close`、`watch_overview`。`command` 改已看状态时只做内存里的数组替换（O(文件数)，5000 个文件约 80 KB 的复制），不做 IO。改审阅意见时只替换 `notes` 和 `notes_state`（O(意见数)，至多 40 条待发送加 14 天内发出的），摘录、prompt 的拼装和途径的调用都在 `Background` 任务里。
+- UI 线程上只调用 `snapshot`、`rows`、`text`、`overview`、`worktrees`（复制 `Arc`）和立即返回的 `open`、`command`、`close`、`watch_overview`、`watch_worktrees`、`refresh_worktrees`。`command` 改已看状态时只做内存里的数组替换（O(文件数)，5000 个文件约 80 KB 的复制），不做 IO。改审阅意见时只替换 `notes` 和 `notes_state`（O(意见数)，至多 40 条待发送加 14 天内发出的），摘录、prompt 的拼装和途径的调用都在 `Background` 任务里。
 
 ### 概览
 
@@ -1415,6 +1451,21 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   5. Drifted 信号只读 `review.attribution` 的缓存（键能从声明和计数改动集的 OID 得到），未命中为 None；不为概览建链。
   6. 今天改动的文件按子项目计数（`Overview::packages`）：这一轮开头读到的 `ProjectSnapshot::active.packages` 为 `Ready` 时，计数改动集里工作区一侧的 mtime（第 2 项那一次 stat；已删除的文件没有 mtime，不计；重命名取新路径）落在本地自然日内的路径，按 `dir` 的最长前缀（按路径段比较：`crates/a` 不含 `crates/ab/x`；`dir` 为 "" 的根子项目含所有路径）归到一个子项目，不在任何子项目里的不计。本地自然日用 `platform::time::utc_offset` 算：路径的 mtime 与这一轮的「现在」（`Config::clock`）各加上自己那一刻的偏移，除以一天的毫秒数后相等，与 usage 的 `window::local_date` 同一规则（夏令时切换日是 23 或 25 小时）。`packages` 为 `Pending`、`Unavailable`，或改动路径超过 4000 个（`Capped`）时为 None；发布时只列计数不为 0 的子项目，`dir` 与快照里的是同一个 `Arc`。计数随下一轮刷新，不在午夜自动归零（project_home 设计的约定）。
 - 重算的时机：fs_watch 的批次、`SessionsChanged`、标注日志的写入、`ProjectEvent` 的 worktree 变化或子项目变化（`ChangedParts::packages`，复用计数改动集），合并 2 秒后在 `Background` 上跑一轮。关注者都放下后释放计数改动集和声明。
+
+#### 并行 worktree 总览
+
+[worktrees 设计](worktrees.md)的前置条件 A。与上面的概览分开关注（`watch_worktrees`）、分开计时，状态在 `engine::worktrees`（`Engine::worktrees`，一把叶子锁，持锁时不做 IO、不取别的锁）。下面是实现的规则；类型与总的约束见 worktrees 设计，两处一致，不一致处记在「与设计的差异」。
+
+- 关注与一轮：`watch_worktrees` 对 git 项目的第一个关注者，在 `Background` 上开始一轮（文件夹项目返回什么也不做的关注）。一轮对 `ProjectSnapshot::worktrees` 里不是 prunable 的 worktree 逐个比较，当前 worktree（`ProjectSnapshot::active.worktree`）在前，其余按项目快照的顺序；每比完一个就存下结果、发布一份新的 `WorktreesOverview` 并发 `ReviewEvent::Worktrees`，所以计数逐个到达（`generation` 每发布一次加一）。同一时刻一个项目最多一轮；运行期间来的触发只记标记，轮在结束前再看一遍标记。最后一个关注放下时取消这一轮：正在比较的 worktree 的结果丢弃，它仍是失效的；已存下的计数、路径哈希和重叠保留到 `ProjectEvent::Closed` 或插件停用。
+- 主干：一轮开头（以及 `RepoBatch::refs`、`config` 或 reflog 变化标记之后的下一次比较）解析一次 `Repo::default_branch()` 和它指向的提交；解析不到提交时当作没有主干。主干的提交变了，其余 worktree 的 `committed` 重新检查。
+- `uncommitted`：当前 worktree 取 `watch_overview` 的计数改动集——有概览关注者且概览已有这个 worktree 的计数时用它（同一份，`Files(n)` 或概览的 `Capped`）；概览的第一轮还没发布时为 `Pending`，概览发布时（`publish_overview`）把当前 worktree 的 `uncommitted` 标为失效，不经节流，立即从新的计数改动集更新；概览的最后一个关注放下时同样标记当前 worktree，之后由这里自己比较；没有概览关注者、或概览属于另一个 worktree 时按非当前 worktree 处理。非当前 worktree 打开一个不进 `gits` 表的句柄（`Engine::open_git`），做一次 `Worktree::changes(Base::Head)`，`Limits` 与概览相同（`retained_bytes = 0`、`total_patch_bytes = 0`），超过 4000 个路径时只留计数（`Capped`）；比完放下句柄，不保留 stat 缓存。重命名的旧路径也算在路径集合里。
+- `committed`：`merge_base(主干, HEAD)` 在内存里按（主干提交，HEAD 提交）缓存（每个项目至多 256 项）；HEAD 就是 merge-base 时为 `Files(0)`；否则 `tree_changes(merge_base, HEAD)` 经 `cutoff::tree_changes` 读写已有的 `review.tree_changes`（按提交对，架构规则 5，键里的路径上限仍是 `MAX_TREE_PATHS` = 20 000，与截止时刻共用同一批条目），超过 4000 个路径或 `TreeChanges::All` 时为 `Capped`。HEAD 为 unborn 或读不出、没有主干、没有共同历史、比较失败时为 `Unavailable`。
+- `vs_base`：`uncommitted` 与 `committed` 路径的并集，两者都是 `Files` 且并集不超过 4000 个路径时为 `Files(并集的大小)`，任一为 `Capped` 或并集超过 4000 个时为 `Capped`，任一还是 `Pending` 时为 `Pending`；`committed` 为 `Unavailable`（没有主干、unborn 等）时 `vs_base` 也是 `Unavailable`。
+- 重叠：每个 worktree 保留 `vs_base` 路径（`vs_base` 为 `Unavailable` 时取 `uncommitted` 的路径）的 64 位哈希（`DefaultHasher::new()`，固定的键，排好序、去重，不超过 4000 个）。一个 worktree 比较完时，用它这一次的路径集合与其余每个有哈希的 worktree 求交：共同的哈希数为 `files`，样本是这一侧路径（按字节序）里哈希在对方集合中的前 10 个，两个方向共用一个 `Arc`；`files` 为 0 的不留。路径集合未知（`Pending`、`Capped`、`Unavailable`）的 worktree，`overlaps` 为 None，也不出现在别人的列表里。每个 worktree 的列表按 `files` 从多到少、再按对方的 `WorktreeKey` 排，至多 8 项。
+- 失效（没有关注者时也记标记，只是不比较）：repo 级 fs_watch 批次——`RepoBatch::worktrees` 里的 HEAD 变化标记这个 worktree 的两个计数，index 变化只标记 `uncommitted`；`refs`、`config`、reflog 记录标记全部 worktree 的 `committed`（比较时 HEAD 和 merge-base 都没变就什么也不做、不发布）；`rescan` 或监听失败标记全部；worktree 列表变化（`RepoBatch::worktree_list`、`ChangedParts::worktrees`）只要求一轮：新的 worktree 补算，不在了的丢掉（连同它的重叠）；`ChangedParts::active` 标记新的当前 worktree 的 `uncommitted`；`SessionsChanged` 里归位到某个 worktree 的会话（一轮里经 `SessionSource::sessions()` 找位置，不在监听线程上做）标记它的 `uncommitted`，一次超过 256 个会话时标记全部的 `uncommitted`。只监听仓库（一个 `RepoWatch`，第一次关注时建立，随项目关闭释放），不监听任何 worktree 的文件。`refresh_worktrees` 标记全部。关注开始时，`counted_at` 早于 5 分钟的 worktree 也标记。
+- 节流：每个 worktree 两次需要比较的计算之间至少间隔 `max(2 s, 上一次耗时的 10 倍)`（时间取 `Config::clock`），期间的触发合并成一次，一轮把到期的先做、没到期的记下最早的到期时刻，用 `Host::later` 在那时再起一轮（没有 host 时没有这个唤醒，下一次触发时再看）。从概览取计数改动集的 `uncommitted`（不比较）不受节流。
+- 释放与内存：每个 worktree 至多 4000 个路径哈希（32 KB）、8 个重叠项。路径哈希合计超过 65 536 个（512 KiB）时，最后一个关注放下 30 秒（`RETAIN`，`Host::later`；没有 host 时立即）后放下路径哈希，只留计数和重叠，这些 worktree 在下一次关注开始时重新比较；其间有了新的关注就不放。
+- 日志：一轮结束记 debug `worktrees round`；句柄打不开、HEAD 读不出、比较或 merge-base 失败记 warn，只记错误种类（「日志与诊断」）。作用域的 `review` 是 SHA-256(仓库哈希, "worktrees") 的前 8 字节。
 
 ### 日志与诊断
 
@@ -1447,6 +1498,11 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 比较范围没有 merge-base，改为相对 HEAD | info | `no merge base; the range compares with head` | — |
   | 概览的计数比较失败（取消不记），这一轮发布空概览（`Pending`） | warn | `overview comparison failed` | `error`（`GitError` 的种类）、`io` |
   | 概览读不出计数改动集里文件的修改时间（`Worktree::mtimes` 失败），这一轮没有命令声明，今天改动的计数都是 0 | warn | `modification times unreadable` | `error`（`GitError` 的种类）、`io` |
+  | 并行 worktree 总览：worktree 的句柄打不开，它的三个计数为 `Unavailable`（取消不记） | warn | `worktree handle unavailable` | `error`（`ReviewError` 的种类：`missing`、`not_in_open_project`，或改动集错误的种类如 `io`） |
+  | 并行 worktree 总览：HEAD 读不出，三个计数为 `Unavailable` | warn | `worktree head unreadable` | `error`（`GitError` 的种类）、`io` |
+  | 并行 worktree 总览：默认分支读不出，这一轮按没有主干 | warn | `default branch unreadable` | `error`、`io` |
+  | 并行 worktree 总览：未提交的比较失败，`uncommitted` 为 `Unavailable` | warn | `worktree comparison failed` | `error`、`io` |
+  | 并行 worktree 总览：merge-base 读不出，`committed` 为 `Unavailable` | warn | `merge base unreadable` | `error`、`io` |
   | 简报规则的提供者 10 秒没有答复 `done`，按完成处理 | info | `brief provider timed out` | `id`、`request`（这个审阅的第几次请求）、`registration`（提供者的登记序号；插件 ID 是文本，不进日志） |
   | 一批审阅意见已送出（#22） | info | `review notes sent` | `id`、`batch`（批次 ID 的数值）、`via`（`clipboard`、`terminal`、`acp`）、`notes`（条数）、`prompt_bytes`、`took_us`（从 `SendNotes` 起） |
   | 一批审阅意见没有送出，回到待发送（#22） | warn | `review notes not sent` | `id`、`batch`、`route`（`clipboard`、`session`）、`reason`（`starting`、`busy`、`no_session`、`timed_out`、`failed`、`too_large`）、`error`（剪贴板的错误种类 `unsupported`、`rejected`；其余为 null）、`notes` |
@@ -1474,6 +1530,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 概览的一轮结束 | `overview round` | `sessions`（窗口内有声明数据的会话数）、`shown`（列出的会话数）、`outside`、`capped`、`packages`（有今天改动的子项目数；`Overview::packages` 为 None 时为 null）、`took_us`；作用域的 `review` 是 SHA-256(仓库哈希, "overview") 的前 8 字节 |
   | 概览的触发 | `overview requested` | `how`（`resolve`、`full`、`paths`、`reuse`） |
   | 最后一个关注放下，状态释放 | `overview released` | — |
+  | 并行 worktree 总览的一轮结束 | `worktrees round` | `worktrees`（项目快照里不是 prunable 的 worktree 数）、`compared`（这一轮存下结果的 worktree 数）、`capped`（其中 `vs_base` 或 `uncommitted` 为 `Capped` 的数）、`took_us`；作用域的 `review` 是 SHA-256(仓库哈希, "worktrees") 的前 8 字节 |
+  | 放下关注 30 秒后路径哈希被放下 | `worktrees hashes released` | — |
 | 标注日志读完 | `annotation log read` | `path`、`records`、`unknown`、`complete`（索引是不是整个文件，决定能否压缩）、`took_us` |
   | 追加之前截掉末尾不完整的一行 | `annotation log tail cut` | `path`、`bytes` |
   | 文件状态未知、不以换行结尾，追加之前补一个换行 | `annotation log of unknown state; newline added before the records` | `path` |
@@ -1484,8 +1542,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 一批意见对上了回应它的那一轮 | `notes answered` | `id`、`batch`、`ordinal`（那一轮的 `Turn::ordinal`） |
 
 - 关联 ID：本 crate 的每个 executor 任务（一轮的准备、后台补齐与归因、`Prepare`、标注日志的读取与追加）都在作用域里运行（`Engine::submit` 设置 `Ctx`）。`session` 是审阅对象会话的标识，从 `open` 起就有；`review` 是审阅对象的 64 位哈希，取 SHA-256（仓库的哈希 `h` 的 16 个字节、标注日志里 `target` 的编码）的前 8 字节，同一审阅对象跨运行相同，在一轮解析出仓库之后加上。标注日志按仓库共用，它的读取和追加任务带发起它的那个审阅的作用域。`task` 由 executor 填（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 5 项）。
-- 不记录：文件内容、diff 的行、改动步的正文（`load` 的结果）、prompt、agent 说明、命令文本、提交说明（reflog 的说明文字）、审阅意见的文字与摘录、拼好的审阅意见 prompt、`NoteDelivery` 的路径与位置、剪贴板的内容、标注日志的行（坏行、认不出的记录照原样留在文件里，不进日志）；来源 ID，以及不是 UUID 的会话 ID 的原文（只记哈希）；worktree 的名字、分支名、`Prepare` 的键（含路径和会话里的位置）；`ChangeError::Io`、`SessionError::Io`、`GitError::Corrupt` 的消息文字和 `io::Error` 的消息（只记种类和系统错误码）；凭据和 token。工作区里的路径只在详细级别的 `file attributed` 里出现。
-- 金丝雀测试（`src/engine/tests/logs.rs`，`testing::capture()` 在 trace 级别）：`logs_hold_no_contents` 把金丝雀放进基准和工作区的文件内容、提交说明、审阅对象会话的 prompt、agent 说明和改动内容、另一个会话的 prompt 和命令、标注日志的坏行、认不出的记录和末尾不完整的一行，以及注入的追加错误的消息里；打开审阅、`Prepare` 展示行和 prompt 正文、标记已看（截掉残行、压缩）、追加失败、再次标记（重试成功），再打开会话外的改动和比较范围，确认 `annotation log recovered`、`annotation log compacted`、追加失败与重试几条记录的字段，以及它们和 `review ready` 都带 `review`、`session`，任何记录都不含金丝雀。`logs_tree_changes_failure_is_a_warn`：reflog 里一条记录的新提交不在仓库里，`tree_changes` 在交互任务和后台各失败一次，各记一条 warn，带两个 OID 和 `object_missing`。`logs_unreadable_turns_are_a_warn`：认不出格式的会话记一条 warn，`error` 为 `unrecognized`。`logs_round_closed_before_it_ran_is_not_a_failure`：打开后一轮还没运行就 `close`，这一轮被取消，不记 `review failed`。`logs_session_tag_is_the_uuid_or_a_hash`：UUID 取原字节，子 agent 的 ID 取哈希。`logs_hold_no_note_contents`（#22）：金丝雀放进意见的文字、锚点所在文件的内容（进摘录）和路径里；加、改、删、经 `FakeClipboard` 送出（成功、`Rejected`）、经 `FakeRoute` 送出（`NotNow(Starting)`、超时、超时后才到的答复）、`CopyBatch`（成功、`Rejected`）、放弃，再压缩一次；任何记录都不含金丝雀，`review notes sent`、`review notes not sent`、`review notes copied again`、`review notes not copied again` 的字段按上表。
+- 不记录：文件内容、diff 的行、改动步的正文（`load` 的结果）、prompt、agent 说明、命令文本、提交说明（reflog 的说明文字）、审阅意见的文字与摘录、拼好的审阅意见 prompt、`NoteDelivery` 的路径与位置、剪贴板的内容、标注日志的行（坏行、认不出的记录照原样留在文件里，不进日志）；来源 ID，以及不是 UUID 的会话 ID 的原文（只记哈希）；worktree 的名字、根路径与 `WorktreeKey`、分支名与主干的引用名、重叠的路径、`Prepare` 的键（含路径和会话里的位置）；`ChangeError::Io`、`SessionError::Io`、`GitError::Corrupt` 的消息文字和 `io::Error` 的消息（只记种类和系统错误码）；凭据和 token。工作区里的路径只在详细级别的 `file attributed` 里出现。
+- 金丝雀测试（`src/engine/tests/logs.rs`，`testing::capture()` 在 trace 级别）：`logs_hold_no_contents` 把金丝雀放进基准和工作区的文件内容、提交说明、审阅对象会话的 prompt、agent 说明和改动内容、另一个会话的 prompt 和命令、标注日志的坏行、认不出的记录和末尾不完整的一行，以及注入的追加错误的消息里；打开审阅、`Prepare` 展示行和 prompt 正文、标记已看（截掉残行、压缩）、追加失败、再次标记（重试成功），再打开会话外的改动和比较范围，确认 `annotation log recovered`、`annotation log compacted`、追加失败与重试几条记录的字段，以及它们和 `review ready` 都带 `review`、`session`，任何记录都不含金丝雀。`logs_tree_changes_failure_is_a_warn`：reflog 里一条记录的新提交不在仓库里，`tree_changes` 在交互任务和后台各失败一次，各记一条 warn，带两个 OID 和 `object_missing`。`logs_unreadable_turns_are_a_warn`：认不出格式的会话记一条 warn，`error` 为 `unrecognized`。`logs_round_closed_before_it_ran_is_not_a_failure`：打开后一轮还没运行就 `close`，这一轮被取消，不记 `review failed`。`logs_session_tag_is_the_uuid_or_a_hash`：UUID 取原字节，子 agent 的 ID 取哈希。`logs_hold_no_note_contents`（#22）：金丝雀放进意见的文字、锚点所在文件的内容（进摘录）和路径里；加、改、删、经 `FakeClipboard` 送出（成功、`Rejected`）、经 `FakeRoute` 送出（`NotNow(Starting)`、超时、超时后才到的答复）、`CopyBatch`（成功、`Rejected`）、放弃，再压缩一次；任何记录都不含金丝雀，`review notes sent`、`review notes not sent`、`review notes copied again`、`review notes not copied again` 的字段按上表。`logs_worktrees_hold_no_paths_names_or_contents`（并行 worktree 总览）：金丝雀放进主干分支名、linked worktree 的名字、根路径和分支名、文件名与内容、提交说明；一个 worktree 的目录删掉；比较两轮（第二轮由 `refresh_worktrees` 触发）再关闭项目，确认 `worktrees round` 与每轮一条的 `worktree handle unavailable`（`error` 为 `io`），任何记录都不含金丝雀。
 
 ## 性能
 
@@ -1500,6 +1558,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 勾选 | `command(MarkSeen)` 到新快照替换 < 0.2 ms（5000 个文件） |
 | 审阅意见（#22） | `command(AddNote)`、`EditNote`、`RemoveNote`、`SendNotes` 到新快照替换 < 0.2 ms（40 条待发送、240 条已发送）；`Background` 上拼 40 条意见的 prompt < 5 ms；剪贴板在主线程上的写入是 `platform` 的一次 `NSPasteboard` 调用，不在本 crate 的份额里。每份快照重算 `place` 是 O(意见数) 的 OID 比较，不读文本 |
 | 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB（标注日志的索引含审阅意见：全部还没发出的，加 14 天内发出的；280 条的形状 < 300 KB，`review/resident_notes_bytes`；每个审阅对象还没发出的至多 40 条、约 210 KiB，审阅对象的个数没有上限，见「审阅意见」的「已知限制」），从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
+| 并行 worktree 总览（worktrees 屏幕，不在采样状态） | 比较在 `Background` 上逐个 worktree 进行，同一时刻一个项目一次，最后一个关注放下时取消。cloudprint 形状每个 worktree 几毫秒，10 万文件每个约 1 s（`git/compare_100k`），17 个 worktree 的第一轮约 17 s，只记录（`review/worktrees_cloudprint`）；每个 worktree 的两次比较至少隔 `max(2 s, 10 × 上一次耗时)`。关注放下后保留的计数、路径哈希（每个 worktree ≤ 4000 个，32 KB）和重叠（≤ 8 项，每项 ≤ 10 个样本路径）计入本 crate 自己的 < 1 MB 份额：10 万文件的形状 17 个 worktree 每个 4000 个改动路径时约 650 KB（路径哈希 544 KB、重叠样本约 110 KB），路径哈希合计超过 65 536 个时关注放下 30 秒后释放哈希。`review/resident_100k_bytes` 的夹具加了 linked worktree 和一次关注再放下（预算不变） |
 | 审阅打开时的内存（不在采样状态，按 ADR 0035「关键约束」各自设上限） | `ChangeList` 和它持有的 `ChangeSet`（git 的 32 MiB 保留上限）；中间版本 LRU 8 MiB；`FileRows` 只为 `Prepare` 的范围保留，合计 ≤ 8 MiB，超出时丢弃离可见范围最远的；正文 ≤ 2 MiB |
 | 磁盘 | 标注日志每个仓库 ≤ max(4 MiB, 一年内仍然有效的记录的两倍) 加一批记录，在压缩的前提成立时（「标注日志」的压缩，[ADR 0045](../adr/0045.md)）；只追加时（读取失败或只读了一部分、文件头坏了或 `v` 不是 1、别的写入者改过文件、压缩改名之后目录的 `fsync` 失败）文件一直增长，到下一次完整读取恢复压缩为止；`review.attribution` 在仓库分库的 512 MiB 预算里，按 LRU 淘汰 |
 
@@ -1537,7 +1596,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | `review/chain_3000_lines` | 只记录（3000 行的文件、40 次 `Replace`，含 `line_diff`，不含 `load`） |
 | `review/log_load_16k` | 中位数 < 30 ms（16 000 条记录、约 5.3 MiB 的日志整份读入并建索引，后台） |
 | `review/overview_cloudprint` | 只记录（cloudprint 形状，20 个会话，计数比较之后的一轮概览） |
-| `review/resident_cloudprint_bytes`、`review/resident_100k_bytes` | 存活字节 < 1 MB / < 1 MB（概览就绪后本 crate 的常驻，不含计数改动集；`Memory`） |
+| `review/worktrees_cloudprint` | 只记录（worktrees A：cloudprint 形状 728 个文件，11 个 worktree（主 worktree 加 10 个 linked，各有 20 个互相重叠的改动文件），冷缓存，从 `watch_worktrees` 到最后一次 `ReviewEvent::Worktrees`；`Driven`） |
+| `review/resident_cloudprint_bytes`、`review/resident_100k_bytes` | 存活字节 < 1 MB / < 1 MB（概览就绪、并行 worktree 总览关注过再放下之后本 crate 的常驻，不含计数改动集；`Memory`。cloudprint 夹具有 10 个各改 20 个文件的 linked worktree，保留的路径哈希和重叠在内；10 万文件的夹具有 3 个同形状、只有索引的 linked worktree，比较都是 `Capped`，保留的只有计数） |
 | `review/brief_5000` | 中位数 < 5 ms（5000 个文件的规则简报） |
 | `review/note_add` | 中位数 < 0.2 ms（#22：40 条待发送、240 条已发送时 `command(AddNote)` 到快照替换） |
 | `review/notes_prompt_40` | 中位数 < 5 ms（#22：`notes::prompt`，40 条意见，每条 4 KiB 文字和 5 行摘录） |
@@ -1599,6 +1659,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `brief_*`：规则是纯函数 `brief::build`，每条规则一个用例、排序与 12 条上限、提供者条目的对账在 `src/brief/tests.rs`（手工构造的 `FileChange`，不经仓库）；引擎侧（`src/engine/tests/brief.rs`）：规则的输入来自审阅（CI 文件与 lockfile、失败的改动调用、命令声明），`BriefRules` 的假提供者经 `register_brief_rules` 登记：一轮只请求一次、分批答复、10 秒超时（`Driven::with_timers` 的手动 `Host`）、登记 drop 或 token 失效后不再调用它且丢弃在途的答复、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）、晚登记的提供者对已打开的审阅补问、从 `started` 里登记（token 还是 `Pending`）的提供者在 50 ms 的重试后被问到。提供者的 `ActivationToken` 来自 `testing::host()`（一个只交出 `PluginHandle` 的 kernel），`Pending` 的情形用一个在 `started` 里登记的测试插件。
   - `overview_*`（`src/engine/tests/overview.rs`）：`overview_lists_the_sessions_with_claims_and_counts_the_outside`（会话、进度、会话外的改动数；审阅算过归因之后 `drifted` 来自缓存）、`overview_uses_zero_retention_limits`（计数改动集的每个文件都是 `Listed`）、`overview_capped`（4001 个改动路径时只有计数、不保留改动集）、`overview_never_calls_turns`（20 个会话一轮之后 `FakeSessions::calls` 的 `turns` 为 0、`turns_unretained` 为 1；第二轮从内存取声明，不再读索引）、`overview_compares_at_most_eight_other_bases_per_round`、`overview_progress_matches_review_after_agent_commit`、`overview_is_released_with_the_last_interest`、`overview_triggers_merge_within_two_seconds`（`Driven::with_timers`，三个触发合成一轮）、`overview_mark_seen_updates_the_progress`、`overview_without_an_active_worktree_is_pending`；`plugin_overview_follows_the_interest`（插件经 `TestKernel`）。
   - `overview_packages_*`（同一个文件，合成的仓库、`FakeProjects::set_packages`、`Driven::set_utc_offset`，文件的 mtime 经 `TestRepo::set_mtime` 定为毫秒）：`overview_packages_assign_by_longest_prefix`（嵌套的子项目取最长前缀、`crates/ab` 不属于 `crates/a`、已删除的文件和不在任何子项目里的文件不计、没有文件的子项目不列出、按 `dir` 排序）、`overview_packages_the_root_package_holds_the_rest`（`dir` 为 "" 的子项目）、`overview_packages_count_only_the_local_day_of_the_modification_time`（UTC+8 与 UTC 下，本地零点前 1 ms 不计、零点计、次日零点前 1 ms 计、次日零点不计）、`overview_packages_is_empty_when_nothing_changed_today`（`Some` 的空列表）、`overview_packages_none_when_capped`（4001 个路径）、`overview_packages_none_while_packages_are_pending`、`overview_packages_follow_the_projects_packages`（`Pending` 转 `Ready` 后，只带 `packages` 的 `ChangedParts` 触发一轮并得到计数；只带 `files` 的不触发）。`SessionFixture` 给 `FakeProjects` 十个子项目（`src/m00`…`src/m09`），所以 `review/overview_round_warm` 含这一项的归类。
+  - `worktrees_*`（并行 worktree 总览，`src/engine/tests/worktrees.rs`；合成仓库 `Trio`：主 worktree 在主干上改了一个文件，linked worktree `feat` 相对主干有两个已提交的文件、一个改过的文件和一个未跟踪文件，`other` 在主干上改了一个与 `feat` 共同的文件；`Driven::watch_worktrees` 等，没有 watcher 的引擎经 `Driven::worktrees_batch` 交一个构造好的 `RepoBatch`，走和 fs_watch 的接收器同一个标记函数）：`worktrees_count_uncommitted_and_committed_of_each_worktree`（三个计数、HEAD、主干、当前 worktree 在前、每比完一个发布一次）、`worktrees_overlap_in_both_directions_with_one_sample_list`（两个方向共用一个 `Arc`，没有共同文件的是已知的空列表）、`worktrees_overlaps_are_ordered_by_files_and_capped_at_eight_items`、`worktrees_current_uses_the_overview_count_set`（概览之后工作区又变了，总览仍是概览那份；概览发布新的计数改动集后立即跟上，不节流）、`worktrees_current_waits_for_the_overview_first_round`、`worktrees_current_is_compared_again_when_the_overview_interest_goes`、`worktrees_overview_capped_makes_the_current_worktree_capped`、`worktrees_capped_worktree_has_no_overlap_and_is_in_no_list`（4001 个未跟踪文件）、`worktrees_without_a_default_branch_use_the_uncommitted_paths`、`worktrees_unborn_head_has_no_commit_counts`、`worktrees_a_worktree_that_cannot_be_opened_is_unavailable`、`worktrees_cache_the_commit_pair_in_review_tree_changes`、`worktrees_keep_no_handle_of_a_worktree_nobody_reviews`（`gits` 表为空）、`worktrees_folder_project_has_no_worktrees`、`worktrees_nothing_is_compared_without_an_interest`（没有关注者也没有状态时标记、刷新、项目变化都不产生任务）、`worktrees_stay_after_the_last_interest_until_the_project_closes`（关注放下后结果不变、事件只标记、不比较；`Closed` 之后清掉）、`worktrees_watching_again_compares_only_the_marked_and_the_stale`（重新关注时只重算被标记的和 `counted_at` 早于 5 分钟的）、`worktrees_release_stops_a_round_that_has_not_started`、`worktrees_throttle_merges_triggers_into_one_comparison`（`Driven::with_timers`：两个批次落在间隔内不比较，间隔过后合并成一次）、`worktrees_refresh_marks_all_and_follows_the_throttle`、`worktrees_the_gap_is_ten_times_the_last_comparison`、`worktrees_a_moved_default_branch_makes_the_commit_counts_again`（主干快进到 `feat`：`feat` 的已提交归零、重叠消失、主 worktree 的 HEAD 没有改 HEAD 文件也被发现）、`worktrees_a_head_change_and_a_rescan_make_counts_stale`、`worktrees_a_ref_change_that_moves_nothing_publishes_nothing`、`worktrees_a_session_marks_the_uncommitted_count_of_its_worktree`（`SessionsChanged` 只让那个会话所在 worktree 的 `uncommitted` 重算）、`worktrees_a_new_worktree_is_counted_and_listed`、`worktrees_hashes_go_after_the_retention_and_the_overlaps_stay`（`set_worktrees_hash_limit(1)`，30 秒的 `RETAIN`）、`worktrees_hashes_are_kept_when_watched_again_within_the_retention`、`worktrees_hash_is_the_same_for_the_same_path`。金丝雀见「日志与诊断」。
   - `plugin_*`（`src/plugin/tests.rs`，另有 `src/engine/watch.rs` 里批次到请求的映射和请求合并的单元测试）：`TestKernel` 激活后提供 `dyn Review`、清单符合「依赖」，激活不提交任务、不监听、不写文件（`plugin_provides_review_and_activation_does_nothing`）；`open` 立即返回，快照经 `Loading` 到 `Ready`，同一对象同一个 ID（`plugin_open_returns_at_once_…`）；fs_watch 的路径批次、`rescan` 和 `SessionsChanged` 触发刷新，批次的路径进 `RefreshHint::Paths`、`rescan` 为 `Full`（`plugin_a_watch_batch_…`、`plugin_a_path_batch_…`、`plugin_sessions_changed_…`）；运行期间来的请求合成一轮，路径取并集（`plugin_requests_during_a_round_…`、`plugin_merge_…`、`plugin_worktree_batches_…`）；kernel 在结果发布后静止，轮次排队时不静止（`plugin_kernel_is_quiescent_…`）；关闭后保留 30 秒、期间重新打开得到同一个审阅且不重算、第一次关闭的定时器不释放第二次关闭之后的审阅、到期后释放快照、监听和版本 LRU（`plugin_close_keeps_…`、`plugin_a_kept_review_…`）；停用后监听和审阅都释放（`plugin_deactivation_…`）；`command` 在 UI 线程上调用时不做 IO（`plugin_commands_on_the_ui_thread_do_no_io`：`cache` 的 `ui_thread` 设为测试线程，任何落在这个线程上的缓存调用在调试构建里 panic，任务都放到另一个线程上运行；标注日志的目录在后台任务运行之前不存在）；概览随第一个关注计算、随最后一个关注放下而消失（`plugin_overview_follows_the_interest`，第 5 步）。测试不用墙上时钟：30 秒是 kernel 的 `ManualClock`，合并窗口是 fs_watch 的假时钟，任务在测试运行 executor 时才执行。
   - `logs_*`（`src/engine/tests/logs.rs`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀与 warn 路径的记录，见「日志与诊断」。标注日志的 IO 故障和尺寸上限经 `Engine::set_log_test`（`cfg(test)`）作用在引擎之后打开的日志上。
   - `services` 的 `changes`、`review` 模块（前置条件 A）：类型的 JSON 往返；`dyn Review` 的 `ID == "review"`、`MULTIPLE == false`；`BriefRules` 没有实现 `Service`；`BriefRulesRegistration`、`OverviewInterest` drop 时各调用一次注销回调。
@@ -1908,6 +1969,14 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - 真实的系统剪贴板：`platform::clipboard::write_text` 的行为由 `platform` 的测试覆盖（私有的具名剪贴板，前置条件 I）；本 crate 的所有测试都用假的写入，没有一次经 `NSPasteboard`。答复在 macOS 的主线程上到达这一点（`Done` 在主线程上被调用）靠 `Writer` 的约定，本步的测试里 `FakeClipboard` 在写入的调用里同步答复，覆盖了回调重入的情形，没有覆盖跨线程。
   - 没有在 CI 的 macOS runner 上测量基准。
   - 会话途径（终端粘贴、ACP）没有真实的实现：`FakeRoute` 代替；它们在 `terminal`、`conversation` 的后续步骤里登记。
+### 并行 worktree 总览（worktrees 设计的前置条件 A 的 `review` 部分）
+
+PR 号待定，在 macOS（arm64）上运行：
+
+- `just check`：格式、架构检查、文档链接和整个工作区的 clippy（警告即失败；这台机器已装 Metal 工具链）通过。`just test -p lectern-review -p lectern-services`：399 个测试通过（`lectern-review` 287 个、`lectern-services` 112 个）。`lectern-bench` 的库测试（172 个）和 `review/` 基准的 smoke 运行通过。新增 `worktrees_*` 29 个、`plugin_worktrees_*` 2 个、`logs_worktrees_hold_no_paths_names_or_contents`。没有改依赖（`Cargo.toml`、`Cargo.lock` 不变），没有运行 `just deny`。
+- 基准，只跑不开窗口的两个目标（`cargo bench --locked -p lectern-bench --all-features --bench time -- review/worktrees_cloudprint`、`--bench memory -- review/resident`）：`review/worktrees_cloudprint` 中位数 686 ms（11 个 worktree、728 个文件、冷缓存，只记录；见「与设计的差异」）；`review/resident_cloudprint_bytes` 84.8 KB、`review/resident_100k_bytes` 8.86 KB（都含并行 worktree 总览关注再放下之后保留的数据，预算 < 1 MB），`review/resident_notes_bytes` 228 KB（预算 < 300 KB，不变）。
+- 没有验证：真实 fs_watch 的仓库批次到标记的整条路径（`Driven` 没有 watcher，批次经 `Driven::worktrees_batch` 交一个构造好的 `RepoBatch`；插件测试只验证了仓库被监听、第一个批次不触发比较、停用时释放）；每个 worktree 4000 个改动路径时约 650 KB 的内存估算（夹具里 10 万文件形状的 linked worktree 只有索引，比较都是 `Capped`，保留的只有计数）；真实仓库上的耗时（夹具的索引没有 stat 信息，每次比较都要读每个文件）；`just deny`；在桌面应用里的实际行为（屏幕在 worktrees 的第 2、3 步）。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -2076,3 +2145,18 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **迟到的答复在审阅已释放时无声丢弃。** 答复到达时这个审阅已不在（插件停用、30 秒保留已过）：不写 `notes_sent`，也不记 `late delivery reply dropped`。10 秒超时小于 30 秒的保留，只有插件停用会遇到。
 - **`logs_hold_no_note_contents` 的路径金丝雀不在锚点所在的文件上。** 设计写金丝雀放进「锚点所在文件的…路径」；锚点所在的文件在快照的 `files` 里，它的路径会按设计出现在详细级别的 `file attributed` 里（「日志与诊断」：工作区里的路径只在那一条里出现），所以那个文件叫 `a.txt`，金丝雀只在它的内容（进摘录）和意见的文字里；路径的金丝雀放在超过 256 KiB 的那一批的 40 条意见上（锚点的文件不在 `files` 里，位置是 `Elsewhere`，路径只进 prompt，不进任何记录）。改和删由同一个测试检查，`notes_cmd_logs_kinds_and_counts_never_contents`（第 6 步）检查 `note changed` 的字段。
 - **基准。** `review/notes_prompt_40` 在 `crates/bench/benches/time/review.rs`，直接用 `notes::prompt::prompt` 和公开类型构造 40 条，不需要新的夹具；`docs/design/bench.md` 的表格加了一行。
+
+### 并行 worktree 总览（worktrees 设计的前置条件 A 的 `review` 部分）
+
+与 [worktrees 设计「对其他 crate 的要求」](worktrees.md#对其他-crate-的要求) A 的差异（技术决定，没有需要产品决定的）：
+
+- **`tree_changes` 的路径上限。** 设计写 `tree_changes(merge_base, HEAD, 4000)`。`review.tree_changes` 的键里有路径上限（`MAX_TREE_PATHS` = 20 000），用 4000 调用再写进同一个键会让值的含义和截止时刻的条目不一致；所以按截止时刻的键读写（`cutoff::tree_changes`），超过 4000 个路径或结果为 `All` 时在本 crate 记为 `Capped`。同一对提交的条目与截止时刻共用。
+- **`vs_base` 在 `committed` 不可用时。** 设计只写了没有主干时 `vs_base` 为 `Unavailable`、重叠用 `uncommitted` 的路径。实现把条件推广到 `committed` 为 `Unavailable` 的所有情况（没有主干、HEAD 为 unborn 或读不出、与主干没有共同历史、比较失败），这时 `vs_base` 为 `Unavailable`，重叠用 `uncommitted` 的路径。unborn 的 worktree 因此有 `uncommitted` 和重叠，没有 `committed`、`vs_base`。主干的引用名存在但解析不到提交时，`WorktreesOverview::base` 为 None。
+- **并集超过 4000。** `uncommitted` 与 `committed` 各自不超过 4000 个路径、并集超过 4000 个时，`vs_base` 为 `Capped`（设计只写了任一为 `Capped` 时为 `Capped`），保证每个 worktree 至多 4000 个路径哈希。`uncommitted` 的路径集合包含重命名的旧路径（`committed` 的 `tree_changes` 本来就含两个路径）。
+- **当前 worktree 的 `uncommitted`。** 设计写「直接取概览的计数改动集」。补充三种情形：概览关注者在、第一轮还没发布时为 `Pending`（概览发布时标记它再更新，不节流）；概览的计数是 `Capped` 时为 `Capped`，不重新比较；概览属于另一个 worktree 或概览那一轮失败时，按非当前 worktree 自己比较；概览的最后一个关注放下时（可能在第一轮发布之前），当前 worktree 的 `uncommitted` 标为失效并自己比较。
+- **只监听仓库。** 设计 A.3 列的失效来源里，worktree 的文件不监听（非当前 worktree 本来就没有）；当前 worktree 的文件变化经概览的计数改动集更新。一个仓库一个 `RepoWatch`，在第一轮建立，随项目关闭或插件停用释放，不随关注释放（事件在没有关注者时也要记标记）。`RepoBatch::refs`、`config` 和 reflog 记录标记全部 worktree 的 `committed`，比较时 HEAD 和 merge-base 都没变就什么也不做、不发布；这样一个 worktree 提交（只动了分支引用）也能被发现。
+- **节流的实现。** 到期时刻用 `Config::clock`，唤醒用 `Host::later`；没有 host 时没有唤醒，下一次触发时再看。从概览取计数改动集（不比较）的 `uncommitted` 不受节流。
+- **结果的发布。** 设计 A.1 没有写发布的粒度。实现在每个 worktree 比较完之后发布一份并发一次 `ReviewEvent::Worktrees`（worktrees 设计「状态与异常」要求计数逐个到达）；第一个 worktree 比较完之前 `worktrees` 为 None。`worktrees round` 记录一轮结束时的合计，不是每次发布一条。
+- **路径哈希的释放。** 超过 65 536 个时，放下关注 30 秒后放下哈希；这些 worktree 在下一次关注开始时重新比较。没有 host（`Driven` 不带计时器）时立即放下。
+- **基准夹具。** `review/resident_100k_bytes` 的 10 万文件夹具是只有索引的形状，linked worktree 的比较都是 `Capped`，所以夹具加了 3 个同形状的 linked worktree（保留的只有计数）；`review/resident_cloudprint_bytes` 加了 10 个各改 20 个文件的 linked worktree（保留的路径哈希和重叠在内）。设计写的「17 个 worktree、每个 4000 个改动路径」的最坏情形（约 650 KB）没有基准，也没有测量。
+- **`review/worktrees_cloudprint` 的数。** 中位数 686 ms（11 个 worktree），约每个 worktree 60 ms，而 worktrees 设计「性能」估算「cloudprint 形状每个 worktree 几毫秒」。夹具的索引条目没有 stat 信息（`TestRepo::write_index` 的默认），每次比较都要读并哈希每个文件（728 个），真实仓库的索引带 stat，只读 stat 不一致的文件。该基准只记录，真实仓库上的耗时没有测量；估算是否成立要在 worktrees 的第 3 步手动检查时看。

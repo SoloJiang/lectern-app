@@ -29,6 +29,7 @@ use lectern_services::session::SessionSource;
 use super::{ReviewDeps, plugin};
 use crate::engine::Engine;
 use crate::engine::round::Kind;
+use crate::engine::tests::worktrees::trio;
 use crate::engine::tests::{Fx, NOW, T, edit, ms, replace, session, target, turn};
 use crate::testing::{FakeClipboard, FakeRoute, FakeSessions, RouteMode};
 
@@ -792,4 +793,68 @@ fn plugin_overview_follows_the_interest() {
     drop(interest);
     assert!(rig.review.overview(&project).is_none());
     rig.executor.run_until_idle();
+}
+
+#[test]
+fn plugin_worktrees_follow_the_interest_and_watch_the_repository() {
+    let t = trio();
+    let common = t.fx.repo.common_dir().to_path_buf();
+    let sessions = t.fx.sessions(Vec::new());
+    let rig = Rig::build(t.fx, sessions, None, "s");
+    let project = rig.fx.projects.key().clone();
+    assert!(rig.review.worktrees(&project).is_none());
+    assert!(!rig.backend.is_armed(&common));
+
+    let interest = rig.review.watch_worktrees(&project);
+    rig.run();
+    let o = rig.review.worktrees(&project).expect("counted");
+    assert_eq!(o.worktrees.len(), 3);
+    assert_eq!(o.base.as_deref(), Some("refs/heads/main"));
+    assert!(
+        rig.kernel
+            .emitted::<ReviewEvent>()
+            .iter()
+            .any(|e| matches!(e, ReviewEvent::Worktrees { .. }))
+    );
+    // The repository is watched; its first batch (the arming) changes
+    // nothing.
+    assert!(rig.backend.is_armed(&common), "{:?}", rig.backend.targets());
+    rig.windows();
+    assert_eq!(
+        rig.review.worktrees(&project).unwrap().generation,
+        o.generation
+    );
+
+    // The result and the watch stay after the last interest: the events go
+    // on marking until the project closes or the plugin stops.
+    drop(interest);
+    rig.run();
+    assert!(rig.review.worktrees(&project).is_some());
+    assert!(rig.backend.is_armed(&common));
+    rig.kernel.deactivate();
+    rig.run();
+    assert!(!rig.backend.is_armed(&common));
+}
+
+#[test]
+fn plugin_worktrees_calls_on_the_ui_thread_do_no_io() {
+    let t = trio();
+    let sessions = t.fx.sessions(Vec::new());
+    // The cache refuses any call from this thread; the tasks run on another.
+    let rig = Rig::build(t.fx, sessions, Some(std::thread::current().id()), "s");
+    let project = rig.fx.projects.key().clone();
+    assert!(rig.review.worktrees(&project).is_none());
+    let interest = rig.review.watch_worktrees(&project);
+    rig.review.refresh_worktrees(&project);
+    assert!(
+        rig.review.worktrees(&project).is_none(),
+        "computed by a task"
+    );
+    let driver = &rig.driver;
+    std::thread::scope(|s| {
+        s.spawn(|| driver.run_until_idle()).join().unwrap();
+    });
+    assert_eq!(rig.review.worktrees(&project).unwrap().worktrees.len(), 3);
+    rig.review.refresh_worktrees(&project);
+    drop(interest);
 }

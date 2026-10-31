@@ -563,3 +563,67 @@ fn logs_hold_no_note_contents() {
     // The log is compacted (the limit above) and still holds no canary.
     log.assert_absent(CANARY);
 }
+
+#[test]
+fn logs_worktrees_hold_no_paths_names_or_contents() {
+    use super::worktrees::{linked, put};
+    const MARK: &str = "canary-w0rkt33-4c9d51";
+    let log = testing::capture();
+    let fx = Fx::new();
+    // The canary is in a branch name, a worktree's name and root, file
+    // names and contents, and a commit message.
+    let tree: Vec<(String, String)> = vec![
+        ("a.txt".into(), "one\n".into()),
+        (format!("dir-{MARK}/f.txt"), format!("body {MARK}\n")),
+    ];
+    let files: Vec<(&str, &str)> = tree.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let blobs: Vec<(&str, &[u8])> = files.iter().map(|(p, c)| (*p, c.as_bytes())).collect();
+    let tree_oid = fx.repo.tree(&blobs);
+    let c1 = fx
+        .repo
+        .commit_at(tree_oid, &[], &format!("message {MARK}"), T - 1000);
+    fx.head(&format!("refs/heads/main-{MARK}"), c1, &files);
+    fx.repo.set_ref("refs/heads/main", c1);
+    put(fx.repo.root(), &files);
+    fx.write(&format!("dir-{MARK}/new.txt"), &format!("new {MARK}\n"));
+    let feat = linked(
+        &fx,
+        &format!("feat-{MARK}"),
+        &format!("refs/heads/feat-{MARK}"),
+        Some(c1),
+        &files,
+        &files,
+    );
+    put(&feat.root, &[(&format!("dir-{MARK}/new.txt"), "new\n")]);
+    let gone = linked(
+        &fx,
+        &format!("gone-{MARK}"),
+        &format!("refs/heads/gone-{MARK}"),
+        Some(c1),
+        &files,
+        &files,
+    );
+    std::fs::remove_dir_all(&gone.root).unwrap();
+
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let project = d.project();
+    let interest = d.watch_worktrees(&project);
+    d.run();
+    let o = d.worktrees(&project).expect("counted");
+    assert_eq!(o.worktrees.len(), 3, "{o:#?}");
+    d.refresh_worktrees(&project);
+    d.set_now(Timestamp(NOW.0 + 60_000));
+    d.run();
+    drop(interest);
+    d.engine.project_closed(&project);
+    d.run();
+
+    assert!(
+        !records(log, "worktrees round", "").is_empty(),
+        "a round is logged"
+    );
+    let failed = records(log, "worktree handle unavailable", "");
+    assert_eq!(failed.len(), 2, "once per round: {failed:#?}");
+    assert_eq!(field(&failed[0], "error"), Some("\"io\""));
+    log.assert_absent(MARK);
+}
