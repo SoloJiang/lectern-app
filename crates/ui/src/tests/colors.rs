@@ -6,7 +6,7 @@ use gpui::{Hsla, Rgba};
 use lectern_syntax::TokenKind;
 
 use crate::palette::over;
-use crate::{Appearance, Palette, SystemColor, code_style, code_styles};
+use crate::{Appearance, Palette, SystemColor, code_style, code_styles, terminal_colors};
 
 fn rgb(color: Hsla) -> [f32; 3] {
     let c = Rgba::from(color);
@@ -483,4 +483,72 @@ fn code_styles_light_snapshot() {
 #[test]
 fn code_styles_dark_snapshot() {
     insta::assert_debug_snapshot!(code_styles(&Palette::builtin(Appearance::Dark)));
+}
+
+#[test]
+fn terminal_colors_follow_the_design_table() {
+    for appearance in Appearance::ALL {
+        let palette = Palette::builtin(appearance);
+        let colors = terminal_colors(&palette);
+        assert_eq!(colors.foreground, palette.label);
+        assert_eq!(colors.background, palette.control_background);
+        assert_eq!(colors.cursor, palette.label);
+        let (black, white) = match appearance {
+            Appearance::Light => (palette.label, palette.tertiary_label),
+            Appearance::Dark => (palette.tertiary_label, palette.label),
+        };
+        assert_eq!(colors.ansi[0], black, "{appearance:?}");
+        assert_eq!(colors.ansi[7], white, "{appearance:?}");
+        assert_eq!(colors.ansi[8], palette.secondary_label, "{appearance:?}");
+        assert_eq!(colors.ansi[15], colors.ansi[7], "{appearance:?}");
+        for n in 1..=6 {
+            assert_eq!(colors.ansi[8 + n], colors.ansi[n], "{appearance:?} {n}");
+            assert_eq!(Rgba::from(colors.ansi[n]).a, 1.0, "{appearance:?} {n}");
+        }
+    }
+}
+
+/// ANSI 1–6 of the appearance, opaque.
+fn ansi_chromatic(palette: &Palette) -> Vec<(usize, [f32; 3])> {
+    let colors = terminal_colors(palette);
+    (1..=6).map(|n| (n, rgb(colors.ansi[n]))).collect()
+}
+
+#[test]
+fn terminal_colors_contrast() {
+    for appearance in Appearance::ALL {
+        let palette = Palette::builtin(appearance);
+        let background = rgb(terminal_colors(&palette).background);
+        for (n, color) in ansi_chromatic(&palette) {
+            let ratio = contrast(color, background);
+            assert!(ratio >= 3.0, "{appearance:?} ANSI {n}: {ratio}");
+        }
+    }
+}
+
+#[test]
+fn terminal_colors_distinct() {
+    for appearance in Appearance::ALL {
+        let palette = Palette::builtin(appearance);
+        let colors = ansi_chromatic(&palette);
+        for (i, (a_n, a)) in colors.iter().enumerate() {
+            for (b_n, b) in &colors[i + 1..] {
+                let distance = delta_e(*a, *b);
+                assert!(
+                    distance >= 12.0,
+                    "{appearance:?}: ANSI {a_n} vs {b_n} ΔE {distance}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_colors_light_snapshot() {
+    insta::assert_debug_snapshot!(terminal_colors(&Palette::builtin(Appearance::Light)));
+}
+
+#[test]
+fn terminal_colors_dark_snapshot() {
+    insta::assert_debug_snapshot!(terminal_colors(&Palette::builtin(Appearance::Dark)));
 }

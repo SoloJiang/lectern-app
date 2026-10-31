@@ -3,7 +3,7 @@
 终端网格绘制（Conversation 的 Terminal 页）。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：[docs/design/terminal_view.md](../../docs/design/terminal_view.md)（已接受，尚未实现）。本 crate 是非插件的视图库，由 `conversation` 的 Terminal 页使用。实现按它的「验收」分三步：`ui` 终端配色与 `i18n` 的键、`TerminalPane`、装配与真机验证。
+- 设计文档：[docs/design/terminal_view.md](../../docs/design/terminal_view.md)（已接受，实现中：第 1 步已实现，本 crate 的代码尚未写）。本 crate 是非插件的视图库，由 `conversation` 的 Terminal 页使用。实现按它的「验收」分三步：`ui` 终端配色与 `i18n` 的键、`TerminalPane`、装配与真机验证。
 - issue：[#5](https://github.com/SoloJiang/lectern-app/issues/5)、[#12](https://github.com/SoloJiang/lectern-app/issues/12)
 - ADR：[0002](../../docs/adr/0002.md)、[0012](../../docs/adr/0012.md)
 

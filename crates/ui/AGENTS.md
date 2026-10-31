@@ -31,6 +31,7 @@
 | `text.rs` | `Text`、`Verbatim`、`strings`、`set_locale` |
 | `font.rs` | 字体家族常量、`TextRole`、`TextRoleExt`、`MonoMetrics`、`mono_metrics` |
 | `code.rs` | `CodeStyle`、`code_style`、`code_styles` |
+| `terminal.rs` | `TerminalColors`、`terminal_colors`（终端的默认色与 ANSI 16 色，[terminal_view 设计](../../docs/design/terminal_view.md#对其他-crate-的要求)） |
 | `contrib.rs` | `workspace` 贡献的载荷类型与 `into_payload` |
 | `icon.rs` | `Icon` 枚举、Lucide 文件名的对应、`IconAssets`（包着 `icon_assets!` 生成的来源，只嵌入这 16 个 SVG 和应用图标 `assets/app-icon.svg`） |
 | `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`，第二批的 `ActionCard`、`menu.rs`（`MenuItem`、`show_menu`、`PopUpButton`、行的右键菜单）、`SidebarRow`、`Capsule`、`Disclosure`、`AppIcon`（整块是一个 SVG，颜色在文件里，不在 Rust 里），多行文本框 `TextArea` 与 `TextAreaState`（包装 gpui-component 的 `Textarea`；⌘↩ 与 Esc 在外框上以 `capture_action` 处理，见设计文档「多行文本框」），以及共用的悬停过渡 `hover.rs`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
