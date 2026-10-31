@@ -15,14 +15,16 @@ use std::time::{Duration, Instant};
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_project::testing::Shape;
+use lectern_review::notes::prompt::{PromptNote, Where, prompt};
 use lectern_review::testing::{
     BriefFixture, ChainRun, CutoffRun, Driven, LogLoad, MarkSeenFixture, SessionFixture,
     chain_fixture, load_log, write_log,
 };
+use lectern_services::changes::ChangePath;
 use lectern_services::project::BlobId;
 use lectern_services::project::ProjectKey;
 use lectern_services::review::{
-    AttributionState, DiffSide, Excerpt, LoadState, Need, NoteAnchor, NoteId, NoteState,
+    AttributionState, BatchId, DiffSide, Excerpt, LoadState, Need, NoteAnchor, NoteId, NoteState,
     ReviewCommand, ReviewEvent, ReviewId, RowsKey,
 };
 
@@ -90,6 +92,14 @@ pub const MARK_SEEN_5000: Bench = Bench {
 pub const NOTE_ADD: Bench = Bench {
     id: "review/note_add",
     run: note_add,
+};
+
+/// (step 7) `notes::prompt` of a full batch: 40 notes, each with 4 KiB of
+/// text, a five-line excerpt and a path. Pure text work, as the `Background`
+/// task of a send does it before it calls the route.
+pub const NOTES_PROMPT_40: Bench = Bench {
+    id: "review/notes_prompt_40",
+    run: notes_prompt_40,
 };
 
 /// (step 5) The rule brief of 5000 files, every rule represented, no
@@ -534,6 +544,46 @@ fn note_add(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         Measured::new("review/note_add", Value::Time(time)).with_note(Some(format!(
             "{files} files, 39 notes not sent and 240 sent"
         ))),
+    ])
+}
+
+fn notes_prompt_40(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let notes: Vec<PromptNote> = (0..40u32)
+        .map(|i| {
+            let words = format!("Why does this {i} hold after the rename, and what about the callers? ");
+            let text: String = words.chars().cycle().take(4096).collect();
+            PromptNote {
+                path: ChangePath(Arc::from(format!("crates/review/src/engine/m{i}.rs").as_bytes())),
+                line: 100 + i,
+                place: match i % 3 {
+                    0 => Where::Current,
+                    1 => Where::Base,
+                    _ => Where::Earlier,
+                },
+                excerpt: Some(Excerpt {
+                    first: 98 + i,
+                    lines: (0..5)
+                        .map(|k| {
+                            Arc::from(format!(
+                                "    let value_{k} = compute({i}, \"fixture line of a hundred bytes or so, 0123456789\");"
+                            ))
+                        })
+                        .collect(),
+                }),
+                text: Arc::from(text),
+            }
+        })
+        .collect();
+    let batch = BatchId(0x0190_f3a2_c4b6_0401);
+    // The prompt of a full batch is within the 256 KiB the routes take.
+    let size = prompt(batch, &notes).len();
+    if !(40 * 4096..=256 * 1024).contains(&size) {
+        return Err(BenchError::debug("prompt bytes", size));
+    }
+    let time = ctx.time(|| prompt(batch, &notes));
+    Ok(vec![
+        Measured::new("review/notes_prompt_40", Value::Time(time))
+            .with_note(Some(format!("40 notes, {} KiB", size / 1024))),
     ])
 }
 

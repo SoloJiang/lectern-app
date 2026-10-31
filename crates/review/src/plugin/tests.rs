@@ -30,7 +30,7 @@ use super::{ReviewDeps, plugin};
 use crate::engine::Engine;
 use crate::engine::round::Kind;
 use crate::engine::tests::{Fx, NOW, T, edit, ms, replace, session, target, turn};
-use crate::testing::FakeSessions;
+use crate::testing::{FakeClipboard, FakeRoute, FakeSessions, RouteMode};
 
 struct Rig {
     fx: Fx,
@@ -44,6 +44,8 @@ struct Rig {
     review: Arc<dyn Review>,
     data_dir: std::path::PathBuf,
     sid: &'static str,
+    /// What the plugin's clipboard route writes to (never the real one).
+    clipboard: FakeClipboard,
 }
 
 /// The sessions of the tests that read the log: a UUID each, so that their
@@ -135,7 +137,9 @@ impl Rig {
             data_dir: data_dir.clone(),
             git_ceilings: Arc::from(Vec::new()),
         });
+        let clipboard = FakeClipboard::new();
         let review = review
+            .with_clipboard_writer(clipboard.writer())
             .with_clock(Arc::new(clock.clone()))
             .with_wall_clock(|| NOW)
             .with_utc_offset(|_| 0)
@@ -158,6 +162,7 @@ impl Rig {
             review: service,
             data_dir,
             sid,
+            clipboard,
         }
     }
 
@@ -597,7 +602,7 @@ fn notes_cmd_on_the_ui_thread_do_no_io() {
         id,
         ReviewCommand::AddNote {
             rows: Some(rows),
-            anchor,
+            anchor: anchor.clone(),
             text: "why?".into(),
             excerpt: None,
         },
@@ -621,8 +626,140 @@ fn notes_cmd_on_the_ui_thread_do_no_io() {
     assert!(rig.review.snapshot(id).unwrap().notes.is_empty());
     assert!(!rig.data_dir.exists(), "the records are written by a task");
 
+    // `SendNotes` too only marks the notes on this thread: the prompt, the
+    // clipboard and the log are a task's.
+    rig.review.command(
+        id,
+        ReviewCommand::AddNote {
+            rows: None,
+            anchor: anchor.clone(),
+            text: "send me".into(),
+            excerpt: Some(lectern_services::review::Excerpt {
+                first: 0,
+                lines: vec![Arc::<str>::from("one")].into(),
+            }),
+        },
+    );
+    rig.review.command(
+        id,
+        ReviewCommand::SendNotes {
+            route: "clipboard".into(),
+        },
+    );
+    let sending = rig.review.snapshot(id).unwrap();
+    assert!(sending.notes_state.sending.is_some());
+    assert!(rig.clipboard.writes().is_empty());
+    assert!(!rig.data_dir.exists());
+
     off_thread(&rig);
     assert!(rig.data_dir.exists());
+    let sent = rig.review.snapshot(id).unwrap();
+    assert_eq!(sent.notes_state.sending, None);
+    assert_eq!(rig.clipboard.writes().len(), 1);
+}
+
+#[test]
+fn notes_send_through_the_plugin_to_a_route_and_to_the_clipboard() {
+    use lectern_services::review::{
+        DiffSide, NoteAnchor, NoteRoute, NoteState, RouteKind, SendOutcome, SentVia,
+    };
+
+    let rig = Rig::new();
+    let (id, snapshot) = rig.open_settled();
+    // As a session route's plugin does: through the service, with the
+    // token of its own activation.
+    let host = crate::testing::host();
+    let route = FakeRoute::new("terminal", RouteMode::Deliver(SentVia::TerminalPaste));
+    let registration = rig.review.register_note_route(
+        Arc::new(route.clone()) as Arc<dyn NoteRoute>,
+        host.handle.token(),
+    );
+    rig.run();
+    let offered = |rig: &Rig| -> Vec<(String, RouteKind)> {
+        rig.review
+            .snapshot(id)
+            .unwrap()
+            .notes_state
+            .routes
+            .iter()
+            .map(|r| (r.id.to_string(), r.kind))
+            .collect()
+    };
+    assert_eq!(
+        offered(&rig),
+        [
+            ("terminal".to_owned(), RouteKind::Session),
+            ("clipboard".to_owned(), RouteKind::Clipboard)
+        ]
+    );
+
+    let file = snapshot.files[0].key.clone();
+    let note = |text: &str| ReviewCommand::AddNote {
+        rows: None,
+        anchor: NoteAnchor {
+            file: file.clone(),
+            side: DiffSide::New,
+            line: 1,
+            oid: lectern_services::project::BlobId::from_bytes(&[3; 20]).unwrap(),
+        },
+        text: text.into(),
+        excerpt: Some(lectern_services::review::Excerpt {
+            first: 1,
+            lines: vec![Arc::<str>::from("two")].into(),
+        }),
+    };
+    rig.review.command(id, note("through the route"));
+    rig.review.command(
+        id,
+        ReviewCommand::SendNotes {
+            route: "terminal".into(),
+        },
+    );
+    rig.run();
+    let s = rig.review.snapshot(id).unwrap();
+    assert!(matches!(
+        s.notes_state.last,
+        Some(SendOutcome::Sent {
+            via: SentVia::TerminalPaste,
+            count: 1,
+            ..
+        })
+    ));
+    assert_eq!(route.deliveries().len(), 1);
+    assert!(rig.clipboard.writes().is_empty());
+
+    // The clipboard route writes to the writer the plugin was given.
+    rig.review.command(id, note("through the clipboard"));
+    rig.review.command(
+        id,
+        ReviewCommand::SendNotes {
+            route: "clipboard".into(),
+        },
+    );
+    rig.run();
+    let s = rig.review.snapshot(id).unwrap();
+    assert!(matches!(
+        s.notes_state.last,
+        Some(SendOutcome::Sent {
+            via: SentVia::Clipboard,
+            ..
+        })
+    ));
+    assert_eq!(rig.clipboard.writes().len(), 1);
+    assert!(rig.clipboard.writes()[0].contains("through the clipboard"));
+    assert!(
+        s.notes
+            .iter()
+            .all(|n| matches!(n.state, NoteState::Sent(_)))
+    );
+
+    // Dropping the registration takes the route away.
+    drop(registration);
+    rig.run();
+    assert_eq!(
+        offered(&rig),
+        [("clipboard".to_owned(), RouteKind::Clipboard)]
+    );
 }
 
 #[test]

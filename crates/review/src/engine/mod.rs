@@ -33,6 +33,7 @@ mod notes;
 pub(crate) mod overview;
 pub(crate) mod round;
 mod rows;
+mod send;
 mod watch;
 
 #[cfg(test)]
@@ -54,15 +55,16 @@ use lectern_logging::{Ctx, Value, debug, info, warn};
 use lectern_services::changes::{ChangeError, ChangePath, RefreshHint};
 use lectern_services::project::{ProjectKey, Projects, WorktreeKey};
 use lectern_services::review::{
-    AnalysisState, Brief, Degraded, FileEntry, FileKey, FileRows, LoadState, Need, Progress,
-    ReviewCommand, ReviewError, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey,
-    SeenState, TextKey, TurnEntry,
+    AnalysisState, BatchId, Brief, Degraded, FileEntry, FileKey, FileRows, LoadState, Need, NoteId,
+    Progress, ReviewCommand, ReviewError, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget,
+    RouteOffer, RowsKey, SeenState, TextKey, TurnEntry, TurnRef,
 };
 use lectern_services::session::{
     Content, SessionKey, SessionSource, SourceId, Timestamp, TurnIndex,
 };
 
 use crate::claims::Claims;
+use crate::clipboard_route::Writer;
 use crate::cutoff::{self, Record, Table};
 use crate::diag;
 use crate::log::{BaseRecord, Index, LogFile, Record as LogRecord, SessionId};
@@ -149,6 +151,9 @@ pub(crate) struct Config {
     /// per-package counts. May read the zone file: only on `Background`.
     pub utc_offset: Arc<dyn Fn(i64) -> i32 + Send + Sync>,
     pub discover: Discover,
+    /// The built-in clipboard route's write: the system's, or a fake in the
+    /// tests (which never touch the real clipboard).
+    pub clipboard: Writer,
     /// How long an interactive round computes cutoff misses
     /// (`cutoff::INTERACTIVE_BUDGET`; the tests set 0).
     pub interactive_budget: Duration,
@@ -171,6 +176,11 @@ pub(crate) struct Engine {
     overviews: Mutex<overview::Overviews>,
     /// The last review note ID given (`next_note_id`). A leaf lock.
     note_ids: Mutex<u64>,
+    /// The session routes of review notes registered (「审阅意见的发送
+    /// 途径」). A leaf lock: the routes are called with it released.
+    note_routes: Mutex<send::Routes>,
+    /// The last delivery attempt number given. A leaf lock.
+    attempts: Mutex<u64>,
     /// IO faults and size limits for the logs opened from now on.
     #[cfg(test)]
     log_test: Mutex<LogTest>,
@@ -243,6 +253,20 @@ struct Open {
     /// A folder project's review notes: it has no annotation log, so they
     /// stay here until the review is released (「审阅意见」).
     folder_notes: Option<Index>,
+    /// The excerpts of notes added on prepared rows, still to be taken
+    /// from their text (by the task of the note or by the send of a batch
+    /// that has it).
+    excerpts: HashMap<NoteId, notes::ExcerptJob>,
+    /// The routes that apply to the target (session routes, then the
+    /// clipboard), as the latest round or registration left them.
+    routes: Arc<[RouteOffer]>,
+    /// The worktree root (a folder project's session: its cwd), for
+    /// `NoteDelivery::root`.
+    root: Option<Arc<Path>>,
+    /// The batch being sent: its notes are `Sending` (「发送」).
+    sending: Option<send::InFlight>,
+    /// A `CopyBatch` under way.
+    copying: Option<send::InFlight>,
 }
 
 impl Open {
@@ -305,6 +329,8 @@ impl Engine {
             providers: Mutex::new(brief::Providers::default()),
             overviews: Mutex::new(overview::Overviews::default()),
             note_ids: Mutex::new(0),
+            note_routes: Mutex::new(send::Routes::default()),
+            attempts: Mutex::new(0),
             #[cfg(test)]
             log_test: Mutex::new(LogTest::default()),
         })
@@ -404,6 +430,11 @@ impl Engine {
                 texts: HashMap::new(),
                 brief: brief::BriefState::default(),
                 folder_notes: None,
+                excerpts: HashMap::new(),
+                routes: notes::clipboard_only(),
+                root: None,
+                sending: None,
+                copying: None,
             },
         );
         self.start_round(&mut state, id, Kind::Fetch, Priority::Interactive);
@@ -528,6 +559,7 @@ impl Engine {
         }
         drop(reviews);
         lock(&self.providers).clear();
+        lock(&self.note_routes).clear();
         self.overviews_clear();
         lock(&self.gits).clear();
         lock(&self.tables).clear();
@@ -568,8 +600,10 @@ impl Engine {
                 | ReviewCommand::DiscardNotes => {
                     self.note_command(&mut state, id, command, &mut events);
                 }
-                // Sending comes with #22's step 7 (review.md「验收」).
-                ReviewCommand::SendNotes { .. } | ReviewCommand::CopyBatch(_) => {}
+                ReviewCommand::SendNotes { route } => {
+                    self.send_command(&mut state, id, route, &mut events);
+                }
+                ReviewCommand::CopyBatch(batch) => self.copy_command(&mut state, id, batch),
                 ReviewCommand::Refresh => self.start_round(
                     &mut state,
                     id,
@@ -696,6 +730,8 @@ impl Engine {
             unclaimed = work.unclaimed,
             pending = !work.pending.is_empty(),
             took_us = prepared_in);
+        // `applies` of the session routes is called with no lock held.
+        let routes = self.offer_routes(&target);
         let mut events = Vec::new();
         {
             let mut state = lock(&self.state);
@@ -704,6 +740,8 @@ impl Engine {
                 return;
             };
             open.ctx = work.ctx;
+            open.routes = routes;
+            open.root = Some(Arc::from(work.git.root.as_path()));
             if !open.ready {
                 open.ready = true;
                 let t = &work.timing;
@@ -841,47 +879,62 @@ impl Engine {
         seq: u64,
         summary: lectern_services::session::SessionSummary,
     ) {
+        let target = ReviewTarget::Session(summary.key.clone());
         let index: Option<Arc<TurnIndex>> =
             round::source_of(self, &summary.key).and_then(|s| s.turns(&summary.key).ok());
         let own = vec![Own { summary, index }];
         let placed = narrative::place(&own);
         let order = narrative::order(&own, &placed);
         let empty = HashMap::new();
-        let turns = narrative::build(
-            &narrative::Inputs {
-                own: &own,
-                placed: &placed,
-                order: &order,
-                step_files: &empty,
-                command_files: &empty,
-                last_seen: None,
-            },
-            &|_| FileKey {
-                old: None,
-                new: None,
-            },
-            &|_, _, _| None,
-        );
+        let routes = self.offer_routes(&target);
         let mut events = Vec::new();
         {
             let mut state = lock(&self.state);
             let Some(open) = current(&mut state, id, seq) else {
                 return;
             };
-            let (notes, notes_state) = match (&open.folder_notes, folder_target(&open.target)) {
+            open.routes = routes;
+            open.root = Some(Arc::from(own[0].summary.cwd.as_ref()));
+            let sending = open.sending.as_ref().map(|f| (f.batch, &f.ids[..]));
+            let (notes, mut notes_state) = match (&open.folder_notes, folder_target(&open.target)) {
                 (Some(index), Some(key)) => notes::build(
                     index,
                     &key,
-                    None,
-                    (&open.snapshot.notes, &open.snapshot.notes_state),
-                    false,
-                    (self.cfg.clock)(),
+                    notes::View {
+                        placing: None,
+                        prev: (&open.snapshot.notes, &open.snapshot.notes_state),
+                        sending,
+                        routes: &open.routes,
+                        last: notes::Last::Keep,
+                        now: (self.cfg.clock)(),
+                    },
                 ),
                 _ => (
                     open.snapshot.notes.clone(),
                     open.snapshot.notes_state.clone(),
                 ),
             };
+            if let Some(index) = &own[0].index
+                && let Some(batches) = send::link(id, &index.turns, &notes_state.batches)
+            {
+                notes_state = send::with_batches(&notes_state, batches);
+            }
+            let turns = narrative::build(
+                &narrative::Inputs {
+                    own: &own,
+                    placed: &placed,
+                    order: &order,
+                    step_files: &empty,
+                    command_files: &empty,
+                    last_seen: None,
+                    answers: &send::answers_of(&notes_state),
+                },
+                &|_| FileKey {
+                    old: None,
+                    new: None,
+                },
+                &|_, _, _| None,
+            );
             let snapshot = ReviewSnapshot {
                 notes,
                 notes_state,
@@ -933,21 +986,36 @@ impl Engine {
             .map(|f| index.map_or(SeenState::Unseen, |i| seen::state(i, &f.seen)))
             .collect();
         let last_seen = index.and_then(|i| i.last_seen(&work.target_key));
-        let (notes, notes_state) = match index {
+        let (notes, mut notes_state) = match index {
             Some(i) => notes::build(
                 i,
                 &work.target_key,
-                Some((work, &results)),
-                (&open.snapshot.notes, &open.snapshot.notes_state),
-                false,
-                (self.cfg.clock)(),
+                notes::View {
+                    placing: Some((work, &results)),
+                    prev: (&open.snapshot.notes, &open.snapshot.notes_state),
+                    sending: open.sending.as_ref().map(|f| (f.batch, &f.ids[..])),
+                    routes: &open.routes,
+                    last: notes::Last::Keep,
+                    now: (self.cfg.clock)(),
+                },
             ),
             None => (
                 Arc::clone(&open.snapshot.notes),
                 Arc::clone(&open.snapshot.notes_state),
             ),
         };
-        let turns = self.turns(work, &results, last_seen);
+        // The batches the session's turns answer (only the previews of the
+        // target's own turns are compared).
+        let own_turns = (matches!(work.target, ReviewTarget::Session(_))
+            && work.degraded.is_none())
+        .then(|| work.own.first().and_then(|o| o.index.as_ref()))
+        .flatten();
+        if let Some(index) = own_turns
+            && let Some(batches) = send::link(open.snapshot.id, &index.turns, &notes_state.batches)
+        {
+            notes_state = send::with_batches(&notes_state, batches);
+        }
+        let turns = self.turns(work, &results, last_seen, &send::answers_of(&notes_state));
         let brief = self.brief(open, work, &results, &seen);
         ReviewSnapshot {
             id: open.snapshot.id,
@@ -977,6 +1045,7 @@ impl Engine {
         work: &Work,
         results: &[Option<Arc<FileResult>>],
         last_seen: Option<Timestamp>,
+        answers: &HashMap<TurnRef, BatchId>,
     ) -> Option<Arc<[TurnEntry]>> {
         if !matches!(work.target, ReviewTarget::Session(_)) || work.degraded.is_some() {
             return None;
@@ -989,6 +1058,7 @@ impl Engine {
                 step_files: &work.step_files,
                 command_files: &work.command_files,
                 last_seen,
+                answers,
             },
             &|f| work.files[f as usize].key.clone(),
             &|s, ordinal, f| attribute::step_entry(work, results, s, ordinal, f),

@@ -22,6 +22,7 @@ use lectern_services::review::{
 };
 use lectern_services::session::{SessionSource, SessionsChanged, Timestamp};
 
+use crate::clipboard_route::{self, Writer};
 use crate::cutoff::INTERACTIVE_BUDGET;
 use crate::engine::{Config, Discover, Engine, Held, Host};
 
@@ -55,6 +56,7 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin) {
             wall: Arc::new(wall_clock),
             zone: Arc::new(local_offset),
             discover: Arc::new(lectern_git::Repo::discover),
+            clipboard: clipboard_route::system(),
             #[cfg(test)]
             provided: Arc::default(),
         },
@@ -70,6 +72,9 @@ pub struct ReviewPlugin {
     /// The local time zone's offset at a Unix time in milliseconds.
     zone: Arc<dyn Fn(i64) -> i32 + Send + Sync>,
     discover: Discover,
+    /// The clipboard route's write: the system's; tests put a fake in its
+    /// place.
+    clipboard: Writer,
     /// The engine and the service of the latest activation, for the tests.
     #[cfg(test)]
     pub(crate) provided: Provided,
@@ -105,6 +110,13 @@ impl ReviewPlugin {
         zone: impl Fn(i64) -> i32 + Send + Sync + 'static,
     ) -> ReviewPlugin {
         self.zone = Arc::new(zone);
+        self
+    }
+
+    /// Replaces the clipboard route's write (tests and benchmarks: a fake
+    /// in place of the system clipboard, which they never write).
+    pub fn with_clipboard_writer(mut self, writer: Writer) -> ReviewPlugin {
+        self.clipboard = writer;
         self
     }
 
@@ -148,6 +160,7 @@ impl Plugin for ReviewPlugin {
             clock: self.wall.clone(),
             utc_offset: self.zone.clone(),
             discover: self.discover.clone(),
+            clipboard: self.clipboard.clone(),
             interactive_budget: INTERACTIVE_BUDGET,
         });
         let review: Arc<dyn Review> = Arc::new(Service {
@@ -253,12 +266,10 @@ impl Review for Service {
 
     fn register_note_route(
         &self,
-        _route: Arc<dyn NoteRoute>,
-        _token: ActivationToken,
+        route: Arc<dyn NoteRoute>,
+        token: ActivationToken,
     ) -> NoteRouteRegistration {
-        // Session routes are offered from #22's step 7 on; until then only the
-        // built-in clipboard route exists and a registration does nothing.
-        NoteRouteRegistration::new(|| {})
+        self.engine.register_note_route(route, token)
     }
 }
 

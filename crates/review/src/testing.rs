@@ -6,17 +6,23 @@
 //! reflog writer and the fixture of the `review/open_session_*` benches.
 //! For review notes (step 6): the log of `review/resident_notes_bytes`
 //! ([`write_notes_log`], [`load_notes_log`]) and the notes seeded for
-//! `review/note_add` ([`MarkSeenFixture::seed_notes`]).
+//! `review/note_add` ([`MarkSeenFixture::seed_notes`]). For sending them
+//! (step 7): [`FakeClipboard`] and [`FakeRoute`], the clipboard's write and
+//! a session route; the tests never write the real clipboard.
 
 mod driven;
 mod fake;
 mod fixture;
 mod host;
+mod send;
 
 pub use driven::{Driven, ReflogLine, write_reflog};
 pub use fake::{Calls, FakeProjects, FakeSessions};
 pub use fixture::{BriefFixture, CutoffRun, MarkSeenFixture, SessionFixture};
 pub use host::{TestHost, host};
+pub use send::{ClipMode, FakeClipboard, FakeRoute, RouteMode};
+
+pub use crate::clipboard_route::{Done, WriteError, Writer};
 
 use std::io;
 use std::path::Path;

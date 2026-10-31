@@ -1,6 +1,9 @@
 //! Review notes: the pure parts (docs/design/review.md「审阅意见」). The
-//! excerpt kept with a note; the engine's commands and the annotation log's
-//! records are in `engine::notes` and `log`.
+//! excerpt kept with a note, and the prompt a batch is sent as ([`prompt`]);
+//! the engine's commands and the annotation log's records are in
+//! `engine::notes` and `log`.
+
+pub mod prompt;
 
 #[cfg(test)]
 mod tests;

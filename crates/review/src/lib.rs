@@ -16,6 +16,7 @@
 mod brief;
 mod chain;
 mod claims;
+mod clipboard_route;
 mod cutoff;
 mod diag;
 mod engine;
@@ -23,7 +24,7 @@ mod group;
 mod log;
 mod lru;
 pub mod noise;
-mod notes;
+pub mod notes;
 mod plugin;
 mod seen;
 

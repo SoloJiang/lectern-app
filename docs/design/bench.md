@@ -807,6 +807,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 的全部 5000 行；进程内，不开窗口，只在 macOS 编译） | [review_view](review_view.md#性能) | `review_view` 第 1 步 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/note_add` | 中位数 < 0.2 ms（`testing::MarkSeenFixture::seed_notes` 写好 39 条待发送、240 条已发送的会话外改动审阅上 `command(AddNote)` 到快照替换；每个样本之前删掉上一个样本加的那条，不计时） | [review](review.md#性能) | `review` 第 6 步 |
+| `review/notes_prompt_40` | 中位数 < 5 ms（`notes::prompt` 拼 40 条意见，每条 4 KiB 文字、5 行摘录和一个路径，约 200 KiB；纯文字处理，进程内，不开窗口） | [review](review.md#性能) | `review` 第 7 步 |
 | `review/resident_notes_bytes` | 中位数 < 300 KB（标注日志读完之后索引的存活字节：280 条意见，40 条待发送、240 条已发送，每条 200 字节文字和 5 行摘录；`Memory`；夹具 `testing::write_notes_log`、`load_notes_log`） | [review](review.md#性能) | `review` 第 6 步 |
 | `review/refresh_one` | 中位数 < 20 ms（同一夹具、审阅已完成时，agent 追加一轮并改写第一个改动文件：从 worktree 的路径批次和来源的 `SessionsChanged` 到第一份同时显示新一轮和新内容的快照；`testing::Driven` 不经插件和 fs_watch，批次与事件直接交给引擎） | [review](review.md#性能) | `review` 第 4 步 |
 | `plugin/review/activate` | 中位数 < 1 ms（kernel 记下的四段耗时之和；`Process` 目标，第 5 步起与 `plugin/*/activate` 的展开一致，原来在 `TestKernel` 下进程内测量；激活没有提交任务也没有写文件由 `review` 的插件测试验证） | [review](review.md#性能) | `review` 第 4 步 |

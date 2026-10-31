@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（[#326](https://github.com/SoloJiang/lectern-app/pull/326)）；第 6 步（意见的存储、命令与位置：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`，`NotePlace`，摘录，标注日志的 `note`、`note_removed`、`notes_sent` 的读取、索引、保留与压缩，`review/note_add`、`review/resident_notes_bytes`）已实现（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）。`SendNotes`、`CopyBatch` 仍被忽略，`register_note_route` 登记的途径不生效，`notes_sent` 只读不写，由第 7 步实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（[#326](https://github.com/SoloJiang/lectern-app/pull/326)）；第 6 步（意见的存储、命令与位置：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`，`NotePlace`，摘录，标注日志的 `note`、`note_removed`、`notes_sent` 的读取、索引、保留与压缩，`review/note_add`、`review/resident_notes_bytes`）已实现（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）。第 7 步（发送、prompt 与回应的那一轮：`SendNotes`、`CopyBatch`，内置的剪贴板途径，`register_note_route`，`notes::prompt`，批次与回应的那一轮的对应，`notes_sent` 的写入，「日志与诊断」里 #22 的发送记录，`review/notes_prompt_40`）已实现（[#331](https://github.com/SoloJiang/lectern-app/pull/331)）。真实的 Claude Code 与 Codex 会话里粘贴 prompt 的手动检查还没做，随 `review_view` 的一步进行（见「实际验证」第 7 步的「没有验证的」）。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的领域部分（意见的存储、锚点与 Drifted、攒批、拼成 prompt、经发送途径送出、与回应它的那一轮对应）。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
@@ -1015,11 +1015,15 @@ pub mod noise {
 
 /// 审阅意见的 prompt（#22，「审阅意见」的模板）。纯函数，任何线程；`prompt_*` 测试和 `review/notes_prompt_40` 直接调它。
 pub mod notes {
-    pub const TEMPLATE_VERSION: u32 = 1;
-    pub struct PromptItem { pub path: String, pub at: PromptLine, pub excerpt: Option<Excerpt>, pub text: Arc<str> }
-    /// 行号都是 0 起，输出时加一。
-    pub enum PromptLine { Current(u32), Base(u32), Earlier(u32), File }
-    pub fn prompt(batch: BatchId, items: &[PromptItem]) -> String;
+    pub mod prompt {
+        pub const TEMPLATE_VERSION: u32 = 1;
+        /// 一条意见，按写进 prompt 的顺序给出。`line` 是锚点的行号，0 起，输出时加一；`path` 是相对 worktree 根的路径（新路径，删除的文件用旧路径），不是 UTF-8 的字节输出为 U+FFFD。
+        pub struct PromptNote { pub path: ChangePath, pub line: u32, pub place: Where, pub excerpt: Option<Excerpt>, pub text: Arc<str> }
+        pub enum Where { Current, Base, Earlier }
+        /// `[lectern-notes <批次 ID 的 16 位十六进制>]`，与回应的那一轮对应时在 `prompt_preview` 里找它。
+        pub fn marker(batch: BatchId) -> String;
+        pub fn prompt(batch: BatchId, notes: &[PromptNote]) -> String;
+    }
 }
 
 /// 测试与 bench 用（`test-support` feature）。
@@ -1034,11 +1038,11 @@ pub mod testing {
     /// 只有快照的 `Projects`：一个仓库项目，worktree 来自 `TestRepo`。`with_packages`、`set_packages` 给快照的 `active.packages` 一组子项目目录（`Ready`），没给时为 `Pending`。
     pub struct FakeProjects;
     /// 不经插件，在调用线程上驱动审阅引擎（`Executor::manual()`）。bench 的 `review/*` 用它。`set_utc_offset` 给本地时区一个固定偏移（默认 UTC），`project_changed` 递一个 `ProjectEvent::Changed` 的 `ChangedParts`。
-    /// #22：`with_clipboard` 换掉剪贴板途径的写入，`register_note_route` 登记一个途径。
+    /// #22：`clipboard()` 是引擎的剪贴板途径写入的那个 `FakeClipboard`（`Driven` 从不碰真实的剪贴板），`register_note_route` 登记一个途径。
     pub struct Driven;
-    /// #22：假剪贴板，记下写入的文字，按测试的设定答复 `Ok` 或 `Err`，或不答复（测超时）。
+    /// #22：假剪贴板，记下写入的文字，按 `ClipMode` 答复 `Ok`、`Rejected`、`Unsupported`，或不答复（测超时，`release` 之后才答复）。`writer()` 交给 `ReviewPlugin::with_clipboard_writer`（`test-support`）换掉插件的写入。
     pub struct FakeClipboard;
-    /// #22：假会话途径，记下 `NoteDelivery`，按测试的设定答复。
+    /// #22：假会话途径，记下 `NoteDelivery`，按 `RouteMode` 答复（送出、`NotNow`、失败、不答复）。
     pub struct FakeRoute;
 }
 ```
@@ -1474,7 +1478,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 追加之前截掉末尾不完整的一行 | `annotation log tail cut` | `path`、`bytes` |
   | 文件状态未知、不以换行结尾，追加之前补一个换行 | `annotation log of unknown state; newline added before the records` | `path` |
   | 审阅意见的命令生效（#22） | `note changed` | `id`、`op`（`add`、`edit`、`remove`、`discard`）、`pending`、`sent`（快照里的条数）、`place`（只对 `add`：`rows`、`drifted`、`elsewhere`） |
-  | 审阅意见的命令被忽略 | `note command ignored` | `id`、`op`（含 `send`）、`reason`（`empty`、`too_long`、`too_many`、`unknown_file`、`not_pending`、`sending`、`unchanged`、`no_route`、`nothing_pending`、`unknown_batch`） |
+  | 审阅意见的命令被忽略 | `note command ignored` | `id`、`op`（含 `send`、`copy`）、`reason`（`empty`、`too_long`、`too_many`、`unknown_file`、`not_pending`、`sending`、`unchanged`、`no_route`、`nothing_pending`、`unknown_batch`） |
   | 发送途径登记、注销 | `note route registered` / `note route released` | `registration`（登记序号；途径 ID 是文本，不进日志） |
   | 超时之后才到的答复被丢弃 | `late delivery reply dropped` | `id`、`batch`、`outcome`（`delivered`、`not_now`、`failed`） |
   | 一批意见对上了回应它的那一轮 | `notes answered` | `id`、`batch`、`ordinal`（那一轮的 `Turn::ordinal`） |
@@ -1606,7 +1610,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
     - `notes_send_*`：经 `FakeClipboard` 成功时为 `Sent`、`batches` 多一项、写出 `notes_sent`；`Rejected` 时回到 `Pending`、`last` 为 `Failed`、不写日志；经 `FakeRoute` 答复 `NotNow(Starting)`；10 秒超时（`Driven::with_timers`）；超时之后才到的答复被丢弃；发送中加的意见不在这一批；途径在发送中注销时为 `Failed`；发送 30 条时只能再加 10 条，这一批失败退回后待发送 40 条、`unsent` 为 40，再发一次全部在一批里；日志里一个审阅对象有 45 条待发送时一条不丢、`AddNote` 被忽略、`SendNotes` 一批取最早的 40 条、其余 5 条留在待发送；`routes` 的顺序（会话途径在前，剪贴板最后）、`applies` 为 false 的途径不列出、同一 `id` 再次登记时替换；`NoteDelivery` 的 `locations` 至多 8 条、只有 `Current` 带行号。
     - `notes_copy_again_*`：`CopyBatch` 经 `FakeClipboard` 写出的文字第一行的标记与原来那一批相同，只含还在的意见（删掉一条之后少一条）；意见的状态、`batches`、`answered_by` 不变，标注日志文件的字节不变；`last` 是 `CopiedAgain { failed: None }`；`Rejected` 时 `failed` 是 `Some(Failed)`、意见仍是已发送；不在 `batches` 里的批次、意见都删掉了的批次、有一批在发送中时被忽略（`unknown_batch`、`sending`）；粘贴再次复制的文字之后，那一轮照样成为 `answered_by`。
     - `notes_link_*`：发出之后会话追加一轮，prompt 第一行带标记，这一轮成为 `answered_by`、`TurnEntry::answers` 是这批；标记出现在另一个会话里时不对上；早于发出时刻 1 秒以上的轮次不对上；重新读日志（模拟重启）之后再次对上。
-    - `prompt_*`（`src/notes/tests.rs`，纯函数）：模板的 insta 快照（`Current`、`Base`、`Earlier`；没有摘录；摘录里有三个反引号时围栏变长；多行文字的缩进和空行；1 条时用 `note`）；标记在第一行的前 60 个字符；40 条各 4 KiB 文字的 prompt 不超过 256 KiB。
+    - `prompt_*`（`src/notes/prompt/tests.rs`，纯函数）：模板的 insta 快照（`Current`、`Base`、`Earlier`；没有摘录；摘录里有三个反引号时围栏变长；多行文字的缩进和空行；1 条时用 `note`）；标记在第一行的前 60 个字符；40 条各 4 KiB 文字的 prompt 不超过 256 KiB。
     - `log_notes_*`（`src/log/tests.rs`）：三种记录的往返，`log_format` 快照加三行；改文字后索引只留最近一条；`note_removed` 删掉；`notes_sent` 标为已发送；已发送超过 14 天的不进索引、压缩后不在文件里，待发送的意见一年后仍在；`log_notes_compaction_keeps_the_index`（压缩前后索引相同）。
 - 结构化输出（链、归因、叙事、简报、分组）都用 insta 快照验收。
 
@@ -1870,6 +1874,40 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - 「测试」里 `notes_cmd_*` 的「已有 40 条还没发出（含 30 条发送中、10 条待发送）时第 41 条被忽略」：第 6 步没有发送中的状态，只测了 40 条待发送时第 41 条被忽略（`notes_cmd_ignored_commands_leave_the_snapshot_alone`）和日志里 45 条待发送时一条不丢（`notes_cmd_more_than_the_limit_in_the_log_are_all_kept`）；发送中的情形随 `SendNotes` 在第 7 步测。
   - 最后一次 `just check` 在文档的这一节写好之前通过；之后只改了本文档和它的链接，重跑了文档链接检查（`lectern-doc-check`），没有再跑全部的 `just check`。
 
+### 第 7 步（发送、prompt 与回应的那一轮）
+
+在 macOS（Darwin，本机，Rust 1.97.0）上运行，基于 main 的 a6eedcd 加第 6 步（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）和前置条件 I（`platform::clipboard::write_text`，[#327](https://github.com/SoloJiang/lectern-app/pull/327)）的提交；屏幕没有操作，没有运行应用，也没有运行打开窗口的测试或基准（基准只跑了 `time`、`memory` 两个进程内的目标，筛选 `review/`，不含 `process` 目标的 `plugin/review/activate`）。**所有测试都没有写过真实的系统剪贴板**：引擎的剪贴板写入是 `clipboard_route::Writer`，测试里是 `FakeClipboard`，本 crate 自己的单元测试里默认的写入直接回 `Unsupported`。
+
+- `just check`（格式、架构规则、文档链接、clippy 警告即失败）、`just deny` 通过。`rg -n 'clipboard::' crates/review/src --glob '!**/tests*' --glob '!**/testing*'` 只在 `src/clipboard_route.rs` 里有结果（三处，都是 `lectern_platform::clipboard`）；`rg -n 'lectern-terminal|lectern-conversation|lectern_terminal|lectern_conversation' crates/review` 没有结果；`rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 和 `rg 'eprintln!|util::log' crates/review/src --glob '!**/tests*'` 仍没有结果。
+- `just test -p lectern-review`：255 个测试通过，新增 35 个：
+  - `prompt_*` 9 个（`src/notes/prompt/tests.rs`）：`prompt_the_design_example` 把「prompt 的模板」的例子逐字比对，并存 insta 快照；另有 `Base`、`Earlier` 的写法与 1 条时用 `note`、没有摘录、摘录里有反引号时围栏变长、行号右对齐到同一宽度、文字的缩进与空行和 CRLF、非 UTF-8 的路径、锚点行不在摘录里时不标 `> `、标记在第一行的前 60 个字符。六个快照（`prompt_the_design_example`、`prompt_one_note_base`、`prompt_no_excerpt`、`prompt_fence`、`prompt_line_width`、`prompt_text`）和 `engine/tests/snapshots/…notes_send_prompt.snap` 逐个看过，与例子的格式一致（围栏缩进 3 个空格、`> ` 与两个空格、` | `、`Note:` 另起一行、条目之间一个空行、最后没有换行）。
+  - `notes_send_*` 11 个、`notes_cmd_forty_unsent_with_thirty_sending_refuse_the_41st` 1 个（`src/engine/tests/send.rs`，`Driven`，`FakeClipboard`、`FakeRoute`）：剪贴板送出时意见在命令返回前已是 `Sending`、之后为 `Sent`、`batches` 多一项、`notes_sent` 写进日志并在重启后读回、按快照的顺序拼出（含发送时还没取出的摘录）；`Rejected`、`Unsupported`、`NotNow(Starting | Busy | NoSession)`、失败各自回到 `Pending` 且 `last` 为 `Failed`、不写日志，再发一次得到新的批次；10 秒超时（`Driven::with_timers`，9 秒时还在发送中）、超时之后才到的答复被丢弃（快照是同一个 `Arc`）、剪贴板同样有超时；登记在发送中 drop、路径的插件已停用（`token.enter()` 取不到，路径没有被调用）时为 `Failed`；`routes` 的顺序、同一 `id` 再次登记替换并排到后面、`applies` 为 false 的不列出、对会话外的改动只有剪贴板、从 `started` 里登记（token 还是 `Pending`，那时 `offer_routes` 只给出剪贴板）；日志里有 45 条待发送时一批取最早的 40 条、其余 5 条下一次再发；不能执行的命令被忽略且快照不变（没有待发送的、没有这个途径、发送中再发、发送中的意见不能删改、`DiscardNotes` 只去掉待发送的）；超过 256 KiB 的 prompt 不发、不截断、回到 `Pending`；30 条发送中加 10 条待发送时第 41 条被忽略，这一批失败退回后仍是 40 条、仍被忽略，再发一次 40 条在一批里（第 6 步没有测的那一项）。
+  - `notes_copy_again_*` 4 个：写出的文字与第一次逐字相同、快照上的 `notes` 是同一个 `Arc`、只有 `last` 变、`batches` 不变、日志里没有第二条 `notes_sent`；删掉一条之后只含还在的、`batches` 的条数不变，全删之后被忽略；`Rejected` 与超时只出现在 `last` 的 `failed`、超时后的答复被丢弃；批次是经会话途径送出的，再次复制仍写剪贴板、不再调用那个途径。
+  - `notes_link_*` 8 个：发出之后会话追加一轮，prompt 第一行带标记，这一轮成为 `answered_by`、`TurnEntry::answers` 是这批；早于发出时刻 1 秒以上的、别的批次的标记、不含标记的轮次、另一个会话里的标记不对上；比发出的时刻早 0.9 秒的轮次算（时钟偏差）；同时有几轮时取开始最早的；找到之后不再变；重新打开（模拟重启）后从 `notes_sent` 与轮次重新对上；粘贴再次复制的文字（第一行取前 120 个字符）同样对上；会话外的改动没有轮次。
+  - `logs_hold_no_note_contents` 1 个：金丝雀放进意见的文字、文件内容（进摘录）和超长路径里；加、改、删、成功、`Rejected`、`NotNow(Starting)`、超时、超时后才到的答复、`CopyBatch` 成功与 `Rejected`、超过 256 KiB（`too_large`）、放弃、再压缩一次；`review notes sent`、`review notes not sent`（三条原因 `failed`+`rejected`、`starting`、`timed_out`，`route` 为 `clipboard` 或 `session`）、`review notes copied again`、`review notes not copied again`、`late delivery reply dropped` 的字段按「日志与诊断」，任何记录都不含金丝雀。
+  - `src/plugin/tests.rs`：`notes_send_through_the_plugin_to_a_route_and_to_the_clipboard`（经 `dyn Review` 登记一个途径、经它送出、再经 `with_clipboard_writer` 换进去的假剪贴板送出、登记 drop 之后途径消失）；`notes_cmd_on_the_ui_thread_do_no_io` 多检查 `SendNotes` 在 UI 线程上只标出发送中，不写剪贴板、不写日志。
+- 基准（`cargo bench -p lectern-bench --all-features --bench time -- review/` 与 `--bench memory -- review/`，采样模式，同一台机器）：
+
+  | 条目 | 预算 | 第 6 步的结果 | 本步 |
+  |---|---|---|---|
+  | `review/notes_prompt_40`（40 条，每条 4 KiB 文字和 5 行摘录，约 200 KiB 的 prompt） | 中位数 < 5 ms | — | 22.5、23.1 µs（两次运行） |
+  | `review/note_add` | 中位数 < 0.2 ms | 46.3、130 µs | 93.6 µs（报告标为 noisy） |
+  | `review/mark_seen_5000` | < 200 µs | 16.1、15.9 µs | 16.6 µs |
+  | `review/rows_first` | < 3 ms | 226、223 µs | 235 µs |
+  | `review/open_session_50` / `_warm` | < 35 ms / < 20 ms | 15.6、16.5 / 5.78、5.75 ms | 16.9 / 5.85 ms |
+  | `review/refresh_one` | < 20 ms | 2.85、3.49 ms | 2.72 ms |
+  | `review/overview_round_warm` | < 20 ms | 7.85、6.86 ms | 7.15 ms |
+  | `review/brief_5000` | < 5 ms | 270、266 µs | 275 µs |
+  | `review/log_load_16k` | < 30 ms | 10.3、9.83 ms | 10.6 ms |
+  | `review/resident_cloudprint_bytes`、`review/resident_100k_bytes`、`review/resident_notes_bytes` | < 1 MB、< 1 MB、< 300 KB | 19.8 KB、3.47 KB、228 KB | 19.8 KB、3.47 KB、228 KB |
+
+  只记录的条目（`open_session_settled` 196 ms，`cutoffs_cold` 192 ms，`attribute_session_50` 16.9 ms，`overview_cloudprint` 42.7 ms，`chain_3000_lines` 10 ms）在第 6 步两次运行之间的波动范围内。`review/notes_prompt_40` 的余量超过两个数量级，预算 5 ms 按设计不改。
+- `just test -p lectern-bench`（179 个）、`just test -p lectern-services`（110 个）通过。
+- 没有验证的：
+  - **手动检查没做**：把 Copy as Prompt 得到的文字粘贴进一个在普通终端里运行的 Claude Code 会话和一个 Codex 会话，各确认一次会话日志原样记下了粘贴的文字（第一行带标记），以及 `notes_link_*` 的规则能对上那一轮。这一步需要真实的会话日志和手工粘贴，而 `review_view` 还没有 Copy as Prompt 的浮条，所以留给 `review_view` 的一步（[review_view 设计「验收」](review_view.md#验收)）；做完之后把结果写在这里。某种 agent 只记下占位而不是原文时，要在「审阅意见」的「已知限制」里写明（现在那一条仍是推测）。`notes_link_*` 用合成的轮次，轮次的 `prompt_preview` 取脚本里的 prompt 全文，没有经过 `agents` 的适配器（插件之间不依赖）；适配器保留 prompt 第一行前 120 个字符是 `agents` 的测试覆盖的。
+  - 真实的系统剪贴板：`platform::clipboard::write_text` 的行为由 `platform` 的测试覆盖（私有的具名剪贴板，前置条件 I）；本 crate 的所有测试都用假的写入，没有一次经 `NSPasteboard`。答复在 macOS 的主线程上到达这一点（`Done` 在主线程上被调用）靠 `Writer` 的约定，本步的测试里 `FakeClipboard` 在写入的调用里同步答复，覆盖了回调重入的情形，没有覆盖跨线程。
+  - 没有在 CI 的 macOS runner 上测量基准。
+  - 会话途径（终端粘贴、ACP）没有真实的实现：`FakeRoute` 代替；它们在 `terminal`、`conversation` 的后续步骤里登记。
 ## 与设计的差异
 
 ### 前置条件 A
@@ -2021,3 +2059,20 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **模块 `notes` 目前不公开。** 设计的 `pub mod notes` 是 `prompt`；第 6 步只有摘录的纯函数（`notes::excerpt`、`hint`、`anchored_text`），第 7 步加 `prompt` 时改为公开。
 - **测试的位置。** `notes_cmd_on_the_ui_thread_do_no_io` 在 `src/plugin/tests.rs`（需要 `Rig` 的「缓存拒绝 UI 线程」设施），其余 `notes_cmd_*`、`notes_place_*`、`notes_excerpt_*` 在 `src/engine/tests/notes.rs`，摘录的纯函数测试在 `src/notes/tests.rs`（同名前缀 `notes_excerpt_*`）。`log_unknown_records_survive_compaction`、`log_lines_not_utf8_are_bad_or_kept` 和 `logs_hold_no_contents` 原来用 `note`、`notes_sent` 当「认不出的记录」，这两个类型现在认得了（形状不对的是坏行），改用 `pin`、`star`。
 - **基准的形状。** `review/note_add` 在 39 条待发送加 240 条已发送上测一次被接受的 `AddNote`（设计写 40 条待发送，第 40 条之后的命令会被忽略；每个样本之前的准备删掉上一个样本加的那条，不计时）。`review/resident_notes_bytes` 只测标注日志的索引（`LogFile::load` 前后的存活字节，夹具 `testing::write_notes_log`、`load_notes_log`），不经引擎；「300 KB」按 300 × 1024 字节。
+
+### 第 7 步（发送、prompt 与回应的那一轮）
+
+- **`notes::prompt` 是模块。** 设计的「本 crate 的公开项」写 `notes::{TEMPLATE_VERSION, PromptItem, PromptLine, prompt}`；实现是 `notes::prompt::{TEMPLATE_VERSION, PromptNote, Where, marker, prompt}`（`pub mod notes` 里的 `pub mod prompt`）。`PromptNote` 带路径（`ChangePath`，在 prompt 里才转成文字）、0 起的行号、三种位置 `Where`（`Current`、`Base`、`Earlier`）、摘录和文字，不是 `PromptLine` 的四个变体（没有「`File`」一项：没有行号的意见在 #22 里不存在）。`marker` 另外公开，给「与回应的那一轮对应」和测试用。`prompt_*` 的测试在 `src/notes/prompt/tests.rs`，不在 `src/notes/tests.rs`。
+- **模板里没写死的几处。** 文字里的空行输出为空行（不加 3 个空格，行尾没有空白）；文字末尾的换行去掉（否则下一条前或整个 prompt 的末尾会多出空行）；整个 prompt 末尾没有换行；摘录里没有文字的行在 ` | ` 之后没有内容（行尾有一个空格）；锚点行不在摘录的范围里时没有 `> ` 的那一行。
+- **剪贴板途径不是 `NoteRoute`。** 设计写「内置，不经登记」；实现里它是引擎里的一个直接调用（`src/clipboard_route.rs` 的 `Writer`），不实现 `NoteRoute`：`DeliveryOutcome::Failed` 带不了剪贴板的错误种类，而 `review notes not sent` 的 `error` 要记 `unsupported` 或 `rejected`。写入的函数是 `Config::clipboard`，插件默认用 `platform::clipboard::write_text`，测试换成 `FakeClipboard`。`ReviewPlugin::with_clipboard_writer`（`test-support`）、`Driven::clipboard()` 是设计「公开项」里 `Driven::with_clipboard` 的位置；`cfg(test)` 下默认的写入回 `Unsupported`，单元测试不会碰真实的剪贴板。
+- **会话途径的 `routes` 在后台任务里算。** 设计写「打开审阅和登记变化时调用 `applies`」；`open`、`snapshot`、`command` 在调用线程上不得调用别的插件，所以 `applies` 在每一轮（`run_round`、`folder_round`）里、不持引擎的锁时调用，登记和注销之后每个打开的审阅提交一个 `Background` 任务重算并在变化时换出快照。第一份（`Loading`）快照只有剪贴板，会话途径从第一份 `Ready` 快照起出现。登记时 token 还是 `Pending`（在 `started` 里登记）的途径，每隔 50 ms（`PENDING_RETRY`，与简报的提供者相同）重问一次，直到它 `Live` 或登记 drop。
+- **同一个 `id` 再次登记，新的排到后面。** 设计写「只保留最后一次登记」「`routes` 的顺序是登记顺序」；实现把旧的去掉、新的放在最后。被替换的登记之后 drop 不影响新的；被替换的登记上还在途的发送按 `Failed`。
+- **迟到的答复按尝试的序号区分，不按批次。** `CopyBatch` 用同一个批次 ID 再发，按批次区分不出一次尝试的答复是不是迟到的；每次发送或复制有一个序号（`Engine::attempts`），答复和 10 秒的定时器都带它。同一个审阅里新的 `CopyBatch` 在上一个还没答复时替换它，上一个的答复算迟到。10 秒的定时器只在有 `Host` 时（插件、`Driven::with_timers`）存在。
+- **摘录的「补齐」是接手排队的任务。** 设计写发送的任务「补齐还没取出的摘录」；实现把 `AddNote` 排的摘录工作放在 `Open::excerpts`（按意见的 ID），发送这一批的任务先接手这一批里还在的（`complete_excerpts`），原来的任务发现没有了就什么也不做，所以不论两个任务谁先运行，摘录只取一次，prompt 里有它。
+- **`NoteDelivery::root` 对文件夹项目是会话的 cwd。** 设计只写「审阅对象的 worktree 根」；文件夹项目的审阅没有 worktree，取会话开始时的 cwd（`Open::root`）。
+- **文件夹项目的批次也找回应的那一轮。** 设计写「只在会话审阅里找」；文件夹项目的审阅也是一个会话的审阅，`folder_round` 同样调用 `send::link`。
+- **`CopyBatch` 被忽略时 `op` 是 `copy`。** 「日志与诊断」写 `op`（含 `send`）；`CopyBatch` 的 `sending`、`unknown_batch` 记 `copy`，这一行已改。`EditNote` 对发送中的意见记 `not_pending`（设计的条件是「意见是 `Pending`」），`RemoveNote` 记 `sending`。`SendNotes` 的检查顺序是 `nothing_pending`、`sending`、`no_route`。
+- **一个会话途径在 `deliver` 之前就已不在登记表里、或 `token.enter()` 取不到时，不调用它。** 与设计一致，只是补充：这时不记「迟到的答复」，直接按 `Failed`（`reason` 为 `failed`）；批次里的意见在 `deliver` 之前已全部删掉（只可能是 `CopyBatch`）时同样按 `Failed`。
+- **迟到的答复在审阅已释放时无声丢弃。** 答复到达时这个审阅已不在（插件停用、30 秒保留已过）：不写 `notes_sent`，也不记 `late delivery reply dropped`。10 秒超时小于 30 秒的保留，只有插件停用会遇到。
+- **`logs_hold_no_note_contents` 的路径金丝雀不在锚点所在的文件上。** 设计写金丝雀放进「锚点所在文件的…路径」；锚点所在的文件在快照的 `files` 里，它的路径会按设计出现在详细级别的 `file attributed` 里（「日志与诊断」：工作区里的路径只在那一条里出现），所以那个文件叫 `a.txt`，金丝雀只在它的内容（进摘录）和意见的文字里；路径的金丝雀放在超过 256 KiB 的那一批的 40 条意见上（锚点的文件不在 `files` 里，位置是 `Elsewhere`，路径只进 prompt，不进任何记录）。改和删由同一个测试检查，`notes_cmd_logs_kinds_and_counts_never_contents`（第 6 步）检查 `note changed` 的字段。
+- **基准。** `review/notes_prompt_40` 在 `crates/bench/benches/time/review.rs`，直接用 `notes::prompt::prompt` 和公开类型构造 40 条，不需要新的夹具；`docs/design/bench.md` 的表格加了一行。

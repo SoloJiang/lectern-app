@@ -1802,6 +1802,15 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // (step 7) `notes::prompt` of 40 notes with 4 KiB of text and a
+    // five-line excerpt each.
+    share(
+        "review/notes_prompt_40",
+        &[median(Limit::TimeBelow(ms(5)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
     // (step 5) The rule brief of 5000 files.
     share(
         "review/brief_5000",

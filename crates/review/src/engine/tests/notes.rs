@@ -16,21 +16,21 @@ use crate::seen::TargetKey;
 
 const DAY: i64 = 24 * 60 * 60 * 1000;
 
-fn session_target(id: &str) -> TargetKey {
+pub(super) fn session_target(id: &str) -> TargetKey {
     TargetKey::Session {
         source: SOURCE.into(),
         id: id.into(),
     }
 }
 
-fn excerpt(first: u32, lines: &[&str]) -> Excerpt {
+pub(super) fn excerpt(first: u32, lines: &[&str]) -> Excerpt {
     Excerpt {
         first,
         lines: lines.iter().map(|l| Arc::<str>::from(*l)).collect(),
     }
 }
 
-fn anchor(file: FileKey, side: DiffSide, line: u32, oid: BlobId) -> NoteAnchor {
+pub(super) fn anchor(file: FileKey, side: DiffSide, line: u32, oid: BlobId) -> NoteAnchor {
     NoteAnchor {
         file,
         side,
@@ -39,7 +39,7 @@ fn anchor(file: FileKey, side: DiffSide, line: u32, oid: BlobId) -> NoteAnchor {
     }
 }
 
-fn add(
+pub(super) fn add(
     rows: Option<RowsKey>,
     anchor: NoteAnchor,
     text: &str,
@@ -54,7 +54,13 @@ fn add(
 }
 
 /// A note record for the annotation log.
-fn record(target: &TargetKey, id: u64, anchor: NoteAnchor, text: &str, at: Timestamp) -> LogRecord {
+pub(super) fn record(
+    target: &TargetKey,
+    id: u64,
+    anchor: NoteAnchor,
+    text: &str,
+    at: Timestamp,
+) -> LogRecord {
     LogRecord::Note(NoteRecord {
         at,
         target: target.clone(),
@@ -66,7 +72,7 @@ fn record(target: &TargetKey, id: u64, anchor: NoteAnchor, text: &str, at: Times
     })
 }
 
-fn sent(target: &TargetKey, batch: u64, ids: &[u64], at: Timestamp) -> LogRecord {
+pub(super) fn sent(target: &TargetKey, batch: u64, ids: &[u64], at: Timestamp) -> LogRecord {
     LogRecord::NotesSent(SentRecord {
         at,
         target: target.clone(),
@@ -78,7 +84,7 @@ fn sent(target: &TargetKey, batch: u64, ids: &[u64], at: Timestamp) -> LogRecord
 
 /// Writes `records` into the annotation log of the fixture's repository,
 /// before any engine reads it.
-fn seed(fx: &Fx, records: Vec<LogRecord>) {
+pub(super) fn seed(fx: &Fx, records: Vec<LogRecord>) {
     let mut file = LogFile::new(&fx.dir.path().join("review"), fx.repo.common_dir());
     let (mut index, _) = file.load(NOW);
     for r in records {
@@ -88,7 +94,7 @@ fn seed(fx: &Fx, records: Vec<LogRecord>) {
 }
 
 /// The annotation log's lines of kind `t`.
-fn lines_of(fx: &Fx, t: &str) -> Vec<String> {
+pub(super) fn lines_of(fx: &Fx, t: &str) -> Vec<String> {
     let dir = fx.dir.path().join("review");
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -102,16 +108,16 @@ fn lines_of(fx: &Fx, t: &str) -> Vec<String> {
     out
 }
 
-struct Rig {
-    fx: Fx,
-    d: Driven,
-    id: ReviewId,
+pub(super) struct Rig {
+    pub(super) fx: Fx,
+    pub(super) d: Driven,
+    pub(super) id: ReviewId,
 }
 
 /// The review of session "a" of `unrelated_commit`: f.txt is "a\nb\nc\n" in
 /// HEAD and "A\nb\nC\n" in the worktree, session b changed `a` to `A`,
 /// session a `c` to `C`.
-fn rig() -> Rig {
+pub(super) fn rig() -> Rig {
     let (fx, sessions) = unrelated_commit();
     let d = fx.driven(vec![sessions]);
     let (id, _) = open(&d, target("a"));
@@ -120,16 +126,16 @@ fn rig() -> Rig {
 
 /// What a view that shows f.txt prepares: the final change and the step of
 /// the review's one turn, with their keys.
-struct Shown {
-    fin: Arc<lectern_services::review::FileRows>,
-    step: Arc<lectern_services::review::FileRows>,
-    fin_key: RowsKey,
-    step_key: RowsKey,
-    step_id: StepId,
+pub(super) struct Shown {
+    pub(super) fin: Arc<lectern_services::review::FileRows>,
+    pub(super) step: Arc<lectern_services::review::FileRows>,
+    pub(super) fin_key: RowsKey,
+    pub(super) step_key: RowsKey,
+    pub(super) step_id: StepId,
 }
 
 impl Rig {
-    fn shown(&self) -> Shown {
+    pub(super) fn shown(&self) -> Shown {
         let s = self.d.snapshot(self.id).unwrap();
         let step_id = s.turns.as_ref().unwrap()[0]
             .items
@@ -163,17 +169,17 @@ impl Rig {
         }
     }
 
-    fn snapshot(&self) -> Arc<ReviewSnapshot> {
+    pub(super) fn snapshot(&self) -> Arc<ReviewSnapshot> {
         self.d.snapshot(self.id).unwrap()
     }
 
-    fn command(&self, command: ReviewCommand) -> Arc<ReviewSnapshot> {
+    pub(super) fn command(&self, command: ReviewCommand) -> Arc<ReviewSnapshot> {
         self.d.command(self.id, command);
         self.snapshot()
     }
 
     /// The command changes nothing: the snapshot is the same `Arc`.
-    fn ignored(&self, command: ReviewCommand) {
+    pub(super) fn ignored(&self, command: ReviewCommand) {
         let before = self.snapshot();
         self.d.command(self.id, command);
         assert!(Arc::ptr_eq(&before, &self.snapshot()));
@@ -182,7 +188,7 @@ impl Rig {
     }
 }
 
-fn new_oid(shown: &Shown) -> BlobId {
+pub(super) fn new_oid(shown: &Shown) -> BlobId {
     shown.fin.new.oid.unwrap()
 }
 
