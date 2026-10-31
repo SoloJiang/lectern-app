@@ -268,7 +268,7 @@ impl Shared {
     fn on_review(&self, event: &ReviewEvent) {
         let id = match event {
             ReviewEvent::Changed { id, .. } | ReviewEvent::Prepared { id, .. } => *id,
-            ReviewEvent::Overview { .. } => return,
+            ReviewEvent::Overview { .. } | ReviewEvent::Worktrees { .. } => return,
         };
         let screens = lock(&self.screens);
         for (screen, _, tx) in screens.iter() {
@@ -392,6 +392,7 @@ fn registrations(shared: &Arc<Shared>) -> Vec<Contribution> {
     let tab_payload = InspectorTab {
         label: lectern_i18n::keys::review::PROGRESS_TITLE,
         build: Arc::new(|_, _, cx: &mut App| cx.new(ProgressTab::new).into()),
+        screen: None,
     };
     vec![
         Contribution {

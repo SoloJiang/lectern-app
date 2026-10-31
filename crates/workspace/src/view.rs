@@ -543,9 +543,23 @@ impl Workspace {
         nav.layout(&registry_env(registry)).inspector && nav.nav().inspector
     }
 
-    /// The inspector tabs by `(order, id)`.
+    /// The visible inspector tabs by `(order, id)`: when the current screen
+    /// has tabs of its own (`InspectorTab::screen` is its ID) only those, else
+    /// the tabs without a screen.
     fn inspector_tabs(&self) -> Vec<Name> {
-        self.driver.registry().applied_of(Kind::InspectorTab)
+        let registry = self.driver.registry();
+        let screen = self.driver.nav().nav().current().screen;
+        let (own, shared): (Vec<_>, Vec<_>) = registry
+            .applied_of(Kind::InspectorTab)
+            .into_iter()
+            .filter_map(|id| {
+                let tab = payload::<InspectorTab>(registry, Kind::InspectorTab, &id)?;
+                Some((id, tab.screen))
+            })
+            .filter(|(_, tab_screen)| tab_screen.as_deref().is_none_or(|s| s == &*screen))
+            .partition(|(_, tab_screen)| tab_screen.is_some());
+        let tabs = if own.is_empty() { shared } else { own };
+        tabs.into_iter().map(|(id, _)| id).collect()
     }
 
     /// The selected tab: the navigation's choice when registered, else the

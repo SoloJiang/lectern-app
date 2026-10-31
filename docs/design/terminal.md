@@ -640,7 +640,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 |---|---|---|
 | `terminal/open` | 中位数 ≤ 100 µs | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
 | `terminal/input` | 中位数 ≤ 6 µs（[ADR 0058](../adr/0058.md) 从 2 µs 改；CI 上要复核） | 主线程上的一次 `input`：入队与唤醒字节；终端线程睡在 `poll` 上时，写唤醒字节本身就要 3 µs 以上 |
-| `terminal/parse_plain` | 中位数 ≤ 10 ms | 1 MiB 纯 ASCII、每行 120 列，120×40，`vt_write` 到解析完成 |
+| `terminal/parse_plain` | 中位数 ≤ 14 ms（[ADR 0055](../adr/0055.md)） | 1 MiB 纯 ASCII、每行 120 列，120×40，`vt_write` 到解析完成 |
 | `terminal/parse_sgr` | 中位数 ≤ 25 ms | 1 MiB、每 8 个字符换一次 24 位色的输出 |
 | `terminal/frame_full` | 中位数 ≤ 300 µs | 120×40 全部行脏，生成一帧 |
 | `terminal/frame_echo` | 中位数 ≤ 30 µs | 只有一行脏（输入回显），生成一帧 |
@@ -830,7 +830,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 
   | 基准 | 实测中位数 | 预算 |
   |---|---|---|
-  | `terminal/parse_plain` | 1.06 ms | ≤ 10 ms |
+  | `terminal/parse_plain` | 1.06 ms | ≤ 10 ms（当时的预算；现在是 14 ms，ADR 0055） |
   | `terminal/parse_sgr` | 5.33 ms | ≤ 25 ms |
   | `terminal/frame_full` | 133 µs | ≤ 300 µs |
   | `terminal/frame_echo` | 2.38 µs | ≤ 30 µs |

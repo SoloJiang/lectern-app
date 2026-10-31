@@ -252,6 +252,65 @@ fn inspector_toggles_with_alt_cmd_i(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn inspector_tab_scoped_to_its_screen(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let mut screens_and_tabs = standard_screens();
+    screens_and_tabs.push(ui_screen(
+        screens::WORKTREES,
+        review_layout(),
+        Arc::default(),
+    ));
+    // A page of the Worktrees screen only, ahead of the others by `order`.
+    screens_and_tabs.push(scoped_inspector_tab(
+        "worktree",
+        0,
+        Some(screens::WORKTREES),
+    ));
+    let _plugins = rig.contribute(Contributor::staged(screens_and_tabs), cx);
+    rig.open(project_path(), &project(), cx);
+    rig.push(screens::REVIEW, cx);
+    rig.dispatch(
+        WorkspaceCommand::SelectInspectorTab(name("conversation")),
+        cx,
+    );
+
+    // The review screen has no page of its own: only the unscoped pages.
+    let tree = rig.tree(cx);
+    assert!(
+        tree.contains("workspace.inspector [Panel] tab=conversation"),
+        "{tree}"
+    );
+    assert!(tree.contains("workspace.inspector.tab[files]"), "{tree}");
+    assert!(tree.contains("workspace.inspector.tab[conversation]"));
+    assert!(
+        !tree.contains("workspace.inspector.tab[worktree]"),
+        "{tree}"
+    );
+
+    // The Worktrees screen has one: only it is shown, and it is the first
+    // visible page because the selected one is hidden. The selection stays.
+    rig.push(screens::WORKTREES, cx);
+    let tree = rig.tree(cx);
+    assert!(
+        tree.contains("workspace.inspector [Panel] tab=worktree"),
+        "{tree}"
+    );
+    assert!(tree.contains("workspace.inspector.tab[worktree] [Tab]"));
+    assert!(!tree.contains("workspace.inspector.tab[files]"), "{tree}");
+    assert!(!tree.contains("workspace.inspector.tab[conversation]"));
+    assert_eq!(rig.nav(cx).inspector_tab.as_deref(), Some("conversation"));
+
+    // Back on the review screen the earlier selection shows again.
+    rig.dispatch(WorkspaceCommand::Pop, cx);
+    let tree = rig.tree(cx);
+    assert!(
+        tree.contains("workspace.inspector [Panel] tab=conversation"),
+        "{tree}"
+    );
+    assert!(!tree.contains("workspace.inspector.tab[worktree]"));
+}
+
+#[gpui::test]
 fn inspector_commands_are_ignored_without_an_inspector(cx: &mut TestAppContext) {
     let rig = UiRig::new(cx);
     let _plugins = rig.contribute(Contributor::staged(standard_screens()), cx);
@@ -379,7 +438,14 @@ fn screens_can_be_pushed_twice(cx: &mut TestAppContext) {
     let _plugins = rig.contribute(Contributor::staged(registrations), cx);
     rig.open(project_path(), &project(), cx);
     rig.push(screens::REVIEW, cx);
-    rig.push(screens::REVIEW, cx);
+    // The same screen with another target (the same route on top is ignored).
+    rig.dispatch(
+        WorkspaceCommand::Push(lectern_services::workspace::Route {
+            screen: name(screens::REVIEW),
+            target: lectern_services::workspace::Target::Project(project()),
+        }),
+        cx,
+    );
     assert_eq!(rig.nav(cx).depth(), 2);
     assert_eq!(built.load(Ordering::SeqCst), 2, "one view per stack entry");
     rig.dispatch(WorkspaceCommand::Pop, cx);

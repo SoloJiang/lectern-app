@@ -504,8 +504,14 @@ impl Navigator {
                     self.ignored(name);
                     return;
                 }
-                self.done(name);
                 let from = self.nav.current();
+                if from == route {
+                    // The screen is already shown: a second push would stack
+                    // an identical screen (a sidebar entry clicked twice).
+                    self.ignored(name);
+                    return;
+                }
+                self.done(name);
                 self.close_panel(out);
                 self.close_overlay(out);
                 self.nav.stack.push(route);

@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：实现中。前置条件 C（`worktrees.ftl`，#333）已实现；A 的 `services` 部分与「验收」的三步尚未实现。
+状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）已实现；「验收」的三步尚未实现。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -511,7 +511,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 每一项是一个 PR，写 `Refs #16`，在「验收」里列为前置条件。`project`、`agents`、`usage` 不新增要求：`ProjectSnapshot::worktrees`、`SessionSummary::place` / `open_turn`、`UsageQuery::Worktree` / `Mr` 都已在它们的设计里。
 
-- **A. `review`（含 `services` 的 `review` 模块）：每个 worktree 的改动计数与文件重叠。** `Overview` 只含当前 worktree（[review 设计「概览」](review.md#概览)），`ProjectSnapshot` 对非当前 worktree 只有元数据，而技术调研要求总览列出每个 worktree 的未提交改动量。所以由 `review` 补一份按 worktree 的计数，`review` 的设计文档同时更新「接口」「概览」「性能」和调用方一节：
+- **A. `review`（含 `services` 的 `review` 模块）：每个 worktree 的改动计数与文件重叠。** `services` 部分（类型、带默认实现的三个方法、事件变体、第 8 条的匹配分支）已实现（#334）；`review` 部分（第 1 至 7 条的计算，`review.md` 的「接口」「概览」「性能」和调用方一节同时更新）已实现（#337），与本文的差异见「与设计的差异」。 `Overview` 只含当前 worktree（[review 设计「概览」](review.md#概览)），`ProjectSnapshot` 对非当前 worktree 只有元数据，而技术调研要求总览列出每个 worktree 的未提交改动量。所以由 `review` 补一份按 worktree 的计数，`review` 的设计文档同时更新「接口」「概览」「性能」和调用方一节：
 
   ```rust
   pub trait Review: Send + Sync {
@@ -589,7 +589,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
   7. 测试与基准（review 的设计展开）：用测试里生成的合成仓库，覆盖未提交与已提交的计数、当前 worktree 复用概览的改动集、两个 worktree 的重叠、`Capped` 没有重叠、节流、没有关注者时不比较、放下关注后保留到项目关闭、没有主干。基准：`review/worktrees_cloudprint`（11 个 worktree，冷，从关注到最后一个计数，只记录）；`review/resident_100k_bytes` 的夹具加上一轮关注再放下之后保留的数据，预算不变（< 1 MB）。
   8. 兼容：新方法带默认实现，已有的实现和假实现不必修改；`ReviewEvent` 加变体时，匹配它的 crate（`project_home`、`review_view`）在同一个 PR 里补上分支或已用 `_`。
 
-- **B. `workspace` 与 `ui::contrib`：只在一个屏幕显示的检查器页；重复压栈。**
+- **B. `workspace` 与 `ui::contrib`：只在一个屏幕显示的检查器页；重复压栈。**（已实现，#336）
   1. `ui::contrib::InspectorTab` 加一个字段 `pub screen: Option<Name>`。`None` 是现在的行为：页在每个 `layout.inspector` 为 true 的屏幕上显示。`Some(s)`：页只在当前屏幕是 `s` 时显示。当前屏幕有自己的页（`screen == Some(当前屏幕)`）时检查器只显示这些页，不显示 `None` 的页；没有时只显示 `None` 的页。`nav.inspector_tab` 不在可见的页里时显示第一个可见的页，`nav.inspector_tab` 本身不变。原因：Worktree 页要显示在 Worktrees 屏幕上，Files（review_view 的 Progress 列表）和 Conversation 在这里没有内容；Worktree 页也不能出现在审阅屏幕上。已有的页取 `None`，行为不变。测试 `inspector_tab_scoped_to_its_screen`。
   2. `Push(r)` 在栈顶已经是同一个 `Route` 时忽略，记 debug：Worktrees 屏幕显示侧栏，再点侧栏的 Worktrees 条目不会压入第二个同样的屏幕（Usage 条目同理）。测试 `push_of_the_top_route_is_ignored`。
 - **C. `i18n`：`locales/{en,zh-CN}/worktrees.ftl`**，内容是「界面」的键表。已实现（#333）。
@@ -625,13 +625,23 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - `rg 'NodeId::new\("worktrees"' crates/worktrees/src` 有结果。
 - `canary_stays_out_of_worktrees_logs` 覆盖渲染、按键、切换与刷新。
 
-**第 3 步：装配、里程碑与基准（`Closes #16`，前置条件 A 的 `review` 实现、D、E 随这一步）。**
+**第 3 步：装配、里程碑与基准（`Closes #16`，前置条件 D、E 随这一步；A 的 `review` 实现已先行完成，见「实际验证」，其中 `review/resident_100k_bytes` 的检查已做，第 3 步复查一次）。**
 
 - `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加二。
 - 手动在 macOS 上运行发布构建（临时 `HOME`、至少 3 个 worktree 且有会话的仓库）：侧栏有 Worktrees 条目；屏幕按 Active / Idle 列出 worktree，带改动数与 token；↵ 打开相对主干的审阅，Esc 返回；「切换到这个 worktree」之后当前标记移动；日志里有 `worktrees milestone reported`。
 - `just bench app/switch_worktree`：中位数 < 100 ms。`just bench worktrees/`：`worktrees/build_1000` < 2 ms、`worktrees/resident_bytes` < 256 KiB。
 - `just bench review/resident`：`review/resident_100k_bytes` 含保留的 worktree 数据，仍 < 1 MB。
 - `app/idle_empty` 与改动前相比增加不超过 32 KiB。
+
+## 实际验证
+
+### 前置条件 B（`workspace` 与 `ui::contrib`）
+
+#336，`Refs #16`，在 macOS（arm64）上运行：
+
+- `just test -p lectern-workspace` 通过，含 `push_of_the_top_route_is_ignored`（`nav.rs`）和 `inspector_tab_scoped_to_its_screen`（`view.rs`，`#[gpui::test]`，不开真实窗口）。
+- 与设计的差异：B.2 的「栈顶」按当前屏幕比较（栈空时是基底屏幕）；`InspectorTab::screen` 的类型写成 `Option<Cow<'static, str>>`（与 `Name` 同一类型，`ui` 不依赖 `kernel`）。原因见 [workspace 设计「与设计的差异」](workspace.md#与设计的差异)。
+- 没有验证：真实窗口里页切换时的外观；还没有 `Some(WORKTREES)` 的页（第 2 步）。
 
 ## 已知限制
 
@@ -645,11 +655,34 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 ## 实际验证
 
+### 前置条件 A 的 `services` 部分
+
+#334，在 macOS（arm64）上运行：`just check` 的格式、架构检查（32 个 crate）和文档链接三步通过；整个工作区的 clippy 这台机器上没有 Metal 工具链，没有运行，改跑 `cargo clippy --locked -p lectern-services --all-targets -- -D warnings`（通过），整个工作区的 clippy 以 CI 为准。`just test -p lectern-services`（112 个测试通过，含 `worktrees_overview_round_trips`、`worktrees_methods_default_to_nothing` 和 `review_event_round_trips` 里新加的 `Worktrees` 变体）。依赖 `services` 的 `lectern-review`、`lectern-review-view`、`lectern-project-home`、`lectern-welcome` 用 `cargo check --locked --all-targets`（默认特性）通过，所以第 8 条的匹配分支（`review_view` 的 `on_review` 补了 `Worktrees` 分支；`project_home` 与 `welcome` 用 `let … else`，不需要改）已通过编译。没有验证：这几个 crate 的 `--all-features` clippy 和它们的测试；`review` 对新方法的实现（A 的 `review` 部分）。
+
 ### 前置条件 C
 
 `worktrees.ftl`（#333），在 macOS（arm64）上运行：`just check` 的格式、架构检查（32 个 crate）和文档链接三步通过；其中整个工作区的 clippy 这台机器上没有 Metal 工具链，`gpui-pre-apple` 的构建脚本失败，改跑 `cargo clippy --locked -p lectern-i18n --all-targets --all-features -- -D warnings`（通过），整个工作区的 clippy 以 CI 为准。`just deny`（advisories、bans、licenses、sources 通过，有一条 `Unicode-DFS-2016` 许可证允许项未用的既有警告）、`just test -p lectern-i18n`（57 个测试通过）。「界面」键表的 51 个键在 en 与 zh-CN 里都有，变量一致（编译期校验）。没有验证：键在界面里的实际显示（视图在第 2 步）。
 
+### 前置条件 A 的 `review` 部分
+
+#337，在 macOS（arm64）上运行：`just check`（含整个工作区的 clippy，这台机器已装 Metal 工具链）、`just test -p lectern-review -p lectern-services`（399 个测试）通过。依赖没有改，没有运行 `just deny`。基准只跑不开窗口的两个目标：`review/worktrees_cloudprint` 中位数 686 ms（11 个 worktree、728 个文件、冷缓存，只记录），`review/resident_cloudprint_bytes` 84.8 KB、`review/resident_100k_bytes` 8.86 KB（含关注再放下之后保留的 worktree 数据，预算 < 1 MB，第 3 步复查）。测试覆盖第 7 条列的各项：未提交与已提交的计数、当前 worktree 复用概览的改动集（含概览为 `Capped`、第一轮未发布）、两个 worktree 的重叠和每个方向共用一个 `Arc`、`Capped` 没有重叠且不在别人的列表里、节流、没有关注者时不比较、放下关注后保留到项目关闭、没有主干，另有主干移动、HEAD 变化、rescan、会话事件、新增 worktree、路径哈希的释放和日志的金丝雀。没有验证：真实 fs_watch 批次到标记的整条路径（`Driven` 没有 watcher，批次直接交给引擎）；第 5 条估算的 17 个 worktree、每个 4000 个改动路径的内存（约 650 KB）没有基准；真实仓库上的耗时（见「与设计的差异」）；屏幕上的实际显示（第 2、3 步）。
+
 ## 与设计的差异
+
+### 前置条件 A 的 `review` 部分
+
+细节在 [review 设计「与设计的差异」](review.md#并行-worktree-总览worktrees-设计的前置条件-a-的-review-部分)，这里列影响本 crate 的几项：
+
+- 第一个 worktree 比较完之前 `Review::worktrees` 为 None；之后每比完一个发布一次，还没比较的 worktree 三个计数是 `Pending`、`overlaps` 为 None（与「合成规则」的 `changes` 行一致）。`snapshot::build` 要处理「`WorktreesOverview` 还没有到达」。
+- 当前 worktree 在概览的第一轮发布之前，`uncommitted` 与 `vs_base` 是 `Pending`；概览发布时更新（不经 `Refresh` 或节流）。
+- `committed` 与 `vs_base` 为 `Unavailable` 的情形比设计多：没有主干、HEAD 为 unborn 或读不出、没有共同历史、比较失败；这时 `overlaps` 用 `uncommitted` 的路径。`WorktreesOverview::base` 为 None 时界面按「没有主干」处理，但引用名存在而解析不到提交时也是 None。
+- `vs_base` 的并集超过 4000 个路径时为 `Capped`（设计只写了任一为 `Capped`）。
+- `review/worktrees_cloudprint`（只记录）的值比「性能」里「cloudprint 形状每个 worktree 几毫秒」的估算大一个数量级（约 60 ms），原因是夹具的索引没有 stat 信息；真实仓库上的耗时没有测量。
+
+### 前置条件 A 的 `services` 部分
+
+- 类型、三个方法的签名和默认实现、`ReviewEvent::Worktrees` 与设计一致。唯一的补充：类型派生了 `Clone`、`PartialEq`、`Eq`、`Hash`、`Debug`、`Serialize`、`Deserialize`（`ChangeCount` 另有 `Copy`），与 `Overview` 相同，进程插件的代理要序列化它们。
+- A 要求 `review` 的设计文档同时更新「接口」「概览」「性能」和调用方一节；`docs/design/review.md` 留给 A 的 `review` 部分的 PR，本 PR 没有改它。
 
 ### 前置条件 C
 

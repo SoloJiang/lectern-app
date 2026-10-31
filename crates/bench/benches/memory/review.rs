@@ -72,7 +72,11 @@ fn resident_notes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 }
 
 fn resident_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let repo = review_repo::build(&Shape::cloudprint(), true, ctx.scale(20, 4))?;
+    let shape = Shape::cloudprint();
+    let repo = review_repo::build(&shape, true, ctx.scale(20, 4))?;
+    // Ten linked worktrees with 20 overlapping edits each: the hashes and
+    // overlaps of a watch that was held and released stay.
+    repo.add_linked(&shape, true, ctx.scale(10, 2), 20)?;
     let samples = resident(ctx, &repo)?;
     Ok(vec![Measured::new(
         "review/resident_cloudprint_bytes",
@@ -82,7 +86,11 @@ fn resident_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 
 fn resident_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
-    let repo = review_repo::build(&Shape::monorepo(files, manifests), false, ctx.scale(20, 4))?;
+    let shape = Shape::monorepo(files, manifests);
+    let repo = review_repo::build(&shape, false, ctx.scale(20, 4))?;
+    // Linked worktrees of the same index-only shape: every comparison is
+    // capped, so what stays after the watch is the counts alone.
+    repo.add_linked(&shape, false, ctx.scale(3, 1), 0)?;
     let samples = resident(ctx, &repo)?;
     Ok(vec![Measured::new(
         "review/resident_100k_bytes",
@@ -127,6 +135,16 @@ fn resident(ctx: &mut Ctx, repo: &ReviewRepo) -> Result<Vec<u64>, BenchError> {
         if driven.overview(&project).is_none() {
             return Err(BenchError::new("no overview after the first round"));
         }
+        // The worktrees overview held and released: its counts, hashes and
+        // overlaps stay (docs/design/review.md「性能」), so they are in
+        // what is counted.
+        let worktrees = driven.watch_worktrees(&project);
+        driven.run();
+        if driven.worktrees(&project).is_none() {
+            return Err(BenchError::new("no worktrees overview after the round"));
+        }
+        drop(worktrees);
+        driven.run();
         let ready = CountingAlloc::live().saturating_sub(before) as u64;
         drop(interest);
         driven.run();

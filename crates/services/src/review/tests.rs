@@ -589,6 +589,7 @@ fn review_is_a_shared_trait_object() {
     shareable::<ReviewSnapshot>();
     shareable::<FileRows>();
     shareable::<Overview>();
+    shareable::<WorktreesOverview>();
     shareable::<ReviewEvent>();
     shareable::<Arc<dyn NoteRoute>>();
     sendable::<BriefRulesRegistration>();
@@ -735,6 +736,52 @@ fn note_types_round_trip() {
 }
 
 #[test]
+fn worktrees_overview_round_trips() {
+    let other = WorktreeKey(path("/r/.git/worktrees/w"));
+    let shared: Arc<[RelPath]> = Arc::from(vec![RelPath::from("a.rs"), RelPath::from("b/c.rs")]);
+    let overview = WorktreesOverview {
+        project: project(),
+        generation: 3,
+        base: Some(text("refs/heads/main")),
+        worktrees: Arc::from(vec![
+            WorktreeChanges {
+                worktree: worktree(),
+                head: Some(oid(1)),
+                uncommitted: ChangeCount::Files(2),
+                committed: ChangeCount::Files(7),
+                vs_base: ChangeCount::Files(8),
+                overlaps: Some(Arc::from(vec![Overlap {
+                    other: other.clone(),
+                    files: 2,
+                    paths: shared.clone(),
+                }])),
+                counted_at: Some(Timestamp(1_000)),
+            },
+            WorktreeChanges {
+                worktree: other,
+                head: None,
+                uncommitted: ChangeCount::Capped,
+                committed: ChangeCount::Unavailable,
+                vs_base: ChangeCount::Pending,
+                overlaps: None,
+                counted_at: None,
+            },
+        ]),
+    };
+    assert_eq!(round_trip(&overview), overview);
+}
+
+#[test]
+fn worktrees_methods_default_to_nothing() {
+    // `Empty` does not override them: the defaults keep existing fakes valid.
+    let review: Arc<dyn Review> = Arc::new(Empty);
+    assert!(review.worktrees(&project()).is_none());
+    review.refresh_worktrees(&project());
+    let interest = review.watch_worktrees(&project());
+    drop(interest);
+}
+
+#[test]
 fn overview_interest_releases_once_on_drop() {
     let count = Arc::new(AtomicUsize::new(0));
     let c = count.clone();
@@ -818,6 +865,10 @@ fn review_event_round_trips() {
         ReviewEvent::Overview {
             project: ProjectKey::Folder { root: path("/f") },
             generation: 5,
+        },
+        ReviewEvent::Worktrees {
+            project: project(),
+            generation: 9,
         },
     ];
     for e in events {

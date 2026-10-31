@@ -171,6 +171,7 @@ const BENCHES: &[Bench] = &[
     review::REFRESH_ONE,
     review::OVERVIEW_ROUND_WARM,
     review::OVERVIEW_CLOUDPRINT,
+    review::WORKTREES_CLOUDPRINT,
     syntax::FIRST_SCREEN,
     syntax::FULL_PARSE_1MIB,
     syntax::CHAIN_16MIB,

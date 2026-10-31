@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画（标题区、轮次标题与折叠行、文件卡片、检查器的 Files 页、胶囊浮条、工具栏的 Mark Reviewed；`Switch`、包数、Drifted 的编辑时间、统一 / 双栏与 Refresh 的 View 菜单不在内），实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。
+状态：「验收」第 1 到第 4 步已实现（第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -356,7 +356,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 | 预算 | 本 crate 的份额 |
 |---|---|
-| 打开一个会话的 Diff < 50 ms（`app/open_diff`：项目主页 ↵ 到第一个文件的 diff 行画出，终点 `Milestone::DiffShown`） | review 的份额 < 35 ms（冷）加第一个文件的行 < 3 ms（review 设计「性能」）。本 crate ≤ 11 ms：工厂建模型与 `open` < 1 ms；`Changed` 投递到主线程 < 1 ms；`snapshot()` 加 `items::build`（50 个文件、20 轮、第一个文件 300 行）< 2 ms；`Prepare` 的发出在同一次更新里；`Prepared` 到达后 `rows()` 与 `splice` < 0.5 ms；画出第一屏（约 60 行等宽文本，纯文本）≤ 6 ms。高亮不在这条路径上：行先按纯文本画出并报告里程碑，区间之后到达 |
+| 打开一个会话的 Diff < 50 ms（产品能力完成之前 CI 按 < 120 ms 判定，[ADR 0057](../adr/0057.md)；`app/open_diff`：项目主页 ↵ 到第一个文件的 diff 行画出，终点 `Milestone::DiffShown`） | review 的份额 < 35 ms（冷）加第一个文件的行 < 3 ms（review 设计「性能」）。本 crate ≤ 11 ms：工厂建模型与 `open` < 1 ms；`Changed` 投递到主线程 < 1 ms；`snapshot()` 加 `items::build`（50 个文件、20 轮、第一个文件 300 行）< 2 ms；`Prepare` 的发出在同一次更新里；`Prepared` 到达后 `rows()` 与 `splice` < 0.5 ms；画出第一屏（约 60 行等宽文本，纯文本）≤ 6 ms。高亮不在这条路径上：行先按纯文本画出并报告里程碑，区间之后到达 |
 | 滚动与输入 120 fps（5000 行的 diff） | `list` 只排版可见的项（约 60 行）；每项的元素构造是常数：`NodeId` 克隆、`Token` 切片、固定行高。每帧 ≤ 8.3 ms（`review_view/scroll_5000`）。滚动期间 `Prepare` 每帧至多一次，命令立即返回 |
 | 勾选 | `command(MarkSeen)` 返回前 review 已换出 `seen`（< 0.2 ms）；本 crate 只重画 Progress 行和步标题，勾选动画只改透明度与描边进度（`CHECK_FILL`、`CHECK_STROKE`） |
 | 审阅意见（#22） | C 到编辑框画出在下一帧（插入一项，`ListState::splice`）；`command(AddNote)` 返回前 review 已换出 `notes`（< 0.2 ms）；`items::build` 多 O(意见数) 的建表；滚动时每项的元素构造不变，意见块按项排版。prompt 不经过本 crate |
@@ -369,7 +369,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 | ID | 统计量与预算 |
 |---|---|
-| `app/open_diff` | 中位数 < 50 ms（bench 设计已列出，归本 crate）：`Driver::open(OpenTarget::Session)` 到 `DiffShown`；夹具与 `review/open_session_50` 相同的仓库与会话，缓存全空 |
+| `app/open_diff` | 中位数 < 50 ms（目标；产品能力完成之前 CI 按 < 120 ms 判定，[ADR 0057](../adr/0057.md)；bench 设计已列出，归本 crate）：`Driver::open(OpenTarget::Session)` 到 `DiffShown`；夹具与 `review/open_session_50` 相同的仓库与会话，缓存全空（实际的夹具较小，见「与设计的差异」第 3 步） |
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 全部行已准备；进程内，不依赖窗口） |
 | `review_view/scroll_5000` | 每帧工作时间 ≤ 8.3 ms（p95）：`WorkspaceHost::record_frames` 在滚过 5000 行的场景上记录（bench 的 `frames` 应答，随 `workspace` 第 3 步接入） |
 | `plugin/review-view/activate`、`plugin/review-view-handoff/activate`、`plugin/*/resident` | 随 bench 的插件基准自动覆盖 |
@@ -755,11 +755,11 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 3. **再次进入会话时，最近一次已看之前的轮次是否折叠。** 交互规范「回到第 3 步只看新轮次」。选项：(a) `after_last_seen` 为 false 的轮次折叠成一行「之前的 n 轮」，可展开，列表滚到第一个新轮次；(b) 不折叠，只滚到第一个新轮次。默认 (a)；没有已看记录时不折叠。画布另外把「没有改动」的轮次和一个有 2 个文件的轮次画成单行折叠（展开箭头 + `Turn N` + prompt 预览 + 备注），所以每一轮都能手动折叠 / 展开；默认状态仍按这一条；没有改动的轮次要不要也默认折叠，画布没有说，需要产品确认。
 4. **agent 说明按纯文本还是 Markdown 显示。** 选项：(a) 纯文本、保留换行、等宽的代码块不识别；(b) 渲染 Markdown（标题、列表、代码块）。默认 (a)，Markdown 渲染另开 issue。
 
-5. **统一 / 双栏的切换和 Refresh 放在哪里。** 画布的 Review 工具栏只有「隐藏格式改动」开关和 Mark Reviewed（加上检查器开关就到了「最多 3 个控件」），没有给统一 / 双栏和 Refresh 留位置。选项：(a) 放进应用菜单栏的 View 菜单，工具栏只有画布上的控件；(b) 保留工具栏上的分段控件，Mark Reviewed 换位置；(c) 工具栏放一个「…」菜单。默认 (a)：画布为准，菜单是 macOS 放这类开关的地方；缺点是双栏不容易被发现。需要产品确认。
+5. **统一 / 双栏的切换和 Refresh 放在哪里。** 画布的 Review 工具栏只有「隐藏格式改动」开关和 Mark Reviewed（加上检查器开关就到了「最多 3 个控件」），没有给统一 / 双栏和 Refresh 留位置。选项：(a) 放进应用菜单栏的 View 菜单，工具栏只有画布上的控件；(b) 保留工具栏上的分段控件，Mark Reviewed 换位置；(c) 工具栏放一个「…」菜单。默认 (a)：画布为准，菜单是 macOS 放这类开关的地方；缺点是双栏不容易被发现。需要产品确认。已按 (a) 实现（[#294](https://github.com/SoloJiang/lectern-app/pull/294)）。
 6. **文件卡片默认展开还是折叠。** 已决定（2026-10-28，产品）：文件卡片一直全部展开，不做折叠。没有折叠的文件行，卡片头上也没有收起的控件；J / K 和 V 不用先展开。噪声文件的折叠（`Noise`）和轮次的折叠不受影响。
 7. **会话审阅里 hunk 的归因标题（Turn N、另外 n 个会话）还要不要。** 画布的文件卡片里没有这一行，Drifted 是一行警示色的字。会话审阅的每一步已经在某一轮之下，归因标题是重复的；规则分组视图（会话外的改动、比较范围）里一个文件的改动可能来自几轮、几个会话，那里需要。默认：会话审阅里去掉，规则分组视图里保留。需要产品确认。
 
-技术问题都已在上文决定。
+第 1–4、7 条按默认实现，产品决定之前不改；第 5 条已按 (a) 实现；第 6 条已决定。技术问题都已在上文决定。
 
 ## 已知限制
 
@@ -801,8 +801,8 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 **第 3 步：`app` 装配、`app/open_diff`、帧基准（`Closes #15`；前置 C、D）。**
 
-- `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加二；启动测试里首帧之前没有 `review_view` 的记录。
-- `just bench app/open_diff`：中位数 < 50 ms；日志里 `diff shown` 的 `took_us` 与基准一致。
+- `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加一（`review-view`；`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再加一，见「与设计的差异」第 3 步）；启动测试里首帧之前没有 `review_view` 的记录。
+- `just bench app/open_diff`：中位数 < 50 ms（CI 按 < 120 ms，ADR 0057）；日志里 `diff shown` 的 `took_us` 与基准一致。
 - `just bench review_view/scroll_5000`：每帧 ≤ 8.3 ms（p95）。
 - 手动在 macOS 上运行发布构建：打开一个有 Claude Code 会话的仓库，项目主页 ↵ 进入审阅：简报、轮次、diff 行显示；V 勾选并滚到下一个文件；⌥⌘I 打开 Progress；⇧⌘O 打开完整文件；⌘[ 返回；切换双栏时内容区变宽。
 - `app/cold_start`、`app/idle_empty` 与改动前相比不变。
@@ -858,6 +858,24 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
   - 快照：`items_snapshot` 加 `header`；`review_tree_session` / `review_tree_groups` 加 `review.header`、`review.turn` 的 `expanded`、Analyze 按钮的标签（`Analyze with Claude Code`）、`Open File`、浮条（`No review notes`、`Looks Good`、`Send to Claude Code ⌘↩` 在 Looks Good 之后，`review.bar.progress` 去掉）；`review_tree_progress` 加 `review.progress.bar`。`i18n` 的 `plurals` 快照随 `review-comments` 的 en 值更新。
 - `just bench review_view/`：`review_view/items_5000` 中位数 27.2 µs、27.4 µs（预算 < 4 ms；第 2 步 27 µs，多了一个 `Header` 项）。
 - 没有验证：真实的帧。卡片的外圈线（局部圆角加局部边线）、圆角裁剪、行高与字体下的间距、`Disclosure` 与 `Capsule` 的外观、浮条与列表底部的留白（`BAR_RESERVE` 72pt）、阅读栏 32pt 两侧的观感、深色外观、`Send` / `Mark Reviewed` 标签里的键提示的观感，都只用测试平台里的布局（固定的字体度量）看过；窗口里的视觉检查随 `app` 的手动检查一起做。
+
+### 第 3 步
+
+`app` 装配（[#320](https://github.com/SoloJiang/lectern-app/pull/320)：里程碑经探针报告，`Driver::open(Diff)`）、基准（[#322](https://github.com/SoloJiang/lectern-app/pull/322)），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。
+
+- `just test -p lectern-app`：#320 的 CI（`Build and test (macOS arm64)`）通过；本机不运行打开真实窗口的测试。新增 `a_diff_is_forwarded_with_its_session_key`、`milestones_keep_their_names`、`open_diff_takes_the_session_row_path`。
+- `app/open_diff`：CI（托管的 `macos-15` runner，运行 [40999951524](https://github.com/SoloJiang/lectern-app/actions/runs/40999951524)）5 次是 88.1–112.0 ms，中位数 93.6 ms，再测一轮 96 ms，超过 50 ms。按 [ADR 0057](../adr/0057.md) 放宽：产品能力完成之前 CI 按 < 120 ms 判定，50 ms 仍是目标。同一次运行里审阅引擎单独的 `review/open_session_50` 是 10.9 ms。本机没有运行（它打开真实窗口）。
+- `review_view/items_5000`：中位数 27.5 µs（预算 < 4 ms），进程内运行，不开窗口。
+- 手动检查，用自动化构建（`just automation`，[ADR 0056](../adr/0056.md)），不是发布构建：它是 debug 构建，加了 gpui-mcp 的桥接。临时 `HOME` 是 `target/automation/home`；仓库和会话是合成的，由 `cargo run -p lectern-bench --example review_fixture` 生成（与 `app/open_diff` 的夹具相同：200 个文件，一个 Claude Code 会话在 17 轮里用 `Write` 改了 50 个文件）。用一个 stdio 的 MCP 客户端调用 `just automation-server` 的 `get_ui_tree`、`click_element`、`keyboard`、`scroll`、`screenshot`、`get_logs`、`get_frame_report`；View 菜单经 System Events 点击。结果：
+  - 项目主页 ↵ 进入审阅：标题区（17 轮、50 个文件、+500 −500）、简报（「Nothing stands out」，没有 reflog 的提示）、轮次、文件卡片和 diff 行都显示。
+  - V 勾选当前文件，Files 页显示「1 of 50 reviewed」，列表滚到下一个文件；⌥⌘I 打开检查器的 Files 页；滚动 5000 px 后显示后面的文件。
+  - ⇧⌘O 和 Open File 置灰，没有反应：`review-view-handoff` 没有装配（「与设计的差异」第 3 步）。
+  - View 菜单有「Unified / Side by Side」和「Refresh」；点「Unified / Side by Side」后 diff 变成双栏，内容区变宽。
+  - ⌘[ 回到项目主页，卡片的进度从 0/50 变成 1/50。
+  - 日志：`diff shown` 的 `took_us` 是 33 754 和 49 115（两次启动，debug 构建）；日志里没有 WARN 或 ERROR，也没有夹具的路径、标题和文件名。
+  - 检查中发现并修正了夹具的一个问题：每一轮最后的 assistant 记录没有 `stop_reason: end_turn`，所有轮次都显示「Running…」（#322 的第二个提交）。修正后显示「Turn 1 · 30 min ago」。
+- 自动化构建只在窗口没有被遮住时画帧：窗口在其他应用之后时，等待帧的调用（`screenshot`、`click_element`、`hover_element`）超时（`frame wait timed out`），元素树停在最后画出的一帧。每一批操作之前把窗口放到最前面就可以。
+- 没有验证：发布构建本身；`review_view/scroll_5000`（计划中）；交接（⇧⌘O 打开完整文件）；`app/cold_start`、`app/idle_empty` 与改动前的比较由 CI 的 `process` 分片给出。
 
 ### 第 4 步
 
@@ -930,6 +948,11 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 ### 第 3 步
 
+- **`app/open_diff` 在 CI 上按 < 120 ms 判定**（[ADR 0057](../adr/0057.md)）：托管 runner 上中位数 93.6–96 ms，超过 50 ms；50 ms 仍是目标，产品能力完成之后在实体 Mac 上核对。有多少是 Lectern 自己的时间还没有分开：`app/open_diff` 的备注从 #322 起同时记下日志里的 `took_us`，下一次 CI 运行之后比较；如果主要是 Lectern 自己的时间，另开 issue。
+- **`review_view/scroll_5000` 仍是计划中。** 它是测量构建的帧记录（`WorkspaceHost::record_frames`），`workspace` 还不记录帧（`on_frames` 的记录总是空的）。预算表里是 `Planned`，`workspace` 记录帧之后生效（[bench 设计「与设计的差异」](bench.md#与设计的差异)第 7 步）。
+- **`app/open_diff` 的夹具比「性能」写的小。** 不是 `review/open_session_50` 的仓库（2000 个提交、300 条 reflog），而是 200 个文件的合成仓库和一个 Claude Code 会话（17 轮，每轮用 `Write` 改 3 个约 300 行的文件，最后一轮 2 个，共 50 个）。会话日志写在临时 `HOME` 的 `.claude/projects/` 下，`app` 像对待真实会话一样发现、归位和归因，所以测量包含 `agents` 的读取。夹具在 `crates/bench/benches/fixtures/review_session.rs`。
+- **`Driver::open(Diff)` 的会话键是 `<来源>:<id>`**（如 `session-claude-code:<uuid>`），`app` 把它变成 `Push(Route { screen: REVIEW, target: Review(Session(key)) })`，与项目主页的会话行相同。
+- **手动检查用自动化构建，不用发布构建。** 自动化构建（ADR 0056）是 debug 构建加 gpui-mcp 的桥接，能按元素点击和截图；发布构建没有这个入口。功能与发布构建相同，数字（`took_us`）比发布构建大。
 - **`app` 只装 `review-view`。** 前置条件 C 要求两个插件都装；没有插件提供 `dyn Reader`、`dyn CodeIntel`（`file_reader` 还没有插件，`code_intel` 没有装配），`review-view-handoff` 装进去图校验报 `MissingProvider`，所以 `app` 丢掉它。屏幕照常，交接按钮置灰、没有用量行，与它单独停用时相同（`handoff_plugin_deactivates_on_its_own`）。
 
 ### 第 2 步

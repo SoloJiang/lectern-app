@@ -20,7 +20,7 @@ use lectern_services::project::{ChangedParts, ProjectKey, Projects, WorktreeKey}
 use lectern_services::review::{
     BriefRules, BriefRulesRegistration, FileRows, NoteRoute, NoteRouteRegistration, Overview,
     OverviewInterest, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey,
-    TextKey,
+    TextKey, WorktreesOverview,
 };
 use lectern_services::session::{SessionKey, SessionSource, SourceId, Timestamp};
 
@@ -293,6 +293,44 @@ impl Driven {
     pub fn overview_refresh(&self, project: &ProjectKey) {
         self.engine
             .overview_request(project, crate::engine::overview::Trigger::full());
+    }
+
+    /// `Review::watch_worktrees`.
+    pub fn watch_worktrees(&self, project: &ProjectKey) -> OverviewInterest {
+        self.engine.watch_worktrees(project)
+    }
+
+    /// `Review::worktrees`.
+    pub fn worktrees(&self, project: &ProjectKey) -> Option<Arc<WorktreesOverview>> {
+        self.engine.worktrees(project)
+    }
+
+    /// `Review::refresh_worktrees`.
+    pub fn refresh_worktrees(&self, project: &ProjectKey) {
+        self.engine.refresh_worktrees(project);
+    }
+
+    /// What the worktrees overview's repository watch would mark for this
+    /// batch (`Driven` has no watcher).
+    pub fn worktrees_batch(&self, project: &ProjectKey, batch: &lectern_fs_watch::RepoBatch) {
+        self.engine.worktrees_batch(project, batch);
+    }
+
+    /// Whether the engine still holds any worktrees overview for the
+    /// project.
+    pub fn has_worktrees_state(&self, project: &ProjectKey) -> bool {
+        self.engine.has_worktrees_state(project)
+    }
+
+    /// The path hashes the worktrees overview holds in all.
+    pub fn worktrees_hash_count(&self, project: &ProjectKey) -> usize {
+        self.engine.worktrees_hash_count(project)
+    }
+
+    /// Lets the hashes go above this many once the interests are released
+    /// (the production limit is 65 536).
+    pub fn set_worktrees_hash_limit(&self, limit: usize) {
+        self.engine.set_worktrees_hash_limit(limit);
     }
 
     /// A `ProjectEvent::Changed` of the project with these parts.
