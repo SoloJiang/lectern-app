@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（#339），第 2 步（视图）已实现（PR 号待定），第 3 步尚未实现。
+状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（#339），第 2 步（视图）已实现（#340），第 3 步尚未实现。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -658,7 +658,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 
 ### 第 2 步（视图）
 
-PR 号待定，`Refs #16`，在 macOS（arm64）上运行，没有打开真实窗口（窗口是 GPUI 的测试窗口）：
+#340，`Refs #16`，在 macOS（arm64）上运行，没有打开真实窗口（窗口是 GPUI 的测试窗口）：
 
 - `just check`（格式、架构检查、文档链接、整个工作区的 clippy）、`just test -p lectern-worktrees`（71 个测试通过：第 1 步的 46 个，其中 `activate_registers_nothing_and_does_no_work` 换成 `activate_registers_contributions_only`；新增 `views.rs` 的 `#[gpui::test]`（「测试」列的 15 个，另有 `the_dot_blinks_when_a_worktree_starts_running`、`the_page_shows_usage_of_merge_requests`、`without_a_base_the_range_is_against_head`、`a_switch_before_the_screen_is_built_is_not_reported`、`a_screen_built_before_the_snapshot_follows_it`、`a_repository_with_one_worktree_says_so`、`a_folder_project_says_it_is_not_a_repository`、`the_page_and_the_text_are_in_the_language_of_the_interface` 等）、`tree.rs` 的 3 份语义树 insta 快照、`canary_stays_out_of_worktrees_logs` 扩到渲染、↓、↵、切换按钮、⌘R 与关闭项目）、`just deny` 通过。
 - 「验收」第 2 步的 `rg`：`hsla\(|rgb\(|…|gpui_component::Button`、`"[A-Z][a-z]+ [a-z]`（非测试）在 `crates/worktrees/src` 没有结果；`NodeId::new("worktrees"` 有结果；第 1 步的几条 `rg` 仍没有结果。

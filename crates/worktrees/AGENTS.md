@@ -6,7 +6,7 @@
 - 设计文档：[docs/design/worktrees.md](../../docs/design/worktrees.md)
 - issue：[#16](https://github.com/SoloJiang/lectern-app/issues/16)
 - ADR：[0006](../../docs/adr/0006.md)、[0022](../../docs/adr/0022.md)、[0025](../../docs/adr/0025.md)、[0046](../../docs/adr/0046.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不开窗口：`snapshot`（`WorktreesSnapshot` 与纯函数 `snapshot::build`）、`Hub`（插件状态与合成任务）、`WorktreesPlugin`、`WorktreesUsagePlugin`、`UsageLink`（#339）。第 2 步已实现，不开真实窗口：`actions`（Action 与快捷键）、`model`（`WorktreesModel`：选中、展开、里程碑、定时）、`screen`（`WorktreesScreen` 与工具栏）、`detail`（`DetailTab`，检查器页）、`present`（文字与命令）、`contribute`（屏幕、检查器页、快捷键的登记）（PR 号待定）。第 3 步（`app` 装配、里程碑接到探针、基准）尚未实现。
+- 进度（设计文档「验收」）：第 1 步已实现，不开窗口：`snapshot`（`WorktreesSnapshot` 与纯函数 `snapshot::build`）、`Hub`（插件状态与合成任务）、`WorktreesPlugin`、`WorktreesUsagePlugin`、`UsageLink`（#339）。第 2 步已实现，不开真实窗口：`actions`（Action 与快捷键）、`model`（`WorktreesModel`：选中、展开、里程碑、定时）、`screen`（`WorktreesScreen` 与工具栏）、`detail`（`DetailTab`，检查器页）、`present`（文字与命令）、`contribute`（屏幕、检查器页、快捷键的登记）（#340）。第 3 步（`app` 装配、里程碑接到探针、基准）尚未实现。
 
 ## 模块
 
