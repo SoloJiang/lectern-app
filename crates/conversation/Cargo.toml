@@ -9,6 +9,37 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
+# The "conversation" and "conversation-live" plugins (docs/design/conversation.md
+# 「依赖」, ADR 0025): they require services only and are depended on by `app`.
+plugin = true
+
+[dependencies]
+# Views, `list` and `ListState`, actions, the foreground task of the event
+# channel (docs/design/conversation.md「依赖」). The views keep this crate
+# macOS-only.
+gpui.workspace = true
+# The event channel to the main thread: `channel::mpsc::unbounded`.
+futures.workspace = true
+# `keys::conversation::*`, `Args`.
+lectern-i18n = { path = "../i18n" }
+# `Plugin`, `Active`, `Context`, `PluginHandle`, `ServiceRef`, `ServiceSet`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging (docs/design/conversation.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Contributions`, `dyn SessionSource`, `dyn Conversations` and their data types.
+lectern-services = { path = "../services" }
+# Colours, text, controls, motion and the probe's semantic nodes (ADR 0015).
+lectern-ui = { path = "../ui" }
+
+[dev-dependencies]
+# `TestAppContext`, `VisualTestContext`, `#[gpui::test]`.
+gpui = { workspace = true, features = ["test-support"] }
+# The semantic-tree snapshots.
+insta.workspace = true
+# `Kernel::barrier`: the plugins run in a real kernel with fake services.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]
 workspace = true

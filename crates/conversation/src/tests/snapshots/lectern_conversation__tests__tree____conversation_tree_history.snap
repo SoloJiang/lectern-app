@@ -1,0 +1,22 @@
+---
+source: crates/conversation/src/tests/tree.rs
+expression: "tree(vcx, all)"
+---
+conversation.page Group page=messages
+  conversation.pages TabBar
+    conversation.pages.item[messages] Tab label=[conversation-page-messages] selected
+    conversation.pages.item[terminal] Tab label=[conversation-page-terminal]
+  conversation.status Text label=[conversation-status-idle] link=idle context=72 agent=claude-code
+  conversation.list List entries=10 earlier=2
+    conversation.earlier Button label=[conversation-earlier]
+    conversation.list.item[h:0:0] ListItem kind=prompt streaming=false truncated=false
+    conversation.list.item[h:0:1] ListItem kind=agent streaming=false truncated=false
+    conversation.list.item[h:0:5] ListItem kind=injected streaming=false truncated=false
+    conversation.list.item[h:0:2] ListItem kind=tools streaming=false truncated=false
+    conversation.list.item[h:1:0] ListItem kind=prompt streaming=false truncated=false
+    conversation.list.item[h:1:1] ListItem kind=agent streaming=false truncated=true
+    conversation.list.item[h:2:0] ListItem kind=notes streaming=false truncated=false
+    conversation.list.item[h:2:1] ListItem kind=ended streaming=false truncated=false
+  conversation.plan Group expanded=false done=1 total=2
+    conversation.plan.toggle Button label=[conversation-plan]
+    conversation.plan.steps Group expanded=false
