@@ -1,6 +1,6 @@
 # conversation 设计
 
-状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现。
+状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现。
 
 对应 issue [#23](https://github.com/SoloJiang/lectern-app/issues/23)（Conversation 面板：经 ACP 的结构化对话）、[#24](https://github.com/SoloJiang/lectern-app/issues/24)（权限请求的界面）和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的 Terminal 页。`conversation` 是检查器的 Conversation 页（⌘\）：Messages 页显示正在审阅的会话的对话（prompt、agent 说明、工具调用、发回的审阅意见），用户在这里回复 agent、批准或拒绝 agent 的权限请求；Terminal 页在内嵌终端里恢复这个会话（`claude --resume`、`codex resume`），显示原始输出（[交互规范「三层结构」](interaction.md#三层结构)、[「状态与异常」](interaction.md#状态与异常)的「Agent 请求权限」、[ADR 0012](../adr/0012.md)、[技术调研「Agent 原生面板」](tech-research.md#4-agent-原生面板第二阶段)）。ACP agent 的启动方式和信任边界见 [ADR 0050](../adr/0050.md)。
 
@@ -894,3 +894,9 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 - `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加四（本 crate 三个、`agents` 一个）；启动测试里首帧之前没有 `conversation` 的记录。
 - `just bench conversation/stream_apply`：p95 ≤ 2 ms。
 - 在 macOS 上运行发布构建，用户已安装两个适配器并已登录：打开一个有 Claude Code 会话的仓库，进入审阅，⌘\ 打开 Conversation：历史显示，没有 agent 进程（`ps` 里没有适配器）；回复一句后状态变为「运行中」，agent 请求运行命令时出现卡片、显示命令文本，点「允许」后继续；这一轮结束后审阅页出现新一轮；空闲 10 分钟后适配器进程退出；切到 Terminal 页恢复会话，终端显示 `claude --resume` 的界面，回复框换成「在终端页中运行」。Codex 会话重复一遍。
+
+## 与设计的差异
+
+前置条件 B（`services` 的 `conversation` 模块）：
+
+1. `PermissionId`、`OptionKind` 另派生 `Copy`、`Hash`、`Ord`，不含数据的枚举（`CallKind`、`CallState`、`EndReason`、`StepState`、`RowKind`、`HistoryError`、`AcpProgram`）和 `ContextUsage` 派生 `Copy`，`EntryKey`、`OptionId` 派生 `Hash`：调用方要把它们作映射的键或按值传递，不改变含义。

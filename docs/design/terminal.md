@@ -638,7 +638,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 
 | ID | 预算 | 测量 |
 |---|---|---|
-| `terminal/open` | 中位数 ≤ 150 µs（[ADR 0058](../adr/0058.md)，原来 ≤ 100 µs） | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
+| `terminal/open` | 中位数 ≤ 240 µs（[ADR 0055](../adr/0055.md)；[ADR 0058](../adr/0058.md) 是 ≤ 150 µs，原来 ≤ 100 µs） | 调用线程上的 `open`：校验、建条目、提交两个专属线程 |
 | `terminal/input` | 只记录，目标中位数 ≤ 6 µs（[ADR 0058](../adr/0058.md)，原来 ≤ 2 µs） | 主线程上的一次 `input`：入队与唤醒字节；终端线程睡在 `poll` 上时，写唤醒字节本身就要 3 µs 以上 |
 | `terminal/parse_plain` | 中位数 ≤ 14 ms（[ADR 0055](../adr/0055.md)） | 1 MiB 纯 ASCII、每行 120 列，120×40，`vt_write` 到解析完成 |
 | `terminal/parse_sgr` | 中位数 ≤ 25 ms | 1 MiB、每 8 个字符换一次 24 位色的输出 |

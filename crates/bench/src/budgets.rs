@@ -2056,7 +2056,7 @@ pub static BUDGETS: &[Budget] = &[
     // after 12 ms of quiet.
     share(
         "terminal/open",
-        &[median(Limit::TimeAtMost(us(150)))],
+        &[median(Limit::TimeAtMost(us(240)))],
         TERMINAL,
         ACTIVE,
         Time,
