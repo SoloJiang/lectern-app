@@ -1,0 +1,9 @@
+---
+source: crates/conversation/src/tests/tree.rs
+expression: "tree(vcx, all)"
+---
+conversation.page Group page=messages
+  conversation.pages TabBar
+    conversation.pages.item[messages] Tab label=[conversation-page-messages] selected
+    conversation.pages.item[terminal] Tab label=[conversation-page-terminal]
+  conversation.empty Text label=[conversation-empty-no-session]
