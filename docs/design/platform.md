@@ -1693,7 +1693,7 @@ pub mod login_env {
     /// 阻塞，只在 executor 的任务或专属线程上调用；首帧之前不调用。
     pub fn login_env() -> Result<Arc<LoginEnv>, LoginEnvError>;
 
-    #[derive(Debug)]
+    /// `Debug` 只打印变量个数：名字和值可能含凭据。
     pub struct LoginEnv {
         /// shell 打印的顺序；去掉了 `_`、`SHLVL`、`PWD`、`OLDPWD`（「规则」）。
         pub vars: Box<[(OsString, OsString)]>,
@@ -2120,4 +2120,4 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - `mach_absolute_time`、`mach_timebase_info` 在模块里手写声明：`libc` 把它们标为弃用，推荐的 `clock_gettime_nsec_np` 不是 `CVTimeStamp.hostTime` 用的刻度。
   - 只替换第一次找到的命令缓冲类的 `commit`：之后的 `record` 在另一个类的设备上不再替换，那里的帧都计入 `incomplete`（「逐帧记录」已写的「类不同时钩子不生效」）。`FrameRecorder` 不调用 `stop` 就被丢弃时，同样停止记录、释放「同一时刻最多一个记录器」，结果丢弃。
 - 剪贴板（#22，「剪贴板」）：接口按 review 设计的前置条件 I 实现，补充四点。`ClipboardError` 实现 `Display` 和 `Error`（与 `WindowError` 相同）；`done` 的类型有别名 `Done`；`Rejected` 也用于建不出 `NSString` 或没有通用剪贴板对象；`done` 的 panic 被 `catch_unwind` 截住并丢弃，避免它越过 libdispatch 的边界使进程中止。
-- 登录 shell 的环境（#12）：`capture` 与 `cached` 用内部类型 `Failure` 代替 `LoginEnvError`，因为缓存的 `LoginEnvError` 是 `Copy`，放不下 `Spawn` 日志要的 `io::Error`；「接口」已改。模块的条件是 macOS 和 Linux，不是所有 unix，因为 `libc` 只是这两个平台的依赖。读到完整的环境后关闭管道再等 shell 退出，这样 `.zlogout` 的输出不会因管道写满而卡到期限。增加了设计没有列出的测试：`login_env_markers_differ_between_runs`、`login_env_caches_a_failure_once`、`login_env_spawn_failure_logs_the_io_error_without_the_path`。超时测试的期限从 300 ms 放宽到 2 秒：期限太短时，负载高的机器上假 shell 可能来不及写完记录，测试会偶发失败。
+- 登录 shell 的环境（#12）：`LoginEnv` 的 `Debug` 是手写的，只打印变量个数，因为名字和值可能含凭据（测试 `login_env_debug_prints_no_names_or_values`）；「接口」原来写的是 derive。`capture` 与 `cached` 用内部类型 `Failure` 代替 `LoginEnvError`，因为缓存的 `LoginEnvError` 是 `Copy`，放不下 `Spawn` 日志要的 `io::Error`；「接口」已改。模块的条件是 macOS 和 Linux，不是所有 unix，因为 `libc` 只是这两个平台的依赖。读到完整的环境后关闭管道再等 shell 退出，这样 `.zlogout` 的输出不会因管道写满而卡到期限。增加了设计没有列出的测试：`login_env_markers_differ_between_runs`、`login_env_caches_a_failure_once`、`login_env_spawn_failure_logs_the_io_error_without_the_path`。超时测试的期限从 300 ms 放宽到 2 秒：期限太短时，负载高的机器上假 shell 可能来不及写完记录，测试会偶发失败。

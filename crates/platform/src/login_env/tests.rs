@@ -278,6 +278,17 @@ fn login_env_caches_a_failure_once() {
 }
 
 #[test]
+fn login_env_debug_prints_no_names_or_values() {
+    let env = LoginEnv {
+        vars: Box::new([(
+            OsString::from("SECRET_NAME"),
+            OsString::from("secret_value"),
+        )]),
+    };
+    assert_eq!(format!("{env:?}"), "LoginEnv { vars: 1 }");
+}
+
+#[test]
 fn login_env_error_kinds_are_distinct_static_names() {
     let names = [
         LoginEnvError::NoShell,

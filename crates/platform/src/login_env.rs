@@ -63,11 +63,19 @@ pub fn login_env() -> Result<Arc<LoginEnv>, LoginEnvError> {
 }
 
 /// The login shell's environment, as [`login_env`] returns it.
-#[derive(Debug)]
 pub struct LoginEnv {
     /// In the order the shell printed them, without `_`, `SHLVL`, `PWD` and
     /// `OLDPWD`.
     pub vars: Box<[(OsString, OsString)]>,
+}
+
+/// Only the count: the names and values may hold credentials.
+impl std::fmt::Debug for LoginEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginEnv")
+            .field("vars", &self.vars.len())
+            .finish()
+    }
 }
 
 impl LoginEnv {
@@ -129,6 +137,10 @@ impl LoginEnvError {
 #[derive(Debug)]
 pub(crate) struct Failure {
     pub(crate) kind: LoginEnvError,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only the macOS log record reads it")
+    )]
     pub(crate) io: Option<io::Error>,
 }
 
