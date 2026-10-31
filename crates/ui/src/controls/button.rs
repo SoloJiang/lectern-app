@@ -8,7 +8,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div, px,
+    App, ClickEvent, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled,
+    Window, div, px,
 };
 use gpui_component::button::{ButtonCustomVariant, ButtonRounded, ButtonVariants};
 use gpui_component::{Disableable, Sizable, Size};
@@ -40,6 +41,7 @@ pub struct Button {
     active: Option<bool>,
     disabled: bool,
     on_click: Option<ClickHandler>,
+    attrs: Vec<(&'static str, SharedString)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -115,6 +117,7 @@ impl Button {
             active: None,
             disabled: false,
             on_click: None,
+            attrs: Vec::new(),
         }
     }
 
@@ -170,6 +173,13 @@ impl Button {
 
     pub fn on_click(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Button {
         self.on_click = Some(Rc::new(f));
+        self
+    }
+
+    /// An attribute of the probe's node (`Semantic::attr`): what a screen
+    /// wants the probe to see of the button besides its label and state.
+    pub fn attr(mut self, key: &'static str, value: impl Into<SharedString>) -> Button {
+        self.attrs.push((key, value.into()));
         self
     }
 
@@ -239,7 +249,7 @@ impl RenderOnce for Button {
             ButtonKind::Secondary => Some(palette.control_background),
             ButtonKind::Plain => None,
         };
-        let spec = Semantic::new(
+        let mut spec = Semantic::new(
             self.id.clone(),
             if self.active.is_some() {
                 Role::Toggle
@@ -253,6 +263,9 @@ impl RenderOnce for Button {
             checked: self.active,
             ..State::default()
         });
+        for (key, value) in self.attrs.iter() {
+            spec = spec.attr(key, value.clone());
+        }
         let gpui_size = match self.size {
             ButtonSize::Small => Size::Small,
             ButtonSize::Regular | ButtonSize::Toolbar => Size::Medium,

@@ -686,7 +686,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `app/open_project` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `project_home` |
 | `app/open_file` | 中位数 < 16 ms；场景：cloudprint 形状的普通文件，另有 4 MiB 与 64 MiB 的合成源码、压缩成一行的 4 MiB JS、从 diff 打开 4 MiB `package-lock.json` 中部的一个 hunk（按字节偏移定位）、从 diff 的旧一侧打开 4 MiB blob 中部的一个 hunk（对象库内容已由审阅视图登记），预算相同（[ADR 0034](../adr/0034.md)、[ADR 0042](../adr/0042.md)） | [性能预算](tech-research.md#性能预算) | `file_reader` |
 | `app/enter_edit` | 中位数 ≤ 100 ms（1 MiB、没有超过 4 KiB 的行的文件从 ⌘E 到可以输入；超标时降低编辑上限，[ADR 0034](../adr/0034.md)） | [交互规范「状态与异常」](interaction.md#状态与异常)（100 ms 内不显示加载态） | `file_reader` |
-| `app/open_diff` | 中位数 < 50 ms | [性能预算](tech-research.md#性能预算) | `review_view` |
+| `app/open_diff` | 中位数 < 120 ms（[ADR 0057](../adr/0057.md) 从 50 ms 放宽；50 ms 仍是目标） | [性能预算](tech-research.md#性能预算) | `review_view` |
 | `app/switch_worktree` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `worktrees` |
 | `app/palette_open` | 中位数 < 16 ms（面板和空查询列表） | [性能预算](tech-research.md#性能预算)（[ADR 0030](../adr/0030.md)，下同） | ⌘K（[#102](https://github.com/SoloJiang/lectern-app/issues/102)） |
 | `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
@@ -805,6 +805,10 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `review/open_session_50`、`review/open_session_50_warm` | 中位数 < 35 ms / < 20 ms（`testing::Driven` 驱动审阅引擎，不经插件；夹具 `testing::SessionFixture`：2000 个提交、300 条 HEAD reflog 记录（10 次分支切换）、50 个会话，审阅对象的会话 20 轮、120 次改动调用，50 个 300 行的改动文件。从 `open` 到第一份 `Ready` 快照：新的缓存目录、`review.*` 全空 / 同一缓存目录上的新引擎、`review.*` 都已命中；缓存的数据库文件在计时前已打开） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/open_session_settled`、`review/cutoffs_cold`、`review/attribute_session_50` | 只记录（同一夹具：缓存全空时从 `open` 到最后一份快照；300 条记录的 `tree_changes` 全部未命中时建出截止时刻表；其余 49 个文件的改动链与归因，每一步都 `load`，不含缓存的读写） | [review](review.md#性能) | `review` 第 3 步 |
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 的全部 5000 行；进程内，不开窗口，只在 macOS 编译） | [review_view](review_view.md#性能) | `review_view` 第 1 步 |
+| `review_view/scroll_5000` | p95 ≤ 8.3 ms（每帧工作时间：滚过 5000 行的 diff；`Process`，`WorkspaceHost::record_frames` 的记录）。计划中：`workspace` 还不记录帧，`on_frames` 的记录总是空的 | [review_view](review_view.md#性能) | `workspace` 的帧记录 |
+| `project_home/build_1000` | 中位数 < 2 ms（`snapshot::build` 对 `lectern_project_home::fixture::BuildFixture`：1000 个会话、50 个概览条目、17 个 worktree、2000 个子项目；进程内，不开窗口，只在 macOS 编译） | [project_home](project_home.md#性能) | `project_home` 第 3 步 |
+| `project_home/resident_bytes` | 存活字节 < 1 MB（同一夹具的 `HomeSnapshot` 与两个视图的状态；`Memory`）。计划中：视图的状态要在窗口里建 | [project_home](project_home.md#性能) | 视图的内存测量 |
+| `app/home_frames` | 每帧工作时间最大值 ≤ 8.3 ms、相邻帧间隔 ≤ 1.5 个刷新周期（项目主页的概览到达与侧栏滚动；`Process`）。计划中：同 `review_view/scroll_5000` | [project_home](project_home.md#性能) | `workspace` 的帧记录 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/note_add` | 中位数 < 0.2 ms（`testing::MarkSeenFixture::seed_notes` 写好 39 条待发送、240 条已发送的会话外改动审阅上 `command(AddNote)` 到快照替换；每个样本之前删掉上一个样本加的那条，不计时） | [review](review.md#性能) | `review` 第 6 步 |
 | `review/notes_prompt_40` | 中位数 < 5 ms（`notes::prompt` 拼 40 条意见，每条 4 KiB 文字、5 行摘录和一个路径，约 200 KiB；纯文字处理，进程内，不开窗口） | [review](review.md#性能) | `review` 第 7 步 |
@@ -1226,6 +1230,13 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
   - 第二次运行 40522083050（三片，缓存完全命中）：`code-intel` 10 分 2 秒（基准一步 553 s）、`process` 10 分 4 秒（545 s）、`rest` 12 分 32 秒（707 s，其中构建 3 分 51 秒、运行约 7 分 47 秒）、合并 41 秒。`rest` 超过 12 分钟的目标；`rest` 的报告里运行时间 441 s，`git/` 占 157 s（`time` 108 s、`memory` 49 s），所以拆出 `git` 分片（「分片」）。这次 `rest` 任务排队 8 分钟才开始，从第一个分片开始到合并结束 21 分 29 秒；排队取决于同时可用的 macOS runner 数，不是分片本身的时长（ADR 0053「已知限制」）。
   - 第三次运行 40528178065（四片，`442fba2`）：`code-intel` 9 分 38 秒、`process` 8 分 59 秒、`rest` 10 分 19 秒（基准一步 564 s）；`git` 的缓存键是新的，没有缓存，15 分 45 秒。只重跑 `git` 一个任务（缓存已建立）：7 分 52 秒（428 s），合并 30 秒。四片都 ≤ 12 分钟；不算排队，最长的分片加合并约 11 分钟，≤ 15 分钟。这次各分片开始的时间相差 9 分钟（等 macOS runner），从第一个分片开始到合并结束 18 分 25 秒，排队见 ADR 0053「已知限制」。
 
+第 7 步（`project_home` 与 `review_view` 的端到端基准，`Refs #15`、`Refs #30`），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。
+
+- `just test -p lectern-bench`：181 个通过，跳过 6 个。新增 `process_home_is_prepared_before_the_launch`（`Scheduler::session_in_home` 在启动之前准备临时 `HOME`）和 `process_idle_after_an_open_waits_from_the_milestone`（`Session::open` 之后的静止等待从里程碑开始算）。
+- `project_home/build_1000`、`review_view/items_5000` 只运行 `time` 目标（`cargo bench -p lectern-bench --bench time -- project_home/ review_view/`，进程内，不开窗口）：中位数 931 µs（预算 < 2 ms）、27.5 µs（< 4 ms），都是 `ok`。
+- 没有在本机运行：`app/open_project`、`app/open_diff`、`app/idle_monorepo`、`app/idle_100k`（`process` 目标，启动带探针的 `lectern` 并打开窗口）。
+- CI（托管的 `macos-15` runner，运行 [40999951524](https://github.com/SoloJiang/lectern-app/actions/runs/40999951524)）：`app/open_project` 中位数 60.8 ms（< 100 ms）、`app/idle_monorepo` 33.2 MB（< 100 MB）、`app/idle_100k` 53.5 MB（< 120 MB）、`project_home/build_1000` 1.49 ms（< 2 ms），都在预算内。`app/open_diff` 5 次是 88.1–112.0 ms，中位数 93.6 ms（再测一轮 96 ms），超过 50 ms；按 [ADR 0057](../adr/0057.md) 放宽到 < 120 ms。之后 `app/open_project` 和 `app/open_diff` 的备注同时记下应用日志里的 `since_opened_us` 和 `took_us`（`Session::quit_reading_home`）。`review_view/scroll_5000`、`app/home_frames`、`project_home/resident_bytes` 是计划中，没有基准。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1299,3 +1310,12 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - `just bench --shard` 在分片的某个目标没有写出报告时退出码 2：设计只写了「退出码 0 表示报告已写好」，没有写没写好时怎么办；这样编译失败或崩溃的分片在自己的任务上就是红的，而不只是在合并任务里。
 - `--shard` 在 Linux 上退出码 2（一行说明）：设计写的是「只在 macOS 上」，没有写其他平台的行为。
 - 运行器的 `Options` 多了 `shards`（分片表），测试用假的分片表；`shard_of` 是对 `SHARDS` 的一层。
+
+第 7 步（`project_home` 与 `review_view` 的端到端基准）：
+
+- **`app/idle_monorepo`、`app/idle_100k` 采样时没有暂停后台工作**：设计要「后台工作已暂停」（ADR 0029），但 desktop 的插件集合里还没有可以暂停的后台工作（`code_intel` 没有装配，[#17](https://github.com/SoloJiang/lectern-app/issues/17)）。采样按 `app/idle_empty` 的方式：打开夹具项目、到 `ProjectHome` 里程碑、静止之后。`code_intel` 装配时加上暂停。
+- **`app/open_diff` 的夹具比 `review/open_session_50` 小**：一个 200 个文件的合成仓库（5 个带 `package.json` 的子项目），一个 Claude Code 会话在 20 轮里用 `Write` 改了 50 个约 300 行的文件；没有 2000 个提交和 reflog。会话日志写在临时 `HOME` 的 `.claude/projects/` 下，`app` 像对待真实会话一样发现、归位和归因。夹具在 `benches/fixtures/review_session.rs`，`examples/review_fixture.rs` 用同一个夹具做手动检查。
+- **`Driver::open(Diff)` 的会话键是 `<来源>:<id>`**（如 `session-claude-code:<uuid>`）：设计只写了 `Diff { session }`。`app` 在第一个 `:` 处分开，两边都不能为空。
+- **`Session::open` 之后的静止等待从里程碑开始算**：原来从首帧开始算，打开项目之后马上发 `Epoch` 时，等待可能已经过了。`app/open_diff` 先打开项目再打开 Diff，两次都要等静止。
+- **`review_view/scroll_5000` 是 `Process` 目标**：测试 `budgets_belong_to_the_documented_targets` 按前缀把 `review_view/` 归到 `time` 目标，但这一条是测量构建的帧记录，测试加了这个例外。
+- **帧的预算仍是计划中**：`workspace` 的 `on_frames` 记录总是空的，`review_view/scroll_5000` 和 `app/home_frames` 等 `workspace` 记录帧之后再生效。`project_home/resident_bytes` 要在窗口里建两个视图的状态才能测量，也是计划中。

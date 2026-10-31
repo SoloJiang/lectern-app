@@ -50,6 +50,6 @@ review.narrative List items=34 visible=0..34 mode=unified
   review.diff.item[step:1].row.item[3:-] DiffLine kind=removed drifted=false
   review.call.item[tool-1] Text <review-tool> "\u{2068}Read\u{2069}" kind=tool status=completed
 review.bar Group
-  review.bar.comments Text <review-comments> "No review notes"
+  review.bar.comments Text <review-comments> "No review notes" pending=0 sending=false
   review.bar.looks-good Button <review-looks-good> "Looks Good"
-  review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" [disabled]
+  review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" [disabled] route=session
