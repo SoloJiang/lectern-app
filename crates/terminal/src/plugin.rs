@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use lectern_executor::Executor;
 use lectern_kernel::{
-    Activation, ActivationToken, Active, Context, Manifest, Plugin, PluginError, PluginHandle,
-    service,
+    Activation, Active, Context, Manifest, Plugin, PluginError, PluginHandle, service,
 };
 use lectern_services::project::{ProjectEvent, Projects};
 use lectern_services::session::SessionSource;
 use lectern_services::terminal::Terminals;
+
+#[cfg(any(test, feature = "test-support"))]
+use lectern_kernel::ActivationToken;
 
 use crate::diag::CloseReason;
 use crate::service::Service;

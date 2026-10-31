@@ -3,7 +3,7 @@
 portable-pty + libghostty-vt 的终端状态，运行在独占线程上；会话 resume。
 
 - 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "terminal"（`TerminalPlugin`）提供 `dyn Terminals`，依赖 `dyn Projects` 与 `dyn SessionSource`，`AfterFirstFrame` 激活。只依赖 kernel 层（`kernel`、`services`、`logging`）和非插件的库 crate（`executor`、`platform`）；`project`、`agents` 是插件，只经 `services` 的接口往来。不得直接或间接依赖 GPUI（架构规则 2）。
-- 设计文档：[docs/design/terminal.md](../../docs/design/terminal.md)（已接受；第 2 步 libghostty-vt 接入与网格快照、第 3 步 PTY、启动、插件与服务已实现，`app` 装配尚未实现）。实现按它的「验收」分四步：`services::terminal`、libghostty-vt 接入与网格快照、PTY 与插件（前置：`platform::login_env`）、`app` 装配。构建需要 Zig 0.15.2（设计文档「依赖」）。
+- 设计文档：[docs/design/terminal.md](../../docs/design/terminal.md)（已接受；第 2 步 libghostty-vt 接入与网格快照、第 3 步 PTY、启动、插件与服务和第 4 步 `app` 装配已实现）。实现按它的「验收」分四步：`services::terminal`、libghostty-vt 接入与网格快照、PTY 与插件（前置：`platform::login_env`）、`app` 装配。构建需要 Zig 0.15.2（设计文档「依赖」）。
 - issue：[#5](https://github.com/SoloJiang/lectern-app/issues/5)、[#12](https://github.com/SoloJiang/lectern-app/issues/12)
 - ADR：[0002](../../docs/adr/0002.md)
 

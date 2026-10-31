@@ -4626,6 +4626,7 @@ dependencies = [
  "lectern-review",
  "lectern-review-view",
  "lectern-services",
+ "lectern-terminal",
  "lectern-ui",
  "lectern-ui-probe",
  "lectern-usage",

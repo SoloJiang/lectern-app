@@ -2036,7 +2036,7 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share("log/idle_memory/verbose", RECORD, LOGGING, ACTIVE, Memory),
     // ---- end logging ----
-    // ---- terminal (terminal design, steps 2 and 3) ----
+    // ---- terminal (terminal design, steps 2 to 4) ----
     // Step 3, the plugin with a real PTY (`/bin/cat` as the shell): the
     // calling thread's part of `open` (the terminal is closed again after
     // each sample); one `input` on a running terminal whose thread sleeps
@@ -2111,6 +2111,16 @@ pub static BUDGETS: &[Budget] = &[
         TERMINAL,
         ACTIVE,
         Memory,
+    ),
+    // Step 4: the process-level `plugin/*/resident` of the plugin alone, with
+    // no terminal open (a pair of launches, the closure without it and with
+    // it). Its activation time is the default `plugin/*/activate` entry.
+    share(
+        "plugin/terminal/resident",
+        &[median(Limit::BytesBelow(MB))],
+        TERMINAL,
+        ACTIVE,
+        Process,
     ),
     // ---- end terminal ----
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),

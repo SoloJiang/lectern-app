@@ -56,6 +56,9 @@ lectern-review-view = { path = "../review_view" }
 # The "worktrees" and "worktrees-usage" plugins and their shared `UsageLink`
 # (docs/design/worktrees.md「对其他 crate 的要求」D).
 lectern-worktrees = { path = "../worktrees" }
+# The "terminal" plugin and `TerminalDeps`
+# (docs/design/terminal.md「对其他 crate 的要求」6).
+lectern-terminal = { path = "../terminal" }
 # The "welcome" and "welcome-discovery" plugins and `WelcomeDeps`
 # (docs/design/welcome.md「对其他 crate 的要求」C).
 lectern-welcome = { path = "../welcome" }
