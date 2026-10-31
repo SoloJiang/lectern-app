@@ -367,8 +367,13 @@ fn set_reading_column_overrides_the_top_screen_until_it_pops() {
     assert!(out.is_empty(), "no event: the root view redraws on its own");
 
     // Another screen above the review has its own layout; the override
-    // resumes when it pops.
-    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    // resumes when it pops. (A different target: the same route on top
+    // would be ignored.)
+    let above = Route {
+        screen: name(screens::REVIEW),
+        target: Target::Project(project_key("/repos/a")),
+    };
+    nav.dispatch(WorkspaceCommand::Push(above), &env, &mut out);
     assert!(
         nav.layout(&env).reading_column,
         "the screen above is not overridden"
@@ -867,4 +872,42 @@ fn window_state_round_trips_as_json() {
     let future: WindowState =
         serde_json::from_str(r#"{"version":2,"project":null,"inspector":false}"#).unwrap();
     assert!(!future.is_supported());
+}
+
+#[test]
+fn push_of_the_top_route_is_ignored() {
+    let env = FakeEnv::standard();
+    let mut nav = on_project(&env);
+    let mut out = Vec::new();
+
+    // The base screen is the current one: pushing it changes nothing.
+    let home = nav.nav().current();
+    nav.dispatch(WorkspaceCommand::Push(home), &env, &mut out);
+    assert!(nav.nav().stack.is_empty());
+    assert!(out.is_empty(), "no effect: {out:?}");
+
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    assert_eq!(nav.nav().depth(), 1);
+    out.clear();
+
+    // The same route on top: ignored, no event, no state change.
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    assert_eq!(nav.nav().depth(), 1);
+    assert!(out.is_empty(), "no effect: {out:?}");
+
+    // The same screen with another target is a new route.
+    let other = Route {
+        screen: name(screens::REVIEW),
+        target: Target::Project(project_key("/repos/a")),
+    };
+    nav.dispatch(WorkspaceCommand::Push(other), &env, &mut out);
+    assert_eq!(nav.nav().depth(), 2);
+    out.clear();
+
+    // After a Pop the route below is on top again, so it is ignored.
+    nav.dispatch(WorkspaceCommand::Pop, &env, &mut out);
+    out.clear();
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    assert_eq!(nav.nav().depth(), 1);
+    assert!(out.is_empty(), "no effect: {out:?}");
 }

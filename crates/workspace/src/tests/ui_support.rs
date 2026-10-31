@@ -291,6 +291,16 @@ pub fn sidebar_item(id: &'static str, order: u16) -> Register {
 /// An inspector tab labelled with this crate's own key (a real one uses
 /// its contributor's key).
 pub fn inspector_tab(id: &'static str, order: u16) -> Register {
+    scoped_inspector_tab(id, order, None)
+}
+
+/// An inspector tab shown only on `screen` (`None`: on every screen with an
+/// inspector).
+pub fn scoped_inspector_tab(
+    id: &'static str,
+    order: u16,
+    screen: Option<&'static str>,
+) -> Register {
     Box::new(move |contributions, token| {
         let payload = InspectorTab {
             label: keys::workspace::INSPECTOR_TOGGLE,
@@ -300,6 +310,7 @@ pub fn inspector_tab(id: &'static str, order: u16) -> Register {
                 })
                 .into()
             }),
+            screen: screen.map(Name::Borrowed),
         };
         contributions.register(
             Contribution {

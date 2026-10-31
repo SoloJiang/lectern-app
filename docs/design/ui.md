@@ -684,7 +684,8 @@ pub mod contrib {
     pub struct SidebarPanel { pub build: ViewFactory<()> }
     /// 侧栏的一个条目（`services::workspace::SidebarEntry` 的载荷）。图标用本 crate 的 `Icon`（见「未决问题」1），不是 SF Symbols 的名字。
     pub struct SidebarItem { pub label: Key, pub icon: Option<Icon>, pub on_select: WorkspaceCommand }
-    pub struct InspectorTab { pub label: Key, pub build: ViewFactory<()> }
+    /// `screen`：只在这个屏幕显示（`None`：每个带检查器的屏幕，除非当前屏幕有自己的页），规则见 [workspace 设计「区域与三层」](workspace.md#区域与三层)。
+    pub struct InspectorTab { pub label: Key, pub build: ViewFactory<()>, pub screen: Option<Cow<'static, str>> }
     pub struct Panel { pub build: ViewFactory<()> }
     pub struct Overlay { pub build: ViewFactory<()> }
     pub struct KeyBindings(pub Vec<(&'static str, Box<dyn gpui::Action>, Option<&'static str>)>);

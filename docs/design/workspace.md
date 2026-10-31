@@ -257,7 +257,12 @@ pub struct Screen {
 pub struct ToolbarItems { pub title: Text, pub subtitle: Option<Text>, pub controls: Vec<AnyElement> /* ≤ 3 */ }
 pub struct SidebarPanel { pub build: ViewFactory<()> };
 pub struct SidebarItem { pub label: i18n::Key, pub icon: Option<ui::Icon>, pub on_select: WorkspaceCommand };
-pub struct InspectorTab { pub label: i18n::Key, pub build: ViewFactory<()> };
+pub struct InspectorTab {
+    pub label: i18n::Key,
+    pub build: ViewFactory<()>,
+    /// 只在这个屏幕显示的页（屏幕 ID，类型同 `kernel::Name`）。`None`：每个带检查器的屏幕都显示，除非当前屏幕有自己的页（「区域与三层」的「检查器页的范围」）。
+    pub screen: Option<Cow<'static, str>>,
+};
 pub struct Panel { pub build: ViewFactory<()> };
 pub struct Overlay { pub build: ViewFactory<()> };
 /// 每条：按键、Action、可选的 KeyContext 谓词（「Action 与快捷键」的上下文名）。
@@ -389,6 +394,8 @@ struct Nav {
 
 当前屏幕是栈顶，栈空时是基底（`Welcome` → `screens::WELCOME`，`Project` → `screens::PROJECT_HOME`）。各区域的显示由当前屏幕的 `ScreenLayout` 和 `Nav` 决定：侧栏 = `layout.sidebar == Shown`；检查器 = `layout.inspector && nav.inspector`；面板、覆盖层只看 `nav`；浮条 = `layout.floating_bar`。内容区是否限制在阅读栏里 = 当前屏幕在 `nav.reading_column` 里的值，没有时是 `layout.reading_column`。
 
+**检查器页的范围。** `InspectorTab::screen` 为 `None` 的页在每个 `layout.inspector` 为 true 的屏幕上显示。`Some(s)` 的页只在当前屏幕是 `s` 时显示。当前屏幕有自己的页（`screen == Some(当前屏幕)`）时，检查器只显示这些页，不显示 `None` 的页；没有时只显示 `None` 的页。`nav.inspector_tab` 不在可见的页里时，检查器显示第一个可见的页（按 `(order, id)`），`nav.inspector_tab` 本身不变，所以弹回原屏幕后原来选的页又出现。这是根视图的显示规则，状态机不查页。
+
 | 当前状态 | 输入 | 守卫 | 结果 |
 |---|---|---|---|
 | 任意 | `ProjectEvent::Opened { Ok(key) }`，`key` 不是当前基底 | — | `base = Project(key)`，`stack` 清空（先问 `View` 守卫，被拒时不换，见「状态与异常」），`sidebar_panel = None`；`ScreenChanged`；`on_state_changed`。原来的基底是 `Project(old)` 时随后调 `Projects::close(old)`：一个窗口同一时刻只显示一个项目，`Projects` 自己不限制同时打开的数目，不关的话旧项目的监听、任务和快照一直留着 |
@@ -399,7 +406,7 @@ struct Nav {
 | `Project(k)` | `OpenProject(p)` | `Project(k)` | 通过后 `Projects::open(p)`（第一版在同一个窗口里换项目，见「未决问题」1）；`p` 属于 `k` 时 `Opened` 带同一个 key，按上面的「同一个项目再次打开」处理，否则 `Opened` 换基底并关闭 `k` |
 | `Project(k)` | `CloseProject` | `Project(k)` | 通过后 `Projects::close(k)` |
 | `Project(k)` | `SetActiveWorktree(w)` | `Worktree(k)` | 通过后 `Projects::set_active_worktree(k, w)` |
-| `Project` | `Push(r)` | — | `r` 的屏幕已注册：压栈，`panel`、`overlay` 关闭；没注册：记 warn，不变 |
+| `Project` | `Push(r)` | — | `r` 的屏幕已注册：压栈，`panel`、`overlay` 关闭；没注册：记 warn，不变；`r` 与当前屏幕（栈顶，栈空时是基底）是同一个 `Route`：忽略，记 debug（侧栏的条目点第二次不会压入同样的屏幕） |
 | `Project`，栈非空 | `Pop` | `View` | 弹出栈顶，`panel`、`overlay` 关闭 |
 | `Project`，栈非空 | `PopToBase` | 每层一次 `View` | 逐层弹出，任一层被拒即停在那一层 |
 | 任意 | `Escape` | 见下 | 关闭最上面的一层 |
@@ -526,6 +533,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 | 恢复窗口状态时项目路径已不存在 | 同上：留在 Welcome；`app` 下次写状态时 `project` 为 None |
 | 基底屏幕（`welcome` / `project-home`）还没有注册（插件没装、激活失败或还没应用） | 内容区显示 `workspace-screen-missing`；注册到达后自动换上 |
 | `Push` 的屏幕没有注册 | 忽略，记 warn |
+| `Push` 的 `Route` 与当前屏幕相同 | 忽略，记 debug；屏幕相同、目标不同的 `Route` 照常压栈 |
 | 贡献的闭包 panic | `contain` 捕获，让这次激活失效（kernel 设计「撤销」），区域显示为空，不崩溃 |
 | 插件停用时它的屏幕正在显示 | 按 `Pop` 处理，不问守卫；是基底时显示 `workspace-screen-missing` |
 | 命令激活失败、没有处理函数 | 一次性提示 `workspace-command-failed`，记录 |
@@ -555,9 +563,9 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 第 2 步起依赖 GPUI，只在 macOS 上编译和测试（第 1 步不依赖 GPUI，Linux 上也跑）：`just test -p lectern-workspace`。
 
-- 状态机（纯函数，`#[test]`，不依赖 GPUI；`src/tests/nav.rs`，用假的 `nav::Env`）：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`；`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）；`opened_with_a_refusing_view_keeps_the_screen`；`window_state_follows_the_open_path`。
+- 状态机（纯函数，`#[test]`，不依赖 GPUI；`src/tests/nav.rs`，用假的 `nav::Env`）：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`；`push_of_the_top_route_is_ignored`（与当前屏幕相同的 `Route` 忽略，无副作用，目标不同的压栈，`Pop` 后栈顶相同的也忽略）；`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）；`opened_with_a_refusing_view_keeps_the_screen`；`window_state_follows_the_open_path`。
 - 注册表（`#[test]`，`src/tests/registry.rs`，用 `TestKernel` 跑真实激活取 token，`driver::Driver` 代替主线程）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`invalid_ids_are_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`pending_token_is_deferred`（`started` 还没返回时 token 是 `Pending`，应用推迟到下一个 `Tick`）、`late_registration_applies_with_its_token`、`late_registration_needs_no_earlier_commit`（`activate` 里什么也没登记的激活在 `started` 里带 token 登记屏幕、守卫和命令处理函数，都应用）、`late_registration_inside_started_is_deferred_until_live`、`late_registration_with_a_dead_token_is_rejected`（停用后用旧 token 登记：不排队、不占 ID，记 `token-dead`）、`removal_drops_the_shown_screen`、`release_frees_the_id_before_the_main_thread_removes_it`、`screens_can_be_pushed_twice`（第 1 步只检查注册表那一半：同一个屏幕压栈两次、载荷取两次；工厂真的被调用两次在第 2 步）、`a_guard_that_drops_its_answer_allows`、`a_registration_without_a_token_outside_activate_is_reported_on_release`、`sidebar_entries_are_sorted_and_shared`、`command_handlers_guards_and_key_bindings_apply`、`leave_guards_are_asked_through_the_queue`、`commands_wait_for_projects`、`project_events_reach_the_state_machine`、`dispatch_after_shutdown_is_dropped`、`plugin_manifest_matches_the_design`。`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）要 GPUI 的 keymap，归第 2 步。
-- `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`；测试平台的窗口没有 `CAMetalLayer`，`platform::frame::record` 返回错误，交回的 `result` 是这个错误）。
+- `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`inspector_tab_scoped_to_its_screen`（`screen: Some(s)` 的页只在 `s` 上显示；`s` 有自己的页时不显示 `None` 的页；选中的页不可见时显示第一个可见的页，`nav.inspector_tab` 不变，弹回后恢复）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`；测试平台的窗口没有 `CAMetalLayer`，`platform::frame::record` 返回错误，交回的 `result` 是这个错误）。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
 - 不用真实的 git、会话扫描和文件 IO；`Projects` 用 `services` 的 trait 对象的假实现，只发事件、返回构造好的快照。
@@ -634,6 +642,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 空闲内存：空窗口的 `phys_footprint` 与 app 设计「实际验证」的 40 MB 相比增加不超过 1 MB。
 
 ## 实际验证
+
+### 检查器页的范围与重复压栈（worktrees 前置条件 B）
+
+`ui::contrib::InspectorTab` 加 `screen`，根视图按它过滤检查器的页，状态机忽略与当前屏幕相同的 `Push`（[worktrees 设计「对其他 crate 的要求」B](worktrees.md#对其他-crate-的要求)，`Refs #16`，PR 号待定）。在 macOS（arm64）上运行：
+
+- `just test -p lectern-workspace` 通过，新增 `push_of_the_top_route_is_ignored`（`nav.rs`）和 `inspector_tab_scoped_to_its_screen`（`view.rs`，`#[gpui::test]`，不开真实窗口）。
+- 没有验证：真实窗口里页切换时分段控件的外观；还没有贡献方带 `Some(屏幕)` 的页（Worktree 页随 worktrees 的第 2 步）。
 
 ### `SetReadingColumn`（review_view 前置条件 A）
 
@@ -724,6 +739,11 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 - **88pt 的左边距是本 crate 定的数**：交互规范和画布只写了「窗口控件在工具栏里」，没有给数。按前置条件 G 的位置，三个按钮到 x ≈ 78pt 为止，再留 10pt 给返回按钮的悬停底色。
 - **侧栏开关没有画**：它的命令和 Action 还没有设计（「界面」）。
+
+### 检查器页的范围与重复压栈（worktrees 前置条件 B）
+
+- **「相同」按当前屏幕比较**：worktrees 设计写「栈顶已经是同一个 `Route`」。栈为空时当前屏幕是基底，所以实现比较 `Nav::current()`：栈空时再压入基底屏幕的同一个 `Route`（如在项目主页上点侧栏的条目）也被忽略。原因：基底与栈顶对用户是同一个屏幕，压入第二个同样的屏幕没有意义。
+- **`InspectorTab::screen` 的类型**：设计写 `Option<Name>`。`ui` 不依赖 `kernel`，所以字段写成 `Option<Cow<'static, str>>`，与 `Name`（`Cow<'static, str>`）是同一个类型。
 
 ### `SetReadingColumn`（review_view 前置条件 A）
 
