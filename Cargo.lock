@@ -5032,6 +5032,17 @@ dependencies = [
 [[package]]
 name = "lectern-worktrees"
 version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-pre",
+ "insta",
+ "lectern-executor",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-ui",
+]
 
 [[package]]
 name = "libbz2-rs-sys"

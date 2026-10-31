@@ -1,0 +1,11 @@
+---
+source: crates/worktrees/src/tests/build.rs
+expression: render(&built)
+---
+snapshot folder=true settled=true switches=0 base=-
+sources project=1 sessions=["a@3"] changes=None usage=0
+built_at=0 next_expiry=-
+active 0
+idle 0
+pending []
+queries
