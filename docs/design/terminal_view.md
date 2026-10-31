@@ -1,6 +1,6 @@
 # terminal_view 设计
 
-状态：已接受，尚未实现。
+状态：实现中。第 1 步（`ui::terminal_colors` 与 `terminal.ftl`）已实现（本 PR）；第 2 步（`TerminalPane`）和第 3 步（装配与真机验证）尚未实现。
 
 对应 issue [#5](https://github.com/SoloJiang/lectern-app/issues/5)（libghostty-vt 接入与 GPUI 网格绘制）的视图部分和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的终端视图。`terminal_view` 把 `terminal` 给出的网格快照（[terminal 设计「帧」](terminal.md#帧)）画在 GPUI 里，把键盘、输入法、鼠标、滚轮、焦点、剪贴板和尺寸变化转成 `Input` 发回 `terminal`。它是 Conversation 的 Terminal 页里的终端视图，在界面的「收起」一层（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。
 
@@ -393,3 +393,22 @@ GPUI 先匹配快捷键，再调用元素的 `on_key_down`（gpui-pre 0.3.7 `win
 - `app/input_frames` 与 `app/terminal_output_frames` 在预算内。
 - 在 macOS 上运行发布构建，两种外观各一遍：恢复一个 Claude Code 会话，输入框的圆角边框上下相接；中文提示与英文对齐网格；用拼音输入法输入中文，候选窗口在光标处；⌘C、⌘V、⌘A 可用，Esc 交给 agent（检查器不关闭）；拖动选择、双击选词；滚轮翻看历史后输入，视口回到底部。结果写进「实际验证」。
 - issue #5 由 `terminal`、`terminal_view` 里最后合并的那个 PR 写 `Closes #5`，其余写 `Refs #5`。
+
+## 实际验证
+
+### 第 1 步：`ui` 终端配色与 `i18n` 的键
+
+macOS（Apple 芯片）上运行，`Refs #5`：
+
+- `just check`（格式、架构规则、文档链接、整个工作区的 clippy）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过。
+- `just test -p lectern-ui`：100 个测试通过，其中 `terminal_colors_contrast`、`terminal_colors_distinct` 和两种外观的快照通过。快照逐个看过：浅色外观的绿、黄、青按派生规则向 `label` 混合之后过 3:1，红、蓝、紫不变；深色外观 1–6 不变。
+- `just test -p lectern-i18n`：57 个测试通过；`terminal-grid` 在 en 与 zh-CN 里都有（编译期校验），生成的 `keys::terminal::GRID` 在构建产物里。
+- `just test -p lectern-terminal-view`：0 个测试（本 crate 还没有代码）。`rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 没有结果。
+- 没有验证：键在界面里的实际显示和终端配色在窗口里的观感（视图在第 2 步，真机在第 3 步）。第 2、3 步的验收条件都没有运行。
+
+## 与设计的差异
+
+### 第 1 步
+
+- 设计表里的 ANSI 1–6 不需要换系统色。
+- 派生规则「向 `label` 混合直到不低于 3:1」加了 40 步的上限（`MAX_STEPS`），让循环在任何调色板上都会结束；内置表远用不到这个上限。

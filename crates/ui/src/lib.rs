@@ -30,6 +30,7 @@ pub mod motion;
 mod palette;
 pub mod semantic;
 mod state;
+mod terminal;
 mod text;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -58,4 +59,5 @@ pub use init::{attach, init, init_fixed, is_ready, ready};
 pub use palette::{
     Appearance, Palette, SystemColor, accent_follows_system, colors, on_accent, palette,
 };
+pub use terminal::{TerminalColors, terminal_colors};
 pub use text::{Text, Verbatim, set_locale, strings};

@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。终端配色（`terminal_colors`，[terminal_view 设计](terminal_view.md#验收)第 1 步的 `ui` 部分）已实现（本 PR）：窗口里的视觉检查随 terminal_view 第 3 步。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -10,6 +10,7 @@
   - 系统语义色与强调色：从 macOS 读取（经 `platform`），按窗口外观（浅色 / 深色）解析成 `Palette`；外观或强调色变化时重新读取并刷新窗口。
   - 字体：系统 UI 字体与系统等宽字体的家族常量、字号层级（`TextRole`），以及 `file_reader` 和 diff 行需要的等宽字体度量（`MonoMetrics`，[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)前置条件 E）。
   - 代码配色：`lectern_syntax::TokenKind` 到系统色与字重的映射，浅色 / 深色各一组。
+  - 终端配色：终端的默认色与 ANSI 16 色，同样来自 `Palette`（`terminal_view` 使用，见「终端配色」）。
   - 动效原语：[交互规范「动效」](interaction.md#动效)表里的时长与曲线作为具名常量；可打断的过渡（`Transition`，含弹簧）、三次贝塞尔求值；减弱动态效果的替代方案。
   - 界面文本的类型 `Text`：控件只接受来自 `lectern-i18n` 的文本或明确标为原样显示的文本（[i18n 设计](i18n.md)「本 issue 之外」留给本 crate 的两件事之一）；`Strings` 的 GPUI 全局与切换语言后的刷新（另一件）。
   - 共用的小控件：只做 Welcome、项目主页、审阅视图需要、而 gpui-component 没有或与 macOS 不一致的几个（见「控件」），加上 `workspace` 的一次性提示 `Hint`。
@@ -282,6 +283,24 @@ pub fn code_styles(palette: &Palette) -> [(TokenKind, CodeStyle); 18];
 | `Function`、`Property`、`Variable`、`Operator`、`Punctuation`、`Escape`、`Other` | `label` | — |
 
 只用系统色，所以 ADR 0015「agent 标识色是唯一的自定义颜色」仍然成立；只上五种颜色，与「安静」的目标一致。色觉辨识用「测试」里的 `code_colors_*` 检查：五种颜色两两之间在正常、红色盲、绿色盲三种模拟下的 ΔE（CIE76）不小于 12，每种与两套 `control_background` 的对比度不低于 3:1。实现时表里的某一行过不了检查就换另一种系统色，并在「与设计的差异」里写明。
+
+### 终端配色
+
+终端的默认色与 ANSI 16 色，与代码配色同类：映射集中在本 crate，`terminal_view` 只做换算（[terminal_view 设计「对其他 crate 的要求」](terminal_view.md#对其他-crate-的要求)第 1 项，[#5](https://github.com/SoloJiang/lectern-app/issues/5)）。
+
+```rust
+/// 终端的颜色，都来自 `Palette`。纯函数，渲染时可调用。
+pub fn terminal_colors(palette: &Palette) -> TerminalColors;
+
+pub struct TerminalColors {
+    pub foreground: Hsla,   // label（带透明度，使用方叠在 background 上）
+    pub background: Hsla,   // control_background
+    pub cursor: Hsla,       // label
+    pub ansi: [Hsla; 16],
+}
+```
+
+映射和派生规则在 terminal_view 设计的表里，这里不重复：0 与 7 在两个外观下对调，8 是 `secondary_label`，1–6 是红、绿、黄、蓝、紫、青，9–14 同 1–6，15 同 7。1–6 叠在 `background` 上对比度不足 3:1 时，每次向 `label` 混合 5%（最多 40 次），直到不低于 3:1。1–6 因此是不透明的。检查是「测试」里的 `terminal_colors_*`。
 
 ### 动效
 
@@ -870,6 +889,7 @@ pub mod semantic {
   - `hint_*`：`is_expired` 在 `duration` 加 `HOVER_OUT` 的淡出过后为 true（见「与设计的差异」第 3 步）；再次 `new` 同一个 ID 从新的 `shown_at` 计时；`frame_when` 的到达、停留、淡出三段与减弱动态效果下的零位移。
   - `node_id_*`：格式、转义、`child`；调试构建下非法的 `view` panic。
   - `code_colors_*`：对内置表的两个外观，五种颜色两两之间在正常、红色盲（protanopia）、绿色盲（deuteranopia）三种模拟（Viénot 1999 的 3×3 矩阵，在测试里写出）下的 ΔE（CIE76）≥ 12；每种与 `control_background` 的对比度（WCAG 2 的公式）≥ 3:1。`code_styles` 的两个外观各一份 insta 快照。
+  - `terminal_colors_*`：`follow_the_design_table`（字段与 8、15、9–14 的对应，1–6 不透明）；`contrast`：两个外观下 ANSI 1–6 对 `background` 的对比度不低于 3:1；`distinct`：1–6 两两之间 ΔE（CIE76）不小于 12；浅色、深色各一份 insta 快照。
   - `palette_builtin_*`：内置表每个颜色的透明度在 0..=1、四个 `diff_*_background` 的叠加结果与手算一致；词级差异底色比同侧的行底色离 `control_background` 更远（ΔE 至少 1.5 倍）；两个外观的 `label` 与 `window_background` 对比度 ≥ 7:1；`label` 在四个 diff 底色上的对比度 ≥ 4.5:1（WCAG 2 AA，最小值是深色下的词级绿色 6.0）。
   - `text_*`：`Text::verbatim` 接受 `Arc<str>` 和 `String`；`compile_fail` 文档测试确认 `Text::verbatim("literal")`、`Text::key(&strings, "literal")` 和 `contrib::ToolbarItems { title: "literal", … }` 不编译（`just doctest`）；`Button::new(id, "literal")` 的那条随第 3 步的 `Button` 加入。
 - `#[gpui::test]`（`TestAppContext`，`init_fixed`）：
@@ -1058,6 +1078,12 @@ pub mod semantic {
 - `just test -p lectern-ui`：95 个测试通过，其中 `tests/text_area.rs` 的 8 个和 `semantic_snapshot_text_area`。把 `on_submit` 的 ⌘↩ 判断和 `on_cancel` 的组字判断临时改坏，`cmd_enter_submits_and_inserts_no_newline` 和 `escape_during_composition_goes_to_the_input_method` 随之失败（改回后通过）。
 - 组字用 `EntityInputHandler::replace_and_mark_text_in_range` 造出标记范围来检验，不是真实的输入法。
 - 没有做：窗口里的视觉检查（底色、边、焦点环、深色外观下的文字与占位文字）和真实输入法的 Esc；这两项等调用方的屏幕 PR 之后手动检查（「验收」第 6 步）。
+
+终端配色（[terminal_view 设计](terminal_view.md#验收)第 1 步，`Refs #5`；macOS，Apple 芯片）：
+
+- `just check`（含整个工作区的 clippy）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过。
+- `just test -p lectern-ui`：100 个测试通过，其中新增 5 个：`terminal_colors_follow_the_design_table`、`terminal_colors_contrast`、`terminal_colors_distinct` 和两份 insta 快照。设计表里的 ANSI 1–6 按派生规则（向 `label` 混合）调整之后通过对比度与 ΔE 两项检查，不需要换系统色，所以「与设计的差异」没有新增条目。
+- 没有新的外部 crate，`Cargo.lock` 不变。
 
 ## 与设计的差异
 
