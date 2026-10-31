@@ -153,6 +153,13 @@ impl Workspace {
     /// root takes the focus.
     pub(crate) fn bind_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.window = Some(window.window_handle());
+        // The window exists from here on, also after a Dock reopen that follows
+        // `WindowClosed`: `current_route` answers before the first
+        // `ScreenChanged` (which waits for `WorkspacePlugin::started`).
+        self.hub.note_route(
+            self.driver.nav().window(),
+            self.driver.nav().nav().current(),
+        );
         self.screens.clear();
         self.sidebar = None;
         self.inspector = None;

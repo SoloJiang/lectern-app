@@ -2,6 +2,7 @@
 //! sending side (docs/design/workspace.md「数据流与线程」). The GPUI-free
 //! part of `WorkspaceHost`: the root view wraps it with the window.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use lectern_logging::debug;
 use lectern_services::project::{ProjectEvent, ProjectSnapshot, Projects};
 use lectern_services::workspace::{
     CommandHandler, Contribution, Contributions, LeaveGuard, LeaveScope, Milestone, Registration,
-    SidebarEntry, WorkspaceCommand, WorkspaceEvent,
+    Route, SidebarEntry, WindowId, WorkspaceCommand, WorkspaceEvent,
 };
 
 use crate::nav::{AskId, Report};
@@ -148,6 +149,9 @@ pub struct Hub {
     registry: Arc<Registry>,
     sender: Sender,
     plugin: Mutex<Plugin>,
+    /// The current screen of each window, as of the last `ScreenChanged`
+    /// that went out (`Contributions::current_route`).
+    routes: Mutex<BTreeMap<WindowId, Route>>,
 }
 
 impl Hub {
@@ -156,6 +160,7 @@ impl Hub {
             registry: Registry::new(payloads, sender.clone()),
             sender,
             plugin: Mutex::new(Plugin::default()),
+            routes: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -220,9 +225,32 @@ impl Hub {
             .clone()
     }
 
+    /// Records the current screen of `window` for `current_route`.
+    pub(crate) fn note_route(&self, window: WindowId, route: Route) {
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(window, route);
+    }
+
     /// Emits a `WorkspaceEvent` through the plugin's emitter; nothing before
-    /// `started` (no listener can exist yet).
+    /// `started` (no listener can exist yet). `ScreenChanged` and
+    /// `WindowClosed` also update the routes `current_route` reads, before
+    /// the event goes out, so a plugin that reads `current_route` in its
+    /// `started` never sees an older screen than the events it receives.
     pub fn emit(&self, event: WorkspaceEvent) {
+        match &event {
+            WorkspaceEvent::ScreenChanged { window, to, .. } => {
+                self.note_route(*window, to.clone());
+            }
+            WorkspaceEvent::WindowClosed { window } => {
+                self.routes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(window);
+            }
+            _ => {}
+        }
         let emitter = self
             .plugin
             .lock()
@@ -283,6 +311,14 @@ impl Contributions for Hub {
 
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         self.registry.sidebar_entries()
+    }
+
+    fn current_route(&self, window: WindowId) -> Option<Route> {
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&window)
+            .cloned()
     }
 
     fn report_milestone(&self, milestone: Milestone) {

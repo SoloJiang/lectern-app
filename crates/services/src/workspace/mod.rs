@@ -61,6 +61,12 @@ pub trait Contributions: Send + Sync {
     /// `WorkspaceEvent::ContributionsChanged` 通知。
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]>;
 
+    /// 窗口当前的屏幕（栈顶；栈空时是基底）。取锁复制，不阻塞，任何线程。窗口不存在
+    /// 时为 `None`。插件在 `Live` 之前收不到 `ScreenChanged`，`started` 里用它补上激活
+    /// 之前的屏幕（conversation 设计「对其他 crate 的要求」A）。值与最近一次
+    /// `ScreenChanged::to` 一致。
+    fn current_route(&self, window: WindowId) -> Option<Route>;
+
     /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：
     /// `workspace` 在下一帧回调里记下时刻并转给 `app`。任何线程。
     fn report_milestone(&self, milestone: Milestone);

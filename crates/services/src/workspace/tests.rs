@@ -60,6 +60,9 @@ impl Contributions for Empty {
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         Arc::from(Vec::new())
     }
+    fn current_route(&self, _window: WindowId) -> Option<Route> {
+        None
+    }
     fn report_milestone(&self, _milestone: Milestone) {}
 }
 
@@ -234,6 +237,7 @@ fn workspace_contributions_is_a_shared_trait_object() {
     drop(contributions.register_leave_guard(Arc::new(Permissive), None));
     contributions.dispatch(WorkspaceCommand::Escape);
     assert!(contributions.sidebar_entries().is_empty());
+    assert_eq!(contributions.current_route(WindowId(0)), None);
     contributions.report_milestone(Milestone::ProjectHome);
 
     // The service and the guards are shared across threads; registrations
