@@ -1,0 +1,11 @@
+---
+source: crates/terminal/tests/frames.rs
+expression: "frame_of(\"osc\", 12, 2)"
+---
+size 12x2  colors fg #ff0000 bg #0000ff cursor #ffffff
+cursor 0,1 Block
+scroll 0/2  modes Modes { bracketed_paste: false, mouse_tracking: false, alt_screen: false, focus_events: false }
+ 0: "text"
+      0..12  fg #ff0000
+ 1: ""
+      0..12  fg #ff0000

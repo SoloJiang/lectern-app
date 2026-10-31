@@ -58,6 +58,7 @@ lectern-project = { path = "../project", features = ["test-support"] }
 lectern-review = { path = "../review", features = ["test-support"] }
 lectern-services = { path = "../services" }
 lectern-syntax = { path = "../syntax", features = ["test-support"] }
+lectern-terminal = { path = "../terminal", features = ["test-support"] }
 lectern-usage = { path = "../usage", features = ["test-support"] }
 # `kill` of a launched process group in benches/process.rs.
 libc.workspace = true

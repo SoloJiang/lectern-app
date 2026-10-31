@@ -183,6 +183,7 @@ const LOGGING: &str = "docs/design/logging.md#性能";
 const USAGE: &str = "docs/design/usage.md#性能";
 const UI: &str = "docs/design/ui.md#性能";
 const REVIEW_VIEW: &str = "docs/design/review_view.md#性能";
+const TERMINAL: &str = "docs/design/terminal.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -2022,6 +2023,56 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share("log/idle_memory/verbose", RECORD, LOGGING, ACTIVE, Memory),
     // ---- end logging ----
+    // ---- terminal (terminal design, step 2) ----
+    // `testing::Engine` (no PTY) at 120×40: 1 MiB of plain ASCII / of
+    // output with a new 24-bit colour every 8 characters into a new
+    // terminal; one frame with every row / one row (an echo) dirty.
+    share(
+        "terminal/parse_plain",
+        &[median(Limit::TimeAtMost(ms(10)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/parse_sgr",
+        &[median(Limit::TimeAtMost(ms(25)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/frame_full",
+        &[median(Limit::TimeAtMost(us(300)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "terminal/frame_echo",
+        &[median(Limit::TimeAtMost(us(30)))],
+        TERMINAL,
+        ACTIVE,
+        Time,
+    ),
+    // Resident growth of a child process: libghostty-vt's pages bypass
+    // CountingAlloc. 4 KiB of output / 10,000 coloured lines of 120
+    // columns, then a frame.
+    share(
+        "terminal/idle_footprint",
+        &[median(Limit::BytesAtMost(4 * MB))],
+        TERMINAL,
+        ACTIVE,
+        Memory,
+    ),
+    share(
+        "terminal/scrollback_footprint",
+        &[median(Limit::BytesAtMost(24 * MB))],
+        TERMINAL,
+        ACTIVE,
+        Memory,
+    ),
+    // ---- end terminal ----
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),
     share("executor/wake_1000x100", RECORD, EXECUTOR, ACTIVE, Time),
     share("kernel/service_get", RECORD, KERNEL, ACTIVE, Time),

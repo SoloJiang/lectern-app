@@ -25,6 +25,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
+      # libghostty-vt-sys builds Ghostty with Zig 0.15.2
+      # (docs/design/terminal.md「依赖」): the official release, checked
+      # against its SHA-256.
+      - name: Zig 0.15.2
+        run: |
+          scripts/install_zig.sh "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -56,6 +63,13 @@ jobs:
       - name: Metal toolchain
         # Run metal: on Xcode 26 the launcher can exist without the toolchain.
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      # libghostty-vt-sys builds Ghostty with Zig 0.15.2
+      # (docs/design/terminal.md「依赖」): the official release, checked
+      # against its SHA-256.
+      - name: Zig 0.15.2
+        run: |
+          scripts/install_zig.sh "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           # Debug builds only; each benchmarks shard caches its release build
@@ -99,6 +113,13 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Metal toolchain
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      # libghostty-vt-sys builds Ghostty with Zig 0.15.2
+      # (docs/design/terminal.md「依赖」): the official release, checked
+      # against its SHA-256.
+      - name: Zig 0.15.2
+        run: |
+          scripts/install_zig.sh "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           # A full key match is never saved again. When the justfile's bench
@@ -174,7 +195,7 @@ jobs:
   # repository that a person with write access chose (workflow_dispatch),
   # never a pull request's code by itself. The job runs only once the repository
   # variable says the runner is registered. It fetches no tools (the
-  # toolchain and just are installed read-only on the machine), keeps its
+  # toolchain, just and Zig are installed read-only on the machine), keeps its
   # homes and temporary files under RUNNER_TEMP, has a read-only token and
   # no secrets, pins its actions to commits, and cleans the workspace before
   # and after; the runner's job-completed hook ends every process it started.
@@ -210,6 +231,7 @@ jobs:
         run: |
           rustc --version
           just --version
+          zig version
           xcrun metal --version
       - name: Judge the budgets that end at the first frame
         env:
