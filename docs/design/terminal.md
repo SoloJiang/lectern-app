@@ -787,7 +787,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 5. 闪烁文字按普通文字显示；kitty 图形协议、Sixel 不支持。
 6. 视图在主线程上画帧不计入静止（「数据流与线程」）：UI 探针在静止之后读语义树时，终端的最后一帧可能还没画出，探针要另等一帧。
 7. Zig 0.15.2 不能链接 macOS 27 的 SDK（它的 `libSystem.tbd` 只列 `arm64e`），本机用 macOS 27 的 Xcode 或命令行工具时构建失败。临时办法：`DEVELOPER_DIR` 指向带旧 SDK 的命令行工具（如 SDK 14.4 的 `/Library/Developer/CommandLineTools`）再运行 Zig。CI 的 `macos-15` runner 不受影响；判定机器升级到 macOS 27 之前要先确认。
-8. 经 PTY 的测试要一个测试一个进程：`just test`（cargo-nextest）这样跑，CI 也一样。把它们当线程放进同一个进程里跑（`cargo test`，或直接运行 libtest 的测试二进制），`tests/lifecycle.rs` 的 16 个测试并行时，刚启动的子进程有时被 `SIGKILL` 结束（在它写出第一个字节之前）、有时 `Starting` 停很久。这与「依赖」里记的风险一致：多线程进程里 `fork` 之后到 `exec` 之前，portable-pty 的 `pre_exec` 要枚举并关闭文件描述符（会分配内存）。不能确认原因：`--test-threads=1` 时 10 次运行没有一次出现，只是 8 个线程同时 `open`、其他线程大量分配内存的单个测试（`concurrent_spawn`）和 16 个线程各自反复启动退出的程序都不出现，没有 root 看不到是谁发的信号。真实应用里终端是少数、长期存在的，启动不会像测试里那样同时发生几十次；若实际使用中看到刚启动就被杀死或一直停在 `Starting`，要改成自己写 `pre_exec`（只用 `setsid`、`ioctl`、`close` 这类不分配内存的调用），那要重新对照「依赖」里 `portable-pty` 的用法和验收里的 `rg` 检查。
+8. 进程里同一时刻有别的线程在 `fork`、或在第一次使用 libSystem 的通知库时，子进程可能在 `exec` 之前就死掉。macOS 的 `fork` 在子进程里运行 libSystem 的 atfork 处理（`_notify_fork_child`），它用 `os_once` 初始化通知库的全局状态；父进程里另一个线程当时正持有同一个 once 门（第一次初始化还没做完）时，子进程发现门被一个不存在的线程占着，报「os_once_t is corrupt」并以 `SIGKILL` 结束（崩溃报告写「crashed on child side of fork pre-exec」，调用栈 `fork` → `libSystem_atfork_child` → `_notify_fork_child` → `_os_alloc_once` → `_os_once_gate_corruption_abort`）。表现是刚启动的程序在写出第一个字节之前被杀，状态 `Exited { signaled: true }`。只在进程里最初的几次 `fork` 同时进行时出现；通知库初始化之后（应用启动时 AppKit / GPUI 早已用过它）不会再出现。本 crate 的处理：所有启动经 `pty::spawn` 里一把进程内的锁，同一时刻只有一个线程 `fork`；回归测试 `concurrent_first_forks_from_several_plugins_start_every_program`（8 个插件实例、48 个线程在新进程里同时 `open`）不加锁时约 13–20% 的运行失败，加锁后 30 次都通过。仍然留下的：本 crate 之外的线程同时 `fork`（`platform::login_env` 取登录环境的 shell、其他插件启动的进程），或同时第一次初始化通知库，仍可能碰上这个窗口；彻底的办法是把这把锁放进 `platform`，所有 `fork` 的调用方共用，另开 issue。
 
 ## 验收
 
@@ -842,7 +842,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 第 3 步（PTY、启动、插件与服务，`Refs #12`），同一台机器：
 
 - 依赖与架构：`python3 scripts/check_architecture.py` 通过（`plugin = true`）；`portable-pty = "=0.9.0"` 与 rustix 的 `event`、`process` feature 在工作区依赖里；`just deny` 通过（新增 `nix` 0.28、`filedescriptor`、`serial2`、`shell-words`、`downcast-rs`、`shared_library`、`lazy_static` 等传递依赖，都是宽松许可）。`rg 'try_clone_reader|take_writer|\.kill\(\)' crates/terminal/src` 只有 `src/pty.rs` 里 `ChildKiller` 的那一处；`rg 'Command::new|"sh"|"-c"' crates/terminal/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果；`rg 'set_logger' crates/terminal/src` 没有结果。
-- 测试：`just test -p lectern-terminal` 110 个测试，连续 10 次都通过（nextest，一个测试一个进程；单元测试 `diag`、`launch`、`pacing`、`palette`，`tests/frames.rs`、`tests/input.rs` 是第 2 步的；第 3 步新增 `tests/launch.rs` 25 个（`launch_*`、`resume_refuses_*`、`no_echo_of_program_text`）、`tests/lifecycle.rs` 16 个、`tests/pty_input.rs` 7 个（`input_*` 经真实 PTY）、`tests/logs.rs` 1 个（`logs_hold_no_terminal_content`））。`just check`、`just test -p lectern-terminal -p lectern-bench -p lectern-services` 通过。程序是假程序 `lectern-terminal-fake`，没有运行真实的 `claude`、`codex` 或用户的 shell。线程并行跑的情况见「已知限制」第 8 条。
+- 测试：`just test -p lectern-terminal` 110 个测试，连续 10 次都通过（nextest，一个测试一个进程；单元测试 `diag`、`launch`、`pacing`、`palette`，`tests/frames.rs`、`tests/input.rs` 是第 2 步的；第 3 步新增 `tests/launch.rs` 25 个（`launch_*`、`resume_refuses_*`、`no_echo_of_program_text`）、`tests/lifecycle.rs` 16 个、`tests/pty_input.rs` 7 个（`input_*` 经真实 PTY）、`tests/logs.rs` 1 个（`logs_hold_no_terminal_content`））。`just check`、`just test -p lectern-terminal -p lectern-bench -p lectern-services` 通过。程序是假程序 `lectern-terminal-fake`，没有运行真实的 `claude`、`codex` 或用户的 shell。把 `tests/lifecycle.rs` 的测试放在同一个进程里并行跑（直接运行 libtest 的测试二进制）时，加锁之前约三分之一的运行里有刚启动的程序被 `SIGKILL`，原因和处理见「已知限制」第 8 条；加锁之后连续 30 次运行没有一次出现，崩溃报告也没有新增。
 - 基准（release，`cargo bench -p lectern-bench --bench time -- terminal/`）：
 
   | 基准 | 实测中位数 | 预算 |
@@ -879,3 +879,4 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 9. `plugin/terminal/activate` 在这个 PR 里没有基准条目：它由进程级的 `plugin/*/activate` 测量，要等第 4 步 `app` 装配。数字见「实际验证」（`TestKernel` 里 kernel 记下的四段耗时）。
 10. 终端表和唤醒 socket 的细节：`Slot` 是命令队列加唤醒 socket 的一对，只在队列由空变非空时写唤醒字节（`woken` 标志），所以连续的 `input` 只写一次。
 11. `terminal/input` 的预算（中位数 ≤ 2 µs）在本机实测 3.6–3.9 µs 时超标，原因和对照数字见「实际验证」。预算没有改：改性能预算要另写 ADR，由负责推进的 agent 决定；可选的做法是按 ADR 0055 的办法放宽到实测加余量（如 ≤ 6 µs），或把唤醒 socket 换成 `kqueue` 的 `EVFILT_USER`（约 1.9 µs，仍不保证 ≤ 2 µs，且要改设计里「数据流与线程」的 `poll`）。
+12. 所有启动经一把进程内的锁（`src/pty.rs` 的 `SPAWN`），同一时刻只有一个线程 `fork`，设计没有写：原因见「已知限制」第 8 条。

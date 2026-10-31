@@ -508,3 +508,63 @@ fn copy_selection_replies_inside_the_callers_admission() {
         Err(RecvTimeoutError::Disconnected)
     );
 }
+
+#[test]
+fn concurrent_first_forks_from_several_plugins_start_every_program() {
+    // Several terminals of several plugin instances in one process start at
+    // the same moment, as the first forks of the process, while others exit
+    // and are closed. Without one fork at a time, libSystem's fork handler in
+    // the child could abort on a once-gate that another forking thread held:
+    // the child died with SIGKILL before it ran one instruction of the program.
+    let kits: Vec<Kit> = (0..8).map(|_| Kit::new()).collect();
+    for (n, kit) in kits.iter().enumerate() {
+        // Half of the plugins start programs that exit at once.
+        kit.plan(if n % 2 == 0 {
+            "say:READY,nl,hold"
+        } else {
+            "exit:0"
+        });
+    }
+    let harnesses: Vec<Harness> = kits.iter().map(Kit::harness).collect();
+    let start = std::sync::Barrier::new(8 * 6);
+    let results = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for (n, (kit, harness)) in kits.iter().zip(&harnesses).enumerate() {
+            for _ in 0..6 {
+                let (start, results) = (&start, &results);
+                scope.spawn(move || {
+                    start.wait();
+                    let id = harness.open(shell(&kit.project), size()).expect("opens");
+                    let holds = n % 2 == 0;
+                    let state = if holds {
+                        harness.wait_state(id, |s| matches!(s, RunState::Running { .. }));
+                        // Still running a moment later: not killed at birth.
+                        std::thread::sleep(Duration::from_millis(150));
+                        harness.terminals.info(id).unwrap().state
+                    } else {
+                        harness
+                            .wait_state(id, |s| matches!(s, RunState::Exited { .. }))
+                            .state
+                    };
+                    results.lock().unwrap().push((holds, state));
+                    harness.terminals.close(id);
+                });
+            }
+        }
+    });
+    let results = results.into_inner().unwrap();
+    assert_eq!(results.len(), 48);
+    for (holds, state) in results {
+        if holds {
+            assert!(matches!(state, RunState::Running { .. }), "{state:?}");
+        } else {
+            assert_eq!(
+                state,
+                RunState::Exited {
+                    code: 0,
+                    signaled: false
+                }
+            );
+        }
+    }
+}

@@ -13,6 +13,7 @@ portable-pty + libghostty-vt 的终端状态，运行在独占线程上；会话
 - 向视图提供网格快照；视图不直接读写 PTY。
 - 恢复命令是安全边界（设计「安全边界」）：程序和固定参数只来自 `src/launch.rs` 里的表，来源只给出会话 ID；`validate` 在调用线程上按顺序检查，`resolve` 在终端线程上规范化目录、再核对项目。agent 不经 shell 启动；不要在 `src/` 里加 `Command::new`、`"sh"`、`"-c"`（验收用 `rg` 查）。
 - PTY 只经 `SlavePty::spawn_command` 启动、主端用原始 fd 非阻塞读写；不用 `try_clone_reader`、`take_writer`（读线程无法被打断），挂断只经 `ChildKiller`（`src/pty.rs` 里的唯一一处）。
+- 所有 `fork` 经 `src/pty.rs` 的 `SPAWN` 锁，同一时刻只有一个线程 `fork`：多线程进程里并发的 `fork`，子进程会在 libSystem 的 atfork 处理里中止并被 `SIGKILL`（设计「已知限制」第 8 条）。不要绕过 `pty::spawn` 启动进程。
 - 线程与 IO：`open`、`input`、`frame`、`list`、`info`、`watch`、`close` 都不阻塞、不做 IO（`src/service.rs`）；登录环境、PTY、子进程都在 `terminal-<id>` 线程上（`src/thread.rs`）。`terminal-<id>-wait` 只等 `Child::wait`。两个线程的主体都在 `catch` 里，panic 只让这一个终端 `Failed(Internal)`。
 - 日志经 `lectern-logging` 的宏（[ADR 0046](../../docs/adr/0046.md)），字段值集中在 `src/diag.rs`；终端输出、标题、选区、粘贴与输入的文字、argv、环境变量、`$SHELL` 和 `PATH` 里的路径、`Theme` 的颜色不进日志（金丝雀测试 `logs_hold_no_terminal_content`）。
 

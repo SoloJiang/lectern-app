@@ -16,6 +16,11 @@ use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group};
 
+/// Only one thread forks at a time. A child of a fork made while another
+/// thread forked too can abort inside libSystem's fork handler (see
+/// `concurrent_first_forks_from_several_plugins_start_every_program`).
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What to start.
 pub(crate) enum Program {
     /// An agent's executable, found in the login environment's `PATH`;
@@ -79,6 +84,9 @@ pub(crate) fn spawn(
     cwd: &Path,
     size: GridSize,
 ) -> Result<Spawned, SpawnError> {
+    let _one_fork_at_a_time = SPAWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let pair = native_pty_system()
         .openpty(pty_size(size))
         .map_err(|error| spawn_error(&*error))?;
