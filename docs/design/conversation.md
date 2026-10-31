@@ -1,6 +1,6 @@
 # conversation 设计
 
-状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现。
+状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`。
 
 对应 issue [#23](https://github.com/SoloJiang/lectern-app/issues/23)（Conversation 面板：经 ACP 的结构化对话）、[#24](https://github.com/SoloJiang/lectern-app/issues/24)（权限请求的界面）和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的 Terminal 页。`conversation` 是检查器的 Conversation 页（⌘\）：Messages 页显示正在审阅的会话的对话（prompt、agent 说明、工具调用、发回的审阅意见），用户在这里回复 agent、批准或拒绝 agent 的权限请求；Terminal 页在内嵌终端里恢复这个会话（`claude --resume`、`codex resume`），显示原始输出（[交互规范「三层结构」](interaction.md#三层结构)、[「状态与异常」](interaction.md#状态与异常)的「Agent 请求权限」、[ADR 0012](../adr/0012.md)、[技术调研「Agent 原生面板」](tech-research.md#4-agent-原生面板第二阶段)）。ACP agent 的启动方式和信任边界见 [ADR 0050](../adr/0050.md)。
 
@@ -56,6 +56,7 @@ kernel 没有可选依赖：`requires` 里的服务都要有活着的提供者�
 
 ```rust
 /// `app` 装配时调用一次，三个插件都放进 `PluginSet`（ID 见上表）。不做 IO。
+/// 第 1 步只返回前两个，`TerminalPagePlugin` 随 Terminal 页（第 3 步）加上。
 pub fn plugins() -> (ConversationPlugin, LivePlugin, TerminalPagePlugin);
 
 pub struct ConversationPlugin { /* Arc<Shared> */ }
@@ -63,7 +64,7 @@ pub struct LivePlugin { /* Arc<Shared> */ }
 pub struct TerminalPagePlugin { /* Arc<Shared> */ }
 ```
 
-- `ConversationPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`（会话列表用于 agent 圆点和「可能还在别处运行」的判断，按 `SessionKey::source` 找提供者，与 review_view 相同）；`Contributions::register(…, None)` 两项贡献（「界面」的「向 `workspace` 登记的贡献」），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<WorkspaceEvent>`（`ScreenChanged`、`WindowClosed`）订阅。不提交任务。`started`：保存 `PluginHandle`；调 `Contributions::current_route(WindowId(0))`（「对其他 crate 的要求」A）补上激活之前的屏幕，因为 `Live` 之前发出的 `ScreenChanged` 收不到（kernel 设计「激活时的上下文」）。停用：`Active` drop 时清空 `Shared` 里的引用。
+- `ConversationPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`（会话列表用于 agent 圆点和「可能还在别处运行」的判断，按 `SessionKey::source` 找提供者，与 review_view 相同）；`Contributions::register(…, None)` 两项贡献（「界面」的「向 `workspace` 登记的贡献」），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<WorkspaceEvent>`（`ScreenChanged`）订阅。不提交任务。`started`：保存 `PluginHandle`；调 `Contributions::current_route(WindowId(0))`（「对其他 crate 的要求」A）补上激活之前的屏幕，因为 `Live` 之前发出的 `ScreenChanged` 收不到（kernel 设计「激活时的上下文」）。停用：`Active` drop 时清空 `Shared` 里的引用。
 - `LivePlugin::activate`：取 `ServiceRef<dyn Conversations>`，订阅 `ConversationEvent`；`started` 时放进 `Shared::conversations`，并读一次 `waiting()` 记进 `Shared::waiting`；`Active` drop 时取出。
 - `TerminalPagePlugin::activate`：取 `ServiceRef<dyn Terminals>` 和 `ctx.service::<dyn Contributions>()`，订阅 `TerminalEvent`；`Contributions::register(…, None)` 一项 `KeyBindings`（`id` 是 `conversation-terminal`，内容是 `terminal_view::key_bindings()`）和 `register_leave_guard(…, None)` 一个离开守卫（「数据结构」的「离开守卫」），返回的 `Registration` 经 `ctx.own_staged` 交出。`started` 时把服务引用和这次激活的 `PluginHandle` 放进 `Shared::terminals`、`Shared::terminal_handle`；`Active` drop 时取出。这两项和终端一起出现、一起消失：没有 `dyn Terminals` 时不绑定终端的键，也不询问。
 - 三个插件共用一个 `Arc<Shared>`（`plugins()` 建）。页每次用到服务时从 `Shared` 取一份（取锁复制），`ServiceRef::get()` 为 None（提供者已停用）时按没有处理。`conversation-live` 或 `conversation-terminal` 启动或停用时向活着的页投递 `Job::Services`，页重画。
@@ -97,9 +98,11 @@ pub(crate) enum Current {
 }
 ```
 
+第 1 步的 `Shared` 只有 `contributions`、`sessions`、`conversations`、`current`、`tabs`；`terminals`、`terminal_handle`、`waiting`、`memory` 和 `conversation` 的 `handle` 随用到它们的步骤加上（`started` 在第 1 步不保存 `PluginHandle`，没有用处）。
+
 ### 视图
 
-视图代码在 `src/view/`（`tab.rs`、`messages.rs`、`terminal.rs`），不读服务的纯函数在 `src/items.rs`、`src/drive.rs`、`src/memory.rs`。
+视图代码在 `src/view/`（`tab.rs`、`messages.rs`、`terminal.rs`），不读服务的纯函数在 `src/items.rs`、`src/present.rs`（快照里的值变成界面文字，第 1 步加）、`src/drive.rs`、`src/memory.rs`。
 
 ```rust
 /// 检查器的 Conversation 页。`InspectorTab("conversation")` 的工厂建，检查器隐藏或换页时 drop。主线程。
@@ -120,18 +123,18 @@ pub enum Page { Messages, Terminal }
 /// 一个会话的 Messages 页状态。只在主线程上读写；没有 IO。
 pub struct MessagesModel {
     session: SessionKey,
-    agent: Agent,
+    cwd: Option<Arc<Path>>,                   // 会话的文件夹，审阅意见的位置按它显示相对路径
     /// `Conversations::watch` 的守卫：持有期间提供者维护这个会话的快照。没有 `dyn Conversations` 时为 None。
     interest: Option<ConversationInterest>,
     opened_at: Instant,                       // 加载态按它算
     snapshot: Option<Arc<ConversationSnapshot>>,
     items: Vec<Item>,                         // 「数据结构」的「列表的项」
-    index: HashMap<EntryKey, u32>,            // 项的稳定键 → 下标，每次应用快照后重建
     list: ListState,
-    follow: bool,                             // 列表停在底部：新项到达时跟到底部
-    arriving: HashMap<EntryKey, Transition>,  // 新项的 `ARRIVE`
+    // 列表停在底部时跟到底部：用 gpui 的 `FollowMode::Tail`（`ListState::is_following_tail`），不另存 `follow`
+    arriving: HashMap<EntryKey, Instant>,     // 新项的 `ARRIVE`（一次性动画，记到达的时刻）
     composer: Entity<ui::TextAreaState>,      // 回复框（「对其他 crate 的要求」F）
-    plan_open: Transition,                    // 计划的展开（`Expander`）
+    plan: (Transition, Transition),           // 计划的展开（`Expander` 的高度与透明度）
+    plan_open: bool,
     more_open: Transition,                    // 「还有 n 个请求」的展开
 }
 
@@ -407,21 +410,26 @@ pub enum OptionKind { AllowOnce, AllowAlways, RejectOnce, RejectAlways }
 `MessagesModel::items` 由快照算出，纯函数（`items::build(&ConversationSnapshot) -> Vec<Item>`），不读服务：
 
 ```rust
-pub(crate) enum Item {
+/// 一行。`node` 随项建一次，每帧只克隆。
+pub(crate) struct Item { key: ItemKey, node: NodeId, body: Body }
+pub(crate) enum ItemKey { Earlier, Entry(EntryKey), Notice }
+pub(crate) enum Body {
     /// 「显示之前的 n 轮」（`earlier > 0` 时在最前）。
     Earlier(u32),
-    Prompt { key: EntryKey, text: Passage },
+    Prompt { text: Passage },
     /// `PromptOrigin::ReviewNotes` 的 prompt：一行「n 条审阅意见 · 位置」。
-    Notes { key: EntryKey, count: u32, locations: Arc<[NoteLocation]> },
-    Agent { key: EntryKey, text: Passage, streaming: bool },
-    Injected { key: EntryKey, text: Passage },
+    Notes { count: u32, locations: Arc<[NoteLocation]> },
+    Agent { text: Passage, streaming: bool },
+    Injected { text: Passage },
     /// 连续的工具调用合成一行（「Edit unit.test.ts · Run yarn test unit」）。键取第一项的；至多显示 4 项，其余是「另有 n 项」。
-    Tools { key: EntryKey, calls: Vec<ToolEntry> },
-    Ended { key: EntryKey, reason: EndReason },
+    Tools { calls: Vec<ToolEntry> },
+    Ended(EndReason),
+    /// `link` 为 `Failed` 时列表末尾的一行：原因和「关闭」（「状态与异常」）。
+    Failed(LinkError),
 }
 ```
 
-- 应用新快照时按 `EntryKey` 比较新旧项：只有变化的项 `ListState::splice`，没有变化的项不重新排版。流式更新只改最后一项，所以每次只重新排版这一项。
+- 应用新快照时比较新旧项（键和内容）：开头和末尾相同的项保留，中间变化的一段 `ListState::splice`（`items::diff`），没有变化的项不重新排版。流式更新只改最后一项，所以每次只重新排版这一项。
 - 新出现的键（不是首次应用）带一个 `ARRIVE` 的 `Transition`；首次应用和 `Earlier` 加载的项没有动画。
 - 跟随底部：`follow` 在列表滚到最后一项可见时为 true；为 true 时应用快照后滚到底部，否则按 `logical_scroll_top` 的键找回原来的位置（与 [review_view 设计「滚动位置与选中项」](review_view.md#滚动位置与选中项)相同的做法）。实时的项换成历史的项时键变化，找不到原键就停在底部。
 
@@ -608,9 +616,9 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 
   | NodeId | 角色 | 说明 |
   |---|---|---|
-  | `conversation` | `Group` | 页的根（在 `workspace.inspector` 之下）；`attrs`：`page`（`messages` / `terminal`） |
+  | `conversation.page` | `Group` | 页的根（在 `workspace.inspector` 之下）；`attrs`：`page`（`messages` / `terminal`） |
   | `conversation.pages` | `TabBar` | 页内分段控件 |
-  | `conversation.pages.tab[messages]`、`conversation.pages.tab[terminal]` | `Tab` | `State::selected` |
+  | `conversation.pages.item[messages]`、`conversation.pages.item[terminal]` | `Tab` | `State::selected` |
   | `conversation.status` | `Text` | `Label::key` 是状态的键；`attrs`：`link`（`Link` 的判别名）、`context`（百分比或 `none`）、`agent` |
   | `conversation.list` | `List` | `attrs`：`entries`、`earlier` |
   | `conversation.list.item[<entry-key>]` | `ListItem` | `attrs`：`kind`（`prompt` / `notes` / `agent` / `injected` / `tools` / `ended`）、`streaming`、`truncated` |
@@ -624,6 +632,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   | `conversation.composer.send`、`conversation.composer.stop` | `Button` | `State::disabled` |
   | `conversation.notice` | `Text` | `Label::key` 是原因的键 |
   | `conversation.notice.action` | `Button` | 「显示终端」「关闭」等 |
+  | `conversation.notice.detail` | `Text` | `link` 为 `Failed(PromptFailed)` 时 agent 写的错误文字（原样，`Label` 为 verbatim）；探针的节点不进日志 |
   | `conversation.empty` | `Text` | `Label::key` 是空状态的键 |
   | `conversation.terminal` | `Group` | `attrs`：`state`（`none` / `starting` / `running` / `exited` / `failed`） |
   | `conversation.terminal.resume` | `Button` | `State::disabled`；`Label::key` 是按钮的键 |
@@ -895,8 +904,39 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 - `just bench conversation/stream_apply`：p95 ≤ 2 ms。
 - 在 macOS 上运行发布构建，用户已安装两个适配器并已登录：打开一个有 Claude Code 会话的仓库，进入审阅，⌘\ 打开 Conversation：历史显示，没有 agent 进程（`ps` 里没有适配器）；回复一句后状态变为「运行中」，agent 请求运行命令时出现卡片、显示命令文本，点「允许」后继续；这一轮结束后审阅页出现新一轮；空闲 10 分钟后适配器进程退出；切到 Terminal 页恢复会话，终端显示 `claude --resume` 的界面，回复框换成「在终端页中运行」。Codex 会话重复一遍。
 
+## 实际验证
+
+### 第 1 步
+
+插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点，叠在前置条件 A、B、G 上，在 macOS（arm64）上运行。没有运行应用，没有打开真实窗口：下面全部是无窗口的 `#[gpui::test]`、纯函数测试和 `just` 入口。
+
+- `just check`（含 clippy `-D warnings`、文档链接和架构检查：`conversation` 带 `plugin = true`，依赖 `gpui`、`futures`、`lectern-i18n`、`lectern-kernel`、`lectern-logging`、`lectern-services`、`lectern-ui`，都不是插件 crate）、`just deny` 通过；`cargo metadata --format-version 1 --locked --all-features` 通过。`git diff -- Cargo.lock` 只有 `lectern-conversation` 的依赖列表，没有新的外部 crate；`tools/automation/Cargo.lock` 不变。
+- 「验收」的五条 `rg` 检查都没有结果（测试里要用时长的地方用 `ui::motion` 的常量，本 crate 的测试不用 `Duration::from_secs`）。
+- `just test -p lectern-conversation`：36 个测试通过，由 nextest 一个测试一个进程地跑。
+  - 纯函数（`#[test]`）：`items_*`（13 个：顺序、连续工具调用合成一行且至多 4 项加「另有 n 项」、不跨别的项合并、工具调用的结局、`ReviewNotes` 成为一行、「显示之前的 n 轮」在最前且链路失败的提示在最后、新旧项的比较只报变化的一段、实时的项换成历史的项只换一次且不算到达、到达的判断、重复的键、不在末尾的 `streaming`、轮次结束的原因、上下文的百分比）；`diag` 的两个会话标识测试。
+  - `#[gpui::test]`（真实的 kernel 加假服务）：设计「验收」第 1 步点名的测试都在：`tab_follows_the_review_route`（含 `started` 之前的屏幕由 `current_route` 补上）、`history_renders_in_order_with_loading_phases`、`earlier_turns_load_on_request`、`streaming_follows_the_bottom_only_when_at_the_bottom`、`streaming_relayouts_only_the_last_item`（200 次流式更新每次只 splice 最后一项）、`context_is_shown_only_when_given`、`failed_link_shows_the_reason_and_dismisses`（七种 `LinkError`）、`stale_generation_is_dropped`、`plugins_register_and_deactivate_cleanly`、`live_plugin_deactivates_on_its_own`。另有 `a_route_change_before_the_page_is_built_is_not_lost`、`the_page_works_when_the_live_plugin_never_started`、`history_failures_and_an_empty_history_say_so`、`several_events_are_one_refresh_with_the_newest_generation`、`the_status_line_follows_the_link`、`the_plan_opens_and_closes`、`the_page_switch_shows_the_terminal_page_without_a_terminal`，以及 `stop_sends_cancel`（第 2 步清单里的名字，见「与设计的差异」第 3 条）。
+  - 语义树：`conversation_tree_history`、`conversation_tree_not_session` 两份 insta 快照（`src/tests/snapshots/`），不含 bounds。
+  - `logs_hold_no_contents`（`src/tests/logs.rs`）：金丝雀放在 prompt、agent 说明、注入内容、工具 `summary`、审阅意见的位置、计划、`PromptFailed` 的文字、请求的 `title`、命令文本、`workdir`、选项 ID 和会话标题里，trace 级别跑完打开页、流式更新、⌘.、切页、失败的链路和「关闭」、「显示之前的 n 轮」、路由变化、`conversation-live` 离开又回来、插件停用；没有记录含金丝雀；`conversation shown`、`snapshot inconsistent`、`conversation failed shown`、`stop requested`、`route unavailable`、`route changed`、`page switched`、`snapshot applied` 的记录都在，并带 `session` 作用域。
+- `rg 'TextArea|ConversationCommand::Answer' crates/conversation/src/view` 没有结果；`crates/conversation/AGENTS.md` 的设计文档行指向本文。
+- 没有验证：真实的帧。`#[gpui::test]` 的窗口只做布局，不画真实的帧，所以 `ARRIVE`、计划的展开、页内分段控件的滑块随真实时间走的样子没有看；列表在真实窗口里的滚动跟随（`FollowMode::Tail`）只在测试窗口的布局里验证过；Conversation 页与真实的 `workspace` 检查器（300pt，与 Files 页的分段控件）的组合要等第 4 步 `app` 装配之后才能看；`conversation/stream_apply` 基准属第 4 步（前置 K）。
+
 ## 与设计的差异
 
 前置条件 B（`services` 的 `conversation` 模块）：
 
 1. `PermissionId`、`OptionKind` 另派生 `Copy`、`Hash`、`Ord`，不含数据的枚举（`CallKind`、`CallState`、`EndReason`、`StepState`、`RowKind`、`HistoryError`、`AcpProgram`）和 `ContextUsage` 派生 `Copy`，`EntryKey`、`OptionId` 派生 `Hash`：调用方要把它们作映射的键或按值传递，不改变含义。
+
+第 1 步（插件、检查器页、Messages 页的显示、探针节点）：
+
+1. **`plugins()` 返回两个插件，`Shared` 少几个字段。** `TerminalPagePlugin` 与 `terminals`、`terminal_handle` 随第 3 步，`waiting`（「权限请求」里切到这一页）与 `memory`（草稿）随第 2 步；`conversation` 的 `started` 不保存 `PluginHandle`，第 1 步没有用处。`Job` 只有 `Route`、`Conversation`、`Services`。
+2. **`InspectorTab::screen` 是 `None`。** 设计没写。`Some(review)` 的页会让检查器只显示 `Some(review)` 的页，审阅屏幕上的 Files 页（`None`）就看不到了（[workspace 设计「检查器页的范围」](workspace.md#区域与三层)）。
+3. **⌘. 与 `Stop` 在第 1 步就有。** `plugins_register_*` 要收到 `conversation` 的 `KeyBindings`，所以登记了 ⌘. → `conversation::Stop`；处理很小（`link` 为 `Working` 时发 `Cancel`，记 `stop requested`），一并写了，测试 `stop_sends_cancel` 是第 2 步清单里的名字。Send 与回复框仍属第 2 步。
+4. **探针节点 ID。** `NodeId::new` 总是写成 `view.area`，带键的子节点只有 `.item[key]`：页的根是 `conversation.page`（设计写 `conversation`），页内分段控件的项是 `conversation.pages.item[messages]` / `[terminal]`（设计写 `tab[…]`）。「显示之前的 n 轮」的节点是 `conversation.earlier`，不在 `conversation.list.item[…]` 之下。另加 `conversation.notice.detail`（`PromptFailed` 时 agent 写的错误文字；设计说原样显示，测试要读到它），`conversation.plan.toggle` 与 `conversation.plan.steps`（计划的按钮和 `Expander`）。`conversation.notice` 同时用于「没有 `dyn Conversations`」「Terminal 页不可用」和链路失败的原因。
+5. **Terminal 页在第 1 步是占位。** 页内分段控件已有两项，Terminal 页显示 `conversation-terminal-unavailable`（与没有 `dyn Terminals` 时相同）；`TerminalPage`、恢复、离开守卫随第 3 步。
+6. **`Item` 是 `{ key, node, body }`。** 设计的枚举每个变体各带 `key`；`NodeId` 要随项建一次，所以拆成 `ItemKey`（`Earlier`、`Entry(EntryKey)`、`Notice`）、`NodeId` 和 `Body`。链路失败的一行（原因与「关闭」）是列表最后的一项（`Body::Failed`），不是列表外的区域。`MessagesModel` 去掉了 `agent`（状态行取自快照）和 `index`（比较用 `items::diff`，不需要下标表），加了 `cwd`（审阅意见的位置显示相对路径）；`plan_open` 是一个 `bool` 加 `Expander` 的两个 `Transition`。
+7. **新旧项的比较是前缀加后缀。** 设计写「按 `EntryKey` 比较」；实现保留开头和末尾相同（键与内容都相同）的项，中间一段 `ListState::splice`。流式更新只剩最后一项；实时的项换成历史的项只换那一段。到达动画只给「在所有保留下来的项之后的新键」；首次应用、前面插入更早的轮次、有项消失（实时换成历史、最早的轮次被去掉）时没有。
+8. **跟随底部用 gpui 的 `FollowMode::Tail`。** 设计写 `follow: bool`。`ListState::set_follow_mode(Tail)` 做同样的事（停在底部时跟随，向上滚动后停止，滚回底部后恢复），页以它打开时在对话末尾。`splice` 在 top 之前或之后时 gpui 自己移动位置；包含 top 项的一次 `splice` 按项的键找回，找不到时跳到末尾。top 是「显示之前的 n 轮」且这一项变了（刚加载了更早的轮次）时，读者留在它下面的那一项上。`arriving` 记到达的时刻（一次性动画，到达后约 2 个 `ARRIVE` 的时间内才播），不是 `Transition`。
+9. **状态行在有快照之后才显示。** 没有快照（正在读历史）时只有加载态；有待确认的请求时状态行写 `conversation-status-waiting`（卡片随第 2 步）。
+10. **设计没规定的显示。** 注入内容用 `TextRole::Caption`；审阅意见行列出全部位置（至多 8 个），逗号分隔；`Think` 与 `Other` 的工具调用只显示 `summary`，调用没有顺利结束时在后面加「 · 失败 / 已拒绝 / 已取消」。
+11. **日志。** `conversation failed shown` 在链路变为 `Failed` 时写一次，不是每帧；另有 debug：`snapshot dropped`（事件比已显示的旧）、`route applied`。`snapshot applied` 的字段是 `generation`、`entries`、`items`、`spliced`、`anchor_kept`、`took_us`。`session` 作用域只在 `MessagesModel` 的记录里设置，`started` 里的 `route unavailable` 和 `route changed` 没有。
+12. **`ConversationTab::new(shared, cx)` 不取窗口。** 第 1 步没有需要 `Window` 的东西；`InspectorTab` 的工厂仍按 `ViewFactory<()>` 收到窗口，只是不用。

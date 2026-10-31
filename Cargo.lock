@@ -4720,6 +4720,16 @@ version = "0.0.0"
 [[package]]
 name = "lectern-conversation"
 version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-pre",
+ "insta",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-ui",
+]
 
 [[package]]
 name = "lectern-doc-check"
