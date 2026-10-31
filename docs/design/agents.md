@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见「日志与诊断」）已实现，命令行与凭据转发端点的记录随 Analyze 实现。见「验收」与「实际验证」。
+状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见「日志与诊断」）已实现，命令行与凭据转发端点的记录随 Analyze 实现。见「验收」与「实际验证」。ACP 客户端（[#23](https://github.com/SoloJiang/lectern-app/issues/23)，[conversation 设计](conversation.md#对其他-crate-的要求)的前置条件 C，[ADR 0060](../adr/0060.md)）分三步，见「ACP 客户端」与「验收」第 6–8 步：第 6 步（核对、设计、会话历史窗口与程序查找）已实现；第 7、8 步（进程与协议、实时项换历史项与改动预览）尚未实现。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -24,7 +24,7 @@
   - Claude Code 的额度（statusline）：`platform` 安装、`usage` 解析。
 - 本 issue 之外：
   - Analyze（[ADR 0019](../adr/0019.md)）：查找并经监护进程启动命令行、凭据转发端点与计量记录、按沙箱跟踪和终止进程、过滤辅助会话。机制大，不属于 P1 的会话发现，另开 issue，设计写进本文的后续修订；约束仍以 `crates/agents/AGENTS.md` 为准。本文为它预留：`SessionFilter`（隐藏辅助会话）、`UsageRecord` 的来源字段（见「数据结构」），以及测试启动命令行的假命令方式（见「测试」）。
-  - ACP 结构化对话（[#23](https://github.com/SoloJiang/lectern-app/issues/23)，P3）：ACP 会话作为另一个 `SessionSource` 实现接入；`ToolKind` 的分类与 ACP 的 tool call kind（read、edit、execute、search 等）一一对应，Conversation 面板读同一套轮次结构。本文不定义 ACP 客户端。
+  - ACP 结构化对话（[#23](https://github.com/SoloJiang/lectern-app/issues/23)，P3）：ACP 不是会话来源。经 ACP 进行的轮次由 agent 写进本机日志（见「ACP 客户端」的核对），之后由本 crate 的两个会话来源读到；ACP 对话本身由插件 "conversations" 提供的 `dyn Conversations` 交出（「ACP 客户端」，接口见 [conversation 设计](conversation.md#服务接口lectern-services-的-conversation-模块)）。`ToolKind` 的分类与 ACP 的 tool call kind 一一对应。
 
 ## 依赖
 
@@ -40,6 +40,7 @@
 | `lectern-logging` | 运行日志（「日志与诊断」）；测试用它的 `test-support` feature 捕获记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)） |
 | `serde` 1（`derive`）+ `serde_json` 1 | 每行反序列化到只声明用到字段、字符串借用原行的结构 | MIT / Apache-2.0；ADR 0014 规定用 serde 自行解析；不先转成 `serde_json::Value`（ADR 0026） |
 | `ruzstd` | 解压 Codex 的 `.jsonl.zst` | MIT，纯 Rust 流式解码器，不需要 C 工具链（ADR 0026） |
+| `lectern-platform` | ACP 客户端：`login_env::login_env()`（登录 shell 的环境）和 `find_program`（「ACP 客户端」的「启动」） | 非插件的基础设施库，与 `terminal` 共用同一份登录环境（ADR 0050）；macOS 专属的部分仍在 `platform` 里（架构规则 6） |
 
 不引入 `chrono` / `time`：日志里的时间戳都是 RFC 3339 UTC（`2026-10-17T02:46:01.123Z`），手写解析到毫秒。不直接用 `notify`：目录监听走 `fs_watch`。版本取实现时 crates.io 上的最新兼容版本，由 Cargo.lock 锁定；新增依赖先跑 `just deny`。
 
@@ -78,7 +79,7 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, SessionPlugin); 2];
 类型都是不含行为的数据，能通过 JSON-RPC 序列化（与 `services::project` 一样派生 `Serialize`、`Deserialize`，外部标记的枚举；都派生 `Clone`、`PartialEq`、`Debug`，不含浮点数的另派生 `Eq`，`RateWindow` 的 `used_percent` 是 `f32`，所以含它的 `RateLimitSample`、`Record`、`Batch` 只有 `PartialEq`），以后的进程插件可以实现同一个接口。进程插件的单条消息上限是 4 MB（[ADR 0018](../adr/0018.md)）：经进程插件实现时，超过这个上限的单条正文由 `load` 返回 `SessionError::TooLarge(len)`，`read` 跳过该记录并计入 `oversized_lines`、游标越过它；分块传输留给进程插件宿主的设计。内置来源在进程内，不受此限。
 
 ```rust
-/// 多实现服务：每种 agent 一个提供者，ACP（P3）和第三方会话来源再各加一个。
+/// 多实现服务：每种 agent 一个提供者，第三方会话来源再各加一个（ACP 不是会话来源，见「ACP 客户端」）。
 /// impl Service for dyn SessionSource { const ID = "session-source"; const MULTIPLE = true; }
 pub trait SessionSource: Send + Sync {
     /// 这个提供者的稳定 ID，等于提供它的插件 ID（"session-claude-code"、"session-codex"；
@@ -149,12 +150,12 @@ pub enum ResumeCommand {
 - 程序名和固定参数由 `terminal` 按枚举映射，来源不能给出任意程序、参数或环境变量。
 - `session_id` 必须是 UUID 的规范写法（两种 agent 的会话 ID 都是 UUID），不是时 `terminal` 拒绝，所以它不会被解析成选项或注入别的参数。
 - 工作目录不取自来源：`terminal` 用这个会话在 `SessionList` 里的 `cwd`，并要求它在一个已打开项目的 worktree 根或已打开的文件夹项目根之内，否则不恢复。
-- `terminal` 只接受内置来源（本 crate 的 "session-claude-code"、"session-codex"，以后内置的 ACP 来源）的 `ResumeCommand`；第三方进程插件来源的 `resume` 结果一律忽略，直到它们有对应的能力声明（另写 ADR）。
+- `terminal` 只接受内置来源（本 crate 的 "session-claude-code"、"session-codex"）的 `ResumeCommand`；第三方进程插件来源的 `resume` 结果一律忽略，直到它们有对应的能力声明（另写 ADR）。
 - 内置来源的身份由宿主保证，不依赖提供者自报的 `id()`：进程插件的 `SessionSource` 由进程插件宿主在 app 进程里的代理实现，代理的 `id()` 是宿主生成的 `ext.<插件 ID>.<插件报告的 ID>`，所以不会等于内置来源的 ID；代理的 `resume` 不转发给插件，总是返回 None。内置 ID 只能来自编译进 app 的插件。
 
 调用方：
 
-- 路由：消费方通过 `ServiceSet<dyn SessionSource>` 拿到全部提供者，按 `SessionKey::source` 找 `id()` 相同的那一个调用 `read` / `turns` / `load` / `resume`；找不到（提供者已停用）就当作 `NotFound`，不改调用别的提供者。同一个上游会话可以同时出现在两个来源里（如本地日志和 P3 的 ACP），它们是两个不同的 `SessionKey`；`usage` 按与来源无关的 `UsageKey` 去重，不会重复计数。
+- 路由：消费方通过 `ServiceSet<dyn SessionSource>` 拿到全部提供者，按 `SessionKey::source` 找 `id()` 相同的那一个调用 `read` / `turns` / `load` / `resume`；找不到（提供者已停用）就当作 `NotFound`，不改调用别的提供者。同一个上游会话可以同时出现在两个来源里（如同一个会话被两个来源读到），它们是两个不同的 `SessionKey`；`usage` 按与来源无关的 `UsageKey` 去重，不会重复计数。
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
 - 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即正在运行的一批持有 `BusyGuard`，这一批的结果写入、游标提交之后才释放；批与批之间不持有守卫，剩余的历史不预先排队，等 kernel 发出 `Quiescent` 事件、并且静止持续 10 秒（长于 [kernel 设计](kernel.md)「静止」里内存采样要求的 5 秒连续静止）后才调度下一批；其间出现忙碌就重新计时。所以每一批都计入忙碌，批与批之间留出完整的采样窗口。每批的大小和节奏由 `usage` 的设计文档规定。活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内）不受这条节奏限制：它的历史一批接一批连续读完，每批仍持有 `BusyGuard`，读完之后追加的内容收到 `SessionsChanged` 就读；游标只有一个，所以必须先读完历史才能读到新追加的内容，活跃会话的数量和大小有限（单个会话的完整解析在 1 s 以内），不会让 kernel 长时间忙碌。
@@ -569,7 +570,7 @@ pub enum RawTokens {
 }
 
 /// 去重用的键，去重规则在 `usage`（ADR 0014）。
-/// 键只由上游的标识组成，不含 `SourceId`：同一个上游会话经本地日志和 ACP 两个来源交来时，键相同、只计一次；
+/// 键只由上游的标识组成，不含 `SourceId`：同一个上游会话经两个来源交来时，键相同、只计一次；
 /// 不同的上游会话即使 token 数相同，键也不同。
 pub enum UsageKey {
     /// 每个内容块一行、重复同一份 usage：同一个键可能出现多次，也可能跨文件出现（分叉、续接复制的记录），按 ADR 0014 只计一次。
@@ -717,6 +718,8 @@ pub enum EditOp {
 - 用量：顶层 `token_usage_record{thread_id, turn_id, response_id, usage}`（每个响应一条），以及 `event_msg` / `token_count` 的 `info.{last_token_usage, total_token_usage}`；两路只用一路，规则见「记录」里的「只用一路用量」。模型取最近一条 `turn_context`；额度取 `token_count` 的 `rate_limits.{primary, secondary}`。
 - 继承前缀：子 agent 与分叉会话先重放来源的历史。有 `subagent_history_start_ordinal` 时，`ordinal` 小于它的行是继承前缀。没有这个字段时（`legacy` 分叉），复制进来的前缀里本身就有来源的 `task_started`，所以按轮次 ID 判断：取来源会话（`forked_from_id` / `parent_thread_id`）文件里全部 `task_started` 的 `turn_id`，包括来源自己继承的轮次（轮次索引不含这些，所以不用轮次索引），多级分叉因此同样成立；这份集合在解析来源时顺带记下，与轮次索引一起缓存。`read` 读到这样的分叉、来源在 `SessionList` 里但集合还没有建立时，先在同一次调用里解析来源建立集合，再判断边界，所以结果与发现和补读的顺序无关。`turn_id` 出现在这份集合里的轮次是继承的，第一条 `turn_id` 不在来源里的 `task_started`（或 `trigger_turn: true` 的 `inter_agent_communication_metadata`）开始自己的部分（ADR 0014）。找不到来源会话时（已删除或不在本机）无法判断边界：全部记录不标 `inherited`，`SessionSummary::inheritance_unknown` 为 true，`usage` 据此提示这个会话的用量可能含继承部分；游标里记下边界未定，来源之后出现时，下一次 `read` 返回 `reset` 并按边界重新回放。
 
+**ACP 适配器**（claude-agent-acp、codex-acp）：程序名、协议版本、会话恢复和命令字段的核对结果与来源提交见「ACP 客户端」的「核对」。
+
 兼容策略：适配器按记录形状判断，不按版本号分支；字段缺失时按上表的旧写法再试一次（如 `resets_in_seconds`、没有 `origin`），仍不行就跳过这一行并计数。上游格式变化时，加 fixtures、改适配器、在本节记下来源提交或版本。
 
 fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份脱敏的真实样本，目录名写 agent 与版本（如 `claude-code/2.1.302/`、`codex/0.14x-legacy/`、`codex/<版本>-paginated/`），旁边的 `SOURCE.md` 记下版本、日期和覆盖了哪些记录。至少包括：Claude Code 的主会话加两个子 agent（一个带 worktree）、一次 `Edit` 失败、一次中断的 `Bash`、一个分叉会话；Codex 的 `legacy` 与 `paginated` 各一个、一个 `.jsonl.zst`、一个子 agent rollout、一个只有额度没有用量的 `token_count`。脱敏用测试辅助工具按字段白名单处理：保留结构、类型、ID 的相同关系、时间戳和 token 数，文本和路径替换为等长的占位内容，路径统一到 `/Users/dev/fixture/` 下。
@@ -838,6 +841,112 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 发现阶段不为压缩文件建副本，也不在发布列表之前整份解压（见「数据流与线程」第 2 步）。压缩文件不变，补齐后的完整摘要存进 `cache` 的应用级分库，键是同一个文件身份加适配器版本和摘要格式版本：升级后适配器或摘要字段变了，旧摘要不再命中、重新补齐；下次启动直接读，不再解压。
 
 放弃的方案：记录 zstd 帧边界（Codex 只写一个帧）；把压缩会话里被引用的每一行正文存进轮次索引（索引的大小接近原文件，全部进 SQLite、加载时进内存，比一个可淘汰的副本文件更贵）。
+
+## ACP 客户端
+
+对应 [conversation 设计](conversation.md#对其他-crate-的要求)的前置条件 C 和 [ADR 0050](../adr/0050.md)、[ADR 0060](../adr/0060.md)。服务接口（`Conversations`、快照、命令、事件）由 `services::conversation` 定义，类型的含义以 [conversation 设计「服务接口」](conversation.md#服务接口lectern-services-的-conversation-模块)为准，本节不重复，只写 `agents` 一侧怎样提供它。
+
+### 范围与分步
+
+| 步 | 内容 | 状态 |
+|---|---|---|
+| 第 6 步 | 本节的设计与核对；插件 "conversations"；`watch` / `snapshot` / `waiting` / `LoadEarlier`；历史窗口；`can_prompt` 的检查（不含连接状态）；程序查找 | 已实现 |
+| 第 7 步 | JSON-RPC 层（`acp/wire.rs`）；进程的启动与关闭；`Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss`；实时项、计划、上下文占用；权限请求；空闲退出与 3 个连接的上限；日志与假 ACP agent 的测试 | 未实现 |
+| 第 8 步 | 实时项在轮次索引出现后换成历史项；`PermissionDetail::Edits` 的改动预览（`git::line_diff`，LRU） | 未实现 |
+
+第 6 步结束时 `can_prompt` 对每个能通过检查的会话都是 `Err(Unavailable::Unsupported)`（模块常量 `CONNECTIONS` 为 false），`command` 只处理 `LoadEarlier`，其余命令忽略并记 debug。插件还没有放进 `app` 的 `PluginSet`（conversation 设计 J 在第 4 步），所以用户看不到这个状态。第 7 步把 `CONNECTIONS` 删掉。
+
+### 核对
+
+conversation 设计 C 要求先按两个适配器的公开源码确认下面六项。核对时间 2026-11-01，只读了公开源码，没有运行适配器，没有读本机日志。哪一项不成立，这个 agent 的 `can_prompt` 就是 `Unavailable::Unsupported`。
+
+| 项 | claude-agent-acp | codex-acp |
+|---|---|---|
+| 程序名（`AcpProgram::name`） | `claude-agent-acp`（npm 包 `@agentclientprotocol/claude-agent-acp` 0.99.1 的 `bin`） | `codex-acp`（npm 包 `@agentclientprotocol/codex-acp` 2.5.0 的 `bin`） |
+| `initialize` 回复的协议版本 | `protocolVersion: 1` 写死（`src/acp-agent.ts` 的 `initialize`） | 客户端发 1 时走 v1 路径，回复 SDK 常量 `PROTOCOL_VERSION`，该常量在 `@agentclientprotocol/sdk` 2.2.0（`package-lock.json` 锁定的版本）里是 1；v2 只对声明 v2 的客户端启用 |
+| 恢复会话 | `agentCapabilities.loadSession: true`，`sessionCapabilities.resume`；`session/resume` 与 `session/load` 都调 `createSession`，把请求里的 `sessionId` 作为 SDK `query()` 的 `resume` 选项 | `loadSession: true`，`sessionCapabilities.resume`；`thread/resume` 的 `threadId` 就是请求里的 `sessionId` |
+| ACP 会话 ID 是否就是上游会话 ID | 是：恢复时不设 `options.sessionId`，也不设 `forkSession`，SDK 沿用原会话 | 是：ACP 的 `sessionId` 就是 Codex 的线程 ID |
+| 经 ACP 的轮次是否写进 CLI 同一份本机日志 | 是，依据：适配器不设 `CLAUDE_CONFIG_DIR`，`settingSources` 是 `user`、`project`、`local`，工作目录取请求的 `cwd`；`@anthropic-ai/claude-agent-sdk` 0.3.316 的 `sdk.d.ts` 说明 `forkSession` 为 true 时才换新的会话 ID。**未运行验证**：SDK 怎样落盘看的是类型声明里的说明，不是 SDK 实现 | 是，依据：适配器启动 `codex app-server` 时传自己的 `process.env`，不改 `CODEX_HOME`；同一线程的轮次追加在原来的 rollout。**未运行验证** |
+| `usage_update`（`used`、`size`） | 发（每个 `result` 之后，另在流式中途发；带 `cost`，不读） | 发（`CodexEventHandler`，`used`、`size` 都有且 `size > 0` 才发） |
+| 执行命令的原始输入里命令在哪 | `rawInput.command`（Bash 工具的输入）；没有工作目录字段 | `rawInput.command` 和 `rawInput.cwd`（`CommandReporter.permission`，命令已去掉 shell 前缀） |
+
+来源提交：claude-agent-acp 是 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) 的 `eb78afa8556b8fc4082495e48e3fd1762fb6a50f`；codex-acp 是 [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp) 的 `927c4802f83c0859b439e7d641b5eb692560e5df`。两者现在都是 Node 程序，由用户安装（ADR 0050）；codex-acp 另启动一个 `codex app-server` 子进程，所以关闭时必须终止整个进程组。
+
+没有查到的：`session/update` 的 `tool_call` 对其他工具的 `rawInput` 形状（不影响，只有执行命令的请求读命令文本）；适配器在 `session/load` 时回放更新的数量（实现时按「丢弃并计数」处理）。适配器会变：不认识的字段忽略，`initialize` 回复的版本不是 1 就是 `Unsupported`，所以格式变化不会让连接带错数据继续。
+
+### 插件与模块
+
+插件 "conversations"：provides `dyn Conversations`，requires `dyn SessionSource`、`dyn Projects`，激活条件 `AfterFirstFrame`，构造时不做 IO，`activate` 只建空的状态、提供服务、订阅 `SessionsChanged` 和 `ProjectEvent`，没有发送之前不启动进程（ADR 0050）。
+
+```rust
+/// `app` 装配时调用一次。进程级的资源由 `app` 创建（ADR 0025）。
+pub fn conversations_plugin(deps: ConversationsDeps) -> (Name, ConversationsPlugin);
+
+pub struct ConversationsDeps {
+    pub executor: Executor,
+}
+```
+
+模块在 `crates/agents/src/acp/`：`program`（程序查找）、`history`（历史窗口）、`engine`（`Conversations` 的实现与状态）、`plugin`；第 7 步加 `wire`（JSON-RPC 消息）、`conn`（一个连接的线程与进程）、`live`（`session/update` 到实时项）。
+
+### 会话的状态与快照
+
+- 每个被关注的会话一份状态：关注数、要读的轮次数（`wanted`，初始 20，`LoadEarlier` 每次加 20，最多 200）、历史窗口、`Load`、当前快照。`watch` 在第一个关注到来时建状态、换出 `Load::Loading` 的快照并提交读取；最后一个关注释放、也没有连接时丢掉状态和快照。第 7 步起有连接的会话保留状态。
+- 快照 `generation` 每次替换加一；事件 `Changed` 在释放状态锁之后、在替换之后发出（任何线程）。`snapshot` 取锁复制一个 `Arc`。
+- 读取在 executor 的 `Interactive` 优先级上，持有 `BusyGuard`（kernel 的静止判断）；同一个会话同时只有一个读取在进行，期间再有变化就在这个读取结束后重读一次。`SessionsChanged` 里有这个会话时重读。
+- `agent` 取自提供者的 `SessionSource::agent()`；找不到提供者时 `Agent::Other(来源 ID)`，`Load::Failed(NotFound)`。
+
+### 历史窗口
+
+`history::read_window(source, key, wanted)` 在 executor 上运行：`SessionSource::turns` 取轮次索引，取最后 `wanted` 轮，`earlier` 是之前剩下的轮数。每一轮依次是：prompt（`Turn::prompt` 有引用时 `load` 它，`origin` 是 `User`）、再按 `TurnItem` 的顺序：`AgentText`、`Injected`、`Tool`。键是 `h:<轮次序号>:<项序号>`（`Turn::ordinal` 与项在这一轮里的序号，prompt 是 0）。
+
+- 正文按 `ContentRef` 读，每段超过 64 KiB 时截断到 64 KiB 以内最后一个完整的字符并标 `truncated`；合计超过 1 MiB 时从窗口最早的一轮起整轮去掉，`earlier` 随之增加。
+- 工具行不读工具的输入与结果，只用索引里的 `ToolKind` 和名字：`Edit` → `CallKind::Edit`，`summary` 是路径的文件名（至多 3 个，用「, 」连接）；`Read` 同样；`Execute` → `Execute`，`summary` 是命令的第一行；`Search`、`SpawnAgent`、`Other` → 同名，`summary` 是工具名。`summary` 至多 160 个字符。历史里分不出 `Delete`、`Move`、`Fetch`、`Think`，都按上面的归类。
+- 状态：`finished` 为 `Completed`、`Failed`、`Denied` 对应同名，`Interrupted` → `Cancelled`；没有结果时，所在的轮次没有结束（`ended_at` 为 None 且是最后一轮）为 `Running`，否则 `Cancelled`。
+- `SessionError` 的映射：`NotFound` → `HistoryError::NotFound`，`Unrecognized` → `Unrecognized`，`Io`、`TooLarge` → `Io`。读 `load` 失败按同一张表，不返回部分窗口。
+- 历史里没有 `Ended`（异常结束的说明只来自实时的 `stopReason`），所以第 6 步的窗口里不出现。
+
+### `can_prompt` 的检查
+
+在 `snapshot` 里重新算（无 IO，只读缓存），按这个顺序，第一个不满足的就是 `Err`：
+
+1. `NotResumable`：会话不在提供者的列表里、有 `parent`（子 agent 会话）、来源不是内置的（"session-claude-code"、"session-codex"）、`SessionSource::resume` 为 None、`ResumeCommand` 与来源不符，或会话 ID 不是 UUID 的规范写法。规则与 `terminal` 对 `Launch::Resume` 的检查相同（「服务接口」里恢复命令的规则）。
+2. `OutsideProject`：会话的 `place` 不是 `Located`，或它的项目不在 `Projects::open_projects()` 里。
+3. `NotInstalled(program)`：程序查找已完成且没有找到。查找完成之前这一项不是 `Err`。
+4. `Unsupported`：核对不成立，或上一次协商的协议版本不是 1（第 7 步）；第 6 步里是常量 `CONNECTIONS`。
+5. 第 7 步起：`TooMany`、`Busy`。
+
+### 启动（第 7 步）
+
+只对第 1 项成立的会话启动。程序按 `AcpProgram` 固定映射，没有参数；工作目录是会话列表里的 `cwd`，检查同 `terminal` 的 `check_cwd`；环境是 `lectern_platform::login_env::login_env()` 的变量去掉 `LECTERN_` 开头的（取不到时退回 Lectern 自己的环境），程序用 `find_program(name, 这份环境的 PATH)` 查找。`initialize` 声明 `protocolVersion: 1`，不声明 `fs`、`terminal`；`mcpServers` 为空；agent 支持 `session/resume` 时用它，否则用 `session/load` 并丢弃回放的更新（只计数）。`initialize` 与恢复各有 30 秒的超时，超时为 `Failed(Protocol)`。
+
+### 程序查找（第 6 步）
+
+- 第一次 `watch` 一个第 1 项成立的会话时，在 executor 的 `Background` 优先级上查找：`login_env()` 阻塞至多 5 秒（本次运行里第一次调用时运行用户的登录 shell，结果与 `terminal` 共用），再 `find_program(name, PATH)`。UI 线程上不查找。查找是取环境，不是启动 agent。
+- 结果按 `AcpProgram` 缓存在本次运行里：找到的不再查；没找到的，下一次 `watch` 重新 `find_program`（登录环境不重取）。查找中途再有 `watch` 不重复提交。
+- 查找完成后，所有等它的会话换出新快照（`can_prompt` 变化）并发 `Changed`。
+- `login_env()` 失败时 PATH 取 Lectern 进程环境的 `PATH`。测试和不想运行登录 shell 的装配用 `ConversationsPlugin::with_login_env(vars)` 传固定的环境；`login_env()` 失败的分支不单独测（它是进程级的单例，测试里取不到失败）。
+
+### 运行、关闭、权限（第 7 步）
+
+- 每个连接一个读 agent 输出的专用线程（`Executor::run_dedicated_gated`），不启动异步运行时；一行至多 16 MiB，超过时关闭连接（`Protocol`）；请求按 `id` 对应回复；不认识的 `session/update` 种类跳过并计数；`session/update` 合并后至多每 50 ms 换一次快照；stderr 只计字节数，不保留内容。
+- 空闲（`Idle` 且没有待确认的请求）10 分钟（`Clock` 可由测试拨动）、`Disconnect`、项目关闭、插件停用时关闭 stdin、向进程组发 SIGTERM，2 秒后 SIGKILL；Lectern 退出时等待至多 500 ms。启动用 `CommandExt::process_group(0)`。至多 3 个连接。
+- 权限：请求不自动回答；`options` 按种类去重；`PermissionDetail::Command` 取 `rawInput.command` 与 `rawInput.cwd`（取不到为 `None`）；`Cancel` 和连接关闭时待确认的请求回答 `cancelled`。
+- 协议版本：`initialize` 回复的版本不是 1 时关闭连接，`Failed(Unsupported)`。
+
+### 日志与诊断（本节补充）
+
+target 仍是 `agents`，与一个会话有关的记录在 `session` 作用域里写出。
+
+- 第 6 步（debug）：`conversation watched`（`wanted`）、`conversation history read`（`turns`、`entries`、`earlier`、`took_us`）、`conversation history failed`（`error`：`not_found`、`unrecognized`、`io`）、`conversation program lookup`（`program`：`claude_code`、`codex`；`found`：bool；`took_us`）、`conversation command ignored`（`command`：判别名，`reason`：`no_connection`（会话被关注但还没有连接）、`not_watched`）。
+- 第 7 步（info）：agent 进程的启动与退出，按 [logging 设计「隐私」](logging.md#隐私)的子进程规则，记程序名（不含目录）、参数个数、工作目录、pid、退出状态；JSON-RPC 只记方法名（固定表里的字面量，表外记 `other`）、`req`、字节数、耗时。
+- 不记录：提示词与回复、`Passage` 的文字、工具行的 `summary`、权限请求的 `title`、命令文本与工作目录、`OptionId`、计划的文字、`PromptFailed` 的错误文字、环境变量的名字与值、stderr 的内容、会话文件里的路径。错误只记种类。
+- 金丝雀测试 `logs_hold_no_conversation_contents`（`src/acp/tests/logs.rs`）：把金丝雀放进会话的 prompt、agent 说明、注入内容、工具的路径与命令、登录环境的变量名与值、会话的 `cwd`，走完第 6 步的流程，`assert_absent`；第 7 步在假 ACP agent 的消息、`OptionId`、标题、命令文本、stderr 里再放，同一个测试扩展。
+
+### 测试（本节补充）
+
+- 第 6 步：`src/acp/tests/`，`history_*`（窗口的顺序、键、截断、1 MiB 上限、`earlier`、工具行的归类与状态、`SessionError` 的映射）、`prompt_gate_*`（`can_prompt` 的每一项和顺序）、`lookup_*`（查找的缓存、重试、相对路径的 PATH 项、新快照的 `generation`）、`watch_*`（关注与释放、`LoadEarlier` 的上限、`SessionsChanged` 后重读、事件的 `generation`）、`conversations_plugin_*`（真实的 `Kernel`：提供服务、停用后不再发事件）、`logs_*`。用本模块自己的假 `SessionSource` 与假 `Projects`，不读真实的会话目录。
+- 第 7 步：假的 ACP agent `lectern-agents-fake-acp`（`test-support` feature 的 `[[bin]]`，与 `terminal` 的 `lectern-terminal-fake` 同一做法）放在 PATH 最前面，记录收到的参数、工作目录、环境变量和每条消息，按 `tests/fixtures/acp/` 里的合成脚本回放（不用真实会话，脚本里不出现模型名）。覆盖项见 conversation 设计 C 的「测试」一条。
 
 ## 数据流与线程
 
@@ -999,6 +1108,15 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - `just test -p lectern-agents` 的 `spawn_link_*` 通过，`subagent_*`、`watch_*` 的快照不变。
    - `rg 'tool_call: None' crates/agents/src/codex/summary.rs` 仍有结果（摘要里不填，发布时填）；`rg -n 'agents.spawns' docs/design/cache.md` 有结果。
    - `agents/discover_codex_1000` 达标；`just bench --measure agents/` 的其余各项与改动前相比没有超出预算。
+
+ACP 客户端（[#23](https://github.com/SoloJiang/lectern-app/issues/23)，conversation 设计的前置条件 C）分三步，每步一个 PR，都写 `Refs #23`：
+
+6. **核对、设计、历史窗口与程序查找**（[ADR 0060](../adr/0060.md)）
+   - 「ACP 客户端」的「核对」写明来源提交；`AcpProgram::name` 与核对一致（`claude-agent-acp`、`codex-acp`，`services` 不用改）。
+   - `just test -p lectern-agents` 的 `history_*`、`prompt_gate_*`、`lookup_*`、`watch_*`、`conversations_plugin_*`、`logs_hold_no_conversation_contents` 通过；`just deny` 通过，`cargo metadata --locked` 通过。
+   - `rg gpui crates/agents/Cargo.toml` 没有结果；没有新的外部 crate（`Cargo.lock` 只多了 `lectern-agents` 对 `lectern-platform` 的依赖边）。
+7. **进程与协议**：`acp/wire.rs`、`conn.rs`、`live.rs`；`Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss`；空闲退出、3 个连接；假 ACP agent 的测试，覆盖 conversation 设计 C「测试」一条列出的情形；日志与金丝雀扩展。`CONNECTIONS` 常量删除。
+8. **实时项换历史项与改动预览**：实时项在轮次索引出现这一轮、`session/prompt` 也返回之后，在同一代里换成历史项；`PermissionDetail::Edits` 用 `git::line_diff` 算，两侧内容的 blob OID 为键、至多 64 项的 LRU；`waiting()` 与 `WaitingChanged`。
 
 review 设计的前置条件 G（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，一个 PR，写 `Refs #15`，改 `services` 的 `session` 模块和本 crate）：`SessionSource::turns_unretained` 按上文「服务接口」；`just test -p lectern-agents` 的 `turns_unretained_*` 和 `just test -p lectern-services` 的 `session_*` 通过。
 
@@ -1196,3 +1314,14 @@ review 设计的前置条件 G：
 - **会话 UUID 在作用域里，不是字段。** `session` 是 `Ctx` 的字段名，宏不接受它作字段名；记录在 `session` 作用域里写出，与 `review`、`usage` 的做法相同。
 - **多记的几条。** 第 7 项之外，本文原来写「记日志」的两处也接上了：会话目录读不了（warn，「状态与异常」）、表外工具名的计数（「本 crate 的公开项」写它「只进日志」；名字是会话文件里的运行时字符串，只记种数和次数，有跳过的行时并进那条 warn，否则是 debug）。另加摘要读失败、第一次发布（info，带发现耗时）和之后每次发布（debug），读失败的会话原来静默地不列出，查不到原因。
 - **`CopyError` 带上原因。** 原来副本写失败只有 `CopyError::Copy`，原因不保留；现在是 `Copy(Step, io::Error)`。不建副本的适配器（`without_decoded_copies`）原来也走这个变体，改为单独的 `NoDir`，不记 warn。
+
+ACP 客户端第 6 步：
+
+- **自己实现 JSON-RPC，不用 `agent-client-protocol` crate。** [技术调研](tech-research.md#4-agent-原生面板第二阶段)原来写用这个 crate；它需要异步执行器，与「专用线程、无运行时」冲突，见 [ADR 0060](../adr/0060.md)。技术调研的选型表已改。
+- **ACP 不是 `SessionSource`。** 「范围」原来写「ACP 会话作为另一个 `SessionSource` 实现接入」，conversation 设计 C 已改为经 ACP 的轮次从本机日志读到；「范围」「接口」里提到 ACP 来源的几处已改。
+- **第 6 步的 `can_prompt` 恒为 `Unsupported`。** 进程与协议在第 7 步；插件没有放进 `app`，所以不影响用户。
+- **找不到提供者的会话在 `watch` 里记 `conversation history failed`。** 这时不提交读取，快照直接是 `Load::Failed(NotFound)`；日志仍记一条 debug，与读取失败同一个名字，这样金丝雀测试能覆盖这条路径。
+- **第 7、8 步没有做。** `command` 对 `Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss` 只记 debug；`waiting()` 恒为空；`Link` 恒为 `None`。
+
+第 6 步的验证（在 macOS 上运行；没有打开窗口，没有读 `~/.claude`、`~/.codex`）：`cargo nextest run -p lectern-agents --locked` 224 个测试通过、1 个跳过（原有的被忽略的脱敏测试）；`just check` 通过；`cargo metadata --locked` 通过；`rg gpui crates/agents/Cargo.toml` 没有结果。
+

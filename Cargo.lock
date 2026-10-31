@@ -4596,6 +4596,7 @@ dependencies = [
  "lectern-fs-watch",
  "lectern-kernel",
  "lectern-logging",
+ "lectern-platform",
  "lectern-services",
  "ruzstd",
  "serde",
