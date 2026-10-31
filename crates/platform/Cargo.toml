@@ -1,6 +1,6 @@
 [package]
 name = "lectern-platform"
-description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version and the language preference, the local UTC offset, the window frame autosave name, the system appearance's colours; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version and the language preference, the local UTC offset, the window frame autosave name, the system appearance's colours, the login shell environment; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -31,7 +31,8 @@ raw-window-handle.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # `ThreadCpuClock`: `pthread_getcpuclockid` and `clock_gettime` on Linux,
 # `pthread_mach_thread_np` and `thread_info` on macOS, which rustix lacks.
-# On both also `localtime_r` (`time::utc_offset`).
+# On both also `localtime_r` (`time::utc_offset`) and `getpwuid_r`, `setsid`,
+# `poll` and `kill` (`login_env`).
 # On macOS also `proc_pid_rusage` (`process::phys_footprint`),
 # `proc_pidinfo` and `proc_listchildpids` (`process::start_time`,
 # `process::children`), `sysctlbyname` (`system::os_version`,
@@ -45,7 +46,8 @@ libc.workspace = true
 # The kqueue thread runs through `Executor::run_dedicated`.
 lectern-executor = { path = "../executor" }
 # The kqueue thread's stop record, the frame autosave name's failure
-# record and the appearance watch's contained panic record
+# record, the appearance watch's contained panic record and the login
+# environment's result record
 # (docs/design/platform.md「日志与诊断」, ADR 0046); nothing else in this
 # crate logs.
 lectern-logging = { path = "../logging" }
