@@ -1,0 +1,21 @@
+---
+source: crates/worktrees/src/tests/tree.rs
+expression: "tree(vcx, detail_part)"
+---
+worktrees.detail Panel selected=true
+  worktrees.detail.title Group label="feat/search"
+  worktrees.detail.usage Group kind=mr
+    worktrees.detail.usage.mr.item[21] ListItem label="First change" shared=1 tokens=660
+    worktrees.detail.usage.mr.item[22] ListItem label="Second change" shared=0
+  worktrees.detail.compare Group uncommitted=1 committed=4 total=5
+    worktrees.detail.compare.open Button label=[worktrees-review-changes]
+  worktrees.detail.overlaps List count=1
+    worktrees.detail.overlaps.item[/fixture/app/.git] ListItem
+      worktrees.detail.overlaps.item[/fixture/app/.git].facts Group label="main" files=12 expanded=true
+    worktrees.detail.overlaps.item[/fixture/app/.git].paths Group expanded=true
+  worktrees.detail.sessions List count=2
+    worktrees.detail.sessions.item[s2] ListItem
+      worktrees.detail.sessions.item[s2].facts Group label="Add the search index" agent=codex running=false
+    worktrees.detail.sessions.item[s3] ListItem
+      worktrees.detail.sessions.item[s3].facts Group label=[worktrees-untitled-session] agent=claude-code running=false
+  worktrees.detail.switch Button label=[worktrees-switch]

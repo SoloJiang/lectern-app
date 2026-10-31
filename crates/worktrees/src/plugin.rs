@@ -2,7 +2,7 @@
 //! and "worktrees-usage", both `AfterFirstFrame`. `activate` takes the
 //! services and subscribes; nothing is read or submitted before `started`.
 //! The screen, the inspector page and the key bindings are registered here
-//! with the views of step 2.
+//! (`ctx.own_staged`: they take effect at the activation's commit).
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -19,6 +19,7 @@ use lectern_services::session::{SessionSource, SessionsChanged, Timestamp};
 use lectern_services::usage::{Usage, UsageEvent};
 use lectern_services::workspace::{Contributions, WorkspaceEvent};
 
+use crate::contribute;
 use crate::hub::{Hub, Parts, Wall};
 use crate::usage_link::UsageLink;
 
@@ -91,18 +92,30 @@ impl Plugin for WorktreesPlugin {
         }
     }
 
-    /// Takes the service references, builds the empty state and subscribes:
-    /// no IO, no task, no registration (step 1).
+    /// Takes the service references, builds the empty state, registers the
+    /// screen, the inspector page and the key bindings, and subscribes: no IO,
+    /// no task. The registrations go to `ctx.own_staged` (there is no token
+    /// yet); the views are built later, by `workspace`, on the main thread.
+    /// The sidebar entry exists only while a git project is open (`Hub`).
     fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        let contributions = ctx.service::<dyn Contributions>();
         let hub = Hub::new(Parts {
             executor: self.deps.executor.clone(),
             projects: ctx.service::<dyn Projects>(),
             sessions: ctx.service_set::<dyn SessionSource>(),
             review: ctx.service::<dyn Review>(),
-            contributions: ctx.service::<dyn Contributions>(),
+            contributions: contributions.clone(),
             usage: self.deps.usage.clone(),
             wall: self.wall.clone(),
         });
+        {
+            let registry = contributions
+                .get()
+                .ok_or(PluginError::DependencyUnavailable)?;
+            for registration in contribute::register(&*registry, &hub) {
+                ctx.own_staged(registration);
+            }
+        }
         #[cfg(test)]
         {
             *self.hub.lock().unwrap() = Some(hub.clone());

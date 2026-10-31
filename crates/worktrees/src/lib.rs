@@ -14,16 +14,24 @@
 //!   optional `dyn Usage`, so that the screen works without the `usage`
 //!   plugin.
 //!
-//! Step 2 adds the views, the actions and the registration of the screen, the
-//! inspector page and the key bindings.
+//! Step 2 (the views): [`WorktreesScreen`] (the main area) and [`DetailTab`]
+//! (the inspector's page) over the shared [`WorktreesModel`], the actions and
+//! key bindings, and the contributions the plugin registers with
+//! `dyn Contributions`.
 //!
 //! No code here runs before the first frame or does IO; the views read the
 //! snapshot and send `WorkspaceCommand`s.
 
+mod actions;
+mod contribute;
+mod detail;
 mod diag;
 mod hub;
+mod model;
 mod nodes;
 mod plugin;
+mod present;
+mod screen;
 pub mod snapshot;
 mod usage_link;
 
@@ -32,9 +40,16 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
+pub use actions::{
+    OpenSession, OpenWorktree, Refresh, ReviewChanges, SelectFirst, SelectLast, SelectNext,
+    SelectPrevious, SwitchTo, ToggleOverlap,
+};
+pub use detail::DetailTab;
 pub use hub::Hub;
+pub use model::WorktreesModel;
 pub use plugin::{
     PLUGIN_ID, USAGE_PLUGIN_ID, WorktreesDeps, WorktreesPlugin, WorktreesUsagePlugin,
 };
+pub use screen::WorktreesScreen;
 pub use snapshot::WorktreesSnapshot;
 pub use usage_link::UsageLink;

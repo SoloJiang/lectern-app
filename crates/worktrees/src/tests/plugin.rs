@@ -10,6 +10,7 @@ use lectern_services::workspace::{
     ContributionKind, Route, SidebarSection, Target, WorkspaceCommand, screens,
 };
 use lectern_ui::Icon;
+use lectern_ui::contrib::InspectorTab;
 
 use crate::snapshot::RowUsage;
 use crate::testing::{
@@ -43,7 +44,7 @@ fn active_parts() -> ChangedParts {
 }
 
 #[test]
-fn activate_registers_nothing_and_does_no_work() {
+fn activate_registers_contributions_only() {
     let rig = Rig::new();
     let (_, key) = project(&rig, "app");
     rig.projects.remove(&key);
@@ -54,11 +55,33 @@ fn activate_registers_nothing_and_does_no_work() {
     assert_eq!(rig.projects.snapshot_calls(), 0);
     assert!(rig.review.watched().is_empty());
     assert!(rig.usage.watched().is_empty());
-    assert!(
-        rig.contributions.kinds().is_empty(),
-        "the screen, the inspector page and the key bindings come with the views"
-    );
     assert!(rig.snapshot().is_none());
+
+    // The screen, the inspector page and the key bindings; no sidebar entry
+    // (it exists only while a git project is open), and no token yet: the
+    // guards go to the activation's commit.
+    assert_eq!(
+        rig.contributions.kinds(),
+        [
+            (
+                ContributionKind::Screen(crate::contribute::LAYOUT),
+                "worktrees".to_owned()
+            ),
+            (ContributionKind::InspectorTab, "worktree".to_owned()),
+            (ContributionKind::KeyBindings, "worktrees".to_owned()),
+        ]
+    );
+    assert_eq!(rig.contributions.tokens_given(), [false, false, false]);
+    assert!(rig.contributions.entries().is_empty());
+    let tab: InspectorTab = rig.contributions.payload("worktree").expect("the page");
+    assert_eq!(
+        tab.screen,
+        Some(std::borrow::Cow::Borrowed(screens::WORKTREES)),
+        "the page is only for the Worktrees screen"
+    );
+    let layout = crate::contribute::LAYOUT;
+    assert!(layout.back_button && layout.reading_column && layout.inspector);
+    assert!(!layout.floating_bar);
 }
 
 #[test]
@@ -66,11 +89,11 @@ fn git_project_registers_the_sidebar_entry() {
     let rig = Rig::new();
     rig.activate_main();
     let (_, key) = project(&rig, "app");
-    assert!(rig.contributions.kinds().is_empty(), "no project yet");
+    assert!(rig.contributions.entries().is_empty(), "no project yet");
 
     rig.opened(&key);
     assert_eq!(
-        rig.contributions.kinds(),
+        rig.contributions.entries(),
         [(
             ContributionKind::SidebarEntry {
                 section: SidebarSection::Views
@@ -81,8 +104,8 @@ fn git_project_registers_the_sidebar_entry() {
     assert_eq!(rig.contributions.order("worktrees"), Some(0));
     assert_eq!(
         rig.contributions.tokens_given(),
-        [true],
-        "registered after `started`, with the activation's token"
+        [false, false, false, true],
+        "the entry is registered after `started`, with the activation's token"
     );
     let item = rig.contributions.sidebar_item("worktrees").unwrap();
     assert_eq!(
@@ -112,7 +135,7 @@ fn folder_project_registers_no_entry() {
     let key = fx.key();
     rig.projects.set(fx.snapshot());
     rig.opened(&key);
-    assert!(rig.contributions.kinds().is_empty());
+    assert!(rig.contributions.entries().is_empty());
 
     // Pushed by the probe, the screen shows the folder's empty state.
     rig.show();
@@ -138,7 +161,7 @@ fn closed_drops_the_entry() {
     assert_eq!(rig.contributions.released(), 1);
     // A `Changed` after `Closed` does not open it again.
     rig.changed(&key);
-    assert_eq!(rig.contributions.kinds().len(), 1);
+    assert_eq!(rig.contributions.entries().len(), 1);
     assert_eq!(rig.run(), 0);
 }
 
@@ -151,12 +174,12 @@ fn opening_another_project_replaces_the_entry() {
     rig.opened(&first);
     rig.opened(&first);
     assert_eq!(
-        rig.contributions.kinds().len(),
+        rig.contributions.entries().len(),
         1,
         "the same project keeps its entry"
     );
     rig.opened(&second);
-    assert_eq!(rig.contributions.kinds().len(), 2);
+    assert_eq!(rig.contributions.entries().len(), 2);
     assert_eq!(rig.contributions.released(), 1, "the old one went first");
     // A project that is not the base closing changes nothing.
     rig.closed(&first);
@@ -166,7 +189,7 @@ fn opening_another_project_replaces_the_entry() {
     rig.projects.set(folder.snapshot());
     rig.opened(&folder.key());
     assert_eq!(rig.contributions.released(), 2);
-    assert_eq!(rig.contributions.kinds().len(), 2);
+    assert_eq!(rig.contributions.entries().len(), 2);
 }
 
 #[test]
@@ -554,7 +577,7 @@ fn started_handles_an_already_open_project() {
     let (_, key) = project(&rig, "app");
     rig.activate_main();
     assert_eq!(
-        rig.contributions.kinds().len(),
+        rig.contributions.entries().len(),
         1,
         "the entry is registered in `started`"
     );
@@ -576,7 +599,7 @@ fn changed_for_an_unknown_project_counts_as_opened() {
     let (_, key) = project(&rig, "app");
     // The `Opened` fell between `started` and the activation going live.
     rig.changed_parts(&key, active_parts());
-    assert_eq!(rig.contributions.kinds().len(), 1, "the entry is there");
+    assert_eq!(rig.contributions.entries().len(), 1, "the entry is there");
     assert_eq!(rig.hub().switches(), 0, "an opening is not a switch");
     rig.show();
     assert_eq!(rig.review.watched(), std::slice::from_ref(&key));
@@ -585,7 +608,7 @@ fn changed_for_an_unknown_project_counts_as_opened() {
     // Another project's `Changed` while one is the base is not a new base.
     let (_, other) = project(&rig, "other");
     rig.changed(&other);
-    assert_eq!(rig.contributions.kinds().len(), 1);
+    assert_eq!(rig.contributions.entries().len(), 1);
     assert_eq!(rig.review.watched().len(), 1);
 }
 
@@ -748,7 +771,11 @@ fn deactivation_drops_everything() {
     rig.show();
     rig.run();
     rig.deactivate_main();
-    assert_eq!(rig.contributions.released(), 1);
+    assert_eq!(
+        rig.contributions.released(),
+        4,
+        "the entry and the three contributions of `activate`"
+    );
     assert_eq!(rig.review.released(), 1);
     assert_eq!(rig.usage.released(), 2);
 }

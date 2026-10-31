@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lectern_executor::Executor;
@@ -260,6 +260,14 @@ impl Sess {
     }
     pub fn title(mut self, title: &str) -> Sess {
         self.0.title = Some(Arc::from(title));
+        self
+    }
+    pub fn untitled(mut self) -> Sess {
+        self.0.title = None;
+        self
+    }
+    pub fn agent(mut self, agent: Agent) -> Sess {
+        self.0.agent = agent;
         self
     }
     /// The last activity `ms` before `NOW`.
@@ -544,6 +552,11 @@ impl FakeSessions {
         }
     }
 
+    /// The sessions of the list now.
+    pub fn current(&self) -> Vec<SessionSummary> {
+        lock(&self.list).sessions.to_vec()
+    }
+
     /// Replaces the list; the generation goes up by one.
     pub fn set(&self, sessions: Vec<SessionSummary>) {
         let mut current = lock(&self.list);
@@ -590,6 +603,7 @@ impl SessionSource for FakeSessions {
 pub(crate) struct FakeReview {
     overview: Mutex<Option<Arc<WorktreesOverview>>>,
     watched: Mutex<Vec<ProjectKey>>,
+    refreshed: Mutex<Vec<ProjectKey>>,
     released: Arc<AtomicUsize>,
 }
 
@@ -600,6 +614,10 @@ impl FakeReview {
     /// The projects `watch_worktrees` was called for, in order.
     pub fn watched(&self) -> Vec<ProjectKey> {
         lock(&self.watched).clone()
+    }
+    /// The projects `refresh_worktrees` was called for, in order.
+    pub fn refreshed(&self) -> Vec<ProjectKey> {
+        lock(&self.refreshed).clone()
     }
     /// Interests dropped so far.
     pub fn released(&self) -> usize {
@@ -641,6 +659,9 @@ impl Review for FakeReview {
         OverviewInterest::new(move || {
             released.fetch_add(1, Ordering::SeqCst);
         })
+    }
+    fn refresh_worktrees(&self, project: &ProjectKey) {
+        lock(&self.refreshed).push(project.clone());
     }
     fn register_brief_rules(
         &self,
@@ -714,6 +735,8 @@ pub(crate) struct FakeContributions {
     contributions: Mutex<Vec<(ContributionKind, String, u16, Payload)>>,
     released: Arc<AtomicUsize>,
     tokens_given: Mutex<Vec<bool>>,
+    commands: Mutex<Vec<WorkspaceCommand>>,
+    milestones: Mutex<Vec<Milestone>>,
 }
 
 impl FakeContributions {
@@ -722,6 +745,14 @@ impl FakeContributions {
         lock(&self.contributions)
             .iter()
             .map(|(kind, id, _, _)| (*kind, id.clone()))
+            .collect()
+    }
+
+    /// The kinds and IDs of the sidebar entries, in registration order.
+    pub fn entries(&self) -> Vec<(ContributionKind, String)> {
+        self.kinds()
+            .into_iter()
+            .filter(|(kind, _)| matches!(kind, ContributionKind::SidebarEntry { .. }))
             .collect()
     }
 
@@ -744,6 +775,60 @@ impl FakeContributions {
                 let any: &(dyn std::any::Any + Send) = &*payload.0;
                 any.downcast_ref::<SidebarItem>().cloned()
             })
+    }
+
+    /// A clone of the payload registered under `id`, as its `ui::contrib` type.
+    pub fn payload<T: Clone + 'static>(&self, id: &str) -> Option<T> {
+        lock(&self.contributions)
+            .iter()
+            .filter(|(_, registered, _, _)| registered == id)
+            .find_map(|(_, _, _, payload)| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                any.downcast_ref::<T>().cloned()
+            })
+    }
+
+    /// The key bindings registered, loaded the way `workspace` loads them.
+    pub fn key_bindings(&self, cx: &gpui::App) -> Vec<gpui::KeyBinding> {
+        lock(&self.contributions)
+            .iter()
+            .filter(|(kind, _, _, _)| matches!(kind, ContributionKind::KeyBindings))
+            .flat_map(|(_, _, _, payload)| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                let bindings = any.downcast_ref::<lectern_ui::contrib::KeyBindings>();
+                bindings
+                    .into_iter()
+                    .flat_map(|bindings| bindings.0.iter())
+                    .map(|(keys, action, context)| {
+                        let predicate = context.map(|context| {
+                            std::rc::Rc::new(
+                                gpui::KeyBindingContextPredicate::parse(context)
+                                    .expect("the binding's context parses"),
+                            )
+                        });
+                        gpui::KeyBinding::load(
+                            keys,
+                            action.boxed_clone(),
+                            predicate,
+                            false,
+                            None,
+                            cx.keyboard_mapper().as_ref(),
+                        )
+                        .expect("the binding's keystrokes parse")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The commands the views dispatched, in order.
+    pub fn commands(&self) -> Vec<WorkspaceCommand> {
+        lock(&self.commands).clone()
+    }
+
+    /// The milestones the views reported.
+    pub fn milestones(&self) -> Vec<Milestone> {
+        lock(&self.milestones).clone()
     }
 
     /// The order of the contribution registered under `id`.
@@ -788,14 +873,14 @@ impl Contributions for FakeContributions {
     ) -> Registration {
         unreachable!("worktrees registers no leave guard")
     }
-    fn dispatch(&self, _: WorkspaceCommand) {
-        unreachable!("the plugin of step 1 sends no command")
+    fn dispatch(&self, command: WorkspaceCommand) {
+        lock(&self.commands).push(command);
     }
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         unreachable!("worktrees never lists the sidebar entries")
     }
-    fn report_milestone(&self, _: Milestone) {
-        unreachable!("the plugin of step 1 reports no milestone")
+    fn report_milestone(&self, milestone: Milestone) {
+        lock(&self.milestones).push(milestone);
     }
 }
 
@@ -861,6 +946,8 @@ pub(crate) struct Rig {
     pub usage: Arc<FakeUsage>,
     pub contributions: Arc<FakeContributions>,
     pub link: UsageLink,
+    /// The time of day the plugin composes with; `advance` moves it.
+    now: Arc<AtomicI64>,
     hub: Arc<Mutex<Option<Arc<Hub>>>>,
 }
 
@@ -873,11 +960,13 @@ impl Rig {
         let usage = Arc::new(FakeUsage::default());
         let contributions = Arc::new(FakeContributions::default());
         let link = UsageLink::default();
+        let now = Arc::new(AtomicI64::new(NOW));
+        let clock = now.clone();
         let main = WorktreesPlugin::new(WorktreesDeps {
             executor: executor.clone(),
             usage: link.clone(),
         })
-        .with_wall_clock(|| Timestamp(NOW));
+        .with_wall_clock(move || Timestamp(clock.load(Ordering::SeqCst)));
         let hub = main.hub.clone();
         let set = PluginSet::new()
             .with("mock-projects", Provide::<dyn Projects>(projects.clone()))
@@ -907,8 +996,14 @@ impl Rig {
             usage,
             contributions,
             link,
+            now,
             hub,
         }
+    }
+
+    /// Moves the time of day the next composition counts from.
+    pub fn advance(&self, ms: i64) {
+        self.now.fetch_add(ms, Ordering::SeqCst);
     }
 
     pub fn activate_main(&self) {

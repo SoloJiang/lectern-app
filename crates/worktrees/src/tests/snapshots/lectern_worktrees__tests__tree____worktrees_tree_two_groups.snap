@@ -1,0 +1,20 @@
+---
+source: crates/worktrees/src/tests/tree.rs
+expression: "tree(vcx, | id | id.starts_with(\"worktrees.\") && !\nid.starts_with(\"worktrees.detail\"))"
+---
+worktrees.toolbar.refresh Button label=[worktrees-refresh]
+worktrees.list List rows=4 active=1 idle=3 ready=true phase=nothing
+  worktrees.active List label=[worktrees-active]
+    worktrees.list.item[/fixture/app/.git] ListItem selected
+      worktrees.list.item[/fixture/app/.git].facts Group label="main" current=true main=true locked=false prunable=false sessions=1 running=1 uncommitted=2 vs-base=5
+        worktrees.list.item[/fixture/app/.git].badge.item[current] Badge label=[worktrees-current]
+  worktrees.idle List label=[worktrees-idle]
+    worktrees.list.item[/fixture/app/.git/worktrees/feat] ListItem
+      worktrees.list.item[/fixture/app/.git/worktrees/feat].facts Group label="feat/search" current=false main=false locked=false prunable=false sessions=2 running=0 uncommitted=1 vs-base=5
+        worktrees.list.item[/fixture/app/.git/worktrees/feat].tokens Text tokens=12345
+    worktrees.list.item[/fixture/app/.git/worktrees/fix] ListItem
+      worktrees.list.item[/fixture/app/.git/worktrees/fix].facts Group label="01234567" current=false main=false locked=true prunable=false sessions=0 running=0 uncommitted=0 vs-base=0
+        worktrees.list.item[/fixture/app/.git/worktrees/fix].badge.item[locked] Badge label=[worktrees-locked]
+    worktrees.list.item[/fixture/app/.git/worktrees/old] ListItem
+      worktrees.list.item[/fixture/app/.git/worktrees/old].facts Group label="old/idea" current=false main=false locked=false prunable=true sessions=0 running=0 uncommitted=unavailable vs-base=unavailable
+        worktrees.list.item[/fixture/app/.git/worktrees/old].badge.item[missing] Badge label=[worktrees-missing]
