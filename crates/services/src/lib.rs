@@ -8,6 +8,8 @@
 //!   change lists, designed in `docs/design/review.md`.
 //! - [`code_intel`]: code navigation (`dyn CodeIntel`) and semantic
 //!   navigation providers, designed in `docs/design/code_intel.md`.
+//! - [`conversation`]: structured agent conversations over ACP
+//!   (`dyn Conversations`), designed in `docs/design/conversation.md`.
 //! - [`project`]: the project model (`dyn Projects`), designed in
 //!   `docs/design/project.md`; its directory table (`DirTable`) in
 //!   `docs/design/file_reader.md`.
@@ -30,6 +32,7 @@
 
 pub mod changes;
 pub mod code_intel;
+pub mod conversation;
 pub mod project;
 pub mod reader;
 pub mod review;
