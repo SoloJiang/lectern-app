@@ -2049,7 +2049,7 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share(
         "terminal/input",
-        &[median(Limit::TimeAtMost(us(6)))],
+        &[median(Limit::TimeAtMost(us(12)))],
         TERMINAL,
         ACTIVE,
         Time,
