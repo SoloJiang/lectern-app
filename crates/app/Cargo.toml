@@ -37,6 +37,9 @@ futures.workspace = true
 # The plugin crates and the resources they share (docs/design/app.md「装配」).
 lectern-agents = { path = "../agents" }
 lectern-cache = { path = "../cache" }
+# The "conversation", "conversation-live" and "conversation-terminal"
+# plugins (docs/design/conversation.md「对其他 crate 的要求」J).
+lectern-conversation = { path = "../conversation" }
 lectern-executor = { path = "../executor" }
 lectern-fs-watch = { path = "../fs_watch" }
 lectern-i18n = { path = "../i18n" }

@@ -854,7 +854,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 | 第 7 步 | JSON-RPC 层（`acp/wire.rs`）；进程的启动与关闭；`Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss`；实时项、计划、上下文占用；权限请求；空闲退出与 3 个连接的上限；日志与假 ACP agent 的测试 | 已实现 |
 | 第 8 步 | 实时项在轮次索引出现后换成历史项；`PermissionDetail::Edits` 的改动预览（`git::line_diff`，LRU）；`waiting()` 与 `WaitingChanged`；不理会 `session/cancel` 的适配器的超时 | 已实现 |
 
-第 6 步结束时 `can_prompt` 对每个能通过检查的会话都是 `Err(Unavailable::Unsupported)`（模块常量 `CONNECTIONS` 为 false），`command` 只处理 `LoadEarlier`。第 7 步删掉了这个常量：`can_prompt` 按「`can_prompt` 的检查」，五个命令都有实现。插件还没有放进 `app` 的 `PluginSet`（conversation 设计 J 在第 4 步），所以用户看不到这个状态。
+第 6 步结束时 `can_prompt` 对每个能通过检查的会话都是 `Err(Unavailable::Unsupported)`（模块常量 `CONNECTIONS` 为 false），`command` 只处理 `LoadEarlier`。第 7 步删掉了这个常量：`can_prompt` 按「`can_prompt` 的检查」，五个命令都有实现。插件已放进 `app` 的 `PluginSet`（conversation 设计 J，见 [app 设计「conversation 的装配」](app.md#conversation-的装配)）。
 
 ### 核对
 
@@ -1389,7 +1389,7 @@ ACP 客户端第 6 步：
 
 - **自己实现 JSON-RPC，不用 `agent-client-protocol` crate。** [技术调研](tech-research.md#4-agent-原生面板第二阶段)原来写用这个 crate；它需要异步执行器，与「专用线程、无运行时」冲突，见 [ADR 0060](../adr/0060.md)。技术调研的选型表已改。
 - **ACP 不是 `SessionSource`。** 「范围」原来写「ACP 会话作为另一个 `SessionSource` 实现接入」，conversation 设计 C 已改为经 ACP 的轮次从本机日志读到；「范围」「接口」里提到 ACP 来源的几处已改。
-- **第 6 步的 `can_prompt` 恒为 `Unsupported`。** 进程与协议在第 7 步；插件没有放进 `app`，所以不影响用户。
+- **第 6 步的 `can_prompt` 恒为 `Unsupported`。** 进程与协议在第 7 步；插件没有放进 `app`，所以不影响用户。（第 7 步之后不再成立；`conversation` 的第 4 步把插件放进了 `app`。）
 - **找不到提供者的会话在 `watch` 里记 `conversation history failed`。** 这时不提交读取，快照直接是 `Load::Failed(NotFound)`；日志仍记一条 debug，与读取失败同一个名字，这样金丝雀测试能覆盖这条路径。
 - **第 7、8 步没有做。** `command` 对 `Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss` 只记 debug；`waiting()` 恒为空；`Link` 恒为 `None`。
 

@@ -1,6 +1,6 @@
 # conversation 设计
 
-状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`；「验收」的第 2 步（回复框、停止、权限请求、草稿，以及只把 `dyn Terminals` 放进共享状态的插件 `conversation-terminal`）已实现，见「实际验证」「与设计的差异」，这一步没有真正的 Terminal 页、终端快捷键和离开守卫，issue 仍是 `Refs #23`、`Refs #24`；前置条件 C 的第 6 步（`agents` 的插件 `conversations`、历史窗口、程序查找）和第 7 步（进程与 JSON-RPC、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限）已实现，见 [agents 设计](agents.md#acp-客户端)；第 8 步（实时项换成历史项、`Edits` 的改动预览、`waiting()` 与 `WaitingChanged`）已实现，见 [agents 设计](agents.md#acp-客户端)。「验收」的第 3 步（Terminal 页、终端的快捷键与离开守卫）已实现，见「实际验证」「与设计的差异」，issue 仍是 `Refs #23`、`Refs #24`、`Refs #12`。
+状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`；「验收」的第 2 步（回复框、停止、权限请求、草稿，以及只把 `dyn Terminals` 放进共享状态的插件 `conversation-terminal`）已实现，见「实际验证」「与设计的差异」，这一步没有真正的 Terminal 页、终端快捷键和离开守卫，issue 仍是 `Refs #23`、`Refs #24`；前置条件 C 的第 6 步（`agents` 的插件 `conversations`、历史窗口、程序查找）和第 7 步（进程与 JSON-RPC、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限）已实现，见 [agents 设计](agents.md#acp-客户端)；第 8 步（实时项换成历史项、`Edits` 的改动预览、`waiting()` 与 `WaitingChanged`）已实现，见 [agents 设计](agents.md#acp-客户端)。「验收」的第 3 步（Terminal 页、终端的快捷键与离开守卫）已实现，见「实际验证」「与设计的差异」，issue 仍是 `Refs #23`、`Refs #24`、`Refs #12`。「验收」的第 4 步（`app` 装配 J、基准 K）已实现，见「实际验证」「与设计的差异」；前置条件 H（`project_home` 的等待标记）还没有，真机验证（发布构建、两个适配器）没有做，所以 issue 仍是 `Refs #23`、`Refs #24`，没有 `Closes`。
 
 对应 issue [#23](https://github.com/SoloJiang/lectern-app/issues/23)（Conversation 面板：经 ACP 的结构化对话）、[#24](https://github.com/SoloJiang/lectern-app/issues/24)（权限请求的界面）和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的 Terminal 页。`conversation` 是检查器的 Conversation 页（⌘\）：Messages 页显示正在审阅的会话的对话（prompt、agent 说明、工具调用、发回的审阅意见），用户在这里回复 agent、批准或拒绝 agent 的权限请求；Terminal 页在内嵌终端里恢复这个会话（`claude --resume`、`codex resume`），显示原始输出（[交互规范「三层结构」](interaction.md#三层结构)、[「状态与异常」](interaction.md#状态与异常)的「Agent 请求权限」、[ADR 0012](../adr/0012.md)、[技术调研「Agent 原生面板」](tech-research.md#4-agent-原生面板第二阶段)）。ACP agent 的启动方式和信任边界见 [ADR 0050](../adr/0050.md)。
 
@@ -501,7 +501,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 | 打开页 | 快照已有时下一帧画出；历史窗口还在读时按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `conversation-loading` |
 | 安装包 80 MB（ADR 0018） | 不新增外部 crate；适配器不随安装包分发（ADR 0050） |
 
-新基准（「对其他 crate 的要求」K）：`conversation/stream_apply`：40 轮、正文合计 1 MiB 的快照，连续应用 200 个快照，每个让最后一段 agent 说明多 200 字节，测每次 `items::build` 加 `splice` 加这一项的排版，p95 ≤ 2 ms。
+新基准（「对其他 crate 的要求」K）：`conversation/stream_apply`：40 轮、正文合计 1 MiB 的快照，连续应用 200 个快照，每个让最后一段 agent 说明多 200 字节，测每次 `items::build` 加 `splice` 加这一项的排版，p95 ≤ 2 ms。夹具是本 crate 的 `fixture::StreamApply`（`test-support` feature）：一个真实的 `MessagesModel` 在 GPUI 测试平台的窗口里（不开真实窗口），每一步应用下一个快照并画一帧；一个周期 200 步，最后一段从 16 KiB 长到约 55 KiB，周期结束后回到开头（`generation` 继续增加）。帧是测试平台的帧，没有 GPU，文字排版比真实的简单，所以这个基准量的是本 crate 的工作（建项、比较、`splice`、渲染可见的项），不是真实的文字排版；真实帧的预算由帧记录的基准判定（`workspace` 记录帧之后）。
 
 ## 界面
 
@@ -839,14 +839,14 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 
   输入法、撤销重做、↵ 换行由 `Input` 自带。`TextAreaState` 的文字变化时 `cx.notify()`，持有它的视图用 `cx.observe` 跟着重画（#22 的保存按钮按文字是否为空、是否超长决定可用）。语义节点不记录输入的文字。
 - **G. `i18n`**：`locales/{en,zh-CN}/conversation.ftl` 加上「界面」表里的键，`keys::conversation::*`。
-- **H. `project_home`**：会话行的等待标记（[project_home 设计「范围」](project_home.md#范围)里留给 Conversation 的一项）。按 `project-home-usage` 的做法加一个插件（requires `dyn Conversations`），渲染时读 `waiting()`，收到 `WaitingChanged` 后重画；`waiting()` 里的会话在行上显示等待的圆点和一行次要文字，语义节点加 `attrs`：`waiting`。键与文字写在 project_home 自己的 ftl 里。
+- **H. `project_home`**（第 4 步时还没有实现，见「与设计的差异」第 4 步）：会话行的等待标记（[project_home 设计「范围」](project_home.md#范围)里留给 Conversation 的一项）。按 `project-home-usage` 的做法加一个插件（requires `dyn Conversations`），渲染时读 `waiting()`，收到 `WaitingChanged` 后重画；`waiting()` 里的会话在行上显示等待的圆点和一行次要文字，语义节点加 `attrs`：`waiting`。键与文字写在 project_home 自己的 ftl 里。
 - **I. 审阅意见的会话途径（#22）**：本 crate 另加一个小插件（如 "conversation-notes"），requires `dyn Review`、`dyn Conversations`、`dyn Terminals`，在 `started` 里调 `Review::register_note_route`，把登记交给 `PluginHandle::own`（[review 设计「审阅意见的发送途径」](review.md#审阅意见的发送途径noteroute)）。不放进 Conversation 页的插件本身：`review` 停用或失败时页面照常。`review_view` 只发 `SendNotes`，不依赖本 crate 和 `terminal`。途径的行为：
   - `applies`：审阅对象是 `ReviewTarget::Session`。
   - `deliver`：按本文「一处驱动」选一条路。有终端在驱动这个会话（`for_session` 有值且 `info(id).state` 是 `Starting` 或 `Running`）就不经 ACP：`Running` 时 `Terminals::input(id, Input::Paste(text))`（不追加回车，用户在终端里按 ↵ 提交），答复 `Delivered(SentVia::TerminalPaste)`；`Starting` 时答复 `NotNow(RouteBlock::Starting)`（进程运行之前 `terminal` 丢弃发给程序的输入，terminal 设计「接口」的 `input`）。没有终端在驱动时，`can_prompt` 为 `Ok` 就发 `Conversations::command(Prompt { text, origin: ReviewNotes { count, locations } })`（`locations` 是 `NoteDelivery::locations` 按 `root` 拼成的绝对路径，没有行号的不列），答复 `Delivered(SentVia::Acp)`；为 `Err` 时按原因答复 `NotNow(Busy)` 或 `NotNow(NoSession)`。
   - 送出之后由 `review_view` 切到 Conversation 页（`dispatch(SelectInspectorTab("conversation"))`）。Conversation 页按本 crate 记下的上一次所在的页打开：用户在 Terminal 页恢复过这个会话、之后没有切走时就是 Terminal 页，否则 Messages 页上有「显示终端」。
   - 分阶段：P1 的出口关卡 G2 不做这个途径，`review` 只有内置的剪贴板途径，用户把 Copy as Prompt 复制的 prompt 粘贴进会话（产品负责人 2026-10-30 决定，[review 设计「未决问题」](review.md#未决问题)4）。G2 之后、`terminal` 实现时先加终端粘贴这一条：插件只 requires `dyn Review`、`dyn Terminals`，没有终端驱动时答复 `NotNow(NoSession)`。ACP 一条随 P3 加上，插件那时再 requires `dyn Conversations`。在这个途径登记之前，`review` 只有剪贴板途径。
-- **J. `app`**：`plugins()` 的三个插件和 `agents` 的 "conversations" 插件放进 `PluginSet`（`Profile::Desktop`；test profile 不装）。
-- **K. `bench`**：预算表加 `conversation/stream_apply`（「性能」）。
+- **J. `app`**：`plugins()` 的三个插件和 `agents` 的 "conversations" 插件放进 `PluginSet`（`Profile::Desktop`；test profile 不装）。已实现，见 [app 设计「conversation 的装配」](app.md#conversation-的装配)。
+- **K. `bench`**：预算表加 `conversation/stream_apply`（「性能」）。已实现（夹具是本 crate 的 `fixture`，`test-support` feature）。
 
 ## 未决问题
 
@@ -950,6 +950,17 @@ Terminal 页、终端的快捷键与离开守卫，叠在第 2 步和前置条�
   - `logs_hold_no_contents` 加上第 3 步的流程：空闲的链路先断开再恢复（第一次被拒绝为 `too_many`，第二次 `started`）、终端的标题和画面带金丝雀、`Listed` 与 `Frame`、换会话再回来时页开在 Terminal 页、关闭终端、离开守卫弹出确认并被回答；没有记录含金丝雀；`terminal resume requested`（`outcome`、`disconnected`）、`terminal closed`（`state`）、`terminal leave answered`（`scope`、`running`、`answer`）、`conversation shown` 的 `page` 为 `terminal` 都在，并带 `session` 作用域（`terminal leave not asked` 的字段在 `leave_guard_without_a_window_goes_on`、`leave_guard_goes_on_after_the_window_closed_until_a_page_is_built_again` 里检查）。
 - 没有验证：真实的终端进程、真实的 `terminal` 服务和真实的 `Window::prompt`（测试平台的假对话框；系统对话框的外观、按钮顺序、Esc 对应哪个按钮）；终端网格在 300pt 宽的检查器里的真实排版与输入法；`area` 在真实窗口里量到的值与 `Resize` 的先后（测试窗口只做布局）；快捷键 ⌘C、⌘V、⌘A、Esc 经 `workspace` 装载之后在 Terminal 页里的行为（只验证了登记的内容与 `terminal_view::key_bindings()` 相同）；`app` 装配之后离开守卫与 `workspace` 的联动（第 4 步）。
 
+### 第 4 步
+
+`app` 装配（J）与基准（K），叠在第 3 步和前置条件 C（`agents` 的 ACP 客户端第 6 到 8 步）上，在 macOS（arm64，Apple M5 Pro，macOS 27.0.1）上运行。没有运行应用，没有打开真实窗口，没有启动任何真实的 ACP 适配器或终端进程：下面全部是无窗口的 `#[gpui::test]`（GPUI 的测试平台）、纯函数测试、基准和 `just` 入口。
+
+- `just check`（含 clippy `-D warnings`、文档链接和架构检查：`app` 依赖 `lectern-conversation`，`lectern-bench` 的开发依赖带 `test-support`，都是允许的方向）、`just test -p lectern-conversation`（104 个测试通过，比第 3 步多 `stream_apply_changes_only_the_last_item`）、`just test -p lectern-app`（56 个通过；默认 profile 跳过 `tests/startup.rs`、`probe.rs`、`bench_probe.rs` 三个会开窗口的测试二进制）、`just test -p lectern-bench`（181 个通过，跳过 6 个）、`just deny` 通过；`cargo metadata --format-version 1 --locked --all-features` 通过。`Cargo.lock` 的差异只有 `lectern-app` 与 `lectern-bench` 的依赖列表里多了 `lectern-conversation`，没有新的外部 crate。`tools/automation/Cargo.lock`（自动化构建的独立工作区，依赖 `lectern-app`）也要更新，否则它的 `--locked` 构建失败：多了 `lectern-conversation`、`lectern-terminal-view` 两个包和 `lectern-app` 依赖列表里的 `lectern-conversation`（另有 `lectern-agents` 的依赖列表补上了之前合并的 PR 漏掉的 `lectern-git`、`lectern-platform`、`rustix`），更新之后 `cargo metadata --locked --manifest-path tools/automation/Cargo.toml` 通过。
+- 「验收」的四条 `rg` 检查没有结果，`rg 'TerminalPane::new' crates/conversation/src` 仍只有 `src/view/terminal.rs` 一处。
+- `every_profile_graph_validates`：desktop 与 probe 的插件数为 19（比 15 多 `conversations`、`conversation`、`conversation-live`、`conversation-terminal`），图校验通过：`dyn Conversations`、`dyn Terminals`、`dyn Contributions`、`dyn SessionSource`、`dyn Projects` 都有提供者；临时目录之后仍是空的。
+- `conversation/stream_apply`：`cargo bench --locked -p lectern-bench --all-features --bench time -- conversation/`，不开真实窗口。p95 655 µs（预算 ≤ 2 ms），中位数 459 µs，最大 749 µs，721 个样本，状态 `ok`（报告标 noisy）。不画帧、只算 `apply`（`items::build`、比较、`splice`）时 p95 568 µs，所以这一帧在测试平台上约增加 90 µs；这个数是测试平台的帧，真实窗口里的文字排版更贵，没有测。夹具由 `stream_apply_changes_only_the_last_item` 守住：120 项、正文恰好 1 MiB，450 步（两个多周期）每一步只替换最后一项。预算表和 bench 设计的表加了这一条；没有放宽任何预算。
+- 发布构建（`cargo build --release --locked -p lectern-app`）的 `lectern` 为 44 857 712 字节，装配前的基线没有测（main 上还合并了别的 PR，不能和 terminal 装配时的数字比）；ADR 0018 的 80 MB 是安装包，没有打包，没有核对。
+- 没有验证：`tests/startup.rs`（`plugins` 为 19，首帧之前没有 target 为 `conversation` 的记录）、`tests/bench_probe.rs`（19 个应答）、`tests/probe.rs` 都要图形会话，已写好，没有在本机运行，结果以 macOS CI 为准；冷启动（`app/cold_start`）、空闲内存（`app/idle_empty`）、`plugin/conversation*/activate`、`plugin/conversations/activate` 没有测；设计「验收」第 4 步的真机验证（发布构建、已安装并登录的两个适配器、回复一句、命令卡片、审阅页出现新一轮、空闲 10 分钟后适配器退出、Terminal 页恢复）一项也没有做，因为没有适配器、不能打开真实窗口；前置条件 H 没有。
+
 ## 与设计的差异
 
 前置条件 B（`services` 的 `conversation` 模块）：
@@ -994,3 +1005,12 @@ Terminal 页、终端的快捷键与离开守卫，叠在第 2 步和前置条�
 8. **Action。** `ResumeInTerminal`、`CloseTerminal` 与其他 Action 一样挂在页的根元素上，再交给 Terminal 页；KeyContext `conversation-terminal` 在 Terminal 页的元素上（终端网格自己的 `terminal` 在它里面）。
 9. **日志。** `conversation shown` 的 `page` 是页打开时所在的页（设计的表已有这个字段，第 1 步写死为 `messages`）；另有 debug `terminal resume skipped` 和 warn `terminal leave not asked`。
 10. **测试。** 假的 `Terminals` 现在记录 `open`、`watch`、`frame`、`input`、`close`、复制时收到的 token，`open` 按真实服务的规则登记（`Starting`、`AlreadyRunning`、替换已结束的终端）；假的 `Contributions` 记录离开守卫。`lectern-terminal-view` 另作为带 `test-support` 的开发依赖，只用它的 `testing::frame` 给假服务造画面（它不是插件 crate，架构检查通过）。`Refs #12` 一并写进提交（「验收」第 3 步），任务要求的 `Refs #23`、`Refs #24` 也在。
+
+第 4 步（`app` 装配、基准）：
+
+1. **没有 `Closes`。** 设计写第 4 步用 `Closes #23`、`Closes #24`（`terminal`、`terminal_view` 的 PR 都已合并时 `Closes #12`）。前置条件 H（`project_home` 的等待标记）还没有，真机验证没有做，所以提交写 `Refs #23`、`Refs #24`，没有 `Closes`；`Refs #12`（`app/input_frames` 和 `terminal_view` 第 3 步的真机验证没有做）。
+2. **H 没有做，装配也没有它。** H 是 `project_home` 的一个新插件（requires `dyn Conversations`）、会话行与卡片的显示、两个语言的键和语义树快照，属于那个 crate 的设计与 PR（设计「对其他 crate 的要求」开头：每一项各自一个 PR）。设计写第 4 步 desktop 的插件数「加四」，不含 H，所以 `app` 现在是 19 个，H 合并时再加一个。没有它时侧栏的会话行没有「等你处理」的标记，权限请求仍会让检查器切到 Conversation 页（「未决问题」3）。
+3. **离开守卫的缺口没有补，仍是「已知限制」。** 关闭窗口、从 Dock 重开、没有再显示过 Conversation 页时按 ⌘Q，运行中的终端不经确认就结束。评估过两种办法，都不小：`LeaveGuard::ask` 带窗口（`services` 的 trait 变化，`workspace`、`review_view`、`file_reader` 等所有守卫和测试的假实现都要改），或 `workspace` 代为弹出（`Item`、`Effect`、根视图里的 `Window::prompt`、`services` 里的请求类型，以及 `workspace` 设计的修订）。两者都超出本步范围，也都不能解决窗口全部关闭、没有 Dock 重开时的情况（没有窗口就不能弹出确认）。
+4. **基准的夹具是 `MessagesModel` 加 GPUI 测试平台的窗口。** 设计写「测每次 `items::build` 加 `splice` 加这一项的排版」，没有说怎样排版。夹具 `fixture::StreamApply` 用真实的 `MessagesModel::apply` 和 `render_body`，每一步画一帧；`apply`、`render_body` 和几个测试用的读方法因此从私有、`cfg(test)` 改为 `pub(crate)`、`cfg(any(test, feature = "test-support"))`，`Shared::new` 改为 `pub(crate)`。`test-support` feature 打开 `gpui/test-support`，所以 `app` 不能启用它（发布构建里没有）。最后一段 agent 说明从 16 KiB 起，200 步后约 55 KiB，在 64 KiB 的上限之内；设计写 1 MiB「合计」，夹具的正文恰好 1 MiB。
+5. **`terminal_keys_reach_the_terminal` 没有写。** [terminal_view 设计](terminal_view.md)把它列在第 3 步的 `app` 一侧。它要 `app` 装配后的完整快捷键表，不是本步的验收条件，没有做；`terminal_view` 设计的状态行如实写了。
+

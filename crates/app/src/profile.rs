@@ -4,8 +4,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lectern_agents::{AgentRoots, AgentsDeps, SessionFilter};
+use lectern_agents::{
+    AgentRoots, AgentsDeps, ConversationsDeps, SessionFilter, conversations_plugin,
+};
 use lectern_cache::Cache;
+use lectern_conversation::{
+    LIVE_ID as CONVERSATION_LIVE_ID, PLUGIN_ID as CONVERSATION_ID,
+    TERMINAL_ID as CONVERSATION_TERMINAL_ID,
+};
 use lectern_executor::Executor;
 use lectern_fs_watch::Watcher;
 use lectern_kernel::PluginSet;
@@ -89,7 +95,9 @@ impl Profile {
     /// Desktop: `project`, the two session sources, `review`, `usage`,
     /// `workspace`, `welcome`, `welcome-discovery`, `welcome-review`,
     /// `project-home`, `project-home-usage`, `review-view`, `worktrees`,
-    /// `worktrees-usage` and `terminal` (docs/design/app.md「插件与资源」).
+    /// `worktrees-usage`, `terminal`, `conversations`, `conversation`,
+    /// `conversation-live` and `conversation-terminal`
+    /// (docs/design/app.md「插件与资源」).
     /// Test: none. With the number of plugins, for the log (`PluginSet` does
     /// not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
@@ -198,7 +206,21 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
             executor: r.executor.clone(),
         }),
     );
-    (set, count + 9)
+    // The conversation. `conversations` (the ACP client, which provides
+    // `dyn Conversations`) starts no process until a prompt is sent; the
+    // three plugins of the inspector's Conversation page only register and
+    // hold service references. All four activate after the first frame
+    // (docs/design/app.md「conversation 的装配」).
+    let (id, conversations) = conversations_plugin(ConversationsDeps {
+        executor: r.executor.clone(),
+    });
+    let (page, live, terminal_page) = lectern_conversation::plugins();
+    let set = set
+        .with(id, conversations)
+        .with(CONVERSATION_ID, page)
+        .with(CONVERSATION_LIVE_ID, live)
+        .with(CONVERSATION_TERMINAL_ID, terminal_page);
+    (set, count + 13)
 }
 
 /// `usage`'s local time zone: `platform::time::utc_offset`

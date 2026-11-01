@@ -3,7 +3,7 @@
 终端网格绘制（Conversation 的 Terminal 页）。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：[docs/design/terminal_view.md](../../docs/design/terminal_view.md)（已接受，实现中：第 1 步、第 2 步已实现，第 3 步（装配与真机验证）在 `conversation`、`app` 的 PR 里）。本 crate 是非插件的视图库，由 `conversation` 的 Terminal 页使用。实现按它的「验收」分三步：`ui` 终端配色与 `i18n` 的键、`TerminalPane`、装配与真机验证。
+- 设计文档：[docs/design/terminal_view.md](../../docs/design/terminal_view.md)（已接受，实现中：第 1 步、第 2 步已实现，第 3 步（装配与真机验证）的装配一半已在 `conversation`、`app` 的 PR 里完成：Terminal 页嵌入 `TerminalPane`，`conversation-terminal` 与 `terminal` 已装配；`app` 的 `terminal_keys_reach_the_terminal`、`app/input_frames`、`app/terminal_output_frames` 和真机验证还没有）。本 crate 是非插件的视图库，由 `conversation` 的 Terminal 页使用。实现按它的「验收」分三步：`ui` 终端配色与 `i18n` 的键、`TerminalPane`、装配与真机验证。
 - issue：[#5](https://github.com/SoloJiang/lectern-app/issues/5)、[#12](https://github.com/SoloJiang/lectern-app/issues/12)
 - ADR：[0002](../../docs/adr/0002.md)、[0012](../../docs/adr/0012.md)
 

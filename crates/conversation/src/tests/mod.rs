@@ -1,3 +1,5 @@
+#[cfg(feature = "test-support")]
+mod fixture;
 mod items;
 mod logs;
 mod plugin;
