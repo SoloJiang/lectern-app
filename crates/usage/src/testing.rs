@@ -19,9 +19,10 @@ use lectern_services::project::{
     RelPath, ResolveError, Resolved, ScanError, Worktree, WorktreeKey,
 };
 use lectern_services::session::{
-    Agent, Batch, Content, ContentRef, Cursor, Diagnostics, Format, Parent, Place, Positioned,
-    Record, ResumeCommand, SessionError, SessionKey, SessionList, SessionSource, SessionSummary,
-    SessionsChanged, SourceId, Timestamp, TurnIndex,
+    Agent, Batch, Content, ContentRef, Cursor, Diagnostics, FileEdit, Format, Parent, Place,
+    Positioned, Record, ResumeCommand, SessionError, SessionKey, SessionList, SessionSource,
+    SessionSummary, SessionsChanged, SourceId, Timestamp, ToolCall, ToolCallId, ToolKind,
+    ToolStatus, Turn, TurnId, TurnIndex, TurnItem,
 };
 
 use crate::LocalZone;
@@ -30,9 +31,9 @@ use crate::time::Time;
 mod scenario;
 
 pub use scenario::{
-    ArchiveStep, ArchiveTotals, HEAVY_NOW, HEAVY_REPOS, HEAVY_SESSIONS, HEAVY_TURNS, HEAVY_USAGES,
-    HeavySession, LINE_BYTES, Scenario, Stored, TURN_BYTES, TURN_LINES, heavy_days, heavy_fill,
-    heavy_open, heavy_roots, heavy_sessions, synthetic_turns,
+    ArchiveStep, ArchiveTotals, Finished, HEAVY_NOW, HEAVY_REPOS, HEAVY_SESSIONS, HEAVY_TURNS,
+    HEAVY_USAGES, HeavySession, LINE_BYTES, Scenario, Stored, TURN_BYTES, TURN_LINES, heavy_days,
+    heavy_fill, heavy_open, heavy_roots, heavy_sessions, synthetic_turns,
 };
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -177,6 +178,17 @@ struct Inner {
     generation: u64,
     sessions: Vec<FakeSession>,
     reads: HashMap<Arc<str>, usize>,
+    /// The turns each session's index holds (`FakeSessions::edit_call`).
+    index: HashMap<Arc<str>, Vec<Turn>>,
+    /// What `load` gives, by session and the `pos` of the reference.
+    contents: HashMap<(Arc<str>, u64), Content>,
+    /// `turns_unretained` calls, and `load` calls, per session.
+    index_reads: HashMap<Arc<str>, usize>,
+    loads: HashMap<Arc<str>, usize>,
+    /// The next `pos` of a content reference.
+    next_ref: u64,
+    /// `turns_unretained` fails with an IO error (`FakeSessions::fail_index`).
+    index_fails: bool,
 }
 
 /// A `SessionSource` replaying record scripts; counts its reads.
@@ -200,6 +212,12 @@ impl FakeSessions {
                 generation: 1,
                 sessions: Vec::new(),
                 reads: HashMap::new(),
+                index: HashMap::new(),
+                contents: HashMap::new(),
+                index_reads: HashMap::new(),
+                loads: HashMap::new(),
+                next_ref: 0,
+                index_fails: false,
             }),
         }
     }
@@ -364,6 +382,87 @@ impl FakeSessions {
     pub fn total_reads(&self) -> usize {
         lock(&self.inner).reads.values().sum()
     }
+
+    /// An `Edit` call of a turn as the session's turn index and `load` give
+    /// it: the call (completed, naming `paths`) is added to the turn, which
+    /// is created when the index has none of this ID yet, and `load` of its
+    /// input gives `edits`. The records of the log (`ToolStarted`,
+    /// `ToolFinished`) are the test's own.
+    pub fn edit_call(
+        &self,
+        session: &str,
+        turn: &str,
+        call: &str,
+        paths: &[PathBuf],
+        edits: Vec<FileEdit>,
+    ) {
+        self.edit_call_with(session, turn, call, paths, edits, ToolStatus::Completed);
+    }
+
+    /// The same with the status the index gives the call.
+    pub fn edit_call_with(
+        &self,
+        session: &str,
+        turn: &str,
+        call: &str,
+        paths: &[PathBuf],
+        edits: Vec<FileEdit>,
+        status: ToolStatus,
+    ) {
+        let mut inner = lock(&self.inner);
+        let id: Arc<str> = session.into();
+        let at = ContentRef::new(inner.next_ref, 0, 0);
+        inner.next_ref += 1;
+        inner
+            .contents
+            .insert((id.clone(), at.pos()), Content::Edits(edits.into()));
+        let turns = inner.index.entry(id).or_default();
+        let position = match turns.iter().position(|t| &*t.id.0 == turn) {
+            Some(p) => p,
+            None => {
+                turns.push(Turn {
+                    id: TurnId(turn.into()),
+                    ordinal: turns.len() as u32 + 1,
+                    started_at: Timestamp(0),
+                    ended_at: None,
+                    prompt: None,
+                    prompt_preview: "".into(),
+                    items: Arc::from(Vec::new()),
+                });
+                turns.len() - 1
+            }
+        };
+        let t = &mut turns[position];
+        let mut items: Vec<TurnItem> = t.items.iter().cloned().collect();
+        items.push(TurnItem::Tool(ToolCall {
+            id: ToolCallId(call.into()),
+            name: "Edit".into(),
+            kind: ToolKind::Edit {
+                paths: paths.to_vec().into(),
+            },
+            started_at: Timestamp(0),
+            finished: Some((Timestamp(0), status)),
+            input: at,
+            result: None,
+        }));
+        t.items = items.into();
+        inner.generation += 1;
+    }
+
+    /// Makes `turns_unretained` fail with an IO error (or work again).
+    pub fn fail_index(&self, fails: bool) {
+        lock(&self.inner).index_fails = fails;
+    }
+
+    /// `turns_unretained` calls for a session so far.
+    pub fn index_reads(&self, id: &str) -> usize {
+        lock(&self.inner).index_reads.get(id).copied().unwrap_or(0)
+    }
+
+    /// `load` calls for a session so far.
+    pub fn loads(&self, id: &str) -> usize {
+        lock(&self.inner).loads.get(id).copied().unwrap_or(0)
+    }
 }
 
 fn record_at(r: &Record) -> Option<i64> {
@@ -441,12 +540,33 @@ impl SessionSource for FakeSessions {
         Err(SessionError::Unrecognized)
     }
 
-    fn turns_unretained(&self, _: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
-        Err(SessionError::Unrecognized)
+    /// The turns `edit_call` registered; `Unrecognized` for a session
+    /// without any.
+    fn turns_unretained(&self, key: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
+        let mut inner = lock(&self.inner);
+        *inner.index_reads.entry(key.id.clone()).or_default() += 1;
+        if inner.index_fails {
+            return Err(SessionError::Io("the index cannot be read".into()));
+        }
+        match inner.index.get(&key.id) {
+            Some(turns) => Ok(Arc::new(TurnIndex {
+                session: key.clone(),
+                cursor: Cursor::START,
+                turns: turns.clone().into(),
+                format: Format::Known,
+            })),
+            None => Err(SessionError::Unrecognized),
+        }
     }
 
-    fn load(&self, _: &SessionKey, _: &ContentRef) -> Result<Content, SessionError> {
-        Err(SessionError::NotFound)
+    fn load(&self, key: &SessionKey, at: &ContentRef) -> Result<Content, SessionError> {
+        let mut inner = lock(&self.inner);
+        *inner.loads.entry(key.id.clone()).or_default() += 1;
+        inner
+            .contents
+            .get(&(key.id.clone(), at.pos()))
+            .cloned()
+            .ok_or(SessionError::NotFound)
     }
 
     fn resume(&self, _: &SessionKey) -> Option<ResumeCommand> {
@@ -474,7 +594,8 @@ impl FakeProjects {
         FakeProjects::default()
     }
 
-    /// A repository with its main worktree at `root`.
+    /// A repository with its main worktree at `root`; called again with the
+    /// same common directory it adds a linked worktree (its own worktree key).
     pub fn repo(&self, root: &Path, common_dir: &Path) -> ProjectKey {
         lock(&self.repos).push((root.to_owned(), common_dir.to_owned()));
         ProjectKey::Git {
@@ -606,7 +727,7 @@ impl FakeProjects {
                 project: ProjectKey::Git {
                     common_dir: common.as_path().into(),
                 },
-                worktree: Some(WorktreeKey(common.as_path().into())),
+                worktree: Some(WorktreeKey(root.as_path().into())),
                 rel: rel(path, root),
             });
         }

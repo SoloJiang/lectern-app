@@ -16,16 +16,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lectern_services::project::ProjectKey;
-use lectern_services::session::Agent;
+use lectern_services::session::{Agent, TurnId};
 use lectern_services::usage::{
     AliasId, AllUsage, DayTotals, HistoryUsage, LocalDate, ProjectInfo, ProjectStatus,
-    ProjectUsage, SnapshotHeader, Tokens, UsageSnapshot, UsageState, Window,
+    ProjectUsage, SessionUsage, SnapshotHeader, Tokens, UsageSnapshot, UsageState, Window,
 };
 
 use crate::round::largest_remainder;
 use crate::store::cold::{self, HistoryTotals};
 use crate::store::under;
-use crate::store::{Aliases, FactDelta, FolderRoot, ProjectRow, Totals, temporary_of};
+use crate::store::{
+    Aliases, FactDelta, FolderRoot, ProjectRow, SessionTotals, Totals, temporary_of,
+};
 use crate::window::BUCKET_MS;
 
 /// Agents in a fixed order: Claude Code, Codex, then the others by name.
@@ -335,6 +337,36 @@ fn fill_project(acc: &mut ProjectAcc, totals: &Totals) {
 
 fn signed(m: &[u64; 4]) -> [i64; 4] {
     m.map(|v| i64::try_from(v).unwrap_or(i64::MAX))
+}
+
+/// The tokens of a session and of each of its own turns
+/// (`UsageQuery::Session`): the total is the session's and its
+/// sub-agents' facts rounded to whole tokens; the branch rows come with the
+/// branches (step 5). The turns are the tokens of the usage counted in each,
+/// not divided between targets.
+pub(crate) fn session(header: SnapshotHeader, totals: &SessionTotals) -> SessionUsage {
+    let total = round_rows(&[totals.micro])[0];
+    let turns = totals
+        .turns
+        .iter()
+        .map(|(turn, t)| {
+            (
+                TurnId(turn.as_str().into()),
+                Tokens {
+                    input: t[0],
+                    output: t[1],
+                    cache_read: t[2],
+                    cache_write: t[3],
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    SessionUsage {
+        header,
+        total,
+        rows: Arc::from(Vec::new()),
+        turns: turns.into(),
+    }
 }
 
 /// The history of a project (`UsageQuery::History`): one row per local

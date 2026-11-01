@@ -12,10 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lectern_logging::{debug, info, warn};
-use lectern_services::session::{Agent, Batch, Cursor, Record, SessionKey, UsageRecord};
+use lectern_services::session::{
+    Agent, Batch, Cursor, Record, SessionKey, ToolCallId, ToolKind, UsageRecord,
+};
 use lectern_services::usage::{LimitKind, LimitSource};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use super::calls::{self, PathPlace};
 use super::cold::{self, Frozen};
 use super::dedup::{Deltas, FactDelta};
 use super::limits::{self, Sample};
@@ -39,6 +42,8 @@ pub(crate) struct SessionInfo<'a> {
     pub(crate) key: &'a SessionKey,
     pub(crate) agent: &'a Agent,
     pub(crate) parent: Option<&'a SessionKey>,
+    /// The tool call of the parent that spawned the session.
+    pub(crate) parent_call: Option<&'a ToolCallId>,
     pub(crate) inheritance_unknown: bool,
     /// The place of the session's starting cwd: the cwd until a `Context`
     /// record says otherwise.
@@ -55,6 +60,8 @@ pub(crate) struct Ingest<'a> {
     pub(crate) batch: &'a Batch,
     /// The place of every cwd of the batch's `Context` records.
     pub(crate) places: &'a HashMap<PathBuf, Place>,
+    /// Where every file named by an `Edit` call of the batch lies.
+    pub(crate) paths: &'a HashMap<PathBuf, PathPlace>,
     /// The log file as it was just before the read; kept when the batch
     /// reaches the end, so the next run skips an unchanged file.
     pub(crate) stamp: Option<FileStamp>,
@@ -133,6 +140,8 @@ pub(crate) struct Ingested {
     pub(crate) inheritance_unknown: bool,
     /// A `RateLimits` record changed a stored limit sample.
     pub(crate) limits_changed: bool,
+    /// The session has turns not settled yet (docs/design/usage.md「轮次的观察与改动项」).
+    pub(crate) turns_pending: bool,
     /// The ingest commit counter (`meta.commits`) of this batch.
     pub(crate) commit: i64,
     /// Cursor offsets before and after.
@@ -358,6 +367,9 @@ fn ingest(
     // records of that month are already in the database (cold, or hot in an
     // older generation). They then stay as they are: cold data rules.
     let mut keep_cold: HashMap<cold::Month, bool> = HashMap::new();
+    // The latest record time of each turn the batch touched and the turns
+    // it closed, written once at the end.
+    let mut touch = Touch::default();
 
     for rec in &batch.records {
         match &rec.value {
@@ -399,6 +411,14 @@ fn ingest(
                 let (turn_id, location) = turn_of(tx, row.id, target, tid)?
                     .map_or((0, state.cwd), |(id, loc)| (id, loc.unwrap_or(state.cwd)));
                 turns.insert(&turn.0, (turn_id, location));
+                // A new prompt ends the turn before it (Claude Code has no
+                // other end marker). A log read again from its start (after
+                // a migration or a salvage) meets turns it has stored
+                // already: only a turn stored earlier is ended.
+                if let Some(previous) = state.turn.filter(|&p| p < turn_id) {
+                    touch.closed.insert(previous);
+                }
+                touch.at(turn_id, at.0);
                 state.turn = Some(turn_id);
             }
             Record::TurnEnded { turn, at, .. } => {
@@ -407,6 +427,70 @@ fn ingest(
                     "UPDATE turn SET ended_at = ?4 WHERE session = ?1 AND gen = ?2 AND tid = ?3",
                 )?
                 .execute(params![row.id, target, tid, at.0])?;
+                if let Some((id, _)) =
+                    turn_ref(tx, &mut ids, &mut turns, (row.id, target), turn, state.cwd)?
+                {
+                    touch.at(id, at.0);
+                    touch.closed.insert(id);
+                }
+            }
+            Record::ToolStarted(call) => {
+                if frozen.contains(call.at.0) && kept(tx, &mut keep_cold, &row, target, call.at.0)?
+                {
+                    continue;
+                }
+                let turn_id = match &call.turn {
+                    Some(t) => turn_ref(tx, &mut ids, &mut turns, (row.id, target), t, state.cwd)?
+                        .map(|t| t.0),
+                    None => state.turn,
+                };
+                let cid = calls::hash(&call.call.0);
+                if let Some(kind) = calls::stored(&call.kind)
+                    && calls::start(tx, row.id, target, cid, turn_id, call.at.0, kind)?
+                {
+                    warn!("two calls of a session have one key");
+                }
+                if let ToolKind::Edit { paths } = &call.kind {
+                    if let Some(t) = turn_id {
+                        touch.edits.insert(t);
+                    }
+                    for path in paths.iter() {
+                        let Some(found) = input.paths.get(path) else {
+                            continue;
+                        };
+                        let place = (
+                            ids.place(tx, &found.place)?,
+                            match &found.worktree {
+                                Some(w) => Some(ids.text(tx, path_bytes(w))?),
+                                None => None,
+                            },
+                        );
+                        let path = ids.text(tx, path_bytes(path))?;
+                        calls::fact(tx, row.id, cid, path, place, call.at.0)?;
+                    }
+                }
+                if let Some(t) = turn_id {
+                    touch.at(t, call.at.0);
+                }
+            }
+            Record::ToolFinished(done) => {
+                if frozen.contains(done.at.0) && kept(tx, &mut keep_cold, &row, target, done.at.0)?
+                {
+                    continue;
+                }
+                let cid = calls::hash(&done.call.0);
+                let turn_id = calls::finish(
+                    tx,
+                    row.id,
+                    target,
+                    cid,
+                    done.at.0,
+                    calls::status_code(done.status),
+                )?;
+                // A call without a row ended in the turn that is running.
+                if let Some(t) = turn_id.unwrap_or(state.turn) {
+                    touch.at(t, done.at.0);
+                }
             }
             Record::Usage(usage) => {
                 if frozen.contains(usage.at.0)
@@ -416,22 +500,17 @@ fn ingest(
                     continue;
                 }
                 let (turn, location) = match &usage.turn {
-                    Some(t) => match turns.get(&*t.0) {
-                        Some(&found) => (Some(found.0), found.1),
-                        None => {
-                            let tid = ids.text(tx, t.0.as_bytes())?;
-                            match turn_of(tx, row.id, target, tid)? {
-                                Some((id, loc)) => {
-                                    let loc = loc.unwrap_or(state.cwd);
-                                    turns.insert(&t.0, (id, loc));
-                                    (Some(id), loc)
-                                }
-                                None => (None, state.cwd),
-                            }
+                    Some(t) => {
+                        match turn_ref(tx, &mut ids, &mut turns, (row.id, target), t, state.cwd)? {
+                            Some((id, loc)) => (Some(id), loc),
+                            None => (None, state.cwd),
                         }
-                    },
+                    }
                     None => (state.turn, state.cwd),
                 };
+                if let Some(t) = turn {
+                    touch.at(t, usage.at.0);
+                }
                 let model = match &usage.model {
                     Some(m) => ids.text(tx, m.as_bytes())?,
                     None => match state.model {
@@ -496,10 +575,10 @@ fn ingest(
                     )?;
                 }
             }
-            Record::ToolStarted(_) | Record::ToolFinished(_) => {}
         }
     }
 
+    touch.write(tx)?;
     tx.prepare_cached(
         "INSERT INTO session_gen (session, gen, cwd, model, turn) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (session, gen) DO UPDATE SET
@@ -549,6 +628,11 @@ fn ingest(
     if out.kept_cold > 0 {
         info!("replayed records of archived months kept cold"; records = out.kept_cold);
     }
+    out.turns_pending = tx
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM turn WHERE session = ?1 AND gen = ?2 AND done = 0)",
+        )?
+        .query_row(params![row.id, row.generation], |r| r.get(0))?;
     out.facts = std::mem::take(&mut deltas.facts);
     out.facts_unknown = deltas.unknown;
     out.inheritance_unknown = info.inheritance_unknown;
@@ -605,6 +689,7 @@ fn session_row(
         )),
         None => None,
     };
+    let parent_call = info.parent_call.map(|c| calls::hash(&c.0));
     let found: Option<FoundSession> = tx
         .prepare_cached(
             "SELECT id, gen, replay, cursor, agent FROM session WHERE source = ?1 AND sid = ?2",
@@ -628,14 +713,15 @@ fn session_row(
             }
             tx.prepare_cached(
                 "UPDATE session SET agent = ?2, parent_source = ?3, parent_sid = ?4,
-                   inheritance_unknown = ?5 WHERE id = ?1",
+                   inheritance_unknown = ?5, parent_call = ?6 WHERE id = ?1",
             )?
             .execute(params![
                 id,
                 agent,
                 parent.map(|p| p.0),
                 parent.map(|p| p.1),
-                info.inheritance_unknown
+                info.inheritance_unknown,
+                parent_call
             ])?;
             let cursor = Cursor::from_bytes(&cursor).unwrap_or(Cursor::START);
             Ok(SessionRow {
@@ -649,8 +735,8 @@ fn session_row(
         None => {
             tx.prepare_cached(
                 "INSERT INTO session (source, sid, agent, parent_source, parent_sid, cursor,
-                                      inheritance_unknown)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                                      inheritance_unknown, parent_call)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?
             .execute(params![
                 source,
@@ -659,7 +745,8 @@ fn session_row(
                 parent.map(|p| p.0),
                 parent.map(|p| p.1),
                 Cursor::START.to_bytes(),
-                info.inheritance_unknown
+                info.inheritance_unknown,
+                parent_call
             ])?;
             Ok(SessionRow {
                 id: tx.last_insert_rowid(),
@@ -675,7 +762,8 @@ fn session_row(
 fn has_rows(tx: &Connection, session: i64) -> rusqlite::Result<bool> {
     tx.prepare_cached(
         "SELECT EXISTS (SELECT 1 FROM usage_source WHERE session = ?1)
-             OR EXISTS (SELECT 1 FROM turn WHERE session = ?1)",
+             OR EXISTS (SELECT 1 FROM turn WHERE session = ?1)
+             OR EXISTS (SELECT 1 FROM call WHERE session = ?1)",
     )?
     .query_row(params![session], |r| r.get(0))
 }
@@ -701,6 +789,64 @@ fn gen_state(
     Ok(GenState { cwd, model, turn })
 }
 
+/// The latest record time of each turn a batch touched, and the turns it
+/// closed: written once at the end of the batch.
+#[derive(Default)]
+struct Touch {
+    last: HashMap<i64, i64>,
+    closed: HashSet<i64>,
+    /// Turns that have an `Edit` call.
+    edits: HashSet<i64>,
+}
+
+impl Touch {
+    fn at(&mut self, turn: i64, at: i64) {
+        let last = self.last.entry(turn).or_insert(at);
+        *last = (*last).max(at);
+    }
+
+    fn write(&self, tx: &Connection) -> rusqlite::Result<()> {
+        for (&turn, &at) in &self.last {
+            tx.prepare_cached(
+                "UPDATE turn SET last_at = max(coalesce(last_at, 0), ?2) WHERE id = ?1",
+            )?
+            .execute(params![turn, at])?;
+        }
+        for &turn in &self.closed {
+            tx.prepare_cached("UPDATE turn SET closed = 1 WHERE id = ?1")?
+                .execute(params![turn])?;
+        }
+        for &turn in &self.edits {
+            tx.prepare_cached("UPDATE turn SET edits = 1 WHERE id = ?1")?
+                .execute(params![turn])?;
+        }
+        Ok(())
+    }
+}
+
+/// A turn of the generation by its `TurnId`: its row and its cwd's
+/// location (`cwd` when a salvage lost it), remembered for the batch. None
+/// when the turn is not stored (its month is archived, or a salvage lost
+/// it).
+fn turn_ref<'a>(
+    tx: &Connection,
+    ids: &mut Ids,
+    turns: &mut HashMap<&'a str, (i64, i64)>,
+    (session, generation): (i64, i64),
+    turn: &'a lectern_services::session::TurnId,
+    cwd: i64,
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    if let Some(&found) = turns.get(&*turn.0) {
+        return Ok(Some(found));
+    }
+    let tid = ids.text(tx, turn.0.as_bytes())?;
+    Ok(turn_of(tx, session, generation, tid)?.map(|(id, loc)| {
+        let found = (id, loc.unwrap_or(cwd));
+        turns.insert(&turn.0, found);
+        found
+    }))
+}
+
 /// A turn's row and location in a generation (None after a salvage lost it).
 fn turn_of(
     tx: &Connection,
@@ -715,11 +861,21 @@ fn turn_of(
         .optional()
 }
 
+/// The statement that deletes the rows of `table` (`item` or `share`) of the
+/// turns of one session's generation that are hot (`?1` the session, `?2`
+/// the generation). The turns are found by their own index.
+pub(crate) fn drop_by_turn_sql(table: &str, hot_turn: &str) -> String {
+    format!(
+        "DELETE FROM {table} WHERE turn IN (
+           SELECT id FROM turn WHERE session = ?1 AND gen = ?2 AND {hot_turn})"
+    )
+}
+
 /// Deletes a generation's rows, collecting the keys to choose again. Rows
 /// of frozen months stay (docs/design/usage.md「冷热分层」: an archived
 /// month's data is not replaced by a replay); they keep their old
 /// generation number.
-fn drop_generation(
+pub(crate) fn drop_generation(
     tx: &Connection,
     session: i64,
     generation: i64,
@@ -737,8 +893,20 @@ fn drop_generation(
         }
     }
     let hot_turn = format!("NOT {}", frozen.sql("started_at"));
+    // The changed files and the shares are found through the generation's
+    // turns (an index on `item` by session would cost a row more for each
+    // of millions): so they go before the turns do.
+    tx.execute(
+        &drop_by_turn_sql("item", &hot_turn),
+        params![session, generation],
+    )?;
+    tx.execute(
+        &drop_by_turn_sql("share", &hot_turn),
+        params![session, generation],
+    )?;
     for (table, hot) in [
         ("usage_source", hot_source.as_str()),
+        ("call", hot_turn.as_str()),
         ("turn", hot_turn.as_str()),
         ("session_gen", "1"),
     ] {

@@ -18,6 +18,7 @@ use lectern_services::usage::{
 };
 
 use crate::engine::{Context, READ_BYTES, compute, place_of_key};
+use crate::finalize::Settled;
 use crate::store::{FileStamp, Ingest, Ingested, Place, SessionInfo, Store};
 use crate::testing::{FakeProjects, FakeSessions, TableZone};
 use crate::window;
@@ -253,14 +254,64 @@ impl Harness {
                 places.insert(cwd.to_path_buf(), self.place(&summary, cwd));
             }
         }
+        let mut paths = HashMap::new();
+        for r in &batch.records {
+            if let Record::ToolStarted(call) = &r.value
+                && let lectern_services::session::ToolKind::Edit { paths: named } = &call.kind
+            {
+                for p in named.iter() {
+                    paths.entry(p.clone()).or_insert_with(|| self.path_place(p));
+                }
+            }
+        }
         PendingRead {
             summary,
             cursor,
             batch,
             stamp,
             places,
+            paths,
             start,
         }
+    }
+
+    pub(crate) fn path_place(&self, path: &Path) -> crate::store::PathPlace {
+        crate::paths::dir_place(Some(&self.projects), crate::paths::dir_of(path))
+    }
+
+    /// One batch of a session's ready turns, as the engine settles them.
+    pub(crate) fn settle(&self, fake: &FakeSessions, id: &str, now: i64) -> Settled {
+        let key = fake.key(id);
+        let summary = lectern_services::session::SessionSource::sessions(fake)
+            .get(&key)
+            .cloned()
+            .expect("session");
+        let resolve = |p: &Path| self.path_place(p);
+        crate::finalize::settle(&crate::finalize::Settling {
+            store: self.store(),
+            source: fake,
+            key: &key,
+            now_ms: now,
+            end_open: !summary.open_turn,
+            resolve: &resolve,
+            turns: crate::finalize::BATCH_TURNS,
+            time: crate::finalize::BATCH_TIME,
+        })
+        .unwrap()
+    }
+
+    /// Settles a session's turns that are ready at `now`, batch by batch,
+    /// until none is left; returns the facts the batches changed in all.
+    pub(crate) fn settle_all(&self, fake: &FakeSessions, id: &str, now: i64) -> usize {
+        let mut facts = 0;
+        for _ in 0..1000 {
+            let done = self.settle(fake, id, now);
+            facts += done.written.as_ref().map_or(0, |w| w.facts.len());
+            if !done.more {
+                return facts;
+            }
+        }
+        panic!("settling never finished");
     }
 
     /// The second half: stores the batch (the cursor it was read from may
@@ -272,12 +323,14 @@ impl Harness {
                 key: &summary.key,
                 agent: &summary.agent,
                 parent: summary.parent.as_ref().map(|p| &p.session),
+                parent_call: summary.parent.as_ref().and_then(|p| p.tool_call.as_ref()),
                 inheritance_unknown: summary.inheritance_unknown,
                 start: &read.start,
             },
             from: &read.cursor,
             batch: &read.batch,
             places: &read.places,
+            paths: &read.paths,
             stamp: read.stamp,
             now_ms: self.now,
         })
@@ -426,6 +479,7 @@ pub(crate) struct PendingRead {
     pub(crate) batch: lectern_services::session::Batch,
     pub(crate) stamp: Option<FileStamp>,
     pub(crate) places: HashMap<PathBuf, Place>,
+    pub(crate) paths: HashMap<PathBuf, crate::store::PathPlace>,
     pub(crate) start: Place,
 }
 

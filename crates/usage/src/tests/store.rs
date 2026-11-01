@@ -2,14 +2,17 @@
 //! records and cursor in one transaction, migrations with a backup, newer
 //! files, and corruption (REINDEX, then salvage).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use lectern_services::session::{Agent, Positioned, Record, Timestamp};
+use lectern_services::session::{
+    Agent, Positioned, Record, Timestamp, ToolCallId, ToolFinished, ToolKind, ToolStarted,
+    ToolStatus, TurnId,
+};
 use lectern_services::usage::{Tokens, Window};
 use rusqlite::Connection;
 
 use super::support::*;
-use crate::store::schema::{CREATE_V4, CURRENT, Migration, Schema, V1, V2, V3};
+use crate::store::schema::{CREATE_V5, CURRENT, Migration, Schema, V1, V2, V3, V4};
 use crate::store::{BACKUP_PREFIX, Checked, Mode, SALVAGE_FILE, Step, StoreError, fail_at};
 use crate::testing::FakeSessions;
 
@@ -92,45 +95,73 @@ fn store_records_and_cursor_commit_together() {
     assert_eq!(count(&conn, "fact"), 30);
 }
 
-/// Versions after the current one (4), for the migration tests.
-const V5_STEPS: &[Migration] = &[Migration {
-    from: 4,
-    sql: "CREATE TABLE extra_v5 (id INTEGER PRIMARY KEY);",
+/// Versions after the current one (5), for the migration tests.
+const V6_STEPS: &[Migration] = &[Migration {
+    from: 5,
+    sql: "CREATE TABLE extra_v6 (id INTEGER PRIMARY KEY);",
 }];
-static V5: Schema = Schema {
-    version: 5,
-    create: CREATE_V4,
-    migrations: V5_STEPS,
+static V6: Schema = Schema {
+    version: 6,
+    create: CREATE_V5,
+    migrations: V6_STEPS,
 };
-const V7_STEPS: &[Migration] = &[
-    Migration {
-        from: 4,
-        sql: "CREATE TABLE extra_v5 (id INTEGER PRIMARY KEY);",
-    },
+const V8_STEPS: &[Migration] = &[
     Migration {
         from: 5,
-        sql: "ALTER TABLE extra_v5 ADD COLUMN note TEXT;",
+        sql: "CREATE TABLE extra_v6 (id INTEGER PRIMARY KEY);",
     },
     Migration {
         from: 6,
-        sql: "CREATE TABLE extra_v7 (id INTEGER PRIMARY KEY);",
+        sql: "ALTER TABLE extra_v6 ADD COLUMN note TEXT;",
+    },
+    Migration {
+        from: 7,
+        sql: "CREATE TABLE extra_v8 (id INTEGER PRIMARY KEY);",
     },
 ];
-static V6: Schema = Schema {
-    version: 6,
-    create: CREATE_V4,
-    migrations: V7_STEPS,
-};
 static V7: Schema = Schema {
     version: 7,
-    create: CREATE_V4,
-    migrations: V7_STEPS,
+    create: CREATE_V5,
+    migrations: V8_STEPS,
+};
+static V8: Schema = Schema {
+    version: 8,
+    create: CREATE_V5,
+    migrations: V8_STEPS,
 };
 
-/// Turns the current tables into version 3's: the `project` table with a
-/// unique location and without the columns of version 4, no identity
-/// tables, and `fact_bucket` without the project in its key.
-pub(super) const BACK_TO_V3: &str = "
+/// Turns the current tables into version 4's: no calls, items and shares,
+/// and the turn and session columns of version 5 gone.
+macro_rules! back_to_v4 {
+    () => {
+        "
+DROP TABLE call;
+DROP TABLE call_fact;
+DROP TABLE item;
+DROP TABLE share;
+DROP INDEX turn_pending;
+DROP INDEX turn_changed;
+DROP INDEX turn_seq;
+ALTER TABLE turn DROP COLUMN edits;
+DROP INDEX session_parent;
+DROP INDEX usage_source_turn;
+ALTER TABLE turn DROP COLUMN last_at;
+ALTER TABLE turn DROP COLUMN closed;
+ALTER TABLE turn DROP COLUMN done;
+ALTER TABLE turn DROP COLUMN changed;
+ALTER TABLE session DROP COLUMN parent_call;
+"
+    };
+}
+pub(super) const BACK_TO_V4: &str = back_to_v4!();
+
+/// Turns the current tables into version 3's: the ones of version 4, then
+/// the `project` table with a unique location and without the columns of
+/// version 4, no identity tables, and `fact_bucket` without the project in
+/// its key.
+pub(super) const BACK_TO_V3: &str = concat!(
+    back_to_v4!(),
+    "
 DROP TABLE project_fact;
 DROP TABLE alias;
 CREATE TABLE project_v3 (
@@ -149,7 +180,8 @@ CREATE TABLE fact_bucket (
 INSERT INTO fact_bucket
   SELECT bucket, location, agent, model, review, sum(input), sum(output), sum(cache_read),
          sum(cache_write), count(*) FROM fact GROUP BY bucket, location, agent, model, review;
-";
+"
+);
 
 fn backups(dir: &Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(dir)
@@ -168,16 +200,16 @@ fn store_migration_keeps_observations_after_a_backup() {
     h.read_all(&fake, "s");
     let before = h.total();
     h.close(true);
-    let reopened = h.open_with(&V5);
-    assert_eq!(reopened.migrated_from, Some(4));
+    let reopened = h.open_with(&V6);
+    assert_eq!(reopened.migrated_from, Some(5));
     assert_eq!(h.store().mode(), Mode::Writable);
     assert_eq!(h.total(), before);
-    // The copy is the version-4 file, whole.
-    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}4")));
-    assert_eq!(pragma(&copy, "user_version"), 4);
+    // The copy is the version-5 file, whole.
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}5")));
+    assert_eq!(pragma(&copy, "user_version"), 5);
     assert_eq!(count(&copy, "usage_source"), 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 5);
+    assert_eq!(pragma(&main, "user_version"), 6);
     assert_eq!(count(&main, "usage_source"), 5);
     drop((copy, main));
     // Writing still works on the migrated file.
@@ -187,12 +219,12 @@ fn store_migration_keeps_observations_after_a_backup() {
 
     // Two more migrations: only the two most recent copies stay.
     h.close(true);
-    h.open_with(&V6);
-    h.close(true);
     h.open_with(&V7);
+    h.close(true);
+    h.open_with(&V8);
     assert_eq!(
         backups(h.dir.path()),
-        [format!("{BACKUP_PREFIX}5"), format!("{BACKUP_PREFIX}6")]
+        [format!("{BACKUP_PREFIX}6"), format!("{BACKUP_PREFIX}7")]
     );
     assert_eq!(h.total().input, 7);
 }
@@ -239,7 +271,7 @@ fn store_migration_from_version_1_adds_the_cold_tables() {
     assert_eq!(reopened.migrated_from, Some(1));
     assert_eq!(h.total(), before);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 4);
+    assert_eq!(pragma(&main, "user_version"), 5);
     for table in [
         "cold_part",
         "cold_month",
@@ -249,6 +281,10 @@ fn store_migration_from_version_1_adds_the_cold_tables() {
         "limit_sample",
         "project_fact",
         "alias",
+        "call",
+        "call_fact",
+        "item",
+        "share",
     ] {
         assert_eq!(count(&main, table), 0, "{table}");
     }
@@ -288,7 +324,7 @@ fn store_migration_from_version_2_adds_the_limit_samples() {
     assert_eq!(reopened.migrated_from, Some(2));
     assert_eq!(h.total(), before);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 4);
+    assert_eq!(pragma(&main, "user_version"), 5);
     assert_eq!(count(&main, "limit_sample"), 0);
     assert_eq!(count(&main, "usage_source"), 5);
     let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}2")));
@@ -341,7 +377,7 @@ fn store_migration_from_version_3_keeps_every_project_and_sum() {
     }
     assert_eq!(h.project(&repo, Window::D7).total.input, 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 4);
+    assert_eq!(pragma(&main, "user_version"), 5);
     assert_eq!(count(&main, "project_fact"), 0);
     assert_eq!(count(&main, "alias"), 0);
     assert_buckets(&h);
@@ -355,6 +391,47 @@ fn store_migration_from_version_3_keeps_every_project_and_sum() {
 }
 
 #[test]
+fn store_migration_from_version_4_reads_every_session_again() {
+    let mut h = Harness::new();
+    let fake = session("s", 5);
+    h.read_all(&fake, "s");
+    let before = h.total();
+    let key = fake.key("s");
+    h.close(true);
+    // A version-4 file: the same rows without calls, items and shares.
+    let conn = raw(&h.db_path());
+    conn.execute_batch(BACK_TO_V4).unwrap();
+    conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+    drop(conn);
+    let fresh = tempfile::tempdir().unwrap();
+    drop(crate::store::Store::open_with(fresh.path(), &V4, h.now).unwrap());
+    let names = |path: &Path| -> String {
+        raw(path)
+            .query_row(
+                "SELECT group_concat(name) FROM (SELECT name FROM sqlite_schema ORDER BY name)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(names(&h.db_path()), names(&fresh.path().join("usage.db")));
+
+    let reopened = h.open_with(&CURRENT);
+    assert_eq!(reopened.migrated_from, Some(4));
+    assert_eq!(h.total(), before);
+    // Version 4 stored no calls: the session is read again from its start.
+    assert!(h.store().cursor(&key).unwrap().is_start());
+    h.read_all(&fake, "s");
+    assert_eq!(h.total(), before, "nothing counted twice");
+    let main = raw(&h.db_path());
+    assert_eq!(pragma(&main, "user_version"), 5);
+    assert_eq!(count(&main, "usage_source"), 5);
+    assert_buckets(&h);
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}4")));
+    assert_eq!(pragma(&copy, "user_version"), 4);
+}
+
+#[test]
 fn store_failed_backup_leaves_the_old_version_read_only() {
     let mut h = Harness::new();
     let fake = session("s", 5);
@@ -362,14 +439,14 @@ fn store_failed_backup_leaves_the_old_version_read_only() {
     let before = h.total();
     h.close(true);
     // Something that cannot be replaced sits where the copy goes.
-    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}4"));
+    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}5"));
     std::fs::create_dir(&blocker).unwrap();
     std::fs::write(blocker.join("keep"), b"x").unwrap();
-    let reopened = h.open_with(&V5);
+    let reopened = h.open_with(&V6);
     assert_eq!(reopened.migrated_from, None);
     assert!(matches!(h.store().mode(), Mode::Unwritable(_)));
     let version = pragma(&raw(&h.db_path()), "user_version");
-    assert_eq!(version, 4, "not migrated");
+    assert_eq!(version, 5, "not migrated");
     // Read only: no write, the old data still readable.
     let more = session("t", 2);
     let refused = h.try_read_once(&more, "t", 1 << 20);
@@ -584,9 +661,34 @@ fn many(fake: &FakeSessions, ids: std::ops::Range<usize>) {
         fake.add(&id, Path::new(&cwd), OCT_20, None);
         let at = OCT_20 + 10 * HOUR;
         let message = format!("{id}-m");
+        let turn_id = format!("{id}-t");
+        let call = ToolCallId(format!("{id}-c").into());
         let records = vec![
             context(0, at, &cwd),
+            turn(50, &turn_id, at),
             claude(100, at, None, &message, [1, 0, 0, 0]),
+            // An edit of a file in the session's directory.
+            rec(
+                150,
+                Record::ToolStarted(ToolStarted {
+                    call: call.clone(),
+                    turn: Some(TurnId(turn_id.as_str().into())),
+                    at: Timestamp(at),
+                    name: "Edit".into(),
+                    kind: ToolKind::Edit {
+                        paths: vec![PathBuf::from(format!("{cwd}/f.rs"))].into(),
+                    },
+                }),
+            ),
+            rec(
+                160,
+                Record::ToolFinished(ToolFinished {
+                    call,
+                    at: Timestamp(at),
+                    status: ToolStatus::Completed,
+                    exec_session: None,
+                }),
+            ),
         ];
         fake.push(&id, records);
     }
@@ -636,7 +738,16 @@ fn dangling(path: &Path) -> i64 {
            OR (cwd IS NOT NULL AND cwd NOT IN (SELECT id FROM location))
            OR (model IS NOT NULL AND model NOT IN (SELECT id FROM intern))
            OR (turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)))
-      + (SELECT count(*) FROM project WHERE location NOT IN (SELECT id FROM location))";
+      + (SELECT count(*) FROM project WHERE location NOT IN (SELECT id FROM location))
+      + (SELECT count(*) FROM call WHERE session NOT IN (SELECT id FROM session)
+           OR (turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)))
+      + (SELECT count(*) FROM call_fact WHERE session NOT IN (SELECT id FROM session)
+           OR path NOT IN (SELECT id FROM intern)
+           OR location NOT IN (SELECT id FROM location)
+           OR (worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern)))
+      + (SELECT count(*) FROM item WHERE session NOT IN (SELECT id FROM session)
+           OR turn NOT IN (SELECT id FROM turn) OR location NOT IN (SELECT id FROM location)
+           OR path NOT IN (SELECT id FROM intern))";
     raw(path).query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
@@ -835,4 +946,259 @@ fn store_full_disk_fails_the_write_and_keeps_the_cursor() {
     h.read_all(&fake, "s");
     assert_eq!(h.store().mode(), Mode::Writable);
     assert_eq!(h.total().input, 400);
+}
+
+#[test]
+fn store_migration_from_version_4_goes_on_with_a_replay_in_progress() {
+    use super::attribution::{Log, source};
+    let mut h = Harness::new();
+    let lib = h.open_repo("/work/lib");
+    let fake = source();
+    let at = OCT_20 + 9 * HOUR;
+    // The edit is in the first lines; more usage follows.
+    let mut log = Log::new(&fake, "s", "/work/app", at);
+    log.turn("t1", at)
+        .edit("t1", "c1", &["/work/lib/a.rs"], at + 20, 2);
+    for i in 0..4 {
+        log.usage("t1", &format!("m{i}"), at + 100 + i, 5);
+    }
+    log.write();
+    h.read_all(&fake, "s");
+    // The adapter is upgraded: the log is replayed, and a read ends before
+    // the replay does.
+    let records: Vec<_> = {
+        let mut again = Log::new(&fake, "again", "/work/app", at);
+        again
+            .turn("t1", at)
+            .edit("t1", "c1", &["/work/lib/a.rs"], at + 20, 2);
+        for i in 0..4 {
+            again.usage("t1", &format!("m{i}"), at + 100 + i, 5);
+        }
+        std::mem::take(&mut again.records)
+    };
+    fake.replace("s", records);
+    let part = h.read_once(&fake, "s", 450);
+    assert!(part.replay_started && !part.at_end);
+    h.close(true);
+    // A version-4 file: no calls, and the replay still in progress.
+    let conn = raw(&h.db_path());
+    conn.execute_batch(BACK_TO_V4).unwrap();
+    conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+    let replaying: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM session WHERE replay IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(replaying, 1);
+    drop(conn);
+    let reopened = h.open_with(&CURRENT);
+    assert_eq!(reopened.migrated_from, Some(4));
+    // The session is read from its start into the generation being filled,
+    // calls included, and the replay ends.
+    h.read_all(&fake, "s");
+    let main = raw(&h.db_path());
+    let replaying: i64 = main
+        .query_row(
+            "SELECT count(*) FROM session WHERE replay IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(replaying, 0);
+    assert_eq!(count(&main, "call_fact"), 1);
+    drop(main);
+    assert_eq!(h.total().input, 20, "nothing counted twice");
+    h.settle_all(&fake, "s", OCT_20 + 2 * DAY);
+    assert_eq!(
+        h.project(&lib, Window::D7).total.input,
+        20,
+        "the edit counts"
+    );
+    assert_buckets(&h);
+}
+
+/// Manual measurement (`cargo test --release -p lectern-usage --lib
+/// heavy_disk_by_table -- --ignored --nocapture`): where the bytes of three
+/// heavy days are, per table and index, by `dbstat` when SQLite has it and
+/// by row counts otherwise.
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn heavy_disk_by_table() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::testing::heavy_days(dir.path(), 3).unwrap();
+    let file = dir.path().join("usage.db");
+    let conn = Connection::open(&file).unwrap();
+    let total = std::fs::metadata(&file).unwrap().len();
+    eprintln!(
+        "usage.db after 3 heavy days: {total} bytes, {} per day",
+        total / 3
+    );
+    let sql =
+        "SELECT name, sum(pgsize), count(*) FROM dbstat GROUP BY name ORDER BY 2 DESC LIMIT 24";
+    match conn.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap();
+            for row in rows {
+                let (name, bytes, pages) = row.unwrap();
+                eprintln!("{name:32} {:>10} bytes {pages:>6} pages", bytes);
+            }
+        }
+        Err(e) => eprintln!("no dbstat: {e}"),
+    }
+    for table in [
+        "intern",
+        "usage_source",
+        "usage_value",
+        "fact",
+        "fact_bucket",
+        "turn",
+        "call",
+        "call_fact",
+        "item",
+        "share",
+        "location",
+    ] {
+        eprintln!("rows {table:14} {}", count(&conn, table));
+    }
+}
+
+/// The lines of the query plan of an SQL statement.
+fn plan(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let n = stmt.parameter_count();
+    let params = rusqlite::params_from_iter(std::iter::repeat_n(1i64, n));
+    stmt.query_map(params, |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn store_statements_on_item_and_share_use_an_index() {
+    use crate::store::{DELETE_ITEMS, RESTART_ITEMS, drop_by_turn_sql, weights_sql};
+    let h = Harness::new();
+    let conn = raw(&h.db_path());
+    let frozen =
+        "NOT ((started_at >= 1 AND started_at < 2) OR (started_at >= 5 AND started_at < 6))";
+    // Every statement that finds `item` or `share` rows. A scan of either
+    // table in an ingest transaction holds the writer for as long as the
+    // table is big (millions of rows); `item` and `share` have no session or
+    // generation to find rows by, so rows are found through their turns.
+    let statements: Vec<(String, &str)> = vec![
+        (drop_by_turn_sql("item", "NOT 0"), "item_turn"),
+        (drop_by_turn_sql("item", frozen), "item_turn"),
+        (
+            drop_by_turn_sql("share", "NOT 0"),
+            "sqlite_autoindex_share_1",
+        ),
+        (
+            drop_by_turn_sql("share", frozen),
+            "sqlite_autoindex_share_1",
+        ),
+        (RESTART_ITEMS.to_owned(), "item_turn"),
+        (DELETE_ITEMS.to_owned(), "item_turn"),
+        (weights_sql("1,2,3"), "item_turn"),
+        (
+            "DELETE FROM share WHERE turn = ?1".to_owned(),
+            "sqlite_autoindex_share_1",
+        ),
+        (
+            "SELECT location, weight FROM share WHERE turn = ?1".to_owned(),
+            "sqlite_autoindex_share_1",
+        ),
+    ];
+    // The check sees a scan: a delete by the session and the generation,
+    // which `item` has no index for, is one.
+    let old = plan(&conn, "DELETE FROM item WHERE session = ?1 AND gen = ?2");
+    assert!(old.iter().any(|l| l.starts_with("SCAN item")), "{old:?}");
+    for (sql, index) in statements {
+        let lines = plan(&conn, &sql);
+        let text = lines.join(" | ");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("SCAN item") || l.starts_with("SCAN share")),
+            "scans a big table: {sql}\n{text}"
+        );
+        assert!(text.contains(index), "does not use {index}: {sql}\n{text}");
+    }
+}
+
+/// Manual measurement (`cargo test --release -p lectern-usage --lib
+/// drop_generation_with_two_million_items -- --ignored --nocapture`): the
+/// time `drop_generation` holds the writer for one session of a table of
+/// about 2 million `item` rows, against the statement it replaced (a delete
+/// by session and generation, which scans the table).
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn drop_generation_with_two_million_items() {
+    use std::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path(), OCT_20).unwrap().store;
+    let (sessions, turns, files) = (1000i64, 50i64, 40i64);
+    store
+        .transaction(|tx| {
+            let mut turn = tx.prepare(
+                "INSERT INTO turn (session, gen, tid, seq, started_at, location, done)
+                 VALUES (?1, 1, ?2, ?3, ?4, 1, 1)",
+            )?;
+            let mut item = tx.prepare(
+                "INSERT INTO item (session, gen, turn, path, location, lines, at)
+                 VALUES (?1, 1, ?2, ?3, 1, 5, ?4)",
+            )?;
+            for s in 1..=sessions {
+                for t in 0..turns {
+                    let at = OCT_20 + s * 1000 + t;
+                    turn.execute(rusqlite::params![s, t + 1, t + 1, at])?;
+                    let id = tx.last_insert_rowid();
+                    for f in 0..files {
+                        item.execute(rusqlite::params![s, id, f + 1, at])?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    let rows: i64 = store
+        .read(|c| c.query_row("SELECT count(*) FROM item", [], |r| r.get(0)))
+        .unwrap();
+    eprintln!("item rows: {rows}");
+    let time =
+        |what: &str, work: &dyn Fn(&rusqlite::Transaction<'_>) -> rusqlite::Result<usize>| {
+            let started = Instant::now();
+            let deleted = store
+                .write(|conn| {
+                    let tx = conn.transaction()?;
+                    let n = work(&tx)?;
+                    // Rolled back: the table stays as it is.
+                    drop(tx);
+                    Ok(n)
+                })
+                .unwrap();
+            eprintln!("{what}: {:?} ({deleted} rows)", started.elapsed());
+        };
+    time("drop_generation (through the turns)", &|tx| {
+        let frozen = crate::store::cold::frozen(tx)?;
+        let mut keys = std::collections::HashSet::new();
+        let before = tx.total_changes();
+        crate::store::drop_generation(tx, 500, 1, &mut keys, &frozen)?;
+        // Rows deleted: the items, the turns, nothing else is in the table.
+        Ok(usize::try_from(tx.total_changes() - before).unwrap_or(0))
+    });
+    time("old statement (by session and generation)", &|tx| {
+        tx.execute(
+            "DELETE FROM item WHERE session = ?1 AND gen = ?2 AND NOT 0",
+            rusqlite::params![500, 1],
+        )
+    });
 }

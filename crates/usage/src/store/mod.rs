@@ -3,6 +3,8 @@
 //! rebuild. Two connections, a writer and a reader, both used only inside
 //! executor tasks; the writer is behind a lock.
 
+mod attrib;
+pub(crate) mod calls;
 pub(crate) mod cold;
 mod dedup;
 mod identity;
@@ -12,6 +14,8 @@ mod query;
 mod recover;
 pub(crate) mod schema;
 mod segment;
+mod sessions;
+mod settle;
 
 use std::fs;
 use std::io;
@@ -23,15 +27,22 @@ use std::time::Duration;
 use lectern_logging::{Value, error, info, warn};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
+pub(crate) use calls::PathPlace;
 pub(crate) use dedup::FactDelta;
 #[cfg(test)]
 pub(crate) use identity::AliasKind;
 pub(crate) use identity::{Aliases, Commanded, Outcome, Recorded, temporary_of};
 pub(crate) use ingest::{FileStamp, Ingest, Ingested, Place, SessionInfo, agent_of, path_bytes};
+#[cfg(test)]
+pub(crate) use ingest::{drop_by_turn_sql, drop_generation};
 pub(crate) use query::{FolderRoot, ProjectRow, Totals, under};
 pub(crate) use recover::Recovery;
 #[cfg(test)]
 pub(crate) use recover::{SALVAGE_FILE, Step, fail_at};
+pub(crate) use sessions::SessionTotals;
+pub(crate) use settle::{ItemWork, TurnWork};
+#[cfg(test)]
+pub(crate) use {attrib::weights_sql, recover::RESTART_ITEMS, settle::DELETE_ITEMS};
 
 use schema::{APPLICATION_ID, CURRENT, DERIVED_VERSION, Schema};
 

@@ -1,6 +1,7 @@
 //! Tests by the prefixes of docs/design/usage.md「测试」 (step 1).
 
 mod archive;
+mod attribution;
 mod dedup;
 mod identity;
 mod limits;

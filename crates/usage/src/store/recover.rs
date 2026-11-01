@@ -577,6 +577,25 @@ fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
          WHERE turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)")?;
     run("UPDATE session_gen SET turn = NULL
          WHERE turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)")?;
+    // Calls, the places of the files they changed and the changed files
+    // (step 4): a row that points at a string, session, turn or place that
+    // is gone is dropped rather than left to point at whatever takes the ID
+    // next. Every session is read again, and the calls and places with it;
+    // the turns are settled again from the items that are left.
+    run("DELETE FROM call WHERE session NOT IN (SELECT id FROM session)")?;
+    run("UPDATE call SET turn = NULL
+         WHERE turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)")?;
+    run("DELETE FROM call_fact
+         WHERE path NOT IN (SELECT id FROM intern)
+            OR location NOT IN (SELECT id FROM location)
+            OR session NOT IN (SELECT id FROM session)")?;
+    run("UPDATE call_fact SET worktree = NULL
+         WHERE worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern)")?;
+    run("DELETE FROM item
+         WHERE path NOT IN (SELECT id FROM intern)
+            OR location NOT IN (SELECT id FROM location)
+            OR turn NOT IN (SELECT id FROM turn)
+            OR session NOT IN (SELECT id FROM session)")?;
 
     let strings = missing(
         conn,
@@ -652,12 +671,19 @@ fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
     Ok(n)
 }
 
+/// The changed files of the turns of an unfinished replay.
+pub(crate) const RESTART_ITEMS: &str = "DELETE FROM item WHERE turn IN (
+       SELECT t.id FROM turn t JOIN session s ON s.id = t.session WHERE t.gen > s.gen)";
+
 /// After lost rows nobody knows which sessions they belonged to: every
 /// session reads its log again from the start, unfinished replays are
 /// dropped. Returns the number of sessions.
 fn restart_sessions(conn: &Connection) -> rusqlite::Result<u64> {
     let start = Cursor::START.to_bytes();
-    for table in ["usage_source", "turn", "session_gen"] {
+    // The changed files of an unfinished replay, through its turns, which
+    // are still there.
+    conn.execute(RESTART_ITEMS, [])?;
+    for table in ["usage_source", "turn", "session_gen", "call"] {
         conn.execute(
             &format!(
                 "DELETE FROM {table} WHERE gen > (SELECT s.gen FROM session s WHERE s.id = {table}.session)"

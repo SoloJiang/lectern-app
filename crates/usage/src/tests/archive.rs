@@ -855,3 +855,109 @@ fn archive_reclaims_free_pages_only_over_the_thresholds() {
     let pages = count(&h, "PRAGMA page_count");
     assert!(free * 4 <= pages, "{free} of {pages}");
 }
+
+/// A session that changes `lib` in September 2025 (archived at the harness's
+/// now) and has a turn in the last days.
+fn changing_session(h: &mut Harness) -> (std::sync::Arc<FakeSessions>, ProjectKey) {
+    use super::attribution::{Log, source};
+    h.open_repo("/work/app");
+    let lib = h.open_repo("/work/lib");
+    let fake = source();
+    let old = utc(2025, 9, 10, 15);
+    let mut log = Log::new(&fake, "s", "/work/app", old);
+    log.turn("a", old).usage("a", "ma", old + 10, 40);
+    log.edit("a", "ca", &["/work/lib/a.rs"], old + 20, 2);
+    log.spawn("a", "sp", old + 25);
+    let recent = utc(2026, 10, 21, 9);
+    log.turn("b", recent).usage("b", "mb", recent + 10, 5);
+    log.write();
+    h.read_every(&fake);
+    h.settle_all(&fake, "s", h.now);
+    (fake, lib)
+}
+
+#[test]
+fn archive_moves_calls_items_and_shares_with_their_turns() {
+    let mut h = Harness::new();
+    let (_fake, lib) = changing_session(&mut h);
+    let all = LocalDate {
+        year: 2025,
+        month: 8,
+        day: 1,
+    };
+    let to = LocalDate {
+        year: 2026,
+        month: 10,
+        day: 22,
+    };
+    let before = history_of(&h, &lib, all, to);
+    let in_month = |conn: &Connection, table: &str, column: &str| -> i64 {
+        let from = utc(2025, 9, 1, 0);
+        let sql = format!("SELECT count(*) FROM {table} WHERE {column} >= ?1 AND {column} < ?2");
+        conn.query_row(&sql, [from, utc(2025, 10, 1, 0)], |r| r.get(0))
+            .unwrap()
+    };
+    let conn = raw(&h);
+    for (table, column) in [
+        ("call", "started_at"),
+        ("call_fact", "at"),
+        ("item", "at"),
+        ("share", "at"),
+    ] {
+        assert_eq!(in_month(&conn, table, column), 1, "{table} hot before");
+    }
+    drop(conn);
+    h.store().archive_all(h.now, &h.zone).unwrap();
+    let conn = raw(&h);
+    for (table, column) in [
+        ("call", "started_at"),
+        ("call_fact", "at"),
+        ("item", "at"),
+        ("share", "at"),
+    ] {
+        assert_eq!(in_month(&conn, table, column), 0, "{table} archived");
+        let parts: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM cold_part WHERE tbl = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(parts, 1, "{table} has a cold segment");
+    }
+    let after = history_of(&h, &lib, all, to);
+    assert_eq!(after.months, before.months, "every total is the same");
+    // The October turn stays hot, with its items and shares.
+    let hot: i64 = conn
+        .query_row("SELECT count(*) FROM share", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(hot, 1);
+}
+
+#[test]
+fn archive_leaves_an_anchor_for_the_hot_turns_that_follow_a_cold_change() {
+    let mut h = Harness::new();
+    let (fake, lib) = changing_session(&mut h);
+    h.store().archive_all(h.now, &h.zone).unwrap();
+    let conn = raw(&h);
+    let anchors: i64 = conn
+        .query_row("SELECT count(*) FROM cold_anchor WHERE kind = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(anchors, 1);
+    drop(conn);
+    // A new turn with no change of its own: no hot turn before it has one,
+    // the cold one counts.
+    let day = utc(2026, 10, 22, 8);
+    let mut log = super::attribution::Log::resume(&fake, "s", "/work/app", day);
+    log.records.clear();
+    log.pos = 10_000;
+    log.turn("c", day).usage("c", "mc", day + 10, 7);
+    log.write();
+    h.read_every(&fake);
+    h.settle_all(&fake, "s", h.now);
+    assert_eq!(h.project(&lib, Window::D7).total.input, 12, "5 and 7");
+    assert_eq!(h.all(Window::D7).other.input, 0);
+    assert_buckets(&h);
+}
