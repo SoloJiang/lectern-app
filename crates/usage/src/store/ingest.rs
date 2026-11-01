@@ -861,11 +861,21 @@ fn turn_of(
         .optional()
 }
 
+/// The statement that deletes the rows of `table` (`item` or `share`) of the
+/// turns of one session's generation that are hot (`?1` the session, `?2`
+/// the generation). The turns are found by their own index.
+pub(crate) fn drop_by_turn_sql(table: &str, hot_turn: &str) -> String {
+    format!(
+        "DELETE FROM {table} WHERE turn IN (
+           SELECT id FROM turn WHERE session = ?1 AND gen = ?2 AND {hot_turn})"
+    )
+}
+
 /// Deletes a generation's rows, collecting the keys to choose again. Rows
 /// of frozen months stay (docs/design/usage.md「冷热分层」: an archived
 /// month's data is not replaced by a replay); they keep their old
 /// generation number.
-fn drop_generation(
+pub(crate) fn drop_generation(
     tx: &Connection,
     session: i64,
     generation: i64,
@@ -883,18 +893,20 @@ fn drop_generation(
         }
     }
     let hot_turn = format!("NOT {}", frozen.sql("started_at"));
-    let hot_item = format!("NOT {}", frozen.sql("at"));
+    // The changed files and the shares are found through the generation's
+    // turns (an index on `item` by session would cost a row more for each
+    // of millions): so they go before the turns do.
     tx.execute(
-        &format!(
-            "DELETE FROM share WHERE turn IN (
-               SELECT id FROM turn WHERE session = ?1 AND gen = ?2 AND {hot_turn})"
-        ),
+        &drop_by_turn_sql("item", &hot_turn),
+        params![session, generation],
+    )?;
+    tx.execute(
+        &drop_by_turn_sql("share", &hot_turn),
         params![session, generation],
     )?;
     for (table, hot) in [
         ("usage_source", hot_source.as_str()),
         ("call", hot_turn.as_str()),
-        ("item", hot_item.as_str()),
         ("turn", hot_turn.as_str()),
         ("session_gen", "1"),
     ] {

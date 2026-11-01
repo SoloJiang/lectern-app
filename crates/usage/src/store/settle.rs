@@ -22,6 +22,9 @@ use super::{Store, StoreError, attrib, cold};
 /// 「轮次的观察与改动项」第 5 步).
 pub(crate) const SETTLE_WAIT_MS: i64 = 2_000;
 
+/// The changed files of one turn, found by the turn.
+pub(crate) const DELETE_ITEMS: &str = "DELETE FROM item WHERE turn = ?1";
+
 /// A turn that can be settled now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReadyTurn {
@@ -194,8 +197,7 @@ impl Store {
                 let Some((at, generation)) = started else {
                     continue;
                 };
-                tx.prepare_cached("DELETE FROM item WHERE turn = ?1")?
-                    .execute(params![turn.id])?;
+                tx.prepare_cached(DELETE_ITEMS)?.execute(params![turn.id])?;
                 for item in &turn.items {
                     let cid = item.call;
                     let path = intern(tx, path_bytes(&item.path))?;

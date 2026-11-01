@@ -169,16 +169,7 @@ fn weights(conn: &Connection, turn: i64, sessions: &[i64]) -> rusqlite::Result<V
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!(
-        "SELECT location, sum(lines), count(DISTINCT path) FROM (
-           SELECT location, lines, path FROM item WHERE turn = ?1
-           UNION ALL
-           SELECT i.location, i.lines, i.path FROM turn t
-             JOIN session s ON s.id = t.session AND s.gen = t.gen
-             JOIN item i ON i.turn = t.id
-             WHERE t.session IN ({list}) )
-         GROUP BY location ORDER BY location"
-    );
+    let sql = weights_sql(&list);
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![turn], |r| {
         let lines: i64 = r.get(1)?;
@@ -189,6 +180,21 @@ fn weights(conn: &Connection, turn: i64, sessions: &[i64]) -> rusqlite::Result<V
         })
     })?;
     rows.collect()
+}
+
+/// The statement behind [`weights`]: `?1` the turn, `list` the sessions
+/// below it, as comma separated IDs.
+pub(crate) fn weights_sql(list: &str) -> String {
+    format!(
+        "SELECT location, sum(lines), count(DISTINCT path) FROM (
+           SELECT location, lines, path FROM item WHERE turn = ?1
+           UNION ALL
+           SELECT i.location, i.lines, i.path FROM turn t
+             JOIN session s ON s.id = t.session AND s.gen = t.gen
+             JOIN item i ON i.turn = t.id
+             WHERE t.session IN ({list}) )
+         GROUP BY location ORDER BY location"
+    )
 }
 
 /// The turn of the parent session a child session was spawned from: the

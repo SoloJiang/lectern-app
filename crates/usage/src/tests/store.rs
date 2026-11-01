@@ -1071,3 +1071,134 @@ fn heavy_disk_by_table() {
         eprintln!("rows {table:14} {}", count(&conn, table));
     }
 }
+
+/// The lines of the query plan of an SQL statement.
+fn plan(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let n = stmt.parameter_count();
+    let params = rusqlite::params_from_iter(std::iter::repeat_n(1i64, n));
+    stmt.query_map(params, |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn store_statements_on_item_and_share_use_an_index() {
+    use crate::store::{DELETE_ITEMS, RESTART_ITEMS, drop_by_turn_sql, weights_sql};
+    let h = Harness::new();
+    let conn = raw(&h.db_path());
+    let frozen =
+        "NOT ((started_at >= 1 AND started_at < 2) OR (started_at >= 5 AND started_at < 6))";
+    // Every statement that finds `item` or `share` rows. A scan of either
+    // table in an ingest transaction holds the writer for as long as the
+    // table is big (millions of rows); `item` and `share` have no session or
+    // generation to find rows by, so rows are found through their turns.
+    let statements: Vec<(String, &str)> = vec![
+        (drop_by_turn_sql("item", "NOT 0"), "item_turn"),
+        (drop_by_turn_sql("item", frozen), "item_turn"),
+        (
+            drop_by_turn_sql("share", "NOT 0"),
+            "sqlite_autoindex_share_1",
+        ),
+        (
+            drop_by_turn_sql("share", frozen),
+            "sqlite_autoindex_share_1",
+        ),
+        (RESTART_ITEMS.to_owned(), "item_turn"),
+        (DELETE_ITEMS.to_owned(), "item_turn"),
+        (weights_sql("1,2,3"), "item_turn"),
+        (
+            "DELETE FROM share WHERE turn = ?1".to_owned(),
+            "sqlite_autoindex_share_1",
+        ),
+        (
+            "SELECT location, weight FROM share WHERE turn = ?1".to_owned(),
+            "sqlite_autoindex_share_1",
+        ),
+    ];
+    // The check sees a scan: a delete by the session and the generation,
+    // which `item` has no index for, is one.
+    let old = plan(&conn, "DELETE FROM item WHERE session = ?1 AND gen = ?2");
+    assert!(old.iter().any(|l| l.starts_with("SCAN item")), "{old:?}");
+    for (sql, index) in statements {
+        let lines = plan(&conn, &sql);
+        let text = lines.join(" | ");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("SCAN item") || l.starts_with("SCAN share")),
+            "scans a big table: {sql}\n{text}"
+        );
+        assert!(text.contains(index), "does not use {index}: {sql}\n{text}");
+    }
+}
+
+/// Manual measurement (`cargo test --release -p lectern-usage --lib
+/// drop_generation_with_two_million_items -- --ignored --nocapture`): the
+/// time `drop_generation` holds the writer for one session of a table of
+/// about 2 million `item` rows, against the statement it replaced (a delete
+/// by session and generation, which scans the table).
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn drop_generation_with_two_million_items() {
+    use std::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path(), OCT_20).unwrap().store;
+    let (sessions, turns, files) = (1000i64, 50i64, 40i64);
+    store
+        .transaction(|tx| {
+            let mut turn = tx.prepare(
+                "INSERT INTO turn (session, gen, tid, seq, started_at, location, done)
+                 VALUES (?1, 1, ?2, ?3, ?4, 1, 1)",
+            )?;
+            let mut item = tx.prepare(
+                "INSERT INTO item (session, gen, turn, path, location, lines, at)
+                 VALUES (?1, 1, ?2, ?3, 1, 5, ?4)",
+            )?;
+            for s in 1..=sessions {
+                for t in 0..turns {
+                    let at = OCT_20 + s * 1000 + t;
+                    turn.execute(rusqlite::params![s, t + 1, t + 1, at])?;
+                    let id = tx.last_insert_rowid();
+                    for f in 0..files {
+                        item.execute(rusqlite::params![s, id, f + 1, at])?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    let rows: i64 = store
+        .read(|c| c.query_row("SELECT count(*) FROM item", [], |r| r.get(0)))
+        .unwrap();
+    eprintln!("item rows: {rows}");
+    let time =
+        |what: &str, work: &dyn Fn(&rusqlite::Transaction<'_>) -> rusqlite::Result<usize>| {
+            let started = Instant::now();
+            let deleted = store
+                .write(|conn| {
+                    let tx = conn.transaction()?;
+                    let n = work(&tx)?;
+                    // Rolled back: the table stays as it is.
+                    drop(tx);
+                    Ok(n)
+                })
+                .unwrap();
+            eprintln!("{what}: {:?} ({deleted} rows)", started.elapsed());
+        };
+    time("drop_generation (through the turns)", &|tx| {
+        let frozen = crate::store::cold::frozen(tx)?;
+        let mut keys = std::collections::HashSet::new();
+        let before = tx.total_changes();
+        crate::store::drop_generation(tx, 500, 1, &mut keys, &frozen)?;
+        // Rows deleted: the items, the turns, nothing else is in the table.
+        Ok(usize::try_from(tx.total_changes() - before).unwrap_or(0))
+    });
+    time("old statement (by session and generation)", &|tx| {
+        tx.execute(
+            "DELETE FROM item WHERE session = ?1 AND gen = ?2 AND NOT 0",
+            rusqlite::params![500, 1],
+        )
+    });
+}

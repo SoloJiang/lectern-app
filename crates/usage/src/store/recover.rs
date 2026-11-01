@@ -671,12 +671,19 @@ fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
     Ok(n)
 }
 
+/// The changed files of the turns of an unfinished replay.
+pub(crate) const RESTART_ITEMS: &str = "DELETE FROM item WHERE turn IN (
+       SELECT t.id FROM turn t JOIN session s ON s.id = t.session WHERE t.gen > s.gen)";
+
 /// After lost rows nobody knows which sessions they belonged to: every
 /// session reads its log again from the start, unfinished replays are
 /// dropped. Returns the number of sessions.
 fn restart_sessions(conn: &Connection) -> rusqlite::Result<u64> {
     let start = Cursor::START.to_bytes();
-    for table in ["usage_source", "turn", "session_gen", "call", "item"] {
+    // The changed files of an unfinished replay, through its turns, which
+    // are still there.
+    conn.execute(RESTART_ITEMS, [])?;
+    for table in ["usage_source", "turn", "session_gen", "call"] {
         conn.execute(
             &format!(
                 "DELETE FROM {table} WHERE gen > (SELECT s.gen FROM session s WHERE s.id = {table}.session)"

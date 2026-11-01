@@ -33,12 +33,16 @@ pub(crate) use dedup::FactDelta;
 pub(crate) use identity::AliasKind;
 pub(crate) use identity::{Aliases, Commanded, Outcome, Recorded, temporary_of};
 pub(crate) use ingest::{FileStamp, Ingest, Ingested, Place, SessionInfo, agent_of, path_bytes};
+#[cfg(test)]
+pub(crate) use ingest::{drop_by_turn_sql, drop_generation};
 pub(crate) use query::{FolderRoot, ProjectRow, Totals, under};
 pub(crate) use recover::Recovery;
 #[cfg(test)]
 pub(crate) use recover::{SALVAGE_FILE, Step, fail_at};
 pub(crate) use sessions::SessionTotals;
 pub(crate) use settle::{ItemWork, TurnWork};
+#[cfg(test)]
+pub(crate) use {attrib::weights_sql, recover::RESTART_ITEMS, settle::DELETE_ITEMS};
 
 use schema::{APPLICATION_ID, CURRENT, DERIVED_VERSION, Schema};
 
