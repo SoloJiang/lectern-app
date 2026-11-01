@@ -190,6 +190,7 @@ const BENCHES: &[Bench] = &[
     usage::INGEST_APPEND_4K,
     usage::BACKFILL_BATCH,
     usage::BACKFILL_LARGE_SESSION,
+    usage::FINALIZE_TURN_20,
     usage::PROJECT_30D,
     usage::ALL_PROJECTS_30D,
     usage::SNAPSHOT_INCREMENT,

@@ -28,9 +28,10 @@ use lectern_services::usage::{
 
 use super::{FakeProjects, FakeSessions, TableZone};
 use crate::engine::{Computed, Context, READ_BYTES, compute, compute_full, place_of_key};
+use crate::finalize::{self, BATCH_TIME, BATCH_TURNS, Settling};
 use crate::snapshot::{Applied, Watched};
 use crate::store::cold::{self, Stepped};
-use crate::store::{DB_FILE, FileStamp, Ingest, Ingested, Place, SessionInfo, Store};
+use crate::store::{DB_FILE, FileStamp, Ingest, Ingested, PathPlace, Place, SessionInfo, Store};
 
 fn io_error(what: &str, e: impl std::fmt::Debug) -> io::Error {
     io::Error::other(format!("{what}: {e:?}"))
@@ -65,6 +66,36 @@ impl Stored {
     /// Fact rows the batch added or removed.
     pub fn fact_changes(&self) -> usize {
         self.out.facts.len()
+    }
+}
+
+/// What [`Scenario::settle`] did.
+pub struct Finished {
+    stored: Stored,
+    turns: usize,
+    more: bool,
+    wait_until: Option<i64>,
+}
+
+impl Finished {
+    /// Turns settled.
+    pub fn turns(&self) -> usize {
+        self.turns
+    }
+
+    /// More turns are ready.
+    pub fn more(&self) -> bool {
+        self.more
+    }
+
+    /// The moment the earliest turn that is not ready yet will be.
+    pub fn wait_until(&self) -> Option<i64> {
+        self.wait_until
+    }
+
+    /// Fact rows added or removed.
+    pub fn fact_changes(&self) -> usize {
+        self.stored.out.facts.len()
     }
 }
 
@@ -172,6 +203,11 @@ impl Scenario {
         fake.push(id, records);
     }
 
+    fn path_place(&self, path: &Path) -> PathPlace {
+        let (dir, name) = crate::paths::split(path);
+        crate::paths::dir_place(Some(&self.projects), dir).file(name)
+    }
+
     fn place(&self, cwd: &Path) -> Place {
         match lectern_services::project::Projects::resolve(&self.projects, cwd) {
             Ok(r) => place_of_key(&r.project, &r.rel),
@@ -203,6 +239,18 @@ impl Scenario {
                     .or_insert_with(|| self.place(cwd));
             }
         }
+        let mut edit_paths = std::collections::HashMap::new();
+        for r in &batch.records {
+            if let Record::ToolStarted(call) = &r.value
+                && let lectern_services::session::ToolKind::Edit { paths } = &call.kind
+            {
+                for p in paths.iter() {
+                    edit_paths
+                        .entry(p.clone())
+                        .or_insert_with(|| self.path_place(p));
+                }
+            }
+        }
         let out = self
             .store
             .ingest(&Ingest {
@@ -210,12 +258,14 @@ impl Scenario {
                     key: &key,
                     agent: &summary.agent,
                     parent: summary.parent.as_ref().map(|p| &p.session),
+                    parent_call: summary.parent.as_ref().and_then(|p| p.tool_call.as_ref()),
                     inheritance_unknown: summary.inheritance_unknown,
                     start: &start,
                 },
                 from: &cursor,
                 batch: &batch,
                 places: &places,
+                paths: &edit_paths,
                 stamp,
                 now_ms: self.now_ms,
             })
@@ -286,6 +336,167 @@ impl Scenario {
                 return Ok(out);
             }
         }
+    }
+
+    /// A session of one turn that makes `calls` `Edit` calls, one file each
+    /// (`src/file<n>.rs` below the worktree roots in turn, six lines each),
+    /// and ends it with three usage records; its log is added to the
+    /// source, not read yet. The bench of settling a turn uses it.
+    pub fn edit_turn(
+        &self,
+        agent: &Agent,
+        id: &str,
+        cwd: &Path,
+        roots: &[PathBuf],
+        calls: usize,
+        at: i64,
+    ) {
+        use lectern_services::session::{
+            ToolCallId, ToolFinished, ToolKind, ToolStarted, ToolStatus,
+        };
+        let fake = self.sessions(agent);
+        fake.add(id, cwd, at, None);
+        let tid = format!("{id}-t0");
+        let record = |pos: u64, value: Record| Positioned {
+            pos,
+            seq: 0,
+            inherited: false,
+            value,
+        };
+        let mut records = vec![
+            record(
+                0,
+                Record::Context {
+                    at: Timestamp(at),
+                    cwd: Arc::from(cwd),
+                    logged_branch: None,
+                    model: Some("model-a".into()),
+                },
+            ),
+            record(
+                LINE_BYTES,
+                Record::TurnStarted {
+                    turn: TurnId(tid.as_str().into()),
+                    at: Timestamp(at),
+                },
+            ),
+        ];
+        let mut pos = 2 * LINE_BYTES;
+        for k in 0..3u64 {
+            records.push(record(
+                pos,
+                Record::Usage(UsageRecord {
+                    at: Timestamp(at + 1000 * (k as i64 + 1)),
+                    turn: Some(TurnId(tid.as_str().into())),
+                    model: Some("model-a".into()),
+                    tokens: RawTokens::Anthropic {
+                        input: 10 + k,
+                        output: 200,
+                        cache_read: 30_000,
+                        cache_write: 400,
+                        cache_write_5m: 0,
+                        cache_write_1h: 0,
+                    },
+                    key: UsageKey::Claude {
+                        message_id: format!("{id}-{k}").into(),
+                        request_id: Some(format!("req-{id}-{k}").into()),
+                    },
+                    advisor: None,
+                    superseded: false,
+                    sidechain: false,
+                    origin: UsageOrigin::SessionLog,
+                }),
+            ));
+            pos += LINE_BYTES;
+        }
+        let content: String = (0..6).map(|i| format!("line {i}\n")).collect();
+        for n in 0..calls {
+            let path = roots[n % roots.len()].join(format!("src/file{n}.rs"));
+            let call = format!("{id}-c{n}");
+            fake.edit_call(
+                id,
+                &tid,
+                &call,
+                std::slice::from_ref(&path),
+                vec![lectern_services::session::FileEdit {
+                    path: path.clone(),
+                    op: lectern_services::session::EditOp::Write {
+                        content: content.as_str().into(),
+                        created: true,
+                    },
+                }],
+            );
+            let started = at + 5000 + 100 * n as i64;
+            records.push(record(
+                pos,
+                Record::ToolStarted(ToolStarted {
+                    call: ToolCallId(call.as_str().into()),
+                    turn: Some(TurnId(tid.as_str().into())),
+                    at: Timestamp(started),
+                    name: "Edit".into(),
+                    kind: ToolKind::Edit {
+                        paths: vec![path].into(),
+                    },
+                }),
+            ));
+            pos += LINE_BYTES;
+            records.push(record(
+                pos,
+                Record::ToolFinished(ToolFinished {
+                    call: ToolCallId(call.as_str().into()),
+                    at: Timestamp(started + 50),
+                    status: ToolStatus::Completed,
+                    exec_session: None,
+                }),
+            ));
+            pos += LINE_BYTES;
+        }
+        fake.push(id, records);
+    }
+
+    /// A linked worktree of a repository: `root` is another working tree of
+    /// the repository whose common directory is `common_dir`.
+    pub fn worktree(&mut self, root: &Path, common_dir: &Path) {
+        self.projects.repo(root, common_dir);
+    }
+
+    /// One batch of the turns of a session that are ready, settled as the
+    /// engine does (docs/design/usage.md「轮次的观察与改动项」第 5 步); the
+    /// watched snapshots take the fact changes.
+    pub fn settle(&mut self, agent: &Agent, id: &str) -> io::Result<Finished> {
+        let fake = self.sessions(agent);
+        let key = fake.key(id);
+        let summary = fake
+            .sessions()
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| io_error("session", id))?;
+        let settled = {
+            let resolve = |p: &Path| self.path_place(p);
+            finalize::settle(&Settling {
+                store: &self.store,
+                source: fake,
+                key: &key,
+                now_ms: self.now_ms,
+                end_open: !summary.open_turn,
+                resolve: &resolve,
+                turns: BATCH_TURNS,
+                time: BATCH_TIME,
+            })
+            .map_err(|e| io_error("settle", e))?
+        };
+        let stored = Stored {
+            out: settled.written.unwrap_or_default(),
+        };
+        if stored.out.commit != 0 {
+            self.replace_snapshots(&stored)?;
+        }
+        Ok(Finished {
+            stored,
+            turns: settled.turns,
+            more: settled.more,
+            wait_until: settled.wait_until,
+        })
     }
 
     fn context(&self) -> Context<'_> {

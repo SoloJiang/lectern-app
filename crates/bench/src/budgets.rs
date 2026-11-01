@@ -1928,6 +1928,14 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // One turn of 20 edits in 3 worktrees (step 4).
+    share(
+        "usage/finalize_turn_20",
+        &[median(Limit::TimeBelow(ms(10)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
     share(
         "usage/project_30d",
         &[median(Limit::TimeBelow(ms(50)))],

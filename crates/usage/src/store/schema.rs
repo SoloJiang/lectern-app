@@ -26,6 +26,31 @@ pub(crate) struct Schema {
 
 /// The tables this version writes.
 pub(crate) const CURRENT: Schema = Schema {
+    version: 5,
+    create: CREATE_V5,
+    migrations: &[
+        Migration {
+            from: 1,
+            sql: COLD_V2,
+        },
+        Migration {
+            from: 2,
+            sql: LIMITS_V3,
+        },
+        Migration {
+            from: 3,
+            sql: IDENTITY_V4,
+        },
+        Migration {
+            from: 4,
+            sql: CALLS_V5,
+        },
+    ],
+};
+
+/// Version 4 alone, for the migration tests.
+#[cfg(test)]
+pub(crate) const V4: Schema = Schema {
     version: 4,
     create: CREATE_V4,
     migrations: &[
@@ -107,6 +132,9 @@ pub(crate) const OBSERVATION_TABLES: &[&str] = &[
     "limit_sample",
     "project_fact",
     "alias",
+    "call",
+    "call_fact",
+    "item",
 ];
 
 /// The hot / cold split (docs/design/usage.md「冷热分层」), table version 2.
@@ -463,6 +491,103 @@ CREATE INDEX alias_src ON alias (src);
     };
 }
 
+/// Calls, changed files and shares (docs/design/usage.md「轮次的观察与改动项」
+/// 「分摊」), table version 5.
+///
+/// - `turn` gets `last_at` (the time of the last record that belongs to the
+///   turn: the design's L, or the later result of one of its calls),
+///   `closed` (its end marker was read), `done` (settled: its `item` and
+///   `share` rows are written) and `changed` (its share comes from changes,
+///   its own or its sub-agents', not from following another turn).
+/// - `session.parent_call` is the tool call that spawned the session (an
+///   `intern` ID of the call ID).
+/// - `call`: one row per tool call of a generation (`cid` is the `intern` ID
+///   of the call ID; `kind` and `status` are the codes of `store::calls`).
+/// - `call_fact`: what the world looked like when an `Edit` call was read:
+///   the place, worktree and relative path of each file it names. Written
+///   once, not per generation, so that a replay keeps them after the
+///   worktree is gone.
+/// - `item`: a changed file of a turn, with its changed lines. `at` is the
+///   turn's start (the archive finds the rows by it).
+/// - `share` (derived): the settled turn's targets, `weight` out of `total`.
+///   `at` is the turn's start.
+///
+/// The migration reads every session again (cursors back to the start):
+/// version 4 stored no calls.
+macro_rules! calls_sql {
+    () => {
+        "
+ALTER TABLE turn ADD COLUMN last_at INTEGER;
+ALTER TABLE turn ADD COLUMN closed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE turn ADD COLUMN done INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE turn ADD COLUMN changed INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX turn_pending ON turn (session, gen, seq) WHERE done = 0;
+CREATE INDEX turn_changed ON turn (session, gen, seq) WHERE done = 1 AND changed = 1;
+CREATE INDEX turn_seq ON turn (session, gen, seq);
+ALTER TABLE session ADD COLUMN parent_call INTEGER;
+CREATE INDEX session_parent ON session (parent_source, parent_sid);
+CREATE INDEX usage_source_turn ON usage_source (turn);
+
+CREATE TABLE call (
+  id          INTEGER PRIMARY KEY,
+  session     INTEGER NOT NULL,
+  gen         INTEGER NOT NULL,
+  cid         INTEGER NOT NULL,
+  turn        INTEGER,
+  started_at  INTEGER NOT NULL,
+  finished_at INTEGER,
+  kind        INTEGER NOT NULL,
+  status      INTEGER,
+  UNIQUE (session, gen, cid)
+);
+CREATE INDEX call_turn ON call (turn);
+CREATE INDEX call_started ON call (started_at);
+
+CREATE TABLE call_fact (
+  id       INTEGER PRIMARY KEY,
+  session  INTEGER NOT NULL,
+  cid      INTEGER NOT NULL,
+  path     INTEGER NOT NULL,
+  location INTEGER NOT NULL,
+  worktree INTEGER,
+  rel      INTEGER,
+  at       INTEGER NOT NULL,
+  UNIQUE (session, cid, path)
+);
+CREATE INDEX call_fact_at ON call_fact (at);
+
+CREATE TABLE item (
+  id       INTEGER PRIMARY KEY,
+  session  INTEGER NOT NULL,
+  gen      INTEGER NOT NULL,
+  turn     INTEGER NOT NULL,
+  cid      INTEGER NOT NULL,
+  path     INTEGER NOT NULL,
+  location INTEGER NOT NULL,
+  lines    INTEGER NOT NULL,
+  at       INTEGER NOT NULL
+);
+CREATE INDEX item_turn ON item (turn);
+CREATE INDEX item_session ON item (session, gen);
+CREATE INDEX item_at ON item (at);
+
+CREATE TABLE share (
+  id       INTEGER PRIMARY KEY,
+  turn     INTEGER NOT NULL,
+  location INTEGER NOT NULL,
+  kind     INTEGER NOT NULL DEFAULT 0,
+  weight   INTEGER NOT NULL,
+  total    INTEGER NOT NULL,
+  at       INTEGER NOT NULL,
+  UNIQUE (turn, location, kind)
+);
+CREATE INDEX share_at ON share (at);
+
+UPDATE session SET cursor = X'01', reached_end = 0, end_stamp = NULL WHERE replay IS NULL;
+"
+    };
+}
+
 /// Version 1 (step 1 of docs/design/usage.md「验收」, first part).
 #[cfg(test)]
 pub(crate) const CREATE_V1: &str = v1_sql!();
@@ -477,7 +602,20 @@ pub(crate) const CREATE_V3: &str = concat!(v1_sql!(), cold_sql!(), limits_sql!()
 
 /// Version 4: version 3 and the project identity tables (the `project`
 /// table of version 1 is rebuilt by the same statements that migrate it).
+#[cfg(test)]
 pub(crate) const CREATE_V4: &str = concat!(v1_sql!(), cold_sql!(), limits_sql!(), identity_sql!());
+
+/// Version 5: version 4 and the calls, items and shares.
+pub(crate) const CREATE_V5: &str = concat!(
+    v1_sql!(),
+    cold_sql!(),
+    limits_sql!(),
+    identity_sql!(),
+    calls_sql!()
+);
+
+/// The step from version 4 to 5.
+pub(crate) const CALLS_V5: &str = calls_sql!();
 
 /// The step from version 1 to 2.
 pub(crate) const COLD_V2: &str = cold_sql!();

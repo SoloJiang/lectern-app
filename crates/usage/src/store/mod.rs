@@ -3,6 +3,8 @@
 //! rebuild. Two connections, a writer and a reader, both used only inside
 //! executor tasks; the writer is behind a lock.
 
+mod attrib;
+mod calls;
 pub(crate) mod cold;
 mod dedup;
 mod identity;
@@ -12,6 +14,8 @@ mod query;
 mod recover;
 pub(crate) mod schema;
 mod segment;
+mod sessions;
+mod settle;
 
 use std::fs;
 use std::io;
@@ -23,6 +27,7 @@ use std::time::Duration;
 use lectern_logging::{Value, error, info, warn};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
+pub(crate) use calls::PathPlace;
 pub(crate) use dedup::FactDelta;
 #[cfg(test)]
 pub(crate) use identity::AliasKind;
@@ -32,6 +37,8 @@ pub(crate) use query::{FolderRoot, ProjectRow, Totals, under};
 pub(crate) use recover::Recovery;
 #[cfg(test)]
 pub(crate) use recover::{SALVAGE_FILE, Step, fail_at};
+pub(crate) use sessions::SessionTotals;
+pub(crate) use settle::{ItemWork, TurnWork};
 
 use schema::{APPLICATION_ID, CURRENT, DERIVED_VERSION, Schema};
 

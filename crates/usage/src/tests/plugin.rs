@@ -641,3 +641,264 @@ fn plugin_archive_takes_one_step_per_quiet_stretch() {
         .unwrap();
     assert_eq!(hot, 0);
 }
+
+/// The tokens of the project at `/work/<name>` in the all-projects list.
+fn project_input(all: &AllUsage, name: &str) -> u64 {
+    all.projects
+        .iter()
+        .find(|(info, _)| &*info.name == name)
+        .map_or(0, |(_, t)| t.input)
+}
+
+#[test]
+fn plugin_settles_a_turn_two_seconds_after_its_last_record() {
+    use lectern_services::session::{
+        EditOp, FileEdit, ToolCallId, ToolFinished, ToolKind, ToolStarted, ToolStatus, TurnId,
+    };
+    let fake = sources();
+    // The session's one turn ended just now: its last result is 500 ms old.
+    let at = NOW - 500;
+    fake.add("live", Path::new("/work/app"), at - 1000, None);
+    let path = PathBuf::from("/work/lib/a.rs");
+    fake.edit_call(
+        "live",
+        "t1",
+        "c1",
+        std::slice::from_ref(&path),
+        vec![FileEdit {
+            path: path.clone(),
+            op: EditOp::Write {
+                content: "a\nb\n".into(),
+                created: true,
+            },
+        }],
+    );
+    let records = vec![
+        context(0, at - 1000, "/work/app"),
+        turn(100, "t1", at - 1000),
+        claude(200, at - 900, Some("t1"), "m1", [5, 0, 0, 0]),
+        rec(
+            300,
+            Record::ToolStarted(ToolStarted {
+                call: ToolCallId("c1".into()),
+                turn: Some(TurnId("t1".into())),
+                at: Timestamp(at - 600),
+                name: "Edit".into(),
+                kind: ToolKind::Edit {
+                    paths: vec![path].into(),
+                },
+            }),
+        ),
+        rec(
+            400,
+            Record::ToolFinished(ToolFinished {
+                call: ToolCallId("c1".into()),
+                at: Timestamp(at),
+                status: ToolStatus::Completed,
+                exec_session: None,
+            }),
+        ),
+    ];
+    fake.push("live", records);
+    let rig = Rig::new(fake, |p| {
+        open_app(p);
+        let lib = p.repo(Path::new("/work/lib"), Path::new("/work/lib/.git"));
+        p.set_open(&lib, true);
+    });
+    rig.settle();
+    // Read, not settled: it counts where the session runs.
+    let all = rig.all();
+    assert_eq!(
+        (project_input(&all, "app"), project_input(&all, "lib")),
+        (5, 0)
+    );
+    rig.advance(Duration::from_millis(1499));
+    let all = rig.all();
+    assert_eq!(project_input(&all, "lib"), 0, "not yet");
+    rig.advance(Duration::from_millis(1));
+    let all = rig.all();
+    assert_eq!(
+        (project_input(&all, "app"), project_input(&all, "lib")),
+        (0, 5)
+    );
+    assert_eq!(all.total.input, 5);
+}
+
+#[test]
+fn plugin_settles_the_turns_a_restart_left_over() {
+    restart_leaves_a_turn(true);
+}
+
+#[test]
+fn plugin_settles_the_last_turn_of_a_session_after_a_restart() {
+    // One turn that no later prompt ended: its end is known only when the
+    // session is looked at, and the log does not change.
+    restart_leaves_a_turn(false);
+}
+
+/// A turn whose wait is not over when Lectern stops; `second_turn` says a
+/// later prompt ended it (else the session just has no open turn).
+fn restart_leaves_a_turn(second_turn: bool) {
+    use lectern_services::session::{
+        EditOp, FileEdit, ToolCallId, ToolFinished, ToolKind, ToolStarted, ToolStatus, TurnId,
+    };
+    let fake = sources();
+    let at = NOW - 500;
+    fake.add("live", Path::new("/work/app"), at - 1000, None);
+    let path = PathBuf::from("/work/lib/a.rs");
+    fake.edit_call(
+        "live",
+        "t1",
+        "c1",
+        std::slice::from_ref(&path),
+        vec![FileEdit {
+            path: path.clone(),
+            op: EditOp::Write {
+                content: "a\n".into(),
+                created: true,
+            },
+        }],
+    );
+    fake.push(
+        "live",
+        vec![
+            context(0, at - 1000, "/work/app"),
+            turn(100, "t1", at - 1000),
+            claude(200, at - 900, Some("t1"), "m1", [6, 0, 0, 0]),
+            rec(
+                300,
+                Record::ToolStarted(ToolStarted {
+                    call: ToolCallId("c1".into()),
+                    turn: Some(TurnId("t1".into())),
+                    at: Timestamp(at - 600),
+                    name: "Edit".into(),
+                    kind: ToolKind::Edit {
+                        paths: vec![path].into(),
+                    },
+                }),
+            ),
+            rec(
+                400,
+                Record::ToolFinished(ToolFinished {
+                    call: ToolCallId("c1".into()),
+                    at: Timestamp(at),
+                    status: ToolStatus::Completed,
+                    exec_session: None,
+                }),
+            ),
+        ],
+    );
+    if second_turn {
+        // The next prompt ended the turn; the session is still open.
+        fake.push("live", vec![turn(500, "t2", at + 100)]);
+        fake.edit("live", |s| s.open_turn = true);
+    }
+    let setup = |p: &FakeProjects| {
+        open_app(p);
+        let lib = p.repo(Path::new("/work/lib"), Path::new("/work/lib/.git"));
+        p.set_open(&lib, true);
+    };
+    let rig = Rig::new(fake, setup);
+    rig.settle();
+    let all = rig.all();
+    assert_eq!(project_input(&all, "lib"), 0, "the wait is not over");
+    // Lectern stops; while it is not running the wait passes.
+    let time = rig.time.clone();
+    let rig = rig.restart(move |_| time.advance(Duration::from_secs(3)));
+    rig.settle();
+    let all = rig.all();
+    assert_eq!(
+        (project_input(&all, "app"), project_input(&all, "lib")),
+        (0, 6)
+    );
+}
+
+#[test]
+fn plugin_settles_an_older_sessions_last_turn_after_a_restart() {
+    use lectern_services::session::{
+        EditOp, FileEdit, ToolCallId, ToolFinished, ToolKind, ToolStarted, ToolStatus, TurnId,
+    };
+    // Two inactive sessions with files: the plugin reads the newest of the
+    // unchanged ones again after a restart, never the other. The other has
+    // one turn that no prompt ended; it is settled all the same.
+    let logs = tempfile::tempdir().unwrap();
+    let fake = FakeSessions::with_files("session-claude-code", Agent::ClaudeCode, logs.path());
+    let (newer, older) = (NOW - 2 * DAY, NOW - 3 * DAY);
+    fake.add("newer", Path::new("/work/app"), newer, None);
+    fake.push(
+        "newer",
+        vec![
+            context(0, newer, "/work/app"),
+            turn(100, "n1", newer),
+            claude(200, newer + 10, Some("n1"), "mn", [1, 0, 0, 0]),
+        ],
+    );
+    fake.add("older", Path::new("/work/app"), older, None);
+    let path = PathBuf::from("/work/lib/a.rs");
+    fake.edit_call(
+        "older",
+        "o1",
+        "c1",
+        std::slice::from_ref(&path),
+        vec![FileEdit {
+            path: path.clone(),
+            op: EditOp::Write {
+                content: "a\nb\n".into(),
+                created: true,
+            },
+        }],
+    );
+    fake.push(
+        "older",
+        vec![
+            context(0, older, "/work/app"),
+            turn(100, "o1", older),
+            claude(200, older + 10, Some("o1"), "mo", [4, 0, 0, 0]),
+            rec(
+                300,
+                Record::ToolStarted(ToolStarted {
+                    call: ToolCallId("c1".into()),
+                    turn: Some(TurnId("o1".into())),
+                    at: Timestamp(older + 20),
+                    name: "Edit".into(),
+                    kind: ToolKind::Edit {
+                        paths: vec![path].into(),
+                    },
+                }),
+            ),
+            rec(
+                400,
+                Record::ToolFinished(ToolFinished {
+                    call: ToolCallId("c1".into()),
+                    at: Timestamp(older + 30),
+                    status: ToolStatus::Completed,
+                    exec_session: None,
+                }),
+            ),
+        ],
+    );
+    let setup = |p: &FakeProjects| {
+        open_app(p);
+        let lib = p.repo(Path::new("/work/lib"), Path::new("/work/lib/.git"));
+        p.set_open(&lib, true);
+    };
+    let rig = Rig::new(fake, setup);
+    rig.settle();
+    // One batch per quiet stretch: both sessions are read, nothing is
+    // settled yet.
+    rig.advance(PACE);
+    rig.advance(PACE);
+    assert_eq!(rig.engine.dirty_sessions(), 0);
+    let all = rig.all();
+    assert_eq!(project_input(&all, "lib"), 0);
+    let rig = rig.restart(|_| {});
+    rig.settle();
+    for _ in 0..4 {
+        rig.advance(PACE);
+    }
+    let all = rig.all();
+    assert_eq!(
+        (project_input(&all, "app"), project_input(&all, "lib")),
+        (1, 4)
+    );
+}

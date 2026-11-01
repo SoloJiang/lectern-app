@@ -211,9 +211,9 @@ fn backfill_batch(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 }
 
 /// `usage/backfill_large_session`: a 200 MB synthetic session (about 9750
-/// turns) backfilled in 8 MiB batches; each batch is a sample. Step 1 has
-/// no finalizing (it comes with step 4); the bytes the source handed out
-/// over all batches must stay within 1.2 times the log.
+/// turns) backfilled in 8 MiB batches and then settled in batches of 50
+/// turns (the log carries no edits); each batch is a sample. The bytes the
+/// source handed out over all batches must stay within 1.2 times the log.
 pub const BACKFILL_LARGE_SESSION: Bench = Bench {
     id: "usage/backfill_large_session",
     run: backfill_large_session,
@@ -245,6 +245,24 @@ fn backfill_large_session(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             break;
         }
     }
+    // The session is read to its end: its turns are settled, a batch of 50
+    // turns at a time (the clock is past the last of them).
+    s.set_now(HEAVY_NOW + 60 * DAY);
+    let mut settled = 0;
+    loop {
+        let started = Instant::now();
+        let done = s.settle(&Agent::ClaudeCode, "large")?;
+        samples.push(started.elapsed());
+        settled += done.turns();
+        if !done.more() {
+            break;
+        }
+    }
+    if settled != turns {
+        return Err(BenchError::new(format!(
+            "{settled} of {turns} turns settled"
+        )));
+    }
     let size = turns as u64 * TURN_BYTES;
     if handed * 10 > size * 12 {
         return Err(BenchError::new(format!(
@@ -259,6 +277,80 @@ fn backfill_large_session(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         .with_note(Some(format!(
             "{turns} turns, {size} bytes, {handed} bytes read in batches"
         ))),
+    ])
+}
+
+/// `usage/finalize_turn_20`: one turn of 20 `Edit` calls in 3 worktrees
+/// settled: the turn index (a hit) and the content of each edit read, the
+/// lines counted, the items, the shares and the fact rows written in one
+/// transaction, on the 30-day fixture.
+pub const FINALIZE_TURN_20: Bench = Bench {
+    id: "usage/finalize_turn_20",
+    run: finalize_turn_20,
+};
+
+fn finalize_turn_20(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let heavy = heavy(ctx)?;
+    let mut s = copy(&heavy, &ctx.scratch().join("db"))?;
+    let main = heavy_roots()[0].clone();
+    let roots = vec![main.clone(), main.join("wt1"), main.join("wt2")];
+    s.worktree(&roots[1], &main.join(".git"));
+    s.worktree(&roots[2], &main.join(".git"));
+    let cwd = main.join("src/finalize");
+    let s = RefCell::new(s);
+    let mut n = 0;
+    let mut last = String::new();
+    let wrong: RefCell<Option<String>> = RefCell::new(None);
+    let time = ctx.time_with_setup(
+        || {
+            n += 1;
+            let id = format!("finalize-{n}");
+            let mut s = s.borrow_mut();
+            s.edit_turn(
+                &Agent::ClaudeCode,
+                &id,
+                &cwd,
+                &roots,
+                20,
+                HEAVY_NOW - 2 * DAY,
+            );
+            if let Err(e) = s.read_all(&Agent::ClaudeCode, &id) {
+                wrong.borrow_mut().get_or_insert(e.to_string());
+            }
+            id
+        },
+        |id| {
+            let done = s.borrow_mut().settle(&Agent::ClaudeCode, &id);
+            match done {
+                Ok(done) if done.turns() == 1 => {}
+                Ok(done) => {
+                    wrong
+                        .borrow_mut()
+                        .get_or_insert(format!("{} turns settled", done.turns()));
+                }
+                Err(e) => {
+                    wrong.borrow_mut().get_or_insert(e.to_string());
+                }
+            }
+            last = id;
+        },
+    );
+    if let Some(wrong) = wrong.into_inner() {
+        return Err(BenchError::new(wrong));
+    }
+    let s = s.into_inner();
+    let fake = s.sessions(&Agent::ClaudeCode);
+    if fake.index_reads(&last) != 1 || fake.loads(&last) != 20 {
+        return Err(BenchError::new(format!(
+            "{} index reads, {} loads",
+            fake.index_reads(&last),
+            fake.loads(&last)
+        )));
+    }
+    Ok(vec![
+        Measured::new("usage/finalize_turn_20", Value::Time(time)).with_note(Some(
+            "20 edits, 3 worktrees, 1 index read, 20 loads".to_owned(),
+        )),
     ])
 }
 
@@ -320,9 +412,9 @@ fn check_total(s: &Scenario, query: &UsageQuery) -> Result<(), BenchError> {
 }
 
 /// `usage/snapshot_increment`: with the first project's 30-day snapshot
-/// watched, a stored batch's fact deltas applied and the snapshot
-/// replaced. The batch's own ingest is not timed here
-/// (`usage/ingest_append_4k`); step 1 has no finalizing.
+/// watched, a turn settled (its fact rows written again) and the snapshot
+/// replaced with the facts' deltas. The batch that ended the turn is read
+/// before the timing (`usage/ingest_append_4k`).
 pub const SNAPSHOT_INCREMENT: Bench = Bench {
     id: "usage/snapshot_increment",
     run: snapshot_increment,
@@ -336,27 +428,32 @@ fn snapshot_increment(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     s.watch(query.clone())?;
     let s = RefCell::new(s);
     let mut n = 0;
-    let mut wrong: Option<String> = None;
+    let wrong: RefCell<Option<String>> = RefCell::new(None);
     let time = ctx.time_with_setup(
         || {
             n += 1;
             let records = append_4k("live", n, pos, HEAVY_NOW - 1_800_000 + n as i64);
-            let s = s.borrow();
+            let mut s = s.borrow_mut();
             s.sessions(&Agent::ClaudeCode).push("live", records);
             pos += 4096;
-            s.store_batch(&Agent::ClaudeCode, "live", 8 << 20)
-        },
-        |stored| match stored.map(|stored| s.borrow_mut().replace_snapshots(&stored)) {
-            Ok(Ok(1)) => {}
-            Ok(Ok(n)) => {
-                wrong.get_or_insert(format!("{n} snapshots replaced"));
+            // The batch is stored and applied; the turns it ended wait.
+            if let Err(e) = s.read(&Agent::ClaudeCode, "live", 8 << 20) {
+                wrong.borrow_mut().get_or_insert(e.to_string());
             }
-            Ok(Err(e)) | Err(e) => {
-                wrong.get_or_insert(e.to_string());
+        },
+        |()| match s.borrow_mut().settle(&Agent::ClaudeCode, "live") {
+            Ok(done) if done.turns() >= 1 && done.fact_changes() > 0 => {}
+            Ok(done) => {
+                wrong
+                    .borrow_mut()
+                    .get_or_insert(format!("{} turns settled", done.turns()));
+            }
+            Err(e) => {
+                wrong.borrow_mut().get_or_insert(e.to_string());
             }
         },
     );
-    if let Some(wrong) = wrong {
+    if let Some(wrong) = wrong.into_inner() {
         return Err(BenchError::new(wrong));
     }
     // The watched snapshot is the one a full compute gives.

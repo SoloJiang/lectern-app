@@ -8,15 +8,16 @@
 //! (timestamp, source ID, session ID, `pos`, `seq`), then the row ID. The
 //! chosen source decides the session, turn and place of the usage.
 //!
-//! Step 1 attributes each usage to its turn's cwd: one fact row per counted
-//! source, holding all of it.
+//! A counted source has one fact row per target of its turn's share
+//! (`attrib`): the turn's cwd until the turn is settled and nothing better is
+//! known.
 
 use std::cmp::Ordering;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::cold::{self, Frozen};
-use crate::round::MICRO;
+use crate::round;
 use crate::window::BUCKET_MS;
 
 struct Candidate {
@@ -192,30 +193,66 @@ fn replace(
     Ok(())
 }
 
-/// The fact rows of a counted source. Step 1 has one target per usage, the
-/// cwd's place: one row with every token, in millionths
-/// (`round::split(tokens, &[1])`).
-fn insert_facts(conn: &Connection, source: i64, deltas: &mut Deltas) -> rusqlite::Result<()> {
+/// The fact rows of a counted source: one per target of its turn
+/// (`attrib::source_targets`), each token kind split by the targets' weights
+/// into millionths of a token (`round::split`), so that the rows add up to
+/// the source exactly. A source without a turn, or whose turn is not
+/// settled and has no turn with changes before it, has one row at its
+/// turn's cwd.
+pub(crate) fn insert_facts(
+    conn: &Connection,
+    source: i64,
+    deltas: &mut Deltas,
+) -> rusqlite::Result<()> {
     const INSERT: &str = "INSERT INTO fact (at, bucket, source, location, project, agent, model,
                            session, turn, input, output, cache_read, cache_write)
-         SELECT s.at, (s.at - (((s.at % ?2) + ?2) % ?2)) / ?2, s.id, s.location, p.id,
-                se.agent, s.model, s.session, s.turn,
-                s.input * ?3, s.output * ?3, s.cache_read * ?3, s.cache_write * ?3
+         SELECT s.at, (s.at - (((s.at % ?2) + ?2) % ?2)) / ?2, s.id, ?3, p.id,
+                se.agent, s.model, s.session, s.turn, ?4, ?5, ?6, ?7
          FROM usage_source s
          JOIN session se ON se.id = s.session
          LEFT JOIN project p ON p.id = (
-             SELECT q.id FROM project q WHERE q.location = s.location AND q.since <= s.at
+             SELECT q.id FROM project q WHERE q.location = ?3 AND q.since <= s.at
              ORDER BY q.since DESC, q.id DESC LIMIT 1)
          WHERE s.id = ?1";
-    let values = params![source, BUCKET_MS, MICRO as i64];
-    if !deltas.on {
-        conn.prepare_cached(INSERT)?.execute(values)?;
-    } else {
-        let sql = format!("{INSERT} RETURNING {DELTA_COLUMNS}");
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(values, |r| delta(r, 1))?;
-        for row in rows {
-            deltas.facts.push(row?);
+    type Own = (Option<i64>, i64, [i64; 4]);
+    let (turn, location, tokens): Own = conn
+        .prepare_cached(
+            "SELECT turn, location, input, output, cache_read, cache_write
+             FROM usage_source WHERE id = ?1",
+        )?
+        .query_row(params![source], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?],
+            ))
+        })?;
+    let targets = super::attrib::source_targets(conn, turn, location)?;
+    let weights: Vec<u64> = targets.iter().map(|t| t.weight).collect();
+    let parts: Vec<Vec<u64>> = tokens
+        .iter()
+        .map(|&t| round::split(u64::try_from(t).unwrap_or(0), &weights))
+        .collect();
+    for (i, target) in targets.iter().enumerate() {
+        let micro = |k: usize| i64::try_from(parts[k][i]).unwrap_or(i64::MAX);
+        let values = params![
+            source,
+            BUCKET_MS,
+            target.location,
+            micro(0),
+            micro(1),
+            micro(2),
+            micro(3)
+        ];
+        if !deltas.on {
+            conn.prepare_cached(INSERT)?.execute(values)?;
+        } else {
+            let sql = format!("{INSERT} RETURNING {DELTA_COLUMNS}");
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(values, |r| delta(r, 1))?;
+            for row in rows {
+                deltas.facts.push(row?);
+            }
         }
     }
     if deltas.buckets {
@@ -362,6 +399,26 @@ pub(crate) fn rebuild(conn: &mut Connection) -> rusqlite::Result<()> {
 
 pub(crate) fn rebuild_in(tx: &Connection) -> rusqlite::Result<()> {
     let frozen = cold::frozen(tx)?;
+    // The turns that were settled are settled again from their items once
+    // the facts are back, in the provisional state.
+    let settled: Vec<i64> = tx
+        .prepare(&format!(
+            "SELECT id FROM turn WHERE done = 1 AND NOT {}",
+            frozen.sql("started_at")
+        ))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    tx.execute(
+        &format!("DELETE FROM share WHERE NOT {}", frozen.sql("at")),
+        [],
+    )?;
+    tx.execute(
+        &format!(
+            "UPDATE turn SET done = 0, changed = 0 WHERE done = 1 AND NOT {}",
+            frozen.sql("started_at")
+        ),
+        [],
+    )?;
     tx.execute(
         &format!("DELETE FROM fact WHERE NOT {}", frozen.sql("at")),
         [],
@@ -381,5 +438,6 @@ pub(crate) fn rebuild_in(tx: &Connection) -> rusqlite::Result<()> {
     for key in &keys {
         reselect(tx, key, &frozen, &mut deltas)?;
     }
+    super::attrib::settle_all(tx, settled, &frozen, &mut deltas)?;
     rebuild_buckets(tx)
 }

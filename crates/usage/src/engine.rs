@@ -26,7 +26,7 @@ use lectern_logging::{Ctx, Value, debug, error, info, warn};
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
 use lectern_services::session::{
     Batch, Place as SessionPlace, Record, SessionError, SessionKey, SessionSource, SessionSummary,
-    SessionsChanged, SourceId, Timestamp,
+    SessionsChanged, SourceId, Timestamp, ToolKind,
 };
 use lectern_services::usage::{
     AnalysisId, AnalysisStart, Limits, LocalDate, MeterEvent, MrSource, MrSourceRegistration,
@@ -36,13 +36,15 @@ use lectern_services::usage::{
 
 use crate::LocalZone;
 use crate::facts;
+use crate::finalize::{self, BATCH_TIME, BATCH_TURNS, Settling};
 use crate::identity::{Previous, RepoFacts};
 use crate::limits::{self, Rejected};
+use crate::paths::{self, DirPlace};
 use crate::snapshot::{self, Applied, Owners, Scope, Watched};
 use crate::store::cold::{self, Month, Stepped};
 use crate::store::{
-    Aliases, Checked, Commanded, FileStamp, Ingest, Ingested, Mode, Outcome, Place, ProjectRow,
-    Recorded, SessionInfo, Store, StoreError, Totals,
+    Aliases, Checked, Commanded, FileStamp, Ingest, Ingested, Mode, Outcome, PathPlace, Place,
+    ProjectRow, Recorded, SessionInfo, Store, StoreError, Totals,
 };
 use crate::time::Time;
 use crate::window;
@@ -189,6 +191,12 @@ struct State {
     backfill: Backfill,
     maintenance: Maintenance,
     places: HashMap<PathBuf, Place>,
+    /// Where the files of a directory lie (`Projects::resolve`, remembered).
+    dirs: HashMap<PathBuf, DirPlace>,
+    /// Sessions with turns to settle (docs/design/usage.md「轮次的观察与改动项」).
+    settle: HashSet<SessionKey>,
+    /// The moment a timer waits for before a session settles again.
+    waits: HashMap<SessionKey, i64>,
     interests: HashMap<UsageQuery, Interest>,
     computing: bool,
     generation: u64,
@@ -375,6 +383,7 @@ impl Engine {
                 state.maintenance.check = true;
                 drop(state);
                 self.register_open_projects(&store);
+                self.queue_unsettled(&store);
                 let keys: Vec<SessionKey> = self.summaries().into_keys().collect();
                 self.state().unverified.extend(keys);
                 self.verify_now();
@@ -737,8 +746,21 @@ impl Engine {
                 return;
             }
             if state.dirty.is_empty() {
-                // Nothing to read: the archive and the reclaim share the
-                // backfill's queue and cadence.
+                // Nothing to read: turns to settle go first, then the
+                // archive and the reclaim, which share the backfill's queue
+                // and cadence.
+                if !state.settle.is_empty() {
+                    drop(state);
+                    match self.next_settle() {
+                        Some(key) => {
+                            if !self.spawn(true, move |engine| engine.settle_one(key)) {
+                                self.state().reading = false;
+                            }
+                        }
+                        None => self.arm_pace(),
+                    }
+                    return;
+                }
                 if !state.maintenance.pending() {
                     return;
                 }
@@ -844,6 +866,10 @@ impl Engine {
                 }
                 if at_end {
                     state.dirty.remove(&key);
+                    // The turns that ended can be settled now.
+                    if out.turns_pending {
+                        state.settle.insert(key.clone());
+                    }
                     if let Some(entry) = state.backfill.sessions.get_mut(&key) {
                         entry.1 = entry.0;
                     }
@@ -1127,17 +1153,20 @@ impl Engine {
         drop(source);
         let start = self.place(&summary, &summary.cwd);
         let places = self.places(&summary, &batch);
+        let paths = self.edit_paths(&batch);
         let input = Ingest {
             session: SessionInfo {
                 key,
                 agent: &summary.agent,
                 parent: summary.parent.as_ref().map(|p| &p.session),
+                parent_call: summary.parent.as_ref().and_then(|p| p.tool_call.as_ref()),
                 inheritance_unknown: summary.inheritance_unknown,
                 start: &start,
             },
             from: &cursor,
             batch: &batch,
             places: &places,
+            paths: &paths,
             stamp,
             now_ms: self.deps.time.now_ms(),
         };
@@ -1244,6 +1273,185 @@ impl Engine {
         out
     }
 
+    /// Where the files named by the batch's `Edit` calls lie.
+    fn edit_paths(&self, batch: &Batch) -> HashMap<PathBuf, PathPlace> {
+        let mut out = HashMap::new();
+        for rec in &batch.records {
+            if let Record::ToolStarted(call) = &rec.value
+                && let ToolKind::Edit { paths } = &call.kind
+            {
+                for path in paths.iter() {
+                    if !out.contains_key(path) {
+                        out.insert(path.clone(), self.path_place(path));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The place of a file: `Projects::resolve` of its directory, remembered.
+    fn path_place(&self, path: &Path) -> PathPlace {
+        let (dir, name) = paths::split(path);
+        let cached = self.state().dirs.get(dir).cloned();
+        let found = match cached {
+            Some(found) => found,
+            None => {
+                let projects = self.projects.get();
+                let found = paths::dir_place(projects.as_deref(), dir);
+                let mut state = self.state();
+                if state.dirs.len() >= PLACE_CACHE {
+                    state.dirs.clear();
+                }
+                state.dirs.insert(dir.to_path_buf(), found.clone());
+                found
+            }
+        };
+        found.file(name)
+    }
+
+    // ---- settling turns ----
+
+    /// The sessions with turns that ended and are not settled yet, after a
+    /// restart: they settle once the database is open.
+    fn queue_unsettled(&self, store: &Store) {
+        match store.unsettled() {
+            Ok(keys) => {
+                let mut state = self.state();
+                state.settle.extend(keys);
+            }
+            Err(e) => warn!("unsettled sessions not listed"; sqlite = e.code()),
+        }
+    }
+
+    /// Takes the next session to settle: an active one at once, any other
+    /// when a quiet stretch allows (the backfill's pace). None when there
+    /// is none, or none may run now.
+    fn next_settle(&self) -> Option<SessionKey> {
+        let keys: Vec<SessionKey> = self.state().settle.iter().cloned().collect();
+        if keys.is_empty() {
+            return None;
+        }
+        let summaries = self.summaries();
+        let now = self.deps.time.now_ms();
+        let mut state = self.state();
+        if state.reading || state.stopped || state.blocked {
+            return None;
+        }
+        state.settle.retain(|k| summaries.contains_key(k));
+        let active = keys
+            .iter()
+            .find(|k| {
+                state.settle.contains(*k) && summaries.get(*k).is_some_and(|s| is_active(s, now))
+            })
+            .cloned();
+        let pick = match active {
+            Some(k) => Some(k),
+            None if state.pace.allowed => {
+                let k = state.settle.iter().next().cloned();
+                if k.is_some() {
+                    state.pace.allowed = false;
+                }
+                k
+            }
+            None => None,
+        };
+        if let Some(k) = &pick {
+            state.settle.remove(k);
+            state.reading = true;
+        }
+        pick
+    }
+
+    /// One batch of a session's turns, settled.
+    fn settle_one(&self, key: SessionKey) {
+        let tag = session_tag(&key.id);
+        let _scope = lectern_logging::scope(Ctx {
+            session: Some(tag),
+            ..Ctx::default()
+        });
+        let settled = self.settle_batch(&key);
+        let mut again = false;
+        let mut wait = None;
+        let mut retry = false;
+        let mut written = None;
+        match settled {
+            Some(Ok(s)) => {
+                again = s.more;
+                wait = s.wait_until;
+                retry = s.retry;
+                written = s.written;
+            }
+            Some(Err(e)) => {
+                if let Some(store) = self.store() {
+                    let _ = self.store_failed(&store, &e);
+                }
+            }
+            None => {}
+        }
+        if again {
+            self.state().settle.insert(key.clone());
+        }
+        if let Some(out) = written {
+            self.apply_facts(&out);
+        }
+        self.state().reading = false;
+        if let Some(at) = wait {
+            self.arm_settle(&key, at);
+        }
+        if retry {
+            let at = self.deps.time.now_ms() + PACE.as_millis() as i64;
+            self.arm_settle(&key, at);
+        }
+        self.compute();
+        self.pump();
+    }
+
+    fn settle_batch(&self, key: &SessionKey) -> Option<Result<finalize::Settled, StoreError>> {
+        let store = self.store()?;
+        let source = self
+            .sources
+            .current()
+            .into_iter()
+            .find(|s| s.id() == key.source)?;
+        let summary = source.sessions().get(key).cloned()?;
+        let resolve = |p: &Path| self.path_place(p);
+        let settling = Settling {
+            store: &store,
+            source: &*source,
+            key,
+            now_ms: self.deps.time.now_ms(),
+            end_open: !summary.open_turn,
+            resolve: &resolve,
+            turns: BATCH_TURNS,
+            time: BATCH_TIME,
+        };
+        Some(finalize::settle(&settling))
+    }
+
+    /// Settles the session again once the wall clock reaches `at_ms`.
+    fn arm_settle(&self, key: &SessionKey, at_ms: i64) {
+        {
+            let mut state = self.state();
+            if state.waits.get(key) == Some(&at_ms) {
+                return;
+            }
+            state.waits.insert(key.clone(), at_ms);
+        }
+        let key = key.clone();
+        let fire = self.timer(move |engine| {
+            {
+                let mut state = engine.state();
+                if state.waits.get(&key) == Some(&at_ms) {
+                    state.waits.remove(&key);
+                }
+                state.settle.insert(key);
+            }
+            engine.pump();
+        });
+        self.deps.time.at_wall(at_ms, fire);
+    }
+
     // ---- pacing ----
 
     pub(crate) fn on_quiescent(&self, seq: u64) {
@@ -1291,7 +1499,9 @@ impl Engine {
             if state.stopped
                 || state.pace.allowed
                 || state.pace.timer == Some(quiet)
-                || (state.dirty.is_empty() && !state.maintenance.pending())
+                || (state.dirty.is_empty()
+                    && state.settle.is_empty()
+                    && !state.maintenance.pending())
             {
                 return;
             }
@@ -1781,10 +1991,16 @@ pub(crate) fn compute_full(
                 snapshot::history(cx.header(inherited), info, *from, &totals),
             ))))
         }
-        // Later steps of docs/design/usage.md「验收」.
-        UsageQuery::Worktree { .. } | UsageQuery::Session { .. } | UsageQuery::Mr { .. } => {
-            Ok(None)
+        UsageQuery::Session { session } => {
+            let Some(totals) = cx.store.session_totals(session)? else {
+                return Ok(None);
+            };
+            Ok(Some(Computed::Snapshot(UsageSnapshot::Session(
+                snapshot::session(cx.header(totals.inherited), &totals),
+            ))))
         }
+        // Later steps of docs/design/usage.md「验收」.
+        UsageQuery::Worktree { .. } | UsageQuery::Mr { .. } => Ok(None),
     }
 }
 
@@ -1890,6 +2106,10 @@ fn with_generation(snapshot: UsageSnapshot, generation: u64) -> UsageSnapshot {
         UsageSnapshot::History(mut h) => {
             h.header.generation = generation;
             UsageSnapshot::History(h)
+        }
+        UsageSnapshot::Session(mut s) => {
+            s.header.generation = generation;
+            UsageSnapshot::Session(s)
         }
         other => other,
     }

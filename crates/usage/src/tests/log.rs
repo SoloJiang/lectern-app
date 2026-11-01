@@ -4,13 +4,13 @@
 //! limit IDs, statusline JSON); paths may be logged, so the canary stays out
 //! of them.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use lectern_services::session::{
-    Agent, RateLimitSample, RateWindow, Record, Timestamp, ToolCallId, ToolFinished, ToolKind,
-    ToolStarted, ToolStatus, TurnId, UsageKey,
+    Agent, EditOp, FileEdit, RateLimitSample, RateWindow, Record, Timestamp, ToolCallId,
+    ToolFinished, ToolKind, ToolStarted, ToolStatus, TurnId, UsageKey,
 };
 use lectern_services::usage::{ForgeRepo, ProjectRef, UsageCommand, UsageQuery, Window};
 
@@ -59,6 +59,27 @@ fn log_canary_never_reaches_a_record() {
                     }),
                 ),
                 rec(
+                    250,
+                    Record::ToolStarted(ToolStarted {
+                        call: ToolCallId(format!("edit-{CANARY}").into()),
+                        turn: Some(TurnId(turn.as_str().into())),
+                        at: Timestamp(at),
+                        name: "Edit".into(),
+                        kind: ToolKind::Edit {
+                            paths: vec![PathBuf::from("/work/other/f.rs")].into(),
+                        },
+                    }),
+                ),
+                rec(
+                    260,
+                    Record::ToolFinished(ToolFinished {
+                        call: ToolCallId(format!("edit-{CANARY}").into()),
+                        at: Timestamp(at),
+                        status: ToolStatus::Completed,
+                        exec_session: None,
+                    }),
+                ),
+                rec(
                     300,
                     Record::ToolFinished(ToolFinished {
                         call: ToolCallId(CANARY.into()),
@@ -95,6 +116,24 @@ fn log_canary_never_reaches_a_record() {
                     )),
                 ),
             ],
+        );
+    }
+    // The text an edit wrote is read when its turn is settled; it carries the
+    // canary too.
+    for id in ["live", "old"] {
+        let path = PathBuf::from("/work/other/f.rs");
+        fake.edit_call(
+            id,
+            &format!("turn-{CANARY}"),
+            &format!("edit-{CANARY}"),
+            std::slice::from_ref(&path),
+            vec![FileEdit {
+                path: path.clone(),
+                op: EditOp::Write {
+                    content: format!("secret {CANARY}\n").into(),
+                    created: true,
+                },
+            }],
         );
     }
     // What identifies the repositories carries the canary too: roots,
@@ -189,6 +228,8 @@ fn log_canary_never_reaches_a_record() {
         "repository facts could not be read",
         "project command applied",
         "project command rejected",
+        "turns settled",
+        "turn settled",
     ] {
         assert!(
             logged.iter().any(|l| l.contains(expected)),

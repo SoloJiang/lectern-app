@@ -31,7 +31,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 #[cfg(test)]
 use super::lock;
 use super::segment::{self, Encoder, Segment};
-use super::{Store, StoreError, dedup};
+use super::{Store, StoreError, attrib, dedup};
 use crate::LocalZone;
 use crate::window::{self, BUCKET_MS};
 
@@ -88,6 +88,35 @@ const TABLES: &[Table] = &[
         order: "started_at, id",
         key: "id",
         at: "started_at",
+    },
+    Table {
+        name: "call",
+        month: "started_at >= ?1 AND started_at < ?2",
+        order: "started_at, id",
+        key: "id",
+        at: "started_at",
+    },
+    Table {
+        name: "call_fact",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
+    Table {
+        name: "item",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
+    // Derived, like `fact`; after the observations it is derived from.
+    Table {
+        name: "share",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
     },
     Table {
         name: "fact",
@@ -1198,6 +1227,7 @@ fn summarize(
             }
             s.write(tx)
         }
+        "turn" => anchor(tx, seg),
         "usage_source" => {
             let Some(i) = seg.column("session") else {
                 return Ok(());
@@ -1217,6 +1247,49 @@ fn summarize(
         }
         _ => Ok(()),
     }
+}
+
+/// What the turns of a session that are still hot follow once the turns
+/// they would follow are cold: the latest archived turn with changes of its
+/// own per session, and its share (`cold_anchor`, kind 0: pairs of place
+/// and weight, as 16 little-endian bytes each). Written while the segment
+/// of `turn` is archived: its `share` rows are still hot then, because
+/// `share` is archived after `turn`. A hot sub-agent session whose parent
+/// turn went cold is not anchored (a known limitation, step 4's design
+/// differences).
+fn anchor(tx: &Connection, seg: &Segment) -> rusqlite::Result<()> {
+    let (Some(id), Some(session), Some(done), Some(changed)) = (
+        seg.column("id"),
+        seg.column("session"),
+        seg.column("done"),
+        seg.column("changed"),
+    ) else {
+        return Ok(());
+    };
+    let int = |v: &Value| match v {
+        Value::Integer(i) => *i,
+        _ => 0,
+    };
+    let mut latest: HashMap<i64, i64> = HashMap::new();
+    for row in &seg.rows {
+        if int(&row[done]) == 1 && int(&row[changed]) == attrib::FROM_CHANGES {
+            let turn = latest.entry(int(&row[session])).or_insert(0);
+            *turn = (*turn).max(int(&row[id]));
+        }
+    }
+    for (session, turn) in latest {
+        let blob = attrib::encode(&attrib::shares(tx, turn)?);
+        if blob.is_empty() {
+            continue;
+        }
+        tx.prepare_cached(
+            "INSERT INTO cold_anchor (session, kind, turn, shares) VALUES (?1, 0, ?2, ?3)
+             ON CONFLICT (session, kind) DO UPDATE SET turn = excluded.turn, shares = excluded.shares
+             WHERE excluded.turn > cold_anchor.turn",
+        )?
+        .execute(params![session, turn, blob])?;
+    }
+    Ok(())
 }
 
 /// Puts a month's observation rows back into the hot tables and takes its
@@ -1243,8 +1316,8 @@ fn restore_month(tx: &Connection, m: Month) -> rusqlite::Result<()> {
                     }
                 }
             }
-            // Derived: rebuilt from the restored sources.
-            "usage_value" => {}
+            // Derived: rebuilt from the restored sources and items.
+            "usage_value" | "share" => {}
             name => {
                 let marks = vec!["?"; seg.columns.len()].join(", ");
                 let sql = format!(
