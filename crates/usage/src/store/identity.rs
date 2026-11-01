@@ -580,8 +580,24 @@ fn record(
          WHERE id = ?1",
     )?
     .execute(params![target, name])?;
-    if latest.get(&target) != Some(facts) {
-        insert_fact(tx, target, loc, now_ms, facts)?;
+    match latest.get(&target) {
+        Some(old) if old == facts => {}
+        // Only the tip moved: the same facts on the latest row, which now
+        // says where the roots were found from. The table does not grow
+        // with every commit.
+        Some(old)
+            if (RepoFacts {
+                tip: facts.tip.clone(),
+                ..old.clone()
+            }) == *facts =>
+        {
+            tx.prepare_cached(
+                "UPDATE project_fact SET tip = ?2
+                 WHERE id = (SELECT max(id) FROM project_fact WHERE project = ?1)",
+            )?
+            .execute(params![target, facts.tip])?;
+        }
+        _ => insert_fact(tx, target, loc, now_ms, facts)?,
     }
     let project = project_by_id_on(tx, target)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     Ok(Recorded { project, outcome })

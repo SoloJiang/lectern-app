@@ -55,6 +55,15 @@ pub struct BranchInfo {
     pub push: Option<RemoteBranch>,
 }
 
+/// The commits `tip` has beyond an ancestor ([`Repo::advance_since`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Advance {
+    /// How many.
+    pub commits: usize,
+    /// The ones without a parent.
+    pub roots: Vec<Oid>,
+}
+
 /// A branch on a remote.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RemoteBranch {
@@ -294,6 +303,64 @@ impl Repo {
             }
         }
         Ok(out)
+    }
+
+    /// What `tip` has that `old` has not (`git rev-list old..tip`), when
+    /// `old` is an ancestor of `tip`: the number of those commits and the
+    /// parentless ones among them. The walk visits the new commits, not the
+    /// history below `old`. None when `old` is not an ancestor of `tip`
+    /// (the history was rewritten, another branch), when more than
+    /// `max_commits` new commits were visited, or when `old` is not in the
+    /// repository any more: the caller then walks the whole history. For
+    /// project identity: the root commits of an advanced tip are the old
+    /// ones and the new parentless commits.
+    pub fn advance_since(
+        &self,
+        old: Oid,
+        tip: Oid,
+        max_commits: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Advance>, GitError> {
+        if old == tip {
+            return Ok(Some(Advance::default()));
+        }
+        let handle = self.open_common()?;
+        let walk = match handle
+            .rev_walk([tip.to_gix()])
+            .with_hidden([old.to_gix()])
+            .all()
+        {
+            Ok(walk) => walk,
+            Err(err) if err.is_not_found() => return Ok(None),
+            Err(err) => return Err(missing_or(err, tip)),
+        };
+        let mut out = Advance::default();
+        let mut reaches_old = false;
+        for info in walk {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(GitError::Cancelled);
+            }
+            let info = match info {
+                Ok(info) => info,
+                // A commit below the tip is missing (a shallow or damaged
+                // repository): no answer from here.
+                Err(err) if err.is_not_found() => return Ok(None),
+                Err(err) => return Err(GitError::from_gix(err)),
+            };
+            out.commits += 1;
+            if out.commits > max_commits {
+                return Ok(None);
+            }
+            let mut parents = 0;
+            for parent in info.parent_ids() {
+                parents += 1;
+                reaches_old |= Oid::from_gix(&parent.detach()) == old;
+            }
+            if parents == 0 {
+                out.roots.push(Oid::from_gix(&info.id));
+            }
+        }
+        Ok(reaches_old.then_some(out))
     }
 
     /// A stash commit's parts: worktree, index and (with `-u` / `-a`)

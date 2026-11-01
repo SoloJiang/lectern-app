@@ -226,6 +226,12 @@ impl Repo {
     pub fn default_branch(&self) -> Result<Option<RefName>, GitError>;
     /// 从 `tip` 可达的根提交，最多 `limit` 个。项目识别用（ADR 0020）。
     pub fn root_commits(&self, tip: Oid, limit: usize, cancel: &AtomicBool) -> Result<Vec<Oid>, GitError>;
+    /// `tip` 比它的祖先 `old` 多出来的提交（`git rev-list old..tip`）：个数和其中没有父提交的。只访问这些新提交，
+    /// 不读 `old` 以下的历史。`old` 不是 `tip` 的祖先（改写了历史、换了分支）、新提交超过 `max_commits` 个、
+    /// 或 `old` 的对象已不在时为 None，调用方改走整个历史。`old == tip` 时为 0 个。项目识别用：顶端向前动了时，
+    /// 根提交是记下的根提交加上这里的根（`usage` 设计「与设计的差异」第 3 步）。
+    pub fn advance_since(&self, old: Oid, tip: Oid, max_commits: usize, cancel: &AtomicBool)
+        -> Result<Option<Advance>, GitError>;
     /// stash 提交的三部分：工作区提交、index 提交、未跟踪文件提交（`-u` / `-a` 时才有）。
     pub fn stash(&self, id: Oid) -> Result<StashInfo, GitError>;
     /// 一棵树里的全部路径和模式，不读内容（如 stash 的未跟踪文件提交，供 `fs_watch` 的不过滤清单）。
@@ -624,6 +630,9 @@ pub struct RemoteBranch {
 }
 
 pub struct RemoteInfo { pub name: Arc<str>, pub fetch_url: Option<Arc<str>>, pub push_url: Option<Arc<str>> }
+
+/// `advance_since` 的结果：新提交的个数，和其中没有父提交的。
+pub struct Advance { pub commits: usize, pub roots: Vec<Oid> }
 
 pub struct StashInfo {
     pub worktree: Oid,                               // stash 提交本身

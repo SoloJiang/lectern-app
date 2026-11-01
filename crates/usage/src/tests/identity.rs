@@ -517,12 +517,207 @@ fn identity_facts_walk_again_when_the_tip_moved() {
     let stale = crate::facts::from_repo(&repo.repo(), &previous_of(&first), None, &cancelled());
     assert!(
         matches!(stale, Err(lectern_git::GitError::Cancelled)),
-        "the tip moved, the history is walked"
+        "the tip moved: the check for an ancestor visits the new commits"
     );
     let second = facts_of(&repo, &previous_of(&first));
     assert_ne!(second.tip, first.tip);
     assert_eq!(second.tip, Some(next.to_string()));
     assert_eq!(second.roots, BTreeSet::from([root]));
+}
+
+/// The tip of `main`.
+fn main_tip(repo: &TestRepo) -> lectern_git::Oid {
+    repo.repo()
+        .resolve(&lectern_git::RefName::new("refs/heads/main").unwrap())
+        .unwrap()
+        .unwrap()
+}
+
+/// What the last identification of a repository whose roots are the made-up
+/// `marker`: the roots the real history does not have. A read that gives
+/// them back used the stored roots; one that walked gives the real ones.
+fn marked(repo: &TestRepo, marker: &str) -> Previous {
+    let first = facts_of(repo, &Previous::default());
+    Previous {
+        roots: BTreeSet::from([marker.to_owned()]),
+        ..previous_of(&first)
+    }
+}
+
+#[test]
+fn identity_facts_for_a_tip_that_moved_forward_do_not_walk_the_history() {
+    let (repo, _) = repo_with(&[]);
+    let previous = marked(&repo, "stored-root");
+    let old = main_tip(&repo);
+    let one = repo.commit(repo.tree(&[("a.txt", b"1")]), &[old], "one");
+    let two = repo.commit(repo.tree(&[("a.txt", b"2")]), &[one], "two");
+    repo.set_ref("refs/heads/main", two);
+    let facts = facts_of(&repo, &previous);
+    assert_eq!(facts.tip, Some(two.to_string()));
+    assert_eq!(
+        facts.roots,
+        BTreeSet::from(["stored-root".to_owned()]),
+        "the stored roots, not the real ones: no walk down to the root"
+    );
+}
+
+#[test]
+fn identity_facts_for_a_rewritten_history_walk_it_and_find_the_roots() {
+    let (repo, _) = repo_with(&[]);
+    let previous = marked(&repo, "stored-root");
+    // A history that does not contain the old tip, with a root of its own.
+    let tree = repo.tree(&[("a.txt", b"other")]);
+    let root = repo.commit(tree, &[], "new root");
+    let tip = repo.commit(tree, &[root], "new tip");
+    repo.set_ref("refs/heads/main", tip);
+    let facts = facts_of(&repo, &previous);
+    assert_eq!(facts.roots, BTreeSet::from([root.to_string()]));
+    assert_eq!(facts.tip, Some(tip.to_string()));
+}
+
+#[test]
+fn identity_facts_for_an_old_tip_that_is_gone_walk_the_history() {
+    // The old tip is not in the repository any more (the bound itself is
+    // tested in lectern-git): the history is walked.
+    let (repo, root) = repo_with(&[]);
+    let first = facts_of(&repo, &Previous::default());
+    let gone = "ab".repeat(20);
+    let previous = Previous {
+        tip: Some(gone),
+        roots: BTreeSet::from(["stored-root".to_owned()]),
+        ..previous_of(&first)
+    };
+    let facts = facts_of(&repo, &previous);
+    assert_eq!(facts.roots, BTreeSet::from([root]));
+}
+
+#[test]
+fn identity_facts_for_a_merge_that_brings_a_root_have_that_root_too() {
+    let (repo, root) = repo_with(&[]);
+    let previous = marked(&repo, &root);
+    let old = main_tip(&repo);
+    let tree = repo.tree(&[("b.txt", b"b")]);
+    let other_root = repo.commit(tree, &[], "other root");
+    let other = repo.commit(tree, &[other_root], "other");
+    let merge = repo.commit(repo.tree(&[("a.txt", b"m")]), &[old, other], "merge");
+    repo.set_ref("refs/heads/main", merge);
+    let facts = facts_of(&repo, &previous);
+    assert_eq!(
+        facts.roots,
+        BTreeSet::from([root, other_root.to_string()]),
+        "the old root and the new one"
+    );
+}
+
+#[test]
+fn identity_facts_for_a_merge_do_not_pass_the_limit_of_roots() {
+    let (repo, root) = repo_with(&[]);
+    let previous = Previous {
+        roots: ["r1", "r2", "r3", &root].map(str::to_owned).into(),
+        ..marked(&repo, &root)
+    };
+    let old = main_tip(&repo);
+    let tree = repo.tree(&[("b.txt", b"b")]);
+    let other_root = repo.commit(tree, &[], "other root");
+    let merge = repo.commit(tree, &[old, other_root], "merge");
+    repo.set_ref("refs/heads/main", merge);
+    assert_eq!(facts_of(&repo, &previous).roots.len(), 4);
+}
+
+#[test]
+fn identity_a_tip_that_moved_adds_no_fact_row() {
+    let mut h = Harness::new();
+    let with_tip = |tip: &str| RepoFacts {
+        tip: Some(tip.to_owned()),
+        ..app_facts()
+    };
+    let rows = |h: &Harness| -> i64 {
+        rusqlite::Connection::open(h.db_path())
+            .unwrap()
+            .query_row("SELECT count(*) FROM project_fact", [], |r| r.get(0))
+            .unwrap()
+    };
+    h.identified(APP, &with_tip("t1"), OCT_20 + HOUR, &[]);
+    assert_eq!(rows(&h), 1);
+    for (i, tip) in ["t2", "t3", "t4"].into_iter().enumerate() {
+        let (_, again) = h.identified(APP, &with_tip(tip), OCT_20 + (2 + i as i64) * HOUR, &[]);
+        assert_eq!(again.outcome, Outcome::Same);
+        assert_eq!(rows(&h), 1, "the tip is updated on the row, not added");
+        assert_eq!(
+            h.store().previous(Path::new(APP)).unwrap().tip,
+            Some(tip.to_owned())
+        );
+    }
+    // Another fact changing does add a row.
+    let more = RepoFacts {
+        forge: Some(forge("7")),
+        ..with_tip("t4")
+    };
+    h.identified(APP, &more, OCT_20 + 9 * HOUR, &[]);
+    assert_eq!(rows(&h), 2);
+}
+
+#[test]
+fn identity_plugin_cancel_during_the_ancestor_check_records_nothing() {
+    // The first identification finds the repository; then its tip moves and
+    // the read is cancelled while the new commits are checked.
+    let (repo, _) = repo_with(&[]);
+    let git = repo.repo();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let reader: FactsReader = {
+        let cancel = cancel.clone();
+        Arc::new(move |_, previous, _| crate::facts::from_repo(&git, previous, None, &cancel))
+    };
+    let fake = claude_fake();
+    session_in(&fake, "s", "/work/app", NOW - 60_000, 3);
+    let rig = Rig::with_facts(
+        fake,
+        |p| {
+            let key = p.repo(Path::new("/work/app"), Path::new(APP));
+            p.set_open(&key, true);
+        },
+        reader,
+    );
+    rig.settle();
+    let before = rig.all();
+    assert_eq!(before.projects.len(), 1);
+    let facts_rows = |rig: &Rig| -> Vec<(i64, Option<String>)> {
+        let conn = rusqlite::Connection::open(rig.db()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, tip FROM project_fact ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let recorded = facts_rows(&rig);
+    assert_eq!(recorded.len(), 1);
+    let old = main_tip(&repo);
+    let next = repo.commit(repo.tree(&[("a.txt", b"n")]), &[old], "next");
+    repo.set_ref("refs/heads/main", next);
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    rig.kernel().emitter().emit(ProjectEvent::Opened {
+        request: lectern_services::project::OpenRequest(9),
+        result: Ok(ProjectKey::Git {
+            common_dir: Path::new(APP).into(),
+        }),
+    });
+    rig.settle();
+    assert_eq!(facts_rows(&rig), recorded, "the tip stayed as it was");
+    assert_eq!(rig.all().projects.len(), 1);
+    // Not cancelled any more: the tip is updated on the same row.
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+    rig.kernel().emitter().emit(ProjectEvent::Opened {
+        request: lectern_services::project::OpenRequest(10),
+        result: Ok(ProjectKey::Git {
+            common_dir: Path::new(APP).into(),
+        }),
+    });
+    rig.settle();
+    let after = facts_rows(&rig);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].1, Some(next.to_string()));
 }
 
 #[test]
@@ -561,9 +756,19 @@ fn identity_facts_walk_cost() {
         let started = std::time::Instant::now();
         let _ = crate::facts::from_repo(&repo.repo(), &previous_of(&first), None, &cancelled())
             .unwrap();
+        let unchanged = started.elapsed();
+        // Ten new commits on the tip.
+        let mut tip = parent;
+        for i in 0..10 {
+            tip = repo.commit(tree, &[tip], &format!("new{i}"));
+        }
+        repo.set_ref("refs/heads/main", tip);
+        let started = std::time::Instant::now();
+        let moved = facts_of(&repo, &previous_of(&first));
+        let forward = started.elapsed();
+        assert_eq!(moved.roots, first.roots);
         println!(
-            "{n} commits: walk {walked:?}, unchanged tip {:?}",
-            started.elapsed()
+            "{n} commits: walk {walked:?}, unchanged tip {unchanged:?}, 10 new commits {forward:?}"
         );
     }
 }

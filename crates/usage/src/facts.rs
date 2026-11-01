@@ -3,10 +3,11 @@
 //! whether there is a commit yet. Blocking; executor only. Nothing here is
 //! logged: remote addresses can carry credentials.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use lectern_git::{GitError, RefName, Repo};
+use lectern_git::{GitError, Oid, RefName, Repo};
 use lectern_services::usage::ForgeRepo;
 
 use crate::identity::{Previous, Remote, RepoFacts, choose_primary, normalize_address};
@@ -14,6 +15,10 @@ use crate::identity::{Previous, Remote, RepoFacts, choose_primary, normalize_add
 /// The root commits kept: a repository that merged other histories has
 /// several, and a handful is enough to recognize it.
 const ROOTS: usize = 4;
+
+/// The most new commits the check "the old tip is an ancestor" visits; a
+/// tip further from the old one is walked from the start.
+const ADVANCE_LIMIT: usize = 10_000;
 
 /// Reads the facts of the repository whose common directory is
 /// `common_dir`. `previous` is what the last identification found: the
@@ -83,11 +88,7 @@ pub(crate) fn from_repo(
         // whole history of a repository with one root: only when the tip
         // moved.
         Some(_) if tip_hex == previous.tip && !previous.roots.is_empty() => previous.roots.clone(),
-        Some(oid) => repo
-            .root_commits(oid, ROOTS, cancel)?
-            .into_iter()
-            .map(|oid| oid.to_string())
-            .collect(),
+        Some(oid) => roots_of(repo, oid, previous, cancel)?,
         None => Default::default(),
     };
     Ok(RepoFacts {
@@ -99,6 +100,47 @@ pub(crate) fn from_repo(
         primary_name,
         forge,
     })
+}
+
+/// The root commits of `tip`. A tip that moved forward from the tip the
+/// stored roots were found from has those roots and the parentless commits
+/// among the new commits (a merge can bring a history with a root of its
+/// own), found by visiting only the new commits. A tip that is not a
+/// descendant (a rewrite, another default branch), further away than
+/// [`ADVANCE_LIMIT`] commits, or whose old tip is gone is walked from the
+/// start.
+fn roots_of(
+    repo: &Repo,
+    tip: Oid,
+    previous: &Previous,
+    cancel: &AtomicBool,
+) -> Result<BTreeSet<String>, GitError> {
+    let old = previous
+        .tip
+        .as_deref()
+        .and_then(|hex| Oid::from_hex(repo.location().hash, hex));
+    if let Some(old) = old
+        && !previous.roots.is_empty()
+    {
+        match repo.advance_since(old, tip, ADVANCE_LIMIT, cancel) {
+            Ok(Some(advance)) => {
+                let mut roots = previous.roots.clone();
+                for root in advance.roots {
+                    if roots.len() < ROOTS {
+                        roots.insert(root.to_string());
+                    }
+                }
+                return Ok(roots);
+            }
+            Err(GitError::Cancelled) => return Err(GitError::Cancelled),
+            Ok(None) | Err(_) => {}
+        }
+    }
+    Ok(repo
+        .root_commits(tip, ROOTS, cancel)?
+        .into_iter()
+        .map(|oid| oid.to_string())
+        .collect())
 }
 
 /// The name of the remote the default branch comes from: the remote of a
