@@ -616,7 +616,7 @@ fn the_plan_opens_and_closes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_page_switch_shows_the_terminal_page_without_a_terminal(cx: &mut TestAppContext) {
+fn the_page_switch_shows_the_terminal_page(cx: &mut TestAppContext) {
     let rig = rig(cx);
     let key = session(1);
     rig.conversations
@@ -642,8 +642,13 @@ fn the_page_switch_shows_the_terminal_page_without_a_terminal(cx: &mut TestAppCo
     );
     let tab = tab_of(&host, vcx);
     assert_eq!(vcx.update(|_, cx| tab.read(cx).page()), Page::Terminal);
+    // No terminal yet: the explanation and the resume button.
     assert!(
-        shown.contains("conversation.notice Text label=[conversation-terminal-unavailable]"),
+        shown.contains("conversation.terminal Group state=none"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("conversation.terminal.resume Button label=[conversation-terminal-resume]"),
         "{shown}"
     );
     assert!(!shown.contains("conversation.list "), "{shown}");

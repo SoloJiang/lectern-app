@@ -1,0 +1,13 @@
+---
+source: crates/conversation/src/tests/tree.rs
+expression: "tree(vcx, | id | all(id) || id.starts_with(\"terminal.\"))"
+---
+conversation.page Group page=terminal
+  conversation.pages TabBar
+    conversation.pages.item[messages] Tab label=[conversation-page-messages]
+    conversation.pages.item[terminal] Tab label=[conversation-page-terminal] selected
+  conversation.terminal Group state=exited
+    conversation.terminal.status Text label=[conversation-terminal-exited]
+    conversation.terminal.close Button label=[conversation-terminal-close]
+    conversation.terminal.resume Button label=[conversation-terminal-resume]
+    terminal.grid Group label=[terminal-grid] cols=40 rows=10 state=exited alt=false scrolled=false

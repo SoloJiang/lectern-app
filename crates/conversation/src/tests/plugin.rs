@@ -5,6 +5,7 @@
 use gpui::TestAppContext;
 use lectern_kernel::Name;
 use lectern_services::review::ReviewTarget;
+use lectern_services::terminal::RunState;
 use lectern_services::workspace::{ContributionKind, Route, Target, screens};
 use lectern_ui::contrib::InspectorTab;
 
@@ -12,6 +13,16 @@ use crate::plugin::{LIVE_ID, TAB_ID, TERMINAL_ID};
 use crate::testing::{Rig, prompt, session, snapshot, with_entries};
 
 use super::stage::*;
+
+/// The names, contexts and keys of a list of bindings, to compare two lists.
+fn binding_names(
+    bindings: &[(&'static str, Box<dyn gpui::Action>, Option<&'static str>)],
+) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
+    bindings
+        .iter()
+        .map(|(keys, action, context)| (*keys, action.name(), *context))
+        .collect()
+}
 
 #[gpui::test]
 fn plugins_register_and_deactivate_cleanly(cx: &mut TestAppContext) {
@@ -36,36 +47,93 @@ fn plugins_register_and_deactivate_cleanly(cx: &mut TestAppContext) {
     assert_eq!(bindings.len(), 1);
     assert_eq!(rig.contributions.released(), 0);
 
+    // The terminal plugin adds the terminal's keys and the leave guard.
+    rig.activate_terminal();
+    assert_eq!(
+        rig.contributions.kinds(),
+        [
+            (ContributionKind::InspectorTab, "conversation".to_owned()),
+            (ContributionKind::KeyBindings, "conversation".to_owned()),
+            (
+                ContributionKind::KeyBindings,
+                "conversation-terminal".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(rig.contributions.tokens_given(), [false; 4]);
+    assert_eq!(rig.contributions.order("conversation-terminal"), Some(0));
+    let registered = rig
+        .contributions
+        .binding_names("conversation-terminal")
+        .expect("the terminal's keys");
+    let wanted = lectern_terminal_view::key_bindings();
+    assert_eq!(registered, binding_names(&wanted));
+    assert!(
+        wanted
+            .iter()
+            .all(|(_, _, context)| *context == Some("terminal")),
+        "the terminal's keys are in the terminal's context"
+    );
+    assert_eq!(rig.contributions.guards().len(), 1);
+    assert_eq!(rig.contributions.guards_released(), 0);
+
+    // Each plugin takes only its own registrations away.
+    rig.deactivate_terminal();
+    assert_eq!(rig.contributions.released(), 1);
+    assert_eq!(rig.contributions.guards_released(), 1);
     rig.deactivate_main();
-    assert_eq!(rig.contributions.released(), 2);
+    assert_eq!(rig.contributions.released(), 3);
+    assert_eq!(rig.contributions.guards_released(), 1);
 }
 
-/// "conversation-terminal" registers nothing with `workspace`: it only brings
-/// `dyn Terminals` to the page. It leaves and comes back on its own.
+/// "conversation-terminal" leaves and comes back on its own: its keys and its
+/// guard go with it, the main plugin's registrations stay.
 #[gpui::test]
-fn terminal_plugin_registers_nothing_and_deactivates_cleanly(cx: &mut TestAppContext) {
+fn terminal_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
     let rig = rig(cx);
     rig.activate_main();
-    let before = rig.contributions.kinds();
-    assert_eq!(before.len(), 2);
+    assert_eq!(rig.contributions.kinds().len(), 2);
 
     rig.activate_terminal();
-    assert_eq!(rig.contributions.kinds(), before, "no contribution");
-    assert_eq!(rig.contributions.tokens_given(), [false, false]);
-    assert_eq!(rig.contributions.released(), 0);
+    assert_eq!(rig.contributions.kinds().len(), 3);
+    assert_eq!(rig.contributions.guards().len(), 1);
 
     rig.deactivate_terminal();
-    assert_eq!(rig.contributions.released(), 0, "the main plugin stays");
-    assert_eq!(rig.contributions.kinds(), before);
+    assert_eq!(rig.contributions.released(), 1, "only the terminal's keys");
+    assert_eq!(rig.contributions.guards_released(), 1);
 
     // It comes back and goes again without leaving anything behind.
     rig.kernel.set_enabled(TERMINAL_ID, true);
     rig.activate_terminal();
-    assert_eq!(rig.contributions.kinds(), before);
+    assert_eq!(rig.contributions.kinds().len(), 4);
+    assert_eq!(rig.contributions.guards().len(), 2);
     rig.deactivate_terminal();
-    assert_eq!(rig.contributions.released(), 0);
-    rig.deactivate_main();
     assert_eq!(rig.contributions.released(), 2);
+    assert_eq!(rig.contributions.guards_released(), 2);
+    rig.deactivate_main();
+    assert_eq!(rig.contributions.released(), 4);
+}
+
+/// The reply box sees a terminal only while the plugin that brings
+/// `dyn Terminals` is active.
+#[gpui::test]
+fn the_reply_box_sees_the_terminal_through_the_plugin(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let key = session(1);
+    rig.conversations.set(snapshot(&key, 1));
+    rig.terminals.set(&key, RunState::Running { pid: 7 });
+    rig.activate_main();
+    rig.activate_live();
+    rig.review(&key);
+    let (_host, vcx) = window(cx, &rig);
+    // The terminal plugin has not started: nobody sees the terminal.
+    assert!(!on_screen(vcx, "conversation.composer.notice.action"));
+    rig.activate_terminal();
+    frame(vcx);
+    assert!(on_screen(vcx, "conversation.composer.notice.action"));
+    rig.deactivate_terminal();
+    frame(vcx);
+    assert!(!on_screen(vcx, "conversation.composer.notice.action"));
 }
 
 #[gpui::test]
@@ -80,7 +148,7 @@ fn live_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
     let (host, vcx) = open(cx, &rig, &key);
     assert_eq!(
         rig.contributions.kinds().len(),
-        2,
+        3,
         "live adds no contribution"
     );
     assert!(on_screen(vcx, "conversation.list.item[h:0:0]"));

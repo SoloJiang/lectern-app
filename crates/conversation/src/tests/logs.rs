@@ -2,12 +2,14 @@
 //! agent's text, injected text, tool summaries, permission titles, commands,
 //! working directories, preview paths and lines, plan steps, the text of a
 //! failed prompt, option IDs, review notes' places and the session title carry
-//! the canary through the whole flow of steps 1 and 2 at trace level (the
+//! the canary through the whole flow of steps 1 to 3 at trace level (the
 //! plugins, the page on a session, the history, the live updates, a failed
 //! link, the stop key, the page switch, the reply box, a request and its
 //! answer, a session that starts to wait, a terminal that runs and ends, a
-//! draft that is saved and put back, the route changes, the services leaving
-//! and coming back), and no record carries it.
+//! draft that is saved and put back, the Terminal page that resumes a session,
+//! shows a terminal whose title and picture carry the canary, closes it and
+//! is asked by the leave guard, the route changes, the services leaving and
+//! coming back), and no record carries it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,11 +22,14 @@ use lectern_services::conversation::{
     PermissionRequest, PlanStep, PreviewRow, PromptOrigin, RowKind, StepState, Unavailable,
 };
 use lectern_services::session::Timestamp;
-use lectern_services::terminal::RunState;
+use lectern_services::terminal::{LaunchError, RunState};
+use lectern_services::workspace::LeaveScope;
+use lectern_terminal_view::testing::frame as grid;
 
 use crate::plugin::LIVE_ID;
 use crate::testing::{
-    Rig, agent_text, entry_key, passage, prompt, session, snapshot, summary, tool, with_entries,
+    Rig, agent_text, entry_key, folder, passage, prompt, session, snapshot, summary, tool,
+    with_entries,
 };
 
 use super::reply::{focus_composer, push};
@@ -207,6 +212,13 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
                 snap.can_prompt = Err(Unavailable::Busy);
                 provider.set(snap);
             }
+            ConversationCommand::Disconnect => {
+                let mut snap = loaded(20);
+                snap.session = key.clone();
+                snap.link = Link::None;
+                snap.can_prompt = Ok(());
+                provider.set(snap);
+            }
             ConversationCommand::Answer { request, .. } => {
                 let mut snap = asking(8);
                 let left: Vec<PermissionRequest> = snap
@@ -268,6 +280,48 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
         rig.terminals_listed();
         frame(vcx);
     }
+
+    // Step 3: the Terminal page. The session is idle, so a resume
+    // disconnects first; the first attempt is refused (too many terminals),
+    // the second starts. The terminal's title and picture carry the canary.
+    click(vcx, "conversation.pages.item[terminal]");
+    frame(vcx);
+    rig.terminals.refuse_next(LaunchError::TooMany);
+    click(vcx, "conversation.terminal.resume");
+    frame(vcx);
+    click(vcx, "conversation.terminal.resume");
+    frame(vcx);
+    let id = rig.terminals.id_of(&key).expect("the terminal was opened");
+    rig.terminals.set_title(id, &format!("title {CANARY}"));
+    rig.terminals.set_frame(
+        id,
+        grid(&[&format!("$ claude --resume {CANARY}"), "output"]).build(),
+    );
+    rig.terminals.set(&key, RunState::Running { pid: 77 });
+    rig.terminals_listed();
+    rig.terminal_frame(id, 2);
+    frame(vcx);
+    // The page is built again on the Terminal page, which the session was
+    // last on.
+    rig.review(&session(2));
+    frame(vcx);
+    rig.review(&key);
+    frame(vcx);
+    click(vcx, "conversation.terminal.close");
+    frame(vcx);
+    // The guard asks about another terminal that runs, and is answered.
+    rig.terminals.set_in(
+        &session(2),
+        folder("/work/app"),
+        RunState::Running { pid: 78 },
+    );
+    let guard = rig.contributions.guards().remove(0);
+    guard.ask(LeaveScope::App, Box::new(|_| {}));
+    vcx.run_until_parked();
+    vcx.simulate_prompt_answer("End Terminals");
+    vcx.run_until_parked();
+    click(vcx, "conversation.pages.item[messages]");
+    frame(vcx);
 
     // A draft with the canary is kept when the page goes and is put back
     // when it comes again.
@@ -353,6 +407,49 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
     for field in ["\"sessions\":", "\"new\":"] {
         assert!(waiting.contains(field), "{field} in {waiting}");
     }
+    // Step 3: the Terminal page and the leave guard.
+    let resumes: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("\"msg\":\"terminal resume requested\""))
+        .collect();
+    assert_eq!(resumes.len(), 2, "{resumes:#?}");
+    assert!(
+        resumes[0].contains("\"outcome\":\"too_many\""),
+        "{}",
+        resumes[0]
+    );
+    assert!(
+        resumes[1].contains("\"outcome\":\"started\""),
+        "{}",
+        resumes[1]
+    );
+    // The first one disconnected the idle link; the second found none.
+    assert!(
+        resumes[0].contains("\"disconnected\":true"),
+        "{}",
+        resumes[0]
+    );
+    assert!(
+        resumes[1].contains("\"disconnected\":false"),
+        "{}",
+        resumes[1]
+    );
+    for resume in &resumes {
+        assert!(resume.contains("\"session\":"), "{resume}");
+    }
+    let closed = find("terminal closed");
+    assert!(closed.contains("\"state\":\"running\""), "{closed}");
+    let left = find("terminal leave answered");
+    for field in ["\"scope\":\"app\"", "\"running\":1", "\"answer\":\"end\""] {
+        assert!(left.contains(field), "{field} in {left}");
+    }
+    assert!(
+        lines.iter().any(|line| {
+            line.contains("\"msg\":\"conversation shown\"")
+                && line.contains("\"page\":\"terminal\"")
+        }),
+        "the page is shown on the Terminal page: {lines:#?}"
+    );
     let restored = find("draft restored");
     assert!(restored.contains("\"bytes\":"), "{restored}");
     assert!(restored.contains("\"session\":"), "{restored}");

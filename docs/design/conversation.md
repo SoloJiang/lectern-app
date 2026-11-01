@@ -1,6 +1,6 @@
 # conversation 设计
 
-状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`；「验收」的第 2 步（回复框、停止、权限请求、草稿，以及只把 `dyn Terminals` 放进共享状态的插件 `conversation-terminal`）已实现，见「实际验证」「与设计的差异」，这一步没有真正的 Terminal 页、终端快捷键和离开守卫，issue 仍是 `Refs #23`、`Refs #24`；前置条件 C 的第 6 步（`agents` 的插件 `conversations`、历史窗口、程序查找）和第 7 步（进程与 JSON-RPC、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限）已实现，见 [agents 设计](agents.md#acp-客户端)；第 8 步（实时项换成历史项、`Edits` 的改动预览、`waiting()` 与 `WaitingChanged`）已实现，见 [agents 设计](agents.md#acp-客户端)。
+状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`；「验收」的第 2 步（回复框、停止、权限请求、草稿，以及只把 `dyn Terminals` 放进共享状态的插件 `conversation-terminal`）已实现，见「实际验证」「与设计的差异」，这一步没有真正的 Terminal 页、终端快捷键和离开守卫，issue 仍是 `Refs #23`、`Refs #24`；前置条件 C 的第 6 步（`agents` 的插件 `conversations`、历史窗口、程序查找）和第 7 步（进程与 JSON-RPC、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限）已实现，见 [agents 设计](agents.md#acp-客户端)；第 8 步（实时项换成历史项、`Edits` 的改动预览、`waiting()` 与 `WaitingChanged`）已实现，见 [agents 设计](agents.md#acp-客户端)。「验收」的第 3 步（Terminal 页、终端的快捷键与离开守卫）已实现，见「实际验证」「与设计的差异」，issue 仍是 `Refs #23`、`Refs #24`、`Refs #12`。
 
 对应 issue [#23](https://github.com/SoloJiang/lectern-app/issues/23)（Conversation 面板：经 ACP 的结构化对话）、[#24](https://github.com/SoloJiang/lectern-app/issues/24)（权限请求的界面）和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的 Terminal 页。`conversation` 是检查器的 Conversation 页（⌘\）：Messages 页显示正在审阅的会话的对话（prompt、agent 说明、工具调用、发回的审阅意见），用户在这里回复 agent、批准或拒绝 agent 的权限请求；Terminal 页在内嵌终端里恢复这个会话（`claude --resume`、`codex resume`），显示原始输出（[交互规范「三层结构」](interaction.md#三层结构)、[「状态与异常」](interaction.md#状态与异常)的「Agent 请求权限」、[ADR 0012](../adr/0012.md)、[技术调研「Agent 原生面板」](tech-research.md#4-agent-原生面板第二阶段)）。ACP agent 的启动方式和信任边界见 [ADR 0050](../adr/0050.md)。
 
@@ -459,6 +459,7 @@ terminal 设计「未决问题」1 的决定 (a)：还有运行中的终端时�
 - `conversation-terminal` 插件在 `activate` 里登记（「插件」）。`ask(scope, done)` 在主线程上调用：用本插件的 `ServiceRef<dyn Terminals>` 取 `list()`，数 `state` 是 `Starting` 或 `Running` 的终端。`Project(key)` 只数 `project == key` 的；`App` 数全部；`View`、`Window`、`Worktree` 立即 `done(true)`，因为终端不随离开视图、关闭窗口、切换 worktree 结束（terminal 设计「数据流与线程」只在项目关闭和插件停用时关闭终端）。`get()` 为 None（提供者已停用）或数目为 0 时立即 `done(true)`。
 - 数目大于 0 时弹出系统的确认（`conversation-leave-*`）：「结束终端」→ `done(true)`，终端由 `terminal` 在项目关闭或停用时结束；「取消」→ `done(false)`。
 - 只管终端。ACP 连接在项目关闭和退出时按 ADR 0050 关闭，不询问。
+- 弹出确认的办法：`ask` 拿不到窗口。页每次建好（`ConversationTab::new`）时在它的窗口里启动一个前台任务，把通道的发送端放进 `Shared::asker`（再建一次页就换掉它，旧任务随旧发送端结束）；守卫把「范围、运行中的终端数、`done`」送进通道，任务弹出 `Window::prompt` 并在回答后调 `done`。没有这个任务时（页从未建过，或窗口已关闭：`WindowClosed` 清掉 `asker`，任务里窗口已不在时同样）不能问用户：`done(true)`，记 warn `terminal leave not asked`（`reason`：`no_window`、`window_closed`）。对话框没有给出回答就被取消（窗口关闭）时也放行；只有第二个按钮（取消）拒绝。这个任务不随 `conversation-terminal` 停用而结束，插件回来之后同一个任务继续服务。
 
 ### 草稿
 
@@ -870,6 +871,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 - 权限请求的 `title` 是 agent 写的；执行命令以外的请求，界面只能显示 agent 给出的内容。
 - 登录 shell 的环境在一次运行里只取一次（terminal 设计「已知限制」2）：用户装了适配器、而它的目录是新加进 shell 配置的 PATH 时，要重启 Lectern 才找得到。
 - 离开守卫只在关闭项目和退出时询问；关闭窗口、切换 worktree 不结束终端，不询问。
+- 离开守卫只能在窗口里有 Conversation 页建过之后弹出确认（`LeaveGuard::ask` 没有窗口，见「离开守卫」）。终端在窗口关闭后继续运行（关闭窗口不结束终端）：从 Dock 重开窗口、还没有再显示 Conversation 页时，关闭项目或退出不弹出确认，直接放行并记 warn `terminal leave not asked`；别的入口（如项目主页的新会话）也开终端时同样。要补上，需要给 `workspace` 一个让守卫弹出确认的办法（`LeaveGuard` 的签名带窗口，或 `workspace` 代为弹出），那时再改。
 
 ## 验收
 
@@ -934,6 +936,20 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - `logs_hold_no_contents` 加上第 2 步的流程：金丝雀经回复框（`simulate_input` 输入后发送）、选项 ID、请求的标题与命令与 `workdir`、改动预览的路径与行、对一个请求的回答、该会话的 `WaitingChanged`、一个终端经 `Starting`、`Running`、`Exited` 与 `Listed`、一份保存后又取回的草稿；没有记录含金丝雀；`prompt sent`（`bytes`、`connects`）、`permission answered`（`option`、`kind`、`waited_ms`，两个请求各一条）、`conversation tab selected for a request`（`pending`）、`waiting changed`（`sessions`、`new`）、`draft restored`（`bytes`）、`send skipped`（`reason` 为 `empty`）都在，并带 `session` 作用域。
 - 没有验证：真实的帧（`#[gpui::test]` 的窗口只做布局，不画真实的帧）：「另有 n 个请求」展开时 260pt 高度内的滚动和两张卡片同时打开时列表还剩多少高度、请求卡片出现时的闪动、回复框在 300pt 宽的检查器里的真实排版；回复框的输入法（组合输入）；真实的 ACP 适配器与真实的 `terminal` 服务（测试用假实现，Show Terminal 只切到占位页）；`conversation/stream_apply` 基准属第 4 步。
 
+### 第 3 步
+
+Terminal 页、终端的快捷键与离开守卫，叠在第 2 步和前置条件 D、E 上（`terminal` 的服务、`TerminalPane`），在 macOS（arm64）上运行。没有运行应用，没有打开真实窗口，没有启动任何真实的终端进程：下面全部是无窗口的 `#[gpui::test]`、纯函数测试和 `just` 入口，终端服务是测试里的假实现。
+
+- `just check`（含 clippy `-D warnings`、文档链接和架构检查：新增的依赖 `lectern-terminal-view` 是非插件的视图库）、`just test -p lectern-conversation`（103 个测试，由 nextest 一个测试一个进程地跑）、`just deny` 通过；`cargo metadata --format-version 1 --locked --all-features` 通过。`git diff -- Cargo.lock` 只有 `lectern-conversation` 的依赖列表多了 `lectern-terminal-view`，没有新的外部 crate。
+- 「验收」的四条 `rg` 检查没有结果，第五条在 `just check` 里通过；`rg 'TerminalPane::new' crates/conversation/src` 只有 `src/view/terminal.rs` 一处。
+- 测试：
+  - 纯函数（`src/tests/terminal_pure.rs`，6 个）：`drive_resume_follows_the_link`、`drive_an_ended_terminal_does_not_stop_a_resume`（恢复一侧）、终端状态行的每个状态、`open` 被拒绝的每种原因对应的行、恢复命令不翻译、`leave_guard_counts_by_scope`（`Project` 只数这个项目里启动中或运行中的，`App` 数全部，`View`、`Window`、`Worktree` 为 0）。
+  - `#[gpui::test]`（`src/tests/terminal.rs`，25 个）：`terminal_page_resumes_and_embeds_the_pane`（`launch`、`size` 由页上记下的 `area` 换算、`theme`、焦点、`TerminalPane` 收到 `conversation-terminal` 这次激活的 token：复制时假服务收到的 token 的激活号等于 `Shared::terminal_token()` 的；启动中、运行中、已退出、被信号结束的状态行；再次恢复换成新终端；关闭）、`a_terminal_that_runs_is_taken_when_the_page_is_built`、`the_terminal_that_already_runs_is_adopted_without_a_reason`、三种拒绝各一行原因且按钮可用性正确（`a_session_that_cannot_be_resumed_says_so`、`a_folder_outside_the_projects_says_so`、`too_many_terminals_leaves_the_button_on`，另有 `a_refusal_that_can_pass_is_tried_again`）、`terminal_failure_arrives_after_open`（六种 `FailReason`，恢复按钮可用，再试换掉失败的终端）、`a_terminal_closed_elsewhere_gives_the_button_back`、`terminal_frames_only_while_visible`（三个 `Frame` 合成一次刷新，别的终端的 `Frame` 不刷新，`Frame` 与 `Listed` 同一批仍是一次；切到 Messages 页、换会话、隐藏检查器后 `FrameInterest` 为 0，再显示时重新 `watch`）、`the_terminal_page_follows_the_service_coming_and_going`、`the_page_says_when_the_terminal_plugin_is_not_there`、`terminal_resume_respects_the_link`（`Idle` 先 `Disconnect` 再恢复）、`a_failed_link_is_disconnected_first_too`、`a_provider_that_keeps_the_link_keeps_the_terminal_from_opening`、`a_busy_link_turns_the_button_off`（`Connecting`、`Working`、`Stopping`）、`the_terminal_page_hints_that_the_session_may_run_elsewhere`、`leave_guard_*` 八个（`Project`、`App` 的数目与标题文字，「结束终端」给 `done(true)`、「取消」给 `done(false)`；数目为 0、范围不涉及终端、提供者停用时立即放行且不弹出；没有窗口时放行并记 warn；窗口关闭后放行并记 warn，新窗口里的页建好之后又会问；两个问题依次问；`conversation-terminal` 回来之后同一个任务继续问）。
+  - 插件：`plugins_register_and_deactivate_cleanly` 现在是三个贡献（`conversation` 的页与快捷键，`conversation-terminal` 的 `terminal_view::key_bindings()`，上下文都是 `terminal`）加一个离开守卫，各插件停用时只带走自己的登记；`terminal_plugin_deactivates_on_its_own` 取代第 2 步的 `terminal_plugin_registers_nothing_and_deactivates_cleanly`；`the_reply_box_sees_the_terminal_through_the_plugin`。
+  - 语义树：新的 `conversation_tree_terminal`（已退出的终端：状态、关闭、恢复按钮，`terminal.grid` 的节点挂在 `conversation.terminal` 之下）；`conversation_tree_history`、`conversation_tree_live_with_permission`、`conversation_tree_not_session` 的快照没有变化。
+  - `logs_hold_no_contents` 加上第 3 步的流程：空闲的链路先断开再恢复（第一次被拒绝为 `too_many`，第二次 `started`）、终端的标题和画面带金丝雀、`Listed` 与 `Frame`、换会话再回来时页开在 Terminal 页、关闭终端、离开守卫弹出确认并被回答；没有记录含金丝雀；`terminal resume requested`（`outcome`、`disconnected`）、`terminal closed`（`state`）、`terminal leave answered`（`scope`、`running`、`answer`）、`conversation shown` 的 `page` 为 `terminal` 都在，并带 `session` 作用域（`terminal leave not asked` 的字段在 `leave_guard_without_a_window_goes_on`、`leave_guard_goes_on_after_the_window_closed_until_a_page_is_built_again` 里检查）。
+- 没有验证：真实的终端进程、真实的 `terminal` 服务和真实的 `Window::prompt`（测试平台的假对话框；系统对话框的外观、按钮顺序、Esc 对应哪个按钮）；终端网格在 300pt 宽的检查器里的真实排版与输入法；`area` 在真实窗口里量到的值与 `Resize` 的先后（测试窗口只做布局）；快捷键 ⌘C、⌘V、⌘A、Esc 经 `workspace` 装载之后在 Terminal 页里的行为（只验证了登记的内容与 `terminal_view::key_bindings()` 相同）；`app` 装配之后离开守卫与 `workspace` 的联动（第 4 步）。
+
 ## 与设计的差异
 
 前置条件 B（`services` 的 `conversation` 模块）：
@@ -965,3 +981,16 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 6. **`kind` 属性和日志字段用小写蛇形名。** `permission answered` 的 `option`（`allow_once` 等）和 `kind`（`execute`、`spawn_agent` 等）、请求节点的 `kind` 属性，都由 `diag` 的判别名函数给出，不用 `Debug` 输出。
 7. **「可能在别处运行」在恰好两分钟时成立。** 设计写「2 分钟之内」；实现的边界含等号（`elsewhere_the_two_minute_boundary_is_inclusive`）。
 8. **原因行只在 `can_prompt` 为 `Err` 且不是 `Busy` 时显示，终端驱动优先。** `Busy` 只让 Send 不可用（状态行已说明）；终端在驱动时回复框换成 `conversation-in-terminal`，不再写 `can_prompt` 的原因。
+
+第 3 步（Terminal 页、终端的快捷键与离开守卫）：
+
+1. **`conversation-terminal` 又 `requires` `dyn Contributions`。** 第 2 步为了只放进服务去掉了它；现在它登记 `KeyBindings`（`id` 是 `conversation-terminal`，内容是 `terminal_view::key_bindings()`）和离开守卫，都经 `ctx.own_staged`，随插件停用注销。`started` 保存 `PluginHandle`（`Shared::terminal_handle`），页用它的 `token()` 建 `TerminalPane`；`Shared` 另有 `asker`（第 3 条）。`terminal_plugin_registers_nothing_and_deactivates_cleanly` 因此换成 `terminal_plugin_deactivates_on_its_own`。
+2. **`Job::Terminal` 带事件。** 设计写 `Terminal(TerminalEvent)`，第 2 步的 `Job::Terminal` 没有字段；现在转发 `Listed` 和 `Frame`，`Bell` 不转发。`ConversationTab::apply` 把一批里的事件合并：任何 `Listed`（或服务来去）让 Terminal 页重读 `for_session` 和 `info` 并刷新一次 pane；只有 `Frame` 时，页上那个终端的刷新一次，别的终端的丢弃。
+3. **离开守卫经页的窗口里的一个前台任务弹出确认。** 设计只写「弹出系统的确认」；`LeaveGuard::ask` 在主线程上调用却没有窗口，见「数据结构」「离开守卫」的最后一条。`ConversationTab::new` 每次建页都启动（并替换）这个任务；没有任务时放行并记 warn `terminal leave not asked`（`scope`、`running`、`reason`：`no_window` 或 `window_closed`）；`WorkspaceEvent::WindowClosed` 清掉 `Shared::asker`，所以窗口关闭后、新窗口里的页建好之前的询问直接走放行。要让守卫在没有页的情况下也能问，需要 `workspace` 的办法（「已知限制」），本步没有改 `services` 或 `workspace`。对话框被取消而没有回答时放行，只有「取消」按钮拒绝。
+4. **`TerminalPage` 没有 `Render`，由 `render_page` 画；页在第一次需要时建。** 与 `MessagesModel` 一样。`ConversationTab::ensure_terminal` 在切到 Terminal 页、或页以 Terminal 页打开时建它（`TerminalPage::new` 多一个 `shown` 参数），换会话时丢弃。`FrameInterest` 随 `shown`：`ConversationTab::show` 调 `set_shown`，切回 Terminal 页时重新 `watch` 并刷新一次 pane。`ConversationTab::show` 和页内分段控件的回调现在取 `Window`。页内的 `Page` 与 `MessagesEvent::ShowTerminal` 不变。
+5. **页上记下的 `area` 是整个终端区域。** 设计写「终端区域上一次绘制的大小」；没有终端时区域里没有 pane，所以量的是状态行和恢复区域之下的整块区域（一个绝对定位的 `canvas` 在 prepaint 里记下 `bounds.size`），有终端时 pane 占满这块区域。`grid_size` 用的就是它，`TerminalPane` 第一次布局后发 `Resize` 纠正差别。
+6. **恢复的细节。** 没有打开终端时记 debug `terminal resume skipped`（`reason`：`linked`、`disconnect_refused`、`unavailable`）：`Disconnect` 之后快照的 `link` 仍不是 `None`（提供者拒绝了）时不打开终端；拒绝的原因保留到下一次尝试，`TooMany` 以外的拒绝使按钮不可用。`AlreadyRunning` 采用那个终端，不显示原因，也不记为拒绝（日志的 `outcome` 是 `already_running`）。`conversation-terminal-explain` 的 `$command` 由 `present::resume_command` 按会话的 agent 给出（`claude --resume`、`codex resume`，不翻译），agent 不是这两个时没有这一行；这一行只在没有终端时显示。终端运行时页不抢键盘焦点，只有这一页恢复出来的终端得到焦点。
+7. **探针节点。** 设计表里的 `conversation.terminal`、`.resume`、`.warning`、`.close` 都在；另加 `conversation.terminal.status`（状态行的文字，`Label::key` 是状态的键）和 `conversation.terminal.explain`。`conversation.elsewhere` 在 Terminal 页与 Messages 页用同一个节点（一次只画一页），两处共用 `view::elsewhere_line`。终端不可用（没有 `dyn Terminals`，或 `conversation-terminal` 还没有 `Live`）时仍是 `conversation.notice`，与第 1 步一致。
+8. **Action。** `ResumeInTerminal`、`CloseTerminal` 与其他 Action 一样挂在页的根元素上，再交给 Terminal 页；KeyContext `conversation-terminal` 在 Terminal 页的元素上（终端网格自己的 `terminal` 在它里面）。
+9. **日志。** `conversation shown` 的 `page` 是页打开时所在的页（设计的表已有这个字段，第 1 步写死为 `messages`）；另有 debug `terminal resume skipped` 和 warn `terminal leave not asked`。
+10. **测试。** 假的 `Terminals` 现在记录 `open`、`watch`、`frame`、`input`、`close`、复制时收到的 token，`open` 按真实服务的规则登记（`Starting`、`AlreadyRunning`、替换已结束的终端）；假的 `Contributions` 记录离开守卫。`lectern-terminal-view` 另作为带 `test-support` 的开发依赖，只用它的 `testing::frame` 给假服务造画面（它不是插件 crate，架构检查通过）。`Refs #12` 一并写进提交（「验收」第 3 步），任务要求的 `Refs #23`、`Refs #24` 也在。

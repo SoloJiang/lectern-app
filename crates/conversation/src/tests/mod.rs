@@ -4,5 +4,7 @@ mod plugin;
 mod pure;
 mod reply;
 mod stage;
+mod terminal;
+mod terminal_pure;
 mod tree;
 mod views;
