@@ -2,7 +2,11 @@
 //! 「数据结构」). It holds the interest in the session's conversation, the
 //! latest snapshot, the list's items and state, and draws the page. It reads
 //! snapshots and sends commands; it does no IO and calls no blocking service
-//! method (the services' snapshot reads copy an `Arc`).
+//! method (the services' snapshot reads copy an `Arc`). The permission cards
+//! and the reply box are drawn by the child modules.
+
+mod composer;
+mod permission;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -11,14 +15,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AnimationExt, AnyElement, App, Context, ElementId, FollowMode, IntoElement, ListAlignment,
-    ListOffset, ListState, ParentElement, Pixels, Styled, Task, Window, div, list, px, svg,
+    AnimationExt, AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter,
+    FollowMode, IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Pixels,
+    SharedString, Styled, Subscription, Task, Window, div, list, px, svg,
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_logging::{debug, info, warn};
 use lectern_services::conversation::{
     ConversationCommand, ConversationInterest, ConversationSnapshot, EntryKey, HistoryError, Link,
-    Load, Passage, PlanStep, StepState,
+    Load, OptionKind, Passage, PermissionId, PlanStep, PromptOrigin, StepState,
 };
 use lectern_services::session::SessionKey;
 use lectern_ui::motion::{
@@ -27,10 +32,11 @@ use lectern_ui::motion::{
 use lectern_ui::semantic::{Role, Semantic, State, semantic};
 use lectern_ui::{
     AgentDot, Button, ButtonKind, ButtonSize, Expander, Icon, LoadingPhase, Skeleton, Text,
-    TextRole, TextRoleExt, colors, loading_phase, strings,
+    TextAreaState, TextRole, TextRoleExt, colors, loading_phase, strings,
 };
 
 use crate::diag;
+use crate::drive;
 use crate::items::{self, Body, Item, ItemKey, Splice};
 use crate::nodes;
 use crate::plugin::Shared;
@@ -47,6 +53,12 @@ const ITEM_GAP: Pixels = px(4.0);
 /// One step of the plan, the unit of the open plan's height.
 const STEP_HEIGHT: Pixels = px(20.0);
 const PROMPT_RADIUS: Pixels = px(8.0);
+
+/// What the Messages page asks of the page that holds it.
+pub(crate) enum MessagesEvent {
+    /// "Show Terminal" on the line that says a terminal drives the session.
+    ShowTerminal,
+}
 
 pub(crate) struct MessagesModel {
     shared: Arc<Shared>,
@@ -68,8 +80,20 @@ pub(crate) struct MessagesModel {
     /// The plan's steps: height and opacity, and whether it is open.
     plan: (Transition, Transition),
     plan_open: bool,
-    /// How many times the agent started a turn since the page saw the link
-    /// idle: a new round blinks the dot once.
+    /// The reply box (a multi-line text box of `ui`), its text as of the last
+    /// change, and the observation that keeps the text.
+    composer: Entity<TextAreaState>,
+    draft: SharedString,
+    _composer_changes: Subscription,
+    /// The requests after the oldest one: shown or hidden, and the height
+    /// and opacity of the open region.
+    more_open: bool,
+    more: (Transition, Transition),
+    /// The requests that arrived after the page was first drawn, with the
+    /// time they did (their cards fade in once).
+    arriving_cards: HashMap<PermissionId, Instant>,
+    /// How many times the agent started a turn or asked for something since
+    /// the page saw the link idle: each blinks the dot once.
     blink_round: u64,
     /// The items replaced in the list by snapshots after the first one, and
     /// the last stretch (tests read them).
@@ -80,15 +104,39 @@ pub(crate) struct MessagesModel {
     timers: Option<Task<()>>,
 }
 
+impl EventEmitter<MessagesEvent> for MessagesModel {}
+
+impl Drop for MessagesModel {
+    /// The reply box's text is kept for the next time the session's page is
+    /// built (changing the session, hiding the inspector).
+    fn drop(&mut self) {
+        self.shared
+            .with_memory(|memory| memory.set_draft(&self.session, &self.draft));
+    }
+}
+
 impl MessagesModel {
     /// Main thread. Watches the session when `dyn Conversations` is there and
-    /// shows its snapshot if the provider has one. Does no IO.
+    /// shows its snapshot if the provider has one. Puts back the draft the
+    /// session had. Does no IO.
     pub(crate) fn new(
         shared: Arc<Shared>,
         session: SessionKey,
+        window: &mut Window,
         cx: &mut Context<MessagesModel>,
     ) -> MessagesModel {
         let summary = shared.session_summary(&session);
+        let composer = cx.new(|cx| TextAreaState::new(window, cx));
+        let restored = shared.with_memory(|memory| memory.draft(&session));
+        if let Some(draft) = &restored {
+            composer.update(cx, |state, cx| state.set_text(draft, window, cx));
+            let _scope = lectern_logging::scope(diag::session_ctx(&session.id));
+            debug!("draft restored"; bytes = diag::count(draft.len()));
+        }
+        let composer_changes = cx.observe(&composer, |this, composer, cx| {
+            this.draft = composer.read(cx).text();
+            cx.notify();
+        });
         let list = ListState::new(0, ListAlignment::Top, OVERDRAW);
         // The list follows the end while the reader is at the end (and starts
         // there); scrolling up stops it, and scrolling back down resumes it.
@@ -105,6 +153,14 @@ impl MessagesModel {
             arriving: HashMap::new(),
             plan: (Transition::new(0.0), Transition::new(0.0)),
             plan_open: false,
+            draft: restored.map_or_else(SharedString::default, |draft| {
+                SharedString::from(draft.to_string())
+            }),
+            composer,
+            _composer_changes: composer_changes,
+            more_open: false,
+            more: (Transition::new(0.0), Transition::new(0.0)),
+            arriving_cards: HashMap::new(),
             blink_round: 0,
             spliced: 0,
             last_splice: None,
@@ -117,6 +173,11 @@ impl MessagesModel {
 
     pub(crate) fn session(&self) -> &SessionKey {
         &self.session
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer(&self) -> &Entity<TextAreaState> {
+        &self.composer
     }
 
     #[cfg(test)]
@@ -284,12 +345,27 @@ impl MessagesModel {
     /// A new round of the agent blinks the dot once. The first snapshot does
     /// not.
     fn track_blink(&mut self, snapshot: &ConversationSnapshot) {
-        let before = self.snapshot.as_ref().map(|shown| &shown.link);
-        if let Some(before) = before
-            && !matches!(before, Link::Working)
-            && matches!(snapshot.link, Link::Working)
-        {
+        let Some(shown) = &self.snapshot else {
+            return;
+        };
+        let new_round =
+            !matches!(shown.link, Link::Working) && matches!(snapshot.link, Link::Working);
+        let new_request = snapshot
+            .permissions
+            .iter()
+            .any(|request| !shown.permissions.iter().any(|old| old.id == request.id));
+        if new_round || new_request {
             self.blink_round += 1;
+        }
+        if new_request {
+            let now = Instant::now();
+            self.arriving_cards
+                .retain(|_, at| now.duration_since(*at) < ARRIVE.duration * 2);
+            for request in snapshot.permissions.iter() {
+                if !shown.permissions.iter().any(|old| old.id == request.id) {
+                    self.arriving_cards.insert(request.id, now);
+                }
+            }
         }
     }
 
@@ -412,6 +488,61 @@ impl MessagesModel {
         cx.notify();
     }
 
+    /// The line "n more requests".
+    pub(crate) fn toggle_more(&mut self, cx: &mut Context<MessagesModel>) {
+        self.more_open = !self.more_open;
+        cx.notify();
+    }
+
+    /// Answers a request with the option of the given kind. A request that is
+    /// no longer pending (the snapshot moved on) or has no option of that
+    /// kind is left alone.
+    pub(crate) fn answer(
+        &mut self,
+        request: PermissionId,
+        kind: OptionKind,
+        cx: &mut Context<MessagesModel>,
+    ) {
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(asked) = snapshot
+            .permissions
+            .iter()
+            .find(|asked| asked.id == request)
+        else {
+            return;
+        };
+        let Some((_, option)) = present::option_buttons(&asked.options)
+            .into_iter()
+            .find(|(offered, _)| *offered == kind)
+        else {
+            return;
+        };
+        let _scope = self.scope();
+        info!(
+            "permission answered";
+            option = diag::option_name(kind),
+            kind = diag::call_kind_name(asked.kind),
+            waited_ms = drive::waited_ms(asked.asked_at, drive::now())
+        );
+        self.send(ConversationCommand::Answer { request, option });
+        self.refresh(cx);
+    }
+
+    /// The oldest request's option of this kind (the actions of the same
+    /// names); nothing when it has none.
+    pub(crate) fn answer_oldest(&mut self, kind: OptionKind, cx: &mut Context<MessagesModel>) {
+        let oldest = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.permissions.first())
+            .map(|request| request.id);
+        if let Some(request) = oldest {
+            self.answer(request, kind, cx);
+        }
+    }
+
     // -------------------------------------------------------------- drawing
 
     /// The whole Messages page: the status line, the list (or what stands in
@@ -430,14 +561,24 @@ impl MessagesModel {
                 cx,
             );
         }
+        let drives = self.shared.terminal_drives(&self.session);
         let mut page = div().size_full().flex().flex_col().gap(GAP);
-        if let Some(status) = self.render_status(&strings, window, cx) {
+        if let Some(status) = self.render_status(&strings, drives, window, cx) {
             page = page.child(status);
         }
         let body = self.render_body(window, cx);
         page = page.child(div().flex_1().min_h_0().child(body));
         if let Some(plan) = self.render_plan(&strings, window, cx) {
             page = page.child(plan);
+        }
+        if let Some(requests) = self.render_permissions(&strings, window, cx) {
+            page = page.child(requests);
+        }
+        if let Some(elsewhere) = self.render_elsewhere(&strings, drives, window, cx) {
+            page = page.child(elsewhere);
+        }
+        if let Some(composer) = self.render_composer(&strings, drives, window, cx) {
+            page = page.child(composer);
         }
         page.into_any_element()
     }
@@ -447,12 +588,13 @@ impl MessagesModel {
     fn render_status(
         &mut self,
         strings: &Strings,
+        in_terminal: bool,
         window: &mut Window,
         cx: &mut Context<MessagesModel>,
     ) -> Option<AnyElement> {
         let snapshot = self.snapshot.clone()?;
         let waiting = present::is_waiting(&snapshot.permissions);
-        let status = present::status_text(strings, &snapshot.link, waiting);
+        let status = present::status_text(strings, &snapshot.link, waiting, in_terminal);
         let percent = snapshot.context.as_ref().and_then(present::context_percent);
         let mut line = status.shared().to_string();
         if let Some(percent) = percent {

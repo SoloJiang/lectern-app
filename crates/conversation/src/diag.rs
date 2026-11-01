@@ -6,7 +6,7 @@
 //! location, a session title, a terminal's output or an entry key.
 
 use lectern_logging::Ctx;
-use lectern_services::conversation::{Link, LinkError};
+use lectern_services::conversation::{CallKind, Link, LinkError, OptionKind, PermissionDetail};
 
 /// A length as a log field.
 pub(crate) fn count(n: usize) -> u32 {
@@ -36,6 +36,42 @@ pub(crate) fn link_error_name(error: &LinkError) -> &'static str {
         LinkError::Exited { .. } => "exited",
         LinkError::AuthRequired => "auth_required",
         LinkError::PromptFailed { .. } => "prompt_failed",
+    }
+}
+
+/// The discriminant of a tool call's kind: the `kind` field of `permission
+/// answered` and the `kind` attribute of a request's node.
+pub(crate) fn call_kind_name(kind: CallKind) -> &'static str {
+    match kind {
+        CallKind::Read => "read",
+        CallKind::Edit => "edit",
+        CallKind::Delete => "delete",
+        CallKind::Move => "move",
+        CallKind::Search => "search",
+        CallKind::Execute => "execute",
+        CallKind::Fetch => "fetch",
+        CallKind::Think => "think",
+        CallKind::SpawnAgent => "spawn_agent",
+        CallKind::Other => "other",
+    }
+}
+
+/// The kind of option that answered a request, for `permission answered`.
+pub(crate) fn option_name(kind: OptionKind) -> &'static str {
+    match kind {
+        OptionKind::AllowOnce => "allow_once",
+        OptionKind::AllowAlways => "allow_always",
+        OptionKind::RejectOnce => "reject_once",
+        OptionKind::RejectAlways => "reject_always",
+    }
+}
+
+/// The `detail` attribute of a request's node.
+pub(crate) fn detail_name(detail: &PermissionDetail) -> &'static str {
+    match detail {
+        PermissionDetail::Command { .. } => "command",
+        PermissionDetail::Edits(_) => "edits",
+        PermissionDetail::None => "none",
     }
 }
 

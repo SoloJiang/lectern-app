@@ -9,7 +9,8 @@ use std::sync::Arc;
 use lectern_i18n::{Args, Strings, keys};
 use lectern_services::conversation::{
     AcpProgram, CallKind, CallState, ContextUsage, EndReason, Link, LinkError, NoteLocation,
-    PermissionRequest, ToolEntry,
+    OptionId, OptionKind, PermissionDetail, PermissionOption, PermissionRequest, ToolEntry,
+    Unavailable,
 };
 use lectern_services::session::Agent;
 use lectern_ui::Text;
@@ -60,10 +61,18 @@ fn program_name(strings: &Strings, agent: &Agent) -> String {
 }
 
 /// The status line's message: a request waiting for the user beats the
-/// link's own state.
-pub(crate) fn status_text(strings: &Strings, link: &Link, waiting: bool) -> Text {
+/// link's own state, and a terminal that drives the session beats the link
+/// (there is none while it does).
+pub(crate) fn status_text(
+    strings: &Strings,
+    link: &Link,
+    waiting: bool,
+    in_terminal: bool,
+) -> Text {
     let key = if waiting {
         keys::conversation::STATUS_WAITING
+    } else if in_terminal {
+        keys::conversation::STATUS_TERMINAL
     } else {
         match link {
             Link::None => keys::conversation::STATUS_HISTORY,
@@ -211,4 +220,91 @@ pub(crate) fn link_error_text(
             Some(Text::verbatim(Arc::clone(message))),
         ),
     }
+}
+
+/// The answer buttons of a request: one per kind the agent gave (the first
+/// of a kind, if it gave several), in the order of `OptionKind`. The agent's
+/// own names for the options are not part of what is returned.
+pub(crate) fn option_buttons(options: &[PermissionOption]) -> Vec<(OptionKind, OptionId)> {
+    let mut buttons: Vec<(OptionKind, OptionId)> = Vec::new();
+    for option in options {
+        if !buttons.iter().any(|(kind, _)| *kind == option.kind) {
+            buttons.push((option.kind, option.id.clone()));
+        }
+    }
+    buttons.sort_by_key(|(kind, _)| *kind);
+    buttons
+}
+
+/// The text of an answer button, by the option's kind (ADR 0050).
+pub(crate) fn option_text(strings: &Strings, kind: OptionKind) -> Text {
+    Text::key(
+        strings,
+        match kind {
+            OptionKind::AllowOnce => keys::conversation::PERMISSION_ALLOW_ONCE,
+            OptionKind::AllowAlways => keys::conversation::PERMISSION_ALLOW_ALWAYS,
+            OptionKind::RejectOnce => keys::conversation::PERMISSION_REJECT_ONCE,
+            OptionKind::RejectAlways => keys::conversation::PERMISSION_REJECT_ALWAYS,
+        },
+    )
+}
+
+/// The question a request asks: run a command, change files, or the
+/// general one when the agent gave no details of either.
+pub(crate) fn permission_heading(strings: &Strings, request: &PermissionRequest) -> Text {
+    match &request.detail {
+        PermissionDetail::Command { .. } => {
+            Text::key(strings, keys::conversation::PERMISSION_EXECUTE)
+        }
+        PermissionDetail::Edits(edits) if !edits.is_empty() => Text::fmt(
+            strings,
+            keys::conversation::PERMISSION_EDIT,
+            &Args::new().num("count", edits.len() as f64),
+        ),
+        _ if request.kind == CallKind::Execute => {
+            Text::key(strings, keys::conversation::PERMISSION_EXECUTE)
+        }
+        _ => Text::key(strings, keys::conversation::PERMISSION_OTHER),
+    }
+}
+
+/// The line under the reply box that says why it cannot send. None for a
+/// busy session (the status line says so).
+pub(crate) fn unavailable_text(
+    strings: &Strings,
+    reason: &Unavailable,
+    agent: &Agent,
+) -> Option<Text> {
+    let named = |key| {
+        Text::fmt(
+            strings,
+            key,
+            &Args::new().str("agent", &agent_name(strings, agent)),
+        )
+    };
+    Some(match reason {
+        Unavailable::NotResumable => {
+            Text::key(strings, keys::conversation::UNAVAILABLE_NOT_RESUMABLE)
+        }
+        Unavailable::OutsideProject => {
+            Text::key(strings, keys::conversation::UNAVAILABLE_OUTSIDE_PROJECT)
+        }
+        Unavailable::NotInstalled(program) => Text::fmt(
+            strings,
+            keys::conversation::UNAVAILABLE_NOT_INSTALLED,
+            &Args::new().str("program", program.name()),
+        ),
+        Unavailable::Unsupported => named(keys::conversation::UNAVAILABLE_UNSUPPORTED),
+        Unavailable::TooMany => Text::key(strings, keys::conversation::UNAVAILABLE_TOO_MANY),
+        Unavailable::Busy => return None,
+    })
+}
+
+/// The reply box's placeholder: the resource text with the agent's name.
+pub(crate) fn reply_placeholder(strings: &Strings, agent: &Agent) -> Text {
+    Text::fmt(
+        strings,
+        keys::conversation::REPLY_PLACEHOLDER,
+        &Args::new().str("agent", &agent_name(strings, agent)),
+    )
 }

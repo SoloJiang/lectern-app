@@ -8,7 +8,7 @@ use lectern_services::review::ReviewTarget;
 use lectern_services::workspace::{ContributionKind, Route, Target, screens};
 use lectern_ui::contrib::InspectorTab;
 
-use crate::plugin::{LIVE_ID, TAB_ID};
+use crate::plugin::{LIVE_ID, TAB_ID, TERMINAL_ID};
 use crate::testing::{Rig, prompt, session, snapshot, with_entries};
 
 use super::stage::*;
@@ -36,6 +36,34 @@ fn plugins_register_and_deactivate_cleanly(cx: &mut TestAppContext) {
     assert_eq!(bindings.len(), 1);
     assert_eq!(rig.contributions.released(), 0);
 
+    rig.deactivate_main();
+    assert_eq!(rig.contributions.released(), 2);
+}
+
+/// "conversation-terminal" registers nothing with `workspace`: it only brings
+/// `dyn Terminals` to the page. It leaves and comes back on its own.
+#[gpui::test]
+fn terminal_plugin_registers_nothing_and_deactivates_cleanly(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.activate_main();
+    let before = rig.contributions.kinds();
+    assert_eq!(before.len(), 2);
+
+    rig.activate_terminal();
+    assert_eq!(rig.contributions.kinds(), before, "no contribution");
+    assert_eq!(rig.contributions.tokens_given(), [false, false]);
+    assert_eq!(rig.contributions.released(), 0);
+
+    rig.deactivate_terminal();
+    assert_eq!(rig.contributions.released(), 0, "the main plugin stays");
+    assert_eq!(rig.contributions.kinds(), before);
+
+    // It comes back and goes again without leaving anything behind.
+    rig.kernel.set_enabled(TERMINAL_ID, true);
+    rig.activate_terminal();
+    assert_eq!(rig.contributions.kinds(), before);
+    rig.deactivate_terminal();
+    assert_eq!(rig.contributions.released(), 0);
     rig.deactivate_main();
     assert_eq!(rig.contributions.released(), 2);
 }

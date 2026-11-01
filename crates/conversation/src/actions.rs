@@ -7,9 +7,23 @@ use gpui::{Action, actions};
 actions!(
     conversation,
     [
+        /// Sends the text of the reply box as a prompt (⌘↩ in the box, or its
+        /// Send button). Ignored when nothing may be sent.
+        Send,
         /// ⌘.: asks the agent to stop the turn that is running. Ignored when
         /// no turn is running.
         Stop,
+        /// Answers the oldest request with its allow-once option, if it has one.
+        AllowOnce,
+        /// Answers the oldest request with its allow-always option, if it has one.
+        AllowAlways,
+        /// Answers the oldest request with its reject-once option, if it has one.
+        RejectOnce,
+        /// Answers the oldest request with its reject-always option, if it has one.
+        RejectAlways,
+        /// The line "n more requests": shows or hides the requests after the
+        /// oldest one.
+        ToggleMoreRequests,
         /// The page switch's Messages item.
         ShowMessages,
         /// The page switch's Terminal item.

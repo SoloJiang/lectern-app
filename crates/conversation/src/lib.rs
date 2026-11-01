@@ -1,24 +1,30 @@
 //! Conversation page of the inspector (docs/design/conversation.md).
 //!
-//! Step 1 (no reply box, no permission card, no Terminal page): the plugins
-//! and the Messages page's display.
+//! Steps 1 and 2 (no Terminal page yet): the plugins, the Messages page's
+//! display, the reply box, Stop, the permission cards and the drafts.
 //!
 //! - [`ConversationPlugin`] ("conversation") registers the inspector's
 //!   Conversation page and its key bindings, and follows the review on the
 //!   screen. [`LivePlugin`] ("conversation-live") brings `dyn Conversations`
 //!   into the state they share, so that the page says so when the service is
-//!   not there. [`plugins`] builds both, for `app`.
+//!   not there, and brings the page up when the session under review gets a
+//!   request. [`TerminalPagePlugin`] ("conversation-terminal") brings
+//!   `dyn Terminals`, so that the reply box knows when a terminal drives the
+//!   session. [`plugins`] builds the three, for `app`.
 //! - [`ConversationTab`] is the page: it holds the Messages page of the
 //!   session under review. `items` turns a snapshot into the list's items and
 //!   says which stretch of the list changed; `present` turns values into
-//!   interface text.
+//!   interface text; `drive` says who drives a session and whether the reply
+//!   box may send; `memory` keeps the drafts.
 //!
 //! No code here runs before the first frame or does IO; the views read the
 //! snapshot and send `ConversationCommand`s.
 
 mod actions;
 mod diag;
+mod drive;
 mod items;
+mod memory;
 mod nodes;
 mod plugin;
 mod present;
@@ -29,6 +35,12 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
-pub use actions::{Dismiss, LoadEarlier, ShowMessages, ShowTerminal, Stop, TogglePlan};
-pub use plugin::{ConversationPlugin, LIVE_ID, LivePlugin, PLUGIN_ID, TAB_ID, plugins};
+pub use actions::{
+    AllowAlways, AllowOnce, Dismiss, LoadEarlier, RejectAlways, RejectOnce, Send, ShowMessages,
+    ShowTerminal, Stop, ToggleMoreRequests, TogglePlan,
+};
+pub use plugin::{
+    ConversationPlugin, LIVE_ID, LivePlugin, PLUGIN_ID, TAB_ID, TERMINAL_ID, TerminalPagePlugin,
+    plugins,
+};
 pub use view::{ConversationTab, Page};

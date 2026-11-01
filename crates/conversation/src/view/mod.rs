@@ -11,7 +11,7 @@ use lectern_i18n::Key;
 use lectern_ui::semantic::{NodeId, Role, Semantic, semantic};
 use lectern_ui::{Text, TextRole, TextRoleExt, strings};
 
-pub(crate) use messages::MessagesModel;
+pub(crate) use messages::{MessagesEvent, MessagesModel};
 pub use tab::{ConversationTab, Page};
 
 /// One line of secondary text from a message of the resource files, as a

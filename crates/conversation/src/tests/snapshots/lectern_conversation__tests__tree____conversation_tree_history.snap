@@ -20,3 +20,6 @@ conversation.page Group page=messages
   conversation.plan Group expanded=false done=1 total=2
     conversation.plan.toggle Button label=[conversation-plan]
     conversation.plan.steps Group expanded=false
+  conversation.composer Group
+    conversation.composer.field TextField
+    conversation.composer.send Button label=[conversation-send] disabled

@@ -2,10 +2,12 @@
 //! agent's text, injected text, tool summaries, permission titles, commands,
 //! working directories, preview paths and lines, plan steps, the text of a
 //! failed prompt, option IDs, review notes' places and the session title carry
-//! the canary through the whole flow of step 1 at trace level (the plugins,
-//! the page on a session, the history, the live updates, a failed link, the
-//! stop key, the page switch, the route changes, the services leaving and
-//! coming back), and no record carries it.
+//! the canary through the whole flow of steps 1 and 2 at trace level (the
+//! plugins, the page on a session, the history, the live updates, a failed
+//! link, the stop key, the page switch, the reply box, a request and its
+//! answer, a session that starts to wait, a terminal that runs and ends, a
+//! draft that is saved and put back, the route changes, the services leaving
+//! and coming back), and no record carries it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,15 +17,17 @@ use lectern_logging::testing;
 use lectern_services::conversation::{
     CallKind, CallState, ConversationCommand, EditPreview, Entry, EntryBody, Link, LinkError,
     NoteLocation, OptionId, OptionKind, PermissionDetail, PermissionId, PermissionOption,
-    PermissionRequest, PlanStep, PreviewRow, PromptOrigin, RowKind, StepState,
+    PermissionRequest, PlanStep, PreviewRow, PromptOrigin, RowKind, StepState, Unavailable,
 };
 use lectern_services::session::Timestamp;
+use lectern_services::terminal::RunState;
 
 use crate::plugin::LIVE_ID;
 use crate::testing::{
     Rig, agent_text, entry_key, passage, prompt, session, snapshot, summary, tool, with_entries,
 };
 
+use super::reply::{focus_composer, push};
 use super::stage::*;
 
 const CANARY: &str = "conversation-canary-8c41e07a";
@@ -73,32 +77,54 @@ fn loaded(generation: u64) -> lectern_services::conversation::ConversationSnapsh
         text: Arc::from(format!("step {CANARY}")),
         state: StepState::InProgress,
     }]));
-    snap.permissions = Arc::from(vec![PermissionRequest {
-        id: PermissionId(1),
-        kind: CallKind::Execute,
-        title: Arc::from(format!("title {CANARY}")),
-        detail: PermissionDetail::Command {
-            text: Arc::from(format!("rm -rf {CANARY}")),
-            workdir: Some(Arc::from(Path::new(&format!("/work/{CANARY}")))),
-        },
-        options: Arc::from(vec![PermissionOption {
-            id: OptionId(Arc::from(format!("option-{CANARY}"))),
-            kind: OptionKind::AllowOnce,
-        }]),
-        asked_at: Timestamp(5),
-    }]);
-    let _ = EditPreview {
-        path: Arc::from(Path::new(&format!("/work/{CANARY}.rs"))),
-        new_file: false,
-        added: 1,
-        removed: 0,
-        rows: Arc::from(vec![PreviewRow {
-            kind: RowKind::Added,
-            text: Arc::from(format!("+ {CANARY}")),
-        }]),
-        omitted: 0,
-    };
     snap.link = Link::Working;
+    snap
+}
+
+/// A working session that waits for two answers: a command in a folder of its
+/// own and an edit, both with the canary in every text and option ID.
+fn asking(generation: u64) -> lectern_services::conversation::ConversationSnapshot {
+    let option = |kind| PermissionOption {
+        id: OptionId(Arc::from(format!("option-{CANARY}"))),
+        kind,
+    };
+    let mut snap = loaded(generation);
+    snap.link = Link::Working;
+    snap.can_prompt = Err(Unavailable::Busy);
+    snap.permissions = Arc::from(vec![
+        PermissionRequest {
+            id: PermissionId(1),
+            kind: CallKind::Execute,
+            title: Arc::from(format!("title {CANARY}")),
+            detail: PermissionDetail::Command {
+                text: Arc::from(format!("rm -rf {CANARY}")),
+                workdir: Some(Arc::from(Path::new(&format!("/work/{CANARY}")))),
+            },
+            options: Arc::from(vec![
+                option(OptionKind::AllowOnce),
+                option(OptionKind::RejectOnce),
+            ]),
+            asked_at: Timestamp(5),
+        },
+        PermissionRequest {
+            id: PermissionId(2),
+            kind: CallKind::Edit,
+            title: Arc::from(format!("edit {CANARY}")),
+            detail: PermissionDetail::Edits(Arc::from(vec![EditPreview {
+                path: Arc::from(Path::new(&format!("/work/app/{CANARY}.rs"))),
+                new_file: false,
+                added: 1,
+                removed: 0,
+                rows: Arc::from(vec![PreviewRow {
+                    kind: RowKind::Added,
+                    text: Arc::from(format!("+ {CANARY}")),
+                }]),
+                omitted: 0,
+            }])),
+            options: Arc::from(vec![option(OptionKind::AllowOnce)]),
+            asked_at: Timestamp(6),
+        },
+    ]);
     snap
 }
 
@@ -124,9 +150,10 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
     // `route unavailable`.
     rig.activate_main();
     rig.activate_live();
+    rig.activate_terminal();
     rig.conversations.set(loaded(1));
     rig.review(&key);
-    let (_host, vcx) = window(cx, &rig);
+    let (host, vcx) = window(cx, &rig);
     frame(vcx);
 
     // Live updates, the stop key, the page switch.
@@ -142,7 +169,7 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
     rig.changed(&key, 2);
     frame(vcx);
     let focus = {
-        let tab = tab_of(&_host, vcx);
+        let tab = tab_of(&host, vcx);
         vcx.update(|_, cx| tab.read(cx).focus_handle())
     };
     vcx.update(|window, cx| window.focus(&focus, cx));
@@ -167,6 +194,90 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
             .any(|(_, command)| matches!(command, ConversationCommand::Cancel)),
         "the stop key reached the provider"
     );
+
+    // The reply box: an empty send is skipped, a draft with the canary is
+    // sent, and the provider takes the turn.
+    rig.conversations.respond({
+        let key = key.clone();
+        move |provider, _, command| match command {
+            ConversationCommand::Prompt { .. } => {
+                let mut snap = loaded(6);
+                snap.session = key.clone();
+                snap.link = Link::Connecting;
+                snap.can_prompt = Err(Unavailable::Busy);
+                provider.set(snap);
+            }
+            ConversationCommand::Answer { request, .. } => {
+                let mut snap = asking(8);
+                let left: Vec<PermissionRequest> = snap
+                    .permissions
+                    .iter()
+                    .filter(|asked| asked.id.0 > request.0)
+                    .cloned()
+                    .collect();
+                snap.permissions = Arc::from(left);
+                provider.set(snap);
+            }
+            _ => {}
+        }
+    });
+    let mut idle = loaded(5);
+    idle.link = Link::Idle;
+    idle.can_prompt = Ok(());
+    push(&rig, vcx, idle);
+    focus_composer(&host, vcx);
+    vcx.simulate_keystrokes("cmd-enter");
+    vcx.simulate_input(&format!("draft {CANARY}"));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("cmd-enter");
+    frame(vcx);
+
+    // The session starts to wait: the page comes up, the requests are shown
+    // and answered one after the other.
+    rig.conversations.set_waiting(vec![key.clone()]);
+    rig.waiting_changed();
+    push(&rig, vcx, asking(7));
+    click(vcx, "conversation.permission.more");
+    click(
+        vcx,
+        "conversation.permission.item[1].option.item[allow-once]",
+    );
+    frame(vcx);
+    click(
+        vcx,
+        "conversation.permission.item[2].option.item[allow-once]",
+    );
+    rig.conversations.set_waiting(vec![]);
+    rig.waiting_changed();
+    frame(vcx);
+
+    // A terminal runs the session and ends; the box comes back.
+    let mut idle = loaded(9);
+    idle.link = Link::Idle;
+    idle.can_prompt = Ok(());
+    push(&rig, vcx, idle);
+    for state in [
+        RunState::Starting,
+        RunState::Running { pid: 41 },
+        RunState::Exited {
+            code: 0,
+            signaled: false,
+        },
+    ] {
+        rig.terminals.set(&key, state);
+        rig.terminals_listed();
+        frame(vcx);
+    }
+
+    // A draft with the canary is kept when the page goes and is put back
+    // when it comes again.
+    focus_composer(&host, vcx);
+    vcx.simulate_input(&format!("unsent {CANARY}"));
+    vcx.run_until_parked();
+    rig.review(&session(2));
+    frame(vcx);
+    rig.review(&key);
+    frame(vcx);
 
     // The routes, the services leaving and coming back, the plugins leaving.
     rig.screen(Rig::review_route(&session(2)));
@@ -214,6 +325,39 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
     find("route changed");
     find("page switched");
     find("snapshot applied");
+    // Step 2: the reply box, the answers, the waiting sessions and the draft.
+    let sent = find("prompt sent");
+    for field in ["\"bytes\":", "\"connects\":", "\"session\":"] {
+        assert!(sent.contains(field), "{field} in {sent}");
+    }
+    let answered = find("permission answered");
+    for field in [
+        "\"option\":\"allow_once\"",
+        "\"kind\":\"execute\"",
+        "\"waited_ms\":",
+        "\"session\":",
+    ] {
+        assert!(answered.contains(field), "{field} in {answered}");
+    }
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("\"msg\":\"permission answered\"")
+                && line.contains("\"kind\":\"edit\"")),
+        "the second request is answered too: {lines:#?}"
+    );
+    let selected = find("conversation tab selected for a request");
+    assert!(selected.contains("\"pending\":"), "{selected}");
+    assert!(selected.contains("\"session\":"), "{selected}");
+    let waiting = find("waiting changed");
+    for field in ["\"sessions\":", "\"new\":"] {
+        assert!(waiting.contains(field), "{field} in {waiting}");
+    }
+    let restored = find("draft restored");
+    assert!(restored.contains("\"bytes\":"), "{restored}");
+    assert!(restored.contains("\"session\":"), "{restored}");
+    let skipped = find("send skipped");
+    assert!(skipped.contains("\"reason\":\"empty\""), "{skipped}");
     // Every record about the session carries its tag, not its ID.
     assert!(
         find("conversation shown").contains("\"session\":"),
