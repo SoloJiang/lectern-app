@@ -68,6 +68,9 @@ fn logs_hold_no_conversation_contents() {
     let interest = rig.engine.watch(&session);
     rig.engine
         .command(&session, ConversationCommand::LoadEarlier);
+    // Nothing runs, so the stop is refused.
+    rig.engine.command(&session, ConversationCommand::Cancel);
+    // The program is on the path, but a rig without an executor cannot start it.
     rig.engine.command(
         &session,
         ConversationCommand::Prompt {
@@ -122,7 +125,11 @@ fn logs_hold_no_conversation_contents() {
     }
     assert!(lines.iter().any(|l| {
         l.contains("\"msg\":\"conversation command ignored\"")
-            && l.contains("\"command\":\"prompt\"")
+            && l.contains("\"command\":\"cancel\"")
+            && l.contains("\"reason\":\"not_working\"")
+    }));
+    assert!(lines.iter().any(|l| {
+        l.contains("\"msg\":\"acp link failed\"") && l.contains("\"error\":\"spawn\"")
     }));
     assert!(lines.iter().any(|l| {
         l.contains("\"msg\":\"conversation program lookup\"")

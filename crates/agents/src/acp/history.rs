@@ -68,6 +68,28 @@ pub(crate) fn read_window(
     })
 }
 
+/// 实时项占了 `live_bytes` 字节：窗口从最早的轮次起整轮让出空间，使两者的正文合计不超过 1 MiB。
+/// 返回第一个保留的项的下标和多出的 `earlier` 轮数（conversation 设计「服务接口」的快照不变量）。
+pub(crate) fn fit(entries: &[Entry], live_bytes: usize) -> (usize, u32) {
+    let mut bytes: usize = entries.iter().map(text_len).sum();
+    let mut start = 0;
+    let mut turns = 0u32;
+    while start < entries.len() && bytes + live_bytes > WINDOW_MAX {
+        let turn = turn_of(&entries[start]);
+        while start < entries.len() && turn_of(&entries[start]) == turn {
+            bytes -= text_len(&entries[start]);
+            start += 1;
+        }
+        turns += 1;
+    }
+    (start, turns)
+}
+
+/// 项键 `h:<轮次序号>:<项序号>` 里的轮次序号。
+fn turn_of(entry: &Entry) -> &str {
+    entry.key.0.split(':').nth(1).unwrap_or_default()
+}
+
 /// 去掉开头的项，直到正文合计不超过上限。
 fn trim_front(entries: &mut Vec<Entry>, mut bytes: usize) {
     let mut drop = 0;
@@ -247,6 +269,32 @@ mod tests {
         assert!(cut.text.len() > PASSAGE_MAX - 3);
         assert!(text.starts_with(&*cut.text));
         assert!(!passage("small").truncated);
+    }
+
+    #[test]
+    fn live_text_pushes_out_whole_turns_from_the_front() {
+        let entry = |turn: u32, item: u32, len: usize| Entry {
+            key: EntryKey(format!("h:{turn}:{item}").into()),
+            body: EntryBody::AgentText {
+                text: Passage {
+                    text: "x".repeat(len).into(),
+                    truncated: false,
+                },
+                streaming: false,
+            },
+        };
+        let entries = vec![
+            entry(1, 0, 400 << 10),
+            entry(1, 1, 100 << 10),
+            entry(2, 0, 400 << 10),
+            entry(3, 0, 100 << 10),
+        ];
+        assert_eq!(fit(&entries, 0), (0, 0));
+        assert_eq!(fit(&entries, 24 << 10), (0, 0));
+        // 1 MiB - 1000 KiB = 24 KiB of room; 25 KiB of live text costs the oldest turn.
+        assert_eq!(fit(&entries, 25 << 10), (2, 1));
+        assert_eq!(fit(&entries, 600 << 10), (3, 2));
+        assert_eq!(fit(&entries, WINDOW_MAX), (4, 3));
     }
 
     #[test]

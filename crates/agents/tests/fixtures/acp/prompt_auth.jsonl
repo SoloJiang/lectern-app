@@ -1,0 +1,3 @@
+{"on":"initialize","do":[{"reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{},"sessionCapabilities":{"resume":{}}},"agentInfo":{"name":"fake-adapter","version":"0.0.0"},"authMethods":[]}}]}
+{"on":"session/resume","do":[{"reply":{}}]}
+{"on":"session/prompt","do":[{"error":{"code":-32000,"message":"Authentication required"}}]}

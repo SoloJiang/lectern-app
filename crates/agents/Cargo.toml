@@ -13,8 +13,14 @@ plugin = true
 
 [features]
 # `testing::parse_file` and the synthetic sessions, for tests and lectern-bench
-# (docs/design/agents.md).
-test-support = []
+# (docs/design/agents.md), the fake ACP agent `lectern-agents-fake-acp` and the
+# plugin's test hooks (a clock, the service object).
+test-support = ["dep:libc"]
+
+[[bin]]
+name = "lectern-agents-fake-acp"
+path = "src/bin/fake_acp.rs"
+required-features = ["test-support"]
 
 [dependencies]
 lectern-kernel = { path = "../kernel" }
@@ -27,10 +33,16 @@ lectern-cache = { path = "../cache" }
 lectern-platform = { path = "../platform" }
 # Runtime logging (docs/design/agents.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
+# `kill_process_group`: SIGTERM and SIGKILL to an ACP agent's process group
+# (docs/design/agents.md「ACP 客户端」, same call as `terminal`; already in the
+# lock file, so ADR 0060's "no new external crate" holds).
+rustix.workspace = true
 serde.workspace = true
 # `raw_value`: tool inputs are kept as borrowed raw JSON and only parsed for
 # the tools the adapter classifies, and `load` returns them verbatim.
 serde_json = { workspace = true, features = ["raw_value"] }
+# The fake ACP agent's signal handling; compiled only with `test-support`.
+libc = { workspace = true, optional = true }
 # Codex `.jsonl.zst` sessions (docs/design/agents.md「压缩会话的随机读取」).
 ruzstd.workspace = true
 

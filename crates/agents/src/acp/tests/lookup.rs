@@ -16,10 +16,7 @@ fn lookup_finds_the_program_on_the_path_once() {
     std::fs::remove_file(dir.path().join("claude-agent-acp")).unwrap();
     let _second = rig.engine.watch(&session);
     assert_eq!(rig.engine.lookup_state(AcpProgram::ClaudeCode), Some(true));
-    assert_eq!(
-        rig.engine.snapshot(&session).unwrap().can_prompt,
-        Err(Unavailable::Unsupported)
-    );
+    assert_eq!(rig.engine.snapshot(&session).unwrap().can_prompt, Ok(()));
     // Only the programs sessions need are looked up.
     assert_eq!(rig.engine.lookup_state(AcpProgram::Codex), None);
 }
@@ -47,7 +44,7 @@ fn lookup_retries_a_missing_program_on_the_next_watch() {
     let _second = rig.engine.watch(&session);
     assert_eq!(rig.engine.lookup_state(AcpProgram::ClaudeCode), Some(true));
     let snapshot = rig.engine.snapshot(&session).unwrap();
-    assert_eq!(snapshot.can_prompt, Err(Unavailable::Unsupported));
+    assert_eq!(snapshot.can_prompt, Ok(()));
     assert!(snapshot.generation > generation);
     drop(first);
 }

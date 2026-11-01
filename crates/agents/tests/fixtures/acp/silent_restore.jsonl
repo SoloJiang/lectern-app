@@ -1,0 +1,2 @@
+{"on":"initialize","do":[{"reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{},"sessionCapabilities":{"resume":{}}},"agentInfo":{"name":"fake-adapter","version":"0.0.0"},"authMethods":[]}}]}
+{"on":"session/resume","do":[]}

@@ -2,6 +2,7 @@
 //! （docs/design/agents.md「ACP 客户端」的「程序查找」，ADR 0050）。
 
 use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -59,6 +60,23 @@ impl Env {
     }
 }
 
+impl Env {
+    /// 子进程的环境：登录 shell 的环境（取不到时 Lectern 自己的），去掉 `LECTERN_` 开头的变量和 `PWD`
+    /// （启动时按工作目录另设）。阻塞：`Login` 第一次调用时运行登录 shell，只在 executor 上调用。
+    pub(crate) fn child_vars(&self) -> Vec<(OsString, OsString)> {
+        let base: Vec<(OsString, OsString)> = match self {
+            Env::Login => match login_env() {
+                Ok(env) => env.vars.to_vec(),
+                Err(_) => std::env::vars_os().collect(),
+            },
+            Env::Fixed(vars) => vars.to_vec(),
+        };
+        base.into_iter()
+            .filter(|(name, _)| !name.as_bytes().starts_with(b"LECTERN_") && name != "PWD")
+            .collect()
+    }
+}
+
 fn process_path() -> Option<OsString> {
     std::env::var_os("PATH")
 }
@@ -83,6 +101,21 @@ mod tests {
         // The names are the adapters' `bin` entries (docs/design/agents.md「核对」).
         assert_eq!(AcpProgram::ClaudeCode.name(), "claude-agent-acp");
         assert_eq!(AcpProgram::Codex.name(), "codex-acp");
+    }
+
+    #[test]
+    fn child_environment_drops_lectern_variables_and_pwd() {
+        let env = Env::Fixed(
+            vec![
+                ("PATH".into(), "/bin".into()),
+                ("LECTERN_TOKEN".into(), "x".into()),
+                ("PWD".into(), "/elsewhere".into()),
+                ("HOME".into(), "/home/u".into()),
+            ]
+            .into(),
+        );
+        let names: Vec<_> = env.child_vars().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["PATH", "HOME"]);
     }
 
     #[test]

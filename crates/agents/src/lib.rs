@@ -30,6 +30,8 @@ pub mod testing;
 #[cfg(test)]
 mod redact;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use acp::Probe;
 pub use acp::{
     ConversationsDeps, ConversationsPlugin, PLUGIN_ID as CONVERSATIONS_PLUGIN_ID,
     conversations_plugin,
