@@ -40,6 +40,21 @@ pub struct RepoFacts {
     pub forge: Option<ForgeRepo>,
     /// The repository has no commit yet.
     pub unborn: bool,
+    /// The commit (hex object ID) the root commits were found from: the tip
+    /// of the default branch, or of HEAD without one. None without a
+    /// commit. While it does not move the roots are not looked for again.
+    pub tip: Option<String>,
+}
+
+/// What the last identification of a location found out, so that reading
+/// the repository again can skip what has not changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Previous {
+    /// The primary remote chosen then (it stays while it exists).
+    pub primary_name: Option<String>,
+    /// The tip the roots were found from.
+    pub tip: Option<String>,
+    pub roots: BTreeSet<String>,
 }
 
 /// A project the database knows, as `identify` compares it.

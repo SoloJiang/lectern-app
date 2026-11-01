@@ -19,7 +19,7 @@ use super::ingest::{Place, location};
 use super::query::{ProjectRow, Temp, project_by_id_on, projects_on, reason_code};
 use super::schema::PROJECT_GIT;
 use super::{Store, StoreError};
-use crate::identity::{Identification, KnownProject, RepoFacts, identify};
+use crate::identity::{Identification, KnownProject, Previous, RepoFacts, identify};
 
 /// What an alias record says. The codes are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,7 +262,8 @@ fn split(text: &str, sep: char) -> impl Iterator<Item = String> + '_ {
 /// The latest identification of every project that has one.
 fn latest_facts(conn: &Connection) -> rusqlite::Result<HashMap<i64, RepoFacts>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT project, roots, remotes, primary_name, primary_addr, forge_host, forge_id, unborn
+        "SELECT project, roots, remotes, primary_name, primary_addr, forge_host, forge_id, unborn,
+                tip
          FROM project_fact WHERE id IN (SELECT max(id) FROM project_fact GROUP BY project)",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -282,6 +283,7 @@ fn latest_facts(conn: &Connection) -> rusqlite::Result<HashMap<i64, RepoFacts>> 
                     id: id.into(),
                 }),
                 unborn: r.get(7)?,
+                tip: r.get(8)?,
             },
         ))
     })?;
@@ -298,8 +300,8 @@ fn insert_fact(
     conn.prepare_cached(
         "INSERT INTO project_fact
            (project, location, at, roots, remotes, primary_name, primary_addr, forge_host,
-            forge_id, unborn)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            forge_id, unborn, tip)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?
     .execute(params![
         project,
@@ -312,6 +314,7 @@ fn insert_fact(
         facts.forge.as_ref().map(|f| &*f.host),
         facts.forge.as_ref().map(|f| &*f.id),
         facts.unborn,
+        facts.tip,
     ])?;
     Ok(())
 }
@@ -373,20 +376,29 @@ fn present(
 }
 
 impl Store {
-    /// The primary remote chosen the last time the repository at
-    /// `common_dir` was identified.
-    pub(crate) fn recorded_primary(&self, common_dir: &Path) -> Result<Option<String>, StoreError> {
+    /// What the last identification of the repository at `common_dir`
+    /// found: the primary remote chosen, and the tip the roots were found
+    /// from with the roots.
+    pub(crate) fn previous(&self, common_dir: &Path) -> Result<Previous, StoreError> {
         self.read(|conn| {
-            conn.prepare_cached(
-                "SELECT f.primary_name FROM project_fact f JOIN location l ON l.id = f.location
-                 WHERE l.kind = ?1 AND l.path = ?2 ORDER BY f.id DESC LIMIT 1",
-            )?
-            .query_row(
-                params![super::schema::LOCATION_GIT, super::path_bytes(common_dir)],
-                |r| r.get(0),
+            let row: Option<(Option<String>, Option<String>, String)> = conn
+                .prepare_cached(
+                    "SELECT f.primary_name, f.tip, f.roots FROM project_fact f
+                     JOIN location l ON l.id = f.location
+                     WHERE l.kind = ?1 AND l.path = ?2 ORDER BY f.id DESC LIMIT 1",
+                )?
+                .query_row(
+                    params![super::schema::LOCATION_GIT, super::path_bytes(common_dir)],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            Ok(
+                row.map_or_else(Previous::default, |(primary_name, tip, roots)| Previous {
+                    primary_name,
+                    tip,
+                    roots: split(&roots, ' ').collect(),
+                }),
             )
-            .optional()
-            .map(Option::flatten)
         })
     }
 

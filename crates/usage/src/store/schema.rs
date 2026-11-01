@@ -386,7 +386,9 @@ CREATE TABLE limit_sample (
 ///   (root commits as hex joined by spaces, the normalized remote
 ///   addresses joined by newlines, the remote chosen as primary and its
 ///   address, the code platform's repository ID, whether it had no commit
-///   yet).
+///   yet, and the default branch's tip the root commits were found from:
+///   the next identification walks the history again only when the tip
+///   moved).
 /// - `alias`: appended records, never changed. `kind` is an
 ///   `store::identity::AliasKind` code; `src` is the project it leaves, `dst` the
 ///   one it joins (none for a confirmation or a promotion), `undoes` the
@@ -442,7 +444,8 @@ CREATE TABLE project_fact (
   primary_addr TEXT,
   forge_host   TEXT,
   forge_id     TEXT,
-  unborn       INTEGER NOT NULL
+  unborn       INTEGER NOT NULL,
+  tip          TEXT
 );
 CREATE INDEX project_fact_project ON project_fact (project, id);
 CREATE INDEX project_fact_location ON project_fact (location, id);

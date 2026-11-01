@@ -100,7 +100,7 @@ fn log_canary_never_reaches_a_record() {
     // What identifies the repositories carries the canary too: roots,
     // remote addresses, the primary remote's name and the platform's ID.
     // One repository cannot be read at all, with the canary in the error.
-    let facts: FactsReader = Arc::new(|dir, _| {
+    let facts: FactsReader = Arc::new(|dir, _, _| {
         if dir.ends_with("lib/.git") {
             return Err(lectern_git::GitError::Corrupt(format!("broken {CANARY}")));
         }
@@ -114,6 +114,7 @@ fn log_canary_never_reaches_a_record() {
                 id: CANARY.into(),
             }),
             unborn: false,
+            tip: Some(format!("tip-{CANARY}")),
         })
     });
     let rig = Rig::with_facts(

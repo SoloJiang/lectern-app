@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use lectern_git::testing::TestRepo;
@@ -19,7 +20,8 @@ use super::plugin::Rig;
 use super::support::*;
 use crate::engine::FactsReader;
 use crate::identity::{
-    Identification, KnownProject, Remote, RepoFacts, choose_primary, identify, normalize_address,
+    Identification, KnownProject, Previous, Remote, RepoFacts, choose_primary, identify,
+    normalize_address,
 };
 use crate::store::{Commanded, Outcome, Recorded};
 use crate::testing::FakeSessions;
@@ -48,6 +50,7 @@ fn facts(roots: &[&str], remote: Option<&str>, id: Option<&str>) -> RepoFacts {
         remotes,
         forge: id.map(forge),
         unborn: false,
+        tip: None,
     }
 }
 
@@ -401,6 +404,21 @@ fn identity_primary_remote_is_chosen_kept_and_chosen_again() {
 
 // ---- reading a repository ------------------------------------------------------------
 
+/// What the repository shows, the history walked when `previous` does not
+/// say it need not be.
+fn facts_of(repo: &TestRepo, previous: &Previous) -> RepoFacts {
+    crate::facts::from_repo(&repo.repo(), previous, None, &AtomicBool::new(false)).unwrap()
+}
+
+/// What the next identification is given after one that found `facts`.
+fn previous_of(facts: &RepoFacts) -> Previous {
+    Previous {
+        primary_name: facts.primary_name.clone(),
+        tip: facts.tip.clone(),
+        roots: facts.roots.clone(),
+    }
+}
+
 /// A repository with one commit on `main` and these remotes
 /// (name, address); `origin` is the upstream of `main`.
 fn repo_with(remotes: &[(&str, &str)]) -> (TestRepo, String) {
@@ -426,7 +444,7 @@ fn identity_facts_come_from_the_repository() {
         ("origin", "https://user:secret@GitHub.com/me/app.git"),
         ("upstream", "git@github.com:acme/app.git"),
     ]);
-    let facts = crate::facts::from_repo(&repo.repo(), None, None).unwrap();
+    let facts = facts_of(&repo, &Previous::default());
     assert_eq!(facts.roots, BTreeSet::from([root]));
     assert_eq!(
         facts.remotes,
@@ -445,23 +463,115 @@ fn identity_facts_come_from_the_repository() {
 #[test]
 fn identity_facts_keep_the_primary_remote_when_one_is_added_or_removed() {
     let (repo, _) = repo_with(&[("origin", "https://github.com/me/app")]);
-    let first = crate::facts::from_repo(&repo.repo(), None, None).unwrap();
+    let first = facts_of(&repo, &Previous::default());
     assert_eq!(first.primary_name.as_deref(), Some("origin"));
     // A fork adds the original as `upstream`: the choice stays.
     repo.append_config("[remote \"upstream\"]\n\turl = https://github.com/acme/app\n");
-    let both = crate::facts::from_repo(&repo.repo(), first.primary_name.as_deref(), None).unwrap();
+    let remembered = Previous {
+        primary_name: first.primary_name.clone(),
+        ..Previous::default()
+    };
+    let both = facts_of(&repo, &remembered);
     assert_eq!(both.primary.as_deref(), Some("github.com/me/app"));
     assert_eq!(both.remotes.len(), 2);
     // Without the recorded choice the default branch's upstream decides the
     // same.
-    let fresh = crate::facts::from_repo(&repo.repo(), None, None).unwrap();
+    let fresh = facts_of(&repo, &Previous::default());
     assert_eq!(fresh.primary_name.as_deref(), Some("origin"));
+}
+
+/// A cancelled flag: a read that walks the history ends at once with
+/// `Cancelled`, so a read that succeeds with it set did not walk.
+fn cancelled() -> AtomicBool {
+    AtomicBool::new(true)
+}
+
+#[test]
+fn identity_facts_walk_the_history_for_the_roots_once_per_tip() {
+    let (repo, root) = repo_with(&[("origin", "https://github.com/me/app")]);
+    // Nothing known: the walk is needed, and the cancel flag stops it.
+    let none = crate::facts::from_repo(&repo.repo(), &Previous::default(), None, &cancelled());
+    assert!(matches!(none, Err(lectern_git::GitError::Cancelled)));
+    let first = facts_of(&repo, &Previous::default());
+    assert_eq!(first.roots, BTreeSet::from([root.clone()]));
+    assert!(first.tip.is_some());
+    // The same tip: the roots come from what was found, no walk (the read
+    // succeeds although the flag is set).
+    let again =
+        crate::facts::from_repo(&repo.repo(), &previous_of(&first), None, &cancelled()).unwrap();
+    assert_eq!(again, first);
+}
+
+#[test]
+fn identity_facts_walk_again_when_the_tip_moved() {
+    let (repo, root) = repo_with(&[]);
+    let first = facts_of(&repo, &Previous::default());
+    // A new commit on the default branch.
+    let tip = repo
+        .repo()
+        .resolve(&lectern_git::RefName::new("refs/heads/main").unwrap())
+        .unwrap()
+        .unwrap();
+    let next = repo.commit(repo.tree(&[("a.txt", b"c")]), &[tip], "third");
+    repo.set_ref("refs/heads/main", next);
+    let stale = crate::facts::from_repo(&repo.repo(), &previous_of(&first), None, &cancelled());
+    assert!(
+        matches!(stale, Err(lectern_git::GitError::Cancelled)),
+        "the tip moved, the history is walked"
+    );
+    let second = facts_of(&repo, &previous_of(&first));
+    assert_ne!(second.tip, first.tip);
+    assert_eq!(second.tip, Some(next.to_string()));
+    assert_eq!(second.roots, BTreeSet::from([root]));
+}
+
+#[test]
+fn identity_facts_reuse_what_the_store_recorded() {
+    let mut h = Harness::new();
+    let (repo, _) = repo_with(&[("origin", "https://github.com/me/app")]);
+    let first = facts_of(&repo, &Previous::default());
+    assert_eq!(
+        h.store().previous(Path::new(APP)).unwrap(),
+        Previous::default()
+    );
+    h.identified(APP, &first, OCT_20 + HOUR, &[]);
+    let recorded = h.store().previous(Path::new(APP)).unwrap();
+    assert_eq!(recorded, previous_of(&first));
+    // The next identification of the unchanged repository does not walk.
+    let again = crate::facts::from_repo(&repo.repo(), &recorded, None, &cancelled()).unwrap();
+    let (_, second) = h.identified(APP, &again, OCT_20 + 2 * HOUR, &[]);
+    assert_eq!(second.outcome, Outcome::Same);
+}
+
+#[test]
+#[ignore = "a measurement: cargo test -p lectern-usage --lib identity_facts_walk_cost -- --ignored --nocapture"]
+fn identity_facts_walk_cost() {
+    // Synthetic history of one root and a chain of `n` commits.
+    for n in [1_000usize, 5_000, 20_000] {
+        let repo = TestRepo::new();
+        let mut parent = repo.commit(repo.tree(&[("a.txt", b"0")]), &[], "root");
+        let tree = repo.tree(&[("a.txt", b"x")]);
+        for i in 1..n {
+            parent = repo.commit(tree, &[parent], &format!("c{i}"));
+        }
+        repo.set_ref("refs/heads/main", parent);
+        let started = std::time::Instant::now();
+        let first = facts_of(&repo, &Previous::default());
+        let walked = started.elapsed();
+        let started = std::time::Instant::now();
+        let _ = crate::facts::from_repo(&repo.repo(), &previous_of(&first), None, &cancelled())
+            .unwrap();
+        println!(
+            "{n} commits: walk {walked:?}, unchanged tip {:?}",
+            started.elapsed()
+        );
+    }
 }
 
 #[test]
 fn identity_facts_of_a_repository_without_a_commit_are_unborn() {
     let repo = TestRepo::new();
-    let facts = crate::facts::from_repo(&repo.repo(), None, None).unwrap();
+    let facts = facts_of(&repo, &Previous::default());
     assert!(facts.unborn);
     assert!(facts.roots.is_empty());
 }
@@ -469,7 +579,7 @@ fn identity_facts_of_a_repository_without_a_commit_are_unborn() {
 #[test]
 fn identity_facts_of_a_local_repository_have_no_remote() {
     let (repo, root) = repo_with(&[]);
-    let facts = crate::facts::from_repo(&repo.repo(), None, None).unwrap();
+    let facts = facts_of(&repo, &Previous::default());
     assert_eq!(facts.roots, BTreeSet::from([root]));
     assert!(facts.remotes.is_empty());
     assert_eq!((facts.primary, facts.primary_name), (None, None));
@@ -1346,7 +1456,7 @@ type Scripted = Arc<Mutex<HashMap<PathBuf, RepoFacts>>>;
 
 fn scripted(map: &Scripted) -> FactsReader {
     let map = map.clone();
-    Arc::new(move |dir, _recorded| {
+    Arc::new(move |dir, _previous, _cancel| {
         map.lock()
             .unwrap()
             .get(dir)
@@ -1509,6 +1619,39 @@ fn identity_plugin_answers_from_an_old_file_kept_after_a_failed_backup() {
         all.header.state
     );
     assert!(all.projects.is_empty());
+}
+
+#[test]
+fn identity_plugin_cancelled_read_records_nothing() {
+    // The plugin stops while the history is walked: no fact, no project
+    // marked opened, not even the record of a repository whose facts
+    // cannot be read.
+    let fake = claude_fake();
+    session_in(&fake, "s", "/work/app", NOW - 60_000, 3);
+    let reader: FactsReader = Arc::new(|_, _, _| Err(lectern_git::GitError::Cancelled));
+    let rig = Rig::with_facts(
+        fake,
+        |p| {
+            let key = p.repo(Path::new("/work/app"), Path::new(APP));
+            p.set_open(&key, true);
+        },
+        reader,
+    );
+    rig.settle();
+    assert!(rig.all().projects.is_empty());
+    let conn = rusqlite::Connection::open(rig.db()).unwrap();
+    for table in ["project_fact", "alias"] {
+        let n: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    let opened: i64 = conn
+        .query_row("SELECT count(*) FROM project WHERE opened = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(opened, 0);
 }
 
 #[test]

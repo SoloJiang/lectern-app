@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,7 @@ use lectern_services::usage::{
 
 use crate::LocalZone;
 use crate::facts;
-use crate::identity::RepoFacts;
+use crate::identity::{Previous, RepoFacts};
 use crate::limits::{self, Rejected};
 use crate::snapshot::{self, Applied, Owners, Scope, Watched};
 use crate::store::cold::{self, Month, Stepped};
@@ -58,14 +59,15 @@ pub(crate) const PACE: Duration = Duration::from_secs(10);
 /// Most cwd paths whose place is remembered.
 const PLACE_CACHE: usize = 4096;
 
-/// Reads what identifies the repository at a common directory, given the
-/// primary remote chosen before. Tests replace it.
+/// Reads what identifies the repository at a common directory, given what
+/// the last identification found; the flag stops the walk of the history
+/// (the plugin is stopping). Tests replace it.
 pub(crate) type FactsReader =
-    Arc<dyn Fn(&Path, Option<&str>) -> Result<RepoFacts, GitError> + Send + Sync>;
+    Arc<dyn Fn(&Path, &Previous, &AtomicBool) -> Result<RepoFacts, GitError> + Send + Sync>;
 
 /// The reader of the real repositories.
 pub(crate) fn git_facts() -> FactsReader {
-    Arc::new(|common_dir, recorded| facts::read(common_dir, recorded, None))
+    Arc::new(|common_dir, previous, cancel| facts::read(common_dir, previous, None, cancel))
 }
 
 /// Whether a project's path still holds anything. Tests replace it.
@@ -84,6 +86,13 @@ pub(crate) struct Deps {
 /// Whether a project's path still holds anything.
 pub(crate) fn path_exists(path: &Path) -> bool {
     std::fs::metadata(path).is_ok()
+}
+
+/// What identifying an opened repository came to.
+enum Identified {
+    Done(Recorded),
+    Failed,
+    Cancelled,
 }
 
 enum Db {
@@ -207,6 +216,8 @@ pub(crate) struct Engine {
     db: Mutex<Db>,
     state: Mutex<State>,
     limits: Mutex<Arc<Limits>>,
+    /// Set when the plugin stops: reading a repository's history ends.
+    stop: AtomicBool,
     /// The watch on the statusline directory; set once the database is open.
     statusline: Mutex<Option<DirWatch>>,
 }
@@ -259,6 +270,7 @@ impl Engine {
             db: Mutex::new(Db::Closed),
             state: Mutex::new(State::default()),
             limits: Mutex::new(Arc::new(Limits::default())),
+            stop: AtomicBool::new(false),
             statusline: Mutex::new(None),
         })
     }
@@ -282,6 +294,7 @@ impl Engine {
 
     /// Deactivation: no more tasks; the database is marked closed normally.
     pub(crate) fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
         {
             let mut state = self.state();
             state.stopped = true;
@@ -523,10 +536,13 @@ impl Engine {
             .and_then(|p| p.snapshot(key))
             .map(|s| s.name.to_string())
             .unwrap_or_default();
-        if let ProjectKey::Git { common_dir } = key
-            && let Some(recorded) = self.identify(store, common_dir, &name)
-        {
-            return Some(recorded.project);
+        if let ProjectKey::Git { common_dir } = key {
+            match self.identify(store, common_dir, &name) {
+                Identified::Done(recorded) => return Some(recorded.project),
+                // Stopping: nothing is recorded, not even the fallback.
+                Identified::Cancelled => return None,
+                Identified::Failed => {}
+            }
         }
         match store.project_opened(key, &name) {
             Ok(row) => {
@@ -540,20 +556,26 @@ impl Engine {
         }
     }
 
-    /// Reads the repository's facts and records who it is. None when the
-    /// facts cannot be read or the record cannot be written.
-    fn identify(&self, store: &Store, common_dir: &Path, name: &str) -> Option<Recorded> {
-        let recorded = store.recorded_primary(common_dir).ok().flatten();
-        let facts = match (self.deps.facts)(common_dir, recorded.as_deref()) {
+    /// Reads the repository's facts and records who it is. A cancelled read
+    /// records nothing; one that fails (facts that cannot be read, a record
+    /// that cannot be written) is `Failed`.
+    fn identify(&self, store: &Store, common_dir: &Path, name: &str) -> Identified {
+        let previous = store.previous(common_dir).unwrap_or_default();
+        let facts = match (self.deps.facts)(common_dir, &previous, &self.stop) {
             Ok(facts) => facts,
+            Err(GitError::Cancelled) => {
+                debug!("repository facts not read: cancelled"; path = Value::path(common_dir));
+                return Identified::Cancelled;
+            }
             Err(_) => {
                 warn!("repository facts could not be read"; path = Value::path(common_dir));
-                return None;
+                return Identified::Failed;
             }
         };
-        let gone: HashSet<i64> = store
-            .projects()
-            .ok()?
+        let Ok(rows) = store.projects() else {
+            return Identified::Failed;
+        };
+        let gone: HashSet<i64> = rows
             .iter()
             .filter(|p| !(self.deps.exists)(&p.path))
             .map(|p| p.location)
@@ -574,11 +596,11 @@ impl Engine {
                 } else {
                     info!("project identified"; project = project, outcome = recorded.outcome.name());
                 }
-                Some(recorded)
+                Identified::Done(recorded)
             }
             Err(e) => {
                 warn!("project could not be identified"; sqlite = e.code());
-                None
+                Identified::Failed
             }
         }
     }

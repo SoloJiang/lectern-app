@@ -9,34 +9,38 @@ use std::sync::atomic::AtomicBool;
 use lectern_git::{GitError, RefName, Repo};
 use lectern_services::usage::ForgeRepo;
 
-use crate::identity::{Remote, RepoFacts, choose_primary, normalize_address};
+use crate::identity::{Previous, Remote, RepoFacts, choose_primary, normalize_address};
 
 /// The root commits kept: a repository that merged other histories has
 /// several, and a handful is enough to recognize it.
 const ROOTS: usize = 4;
 
 /// Reads the facts of the repository whose common directory is
-/// `common_dir`. `recorded` is the primary remote chosen the last time the
-/// repository was identified; it stays the primary while that remote
-/// exists (docs/design/usage.md: 新增的远端不影响). `forge` is the code
-/// platform's repository ID, when known.
+/// `common_dir`. `previous` is what the last identification found: the
+/// primary remote chosen then stays the primary while that remote exists
+/// (docs/design/usage.md: 新增的远端不影响), and the root commits are not
+/// looked for again while the tip they were found from is still the tip.
+/// `forge` is the code platform's repository ID, when known. `cancel` stops
+/// the walk of the history (`GitError::Cancelled`).
 pub(crate) fn read(
     common_dir: &Path,
-    recorded: Option<&str>,
+    previous: &Previous,
     forge: Option<ForgeRepo>,
+    cancel: &AtomicBool,
 ) -> Result<RepoFacts, GitError> {
     let found = Repo::discover(common_dir, &[])?;
     let Some(found) = found else {
         return Err(GitError::Corrupt("not a repository".into()));
     };
-    from_repo(&found.repo, recorded, forge)
+    from_repo(&found.repo, previous, forge, cancel)
 }
 
 /// The same for an open [`Repo`].
 pub(crate) fn from_repo(
     repo: &Repo,
-    recorded: Option<&str>,
+    previous: &Previous,
     forge: Option<ForgeRepo>,
+    cancel: &AtomicBool,
 ) -> Result<RepoFacts, GitError> {
     let remotes: Vec<Remote> = repo
         .remotes()?
@@ -68,10 +72,19 @@ pub(crate) fn from_repo(
         None => repo.branches()?.first().map(|b| b.commit),
     };
     let upstream = default_upstream(repo, default.as_ref(), &remotes)?;
-    let (primary_name, primary) = choose_primary(&remotes, recorded, upstream.as_deref());
+    let (primary_name, primary) = choose_primary(
+        &remotes,
+        previous.primary_name.as_deref(),
+        upstream.as_deref(),
+    );
+    let tip_hex = tip.map(|oid| oid.to_string());
     let roots = match tip {
-        Some(tip) => repo
-            .root_commits(tip, ROOTS, &AtomicBool::new(false))?
+        // The walk reads every commit down to the roots, which is the
+        // whole history of a repository with one root: only when the tip
+        // moved.
+        Some(_) if tip_hex == previous.tip && !previous.roots.is_empty() => previous.roots.clone(),
+        Some(oid) => repo
+            .root_commits(oid, ROOTS, cancel)?
             .into_iter()
             .map(|oid| oid.to_string())
             .collect(),
@@ -79,6 +92,7 @@ pub(crate) fn from_repo(
     };
     Ok(RepoFacts {
         unborn: tip.is_none(),
+        tip: tip_hex,
         roots,
         remotes: remotes.into_iter().map(|r| r.address).collect(),
         primary,
