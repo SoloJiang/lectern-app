@@ -3,7 +3,7 @@
 //! local days, and the `dyn Usage` service (docs/design/usage.md). Tokens
 //! only, no amounts of money: ADR 0022.
 //!
-//! Implemented so far: steps 1 to 4 of the design's 「验收」. Step 1: the
+//! Implemented so far: steps 1 to 5 of the design's 「验收」. Step 1: the
 //! database, reading and cursors, dedupe, per-cwd places and project
 //! totals, windows, rounding, the hot / cold split and the `History`
 //! query, the `Project` and `AllProjects` queries kept up to date by fact
@@ -12,12 +12,20 @@
 //! (`identity`, aliases, the Usage page's commands, folder claims, 「其他」).
 //! Step 4: tool calls, changed files and shares (a turn's tokens go where
 //! its files changed), settling turns, per-turn tokens of a session.
+//! Step 5: branches. The reflog of the open repositories is stored with the
+//! times it was read, HEAD is replayed around the calls of a turn when it is
+//! settled, and a turn's tokens go to the branch (segment) its changed files
+//! or the worktrees it went into were on; the `Worktree` and `Session`
+//! queries give the branches.
 
+mod command;
 mod engine;
 mod facts;
 mod finalize;
+mod gitread;
 mod key;
 mod limits;
+mod observe;
 mod paths;
 mod plugin;
 mod snapshot;

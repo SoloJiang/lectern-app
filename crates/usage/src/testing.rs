@@ -409,6 +409,21 @@ impl FakeSessions {
         edits: Vec<FileEdit>,
         status: ToolStatus,
     ) {
+        self.edit_call_at(session, turn, call, paths, edits, status, (0, 0));
+    }
+
+    /// The same with the times (Unix milliseconds) the index gives the call.
+    #[allow(clippy::too_many_arguments, reason = "a test fixture: one value each")]
+    pub fn edit_call_at(
+        &self,
+        session: &str,
+        turn: &str,
+        call: &str,
+        paths: &[PathBuf],
+        edits: Vec<FileEdit>,
+        status: ToolStatus,
+        (start, end): (i64, i64),
+    ) {
         let mut inner = lock(&self.inner);
         let id: Arc<str> = session.into();
         let at = ContentRef::new(inner.next_ref, 0, 0);
@@ -416,37 +431,36 @@ impl FakeSessions {
         inner
             .contents
             .insert((id.clone(), at.pos()), Content::Edits(edits.into()));
-        let turns = inner.index.entry(id).or_default();
-        let position = match turns.iter().position(|t| &*t.id.0 == turn) {
-            Some(p) => p,
-            None => {
-                turns.push(Turn {
-                    id: TurnId(turn.into()),
-                    ordinal: turns.len() as u32 + 1,
-                    started_at: Timestamp(0),
-                    ended_at: None,
-                    prompt: None,
-                    prompt_preview: "".into(),
-                    items: Arc::from(Vec::new()),
-                });
-                turns.len() - 1
-            }
+        let kind = ToolKind::Edit {
+            paths: paths.to_vec().into(),
         };
-        let t = &mut turns[position];
-        let mut items: Vec<TurnItem> = t.items.iter().cloned().collect();
-        items.push(TurnItem::Tool(ToolCall {
-            id: ToolCallId(call.into()),
-            name: "Edit".into(),
-            kind: ToolKind::Edit {
-                paths: paths.to_vec().into(),
-            },
-            started_at: Timestamp(0),
-            finished: Some((Timestamp(0), status)),
-            input: at,
-            result: None,
-        }));
-        t.items = items.into();
-        inner.generation += 1;
+        add_tool(&mut inner, id, turn, call, kind, at, (start, end), status);
+    }
+
+    /// A call that is not an edit (a command, a read, a search) as the
+    /// session's turn index has it; the records of the log are the test's
+    /// own.
+    pub fn tool_call(
+        &self,
+        session: &str,
+        turn: &str,
+        call: &str,
+        kind: ToolKind,
+        (start, end): (i64, i64),
+    ) {
+        let mut inner = lock(&self.inner);
+        let at = ContentRef::new(inner.next_ref, 0, 0);
+        inner.next_ref += 1;
+        add_tool(
+            &mut inner,
+            session.into(),
+            turn,
+            call,
+            kind,
+            at,
+            (start, end),
+            ToolStatus::Completed,
+        );
     }
 
     /// Makes `turns_unretained` fail with an IO error (or work again).
@@ -463,6 +477,58 @@ impl FakeSessions {
     pub fn loads(&self, id: &str) -> usize {
         lock(&self.inner).loads.get(id).copied().unwrap_or(0)
     }
+}
+
+/// Adds a call to a turn of a session's index, creating the turn when the
+/// index has none of that ID.
+#[allow(clippy::too_many_arguments, reason = "a test fixture: one value each")]
+fn add_tool(
+    inner: &mut Inner,
+    session: Arc<str>,
+    turn: &str,
+    call: &str,
+    kind: ToolKind,
+    input: ContentRef,
+    (start, end): (i64, i64),
+    status: ToolStatus,
+) {
+    let turns = inner.index.entry(session).or_default();
+    let position = match turns.iter().position(|t| &*t.id.0 == turn) {
+        Some(p) => p,
+        None => {
+            turns.push(Turn {
+                id: TurnId(turn.into()),
+                ordinal: turns.len() as u32 + 1,
+                started_at: Timestamp(0),
+                ended_at: None,
+                prompt: None,
+                prompt_preview: "".into(),
+                items: Arc::from(Vec::new()),
+            });
+            turns.len() - 1
+        }
+    };
+    let t = &mut turns[position];
+    let mut items: Vec<TurnItem> = t.items.iter().cloned().collect();
+    let name = match &kind {
+        ToolKind::Edit { .. } => "Edit",
+        ToolKind::Execute { .. } => "Bash",
+        ToolKind::Read { .. } => "Read",
+        ToolKind::Search { .. } => "Grep",
+        ToolKind::SpawnAgent => "Task",
+        ToolKind::Other => "Other",
+    };
+    items.push(TurnItem::Tool(ToolCall {
+        id: ToolCallId(call.into()),
+        name: name.into(),
+        kind,
+        started_at: Timestamp(start),
+        finished: Some((Timestamp(end), status)),
+        input,
+        result: None,
+    }));
+    t.items = items.into();
+    inner.generation += 1;
 }
 
 fn record_at(r: &Record) -> Option<i64> {
@@ -583,6 +649,7 @@ impl SessionSource for FakeSessions {
 #[derive(Default)]
 pub struct FakeProjects {
     repos: Mutex<Vec<(PathBuf, PathBuf)>>,
+    heads: Mutex<HashMap<PathBuf, Head>>,
     folders: Mutex<Vec<PathBuf>>,
     missing: Mutex<Vec<PathBuf>>,
     open: Mutex<Vec<ProjectKey>>,
@@ -601,6 +668,11 @@ impl FakeProjects {
         ProjectKey::Git {
             common_dir: common_dir.into(),
         }
+    }
+
+    /// What HEAD of the worktree at `root` points at.
+    pub fn set_head(&self, root: &Path, head: Head) {
+        lock(&self.heads).insert(root.to_owned(), head);
     }
 
     /// A folder project's root (not yet open).
@@ -625,6 +697,22 @@ impl FakeProjects {
     /// `resolve` calls so far.
     pub fn resolves(&self) -> usize {
         self.resolves.load(Ordering::Relaxed)
+    }
+
+    /// The key of the worktree at `root`: the common directory for the first
+    /// worktree registered, `<common>/worktrees/<name>` for the others, as
+    /// `project` names them.
+    fn worktree_key(&self, root: &Path, common: &Path) -> WorktreeKey {
+        let repos = lock(&self.repos);
+        let first = repos
+            .iter()
+            .find(|(_, c)| c == common)
+            .map(|(r, _)| r.clone());
+        if first.as_deref() == Some(root) {
+            return WorktreeKey(common.into());
+        }
+        let name = root.file_name().map(PathBuf::from).unwrap_or_default();
+        WorktreeKey(common.join("worktrees").join(name).into())
     }
 
     fn root_of(&self, key: &ProjectKey) -> Option<PathBuf> {
@@ -657,14 +745,24 @@ impl Projects for FakeProjects {
     fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
         let root = self.root_of(project)?;
         let worktrees: Vec<Worktree> = match project {
-            ProjectKey::Git { common_dir } => vec![Worktree {
-                key: WorktreeKey(common_dir.clone()),
-                root: root.as_path().into(),
-                is_main: true,
-                head: Head::Unknown,
-                locked: false,
-                prunable: false,
-            }],
+            ProjectKey::Git { common_dir } => {
+                let roots: Vec<PathBuf> = lock(&self.repos)
+                    .iter()
+                    .filter(|(_, c)| c.as_path() == &**common_dir)
+                    .map(|(r, _)| r.clone())
+                    .collect();
+                roots
+                    .into_iter()
+                    .map(|r| Worktree {
+                        key: self.worktree_key(&r, common_dir),
+                        is_main: r == root,
+                        head: lock(&self.heads).get(&r).cloned().unwrap_or(Head::Unknown),
+                        root: r.as_path().into(),
+                        locked: false,
+                        prunable: false,
+                    })
+                    .collect()
+            }
             ProjectKey::Folder { .. } => Vec::new(),
         };
         Some(Arc::new(ProjectSnapshot {
@@ -718,17 +816,18 @@ impl FakeProjects {
         if lock(&self.missing).iter().any(|m| path.starts_with(m)) {
             return Err(OpenError::NotFound);
         }
-        if let Some((root, common)) = lock(&self.repos)
+        let found = lock(&self.repos)
             .iter()
             .filter(|(r, _)| path.starts_with(r))
             .max_by_key(|(r, _)| r.as_os_str().len())
-        {
+            .cloned();
+        if let Some((root, common)) = found {
             return Ok(Resolved {
                 project: ProjectKey::Git {
                     common_dir: common.as_path().into(),
                 },
-                worktree: Some(WorktreeKey(root.as_path().into())),
-                rel: rel(path, root),
+                worktree: Some(self.worktree_key(&root, &common)),
+                rel: rel(path, &root),
             });
         }
         let open = lock(&self.open).clone();
@@ -755,5 +854,125 @@ impl FakeProjects {
             worktree: None,
             rel: "".into(),
         })
+    }
+}
+
+/// What the branch observations read from a repository, from a table
+/// (`crate::gitread::GitRead`): the worktrees with their HEADs, the default
+/// branch, the reflog of a branch and the paths of a commit. Counts the
+/// reads of branch logs and commits.
+#[derive(Default)]
+pub struct FakeGit {
+    inner: Mutex<FakeGitInner>,
+}
+
+#[derive(Default)]
+struct FakeGitInner {
+    heads: HashMap<PathBuf, Vec<crate::gitread::WorktreeHead>>,
+    defaults: HashMap<PathBuf, String>,
+    logs: HashMap<(PathBuf, String), crate::gitread::BranchLog>,
+    commits: HashMap<Vec<u8>, Vec<String>>,
+    log_reads: usize,
+    commit_reads: usize,
+}
+
+impl FakeGit {
+    pub fn new() -> FakeGit {
+        FakeGit::default()
+    }
+
+    /// The worktrees of a repository: each worktree's key (its
+    /// administrative directory) and the full name of the branch HEAD is
+    /// on, or None when detached.
+    pub fn set_heads(&self, common_dir: &Path, heads: &[(&Path, Option<&str>)]) {
+        lock(&self.inner).heads.insert(
+            common_dir.to_owned(),
+            heads
+                .iter()
+                .map(|(key, branch)| crate::gitread::WorktreeHead {
+                    key: key.to_path_buf(),
+                    branch: branch.map(str::to_owned),
+                })
+                .collect(),
+        );
+    }
+
+    /// The repository cannot be read any more (`heads` gives nothing).
+    pub fn clear_heads(&self, common_dir: &Path) {
+        lock(&self.inner).heads.remove(common_dir);
+    }
+
+    pub fn set_default(&self, common_dir: &Path, branch: &str) {
+        lock(&self.inner)
+            .defaults
+            .insert(common_dir.to_owned(), branch.to_owned());
+    }
+
+    /// The reflog of an existing branch: when it was created (milliseconds),
+    /// and its renames (when, from, to).
+    pub fn set_log(
+        &self,
+        common_dir: &Path,
+        branch: &str,
+        created: Option<i64>,
+        renames: &[(i64, &str, &str)],
+    ) {
+        lock(&self.inner).logs.insert(
+            (common_dir.to_owned(), branch.to_owned()),
+            crate::gitread::BranchLog {
+                exists: true,
+                created,
+                renames: renames
+                    .iter()
+                    .map(|(at, from, to)| (*at, (*from).to_owned(), (*to).to_owned()))
+                    .collect(),
+            },
+        );
+    }
+
+    /// The paths a commit changed.
+    pub fn set_commit(&self, new: &[u8], paths: &[&str]) {
+        lock(&self.inner).commits.insert(
+            new.to_vec(),
+            paths.iter().map(|p| (*p).to_owned()).collect(),
+        );
+    }
+
+    /// Reflogs of branches read so far.
+    pub fn log_reads(&self) -> usize {
+        lock(&self.inner).log_reads
+    }
+
+    /// Commits whose paths were asked for so far.
+    pub fn commit_reads(&self) -> usize {
+        lock(&self.inner).commit_reads
+    }
+}
+
+impl crate::gitread::GitRead for FakeGit {
+    fn heads(&self, common_dir: &Path) -> Option<Vec<crate::gitread::WorktreeHead>> {
+        lock(&self.inner).heads.get(common_dir).cloned()
+    }
+
+    fn default_branch(&self, common_dir: &Path) -> Option<String> {
+        lock(&self.inner).defaults.get(common_dir).cloned()
+    }
+
+    fn branch_log(&self, common_dir: &Path, branch: &str) -> Option<crate::gitread::BranchLog> {
+        let mut inner = lock(&self.inner);
+        inner.log_reads += 1;
+        Some(
+            inner
+                .logs
+                .get(&(common_dir.to_owned(), branch.to_owned()))
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+
+    fn commit_paths(&self, _: &Path, _: Option<&[u8]>, new: &[u8]) -> Option<Vec<String>> {
+        let mut inner = lock(&self.inner);
+        inner.commit_reads += 1;
+        inner.commits.get(new).cloned()
     }
 }

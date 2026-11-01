@@ -1974,6 +1974,9 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     share("usage/disk_day_heavy", RECORD, USAGE, ACTIVE, Time),
+    // The derived tables of the 30-day fixture made again from the
+    // observations (step 5).
+    share("usage/rebuild_30d", RECORD, USAGE, ACTIVE, Time),
     share(
         "usage/resident_bytes",
         &[median(Limit::BytesAtMost(2 * MB))],

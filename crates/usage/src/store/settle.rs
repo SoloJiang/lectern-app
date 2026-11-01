@@ -8,15 +8,17 @@
 //! only after its first read to the end (`session.reached_end`) and while
 //! no replay runs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lectern_services::session::{SessionKey, SourceId};
 use rusqlite::{OptionalExtension, params};
 
-use super::calls::{self, PathPlace};
+use super::calls::PathPlace;
 use super::dedup::Deltas;
-use super::ingest::{Ingested, intern, location, path_bytes};
+use super::ingest::{Ingested, Place, intern, location, path_bytes};
+use super::observe::{CallWork, Cx, ItemIn, TurnInfo, WtRef, full_ref, settle_turn};
 use super::{Store, StoreError, attrib, cold};
+use crate::gitread::GitRead;
 
 /// Milliseconds a turn waits after its last moment (docs/design/usage.md
 /// 「轮次的观察与改动项」第 5 步).
@@ -34,6 +36,11 @@ pub(crate) struct ReadyTurn {
     /// It has `Edit` calls (`turn.edits`): its changed files are in the
     /// session's turn index.
     pub(crate) edits: bool,
+    /// The turn's first and last moments (milliseconds).
+    pub(crate) started_at: i64,
+    pub(crate) last_at: i64,
+    /// The repository the session ran in, when it is one.
+    pub(crate) repo: Option<PathBuf>,
 }
 
 /// The turns of a session waiting to be settled.
@@ -56,13 +63,18 @@ pub(crate) struct ItemWork {
     pub(crate) lines: u64,
     /// Where it lies, used when the call's own record does not say.
     pub(crate) place: PathPlace,
+    /// The call's start and result times, milliseconds.
+    pub(crate) start: i64,
+    pub(crate) end: i64,
 }
 
-/// A turn to settle with its changed files.
+/// A turn to settle with its changed files and, when the repository was
+/// watched around it, the calls that say where the session was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TurnWork {
     pub(crate) id: i64,
     pub(crate) items: Vec<ItemWork>,
+    pub(crate) calls: Vec<CallWork>,
 }
 
 impl Store {
@@ -131,21 +143,31 @@ impl Store {
             }
             let frozen = cold::frozen(conn)?;
             let sql = format!(
-                "SELECT t.id, i.text, coalesce(t.last_at, t.started_at), t.edits FROM turn t
+                "SELECT t.id, i.text, coalesce(t.last_at, t.started_at), t.edits, t.started_at,
+                        l.path FROM turn t
                  JOIN intern i ON i.id = t.tid
+                 LEFT JOIN location l ON l.id = t.location AND l.kind = 0
                  WHERE t.session = ?1 AND t.gen = ?2 AND t.done = 0 AND t.closed = 1
                    AND NOT {}
                  ORDER BY t.seq",
                 frozen.sql("t.started_at")
             );
             let mut pending = Pending::default();
-            let rows: Vec<(i64, Vec<u8>, i64, bool)> = conn
+            type Row = (i64, Vec<u8>, i64, bool, i64, Option<Vec<u8>>);
+            let rows: Vec<Row> = conn
                 .prepare_cached(&sql)?
                 .query_map(params![session, generation], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
-            for (id, turn, last, edits) in rows {
+            for (id, turn, last, edits, started, repo) in rows {
                 let ready_at = last.saturating_add(SETTLE_WAIT_MS);
                 if ready_at > now_ms {
                     pending.wait_until =
@@ -160,20 +182,53 @@ impl Store {
                     id,
                     turn: String::from_utf8_lossy(&turn).into_owned(),
                     edits,
+                    started_at: started,
+                    last_at: last,
+                    repo: repo.map(|p| {
+                        use std::os::unix::ffi::OsStringExt;
+                        PathBuf::from(std::ffi::OsString::from_vec(p))
+                    }),
                 });
             }
             Ok(Some(pending))
         })
     }
 
-    /// Settles turns: their changed files are written, then their shares
-    /// and the fact rows that follow, and so are the turns that depend on
-    /// them (docs/design/usage.md「分摊」), in one transaction. The facts
-    /// changed are in the result, like a batch's.
+    /// Whether the repository's watch covers any of `from..to`
+    /// (milliseconds): the calls of a turn in it can have been observed.
+    pub(crate) fn watched(
+        &self,
+        common_dir: &Path,
+        from: i64,
+        to: i64,
+    ) -> Result<bool, StoreError> {
+        self.read(|conn| {
+            conn.prepare_cached(
+                "SELECT EXISTS (
+                   SELECT 1 FROM watch_span w JOIN location l ON l.id = w.repo
+                   WHERE l.kind = 0 AND l.path = ?1 AND w.begin_ns <= ?3
+                     AND (w.end_ns IS NULL OR w.end_ns >= ?2))",
+            )?
+            .query_row(
+                params![
+                    path_bytes(common_dir),
+                    from.saturating_mul(1_000_000),
+                    to.saturating_mul(1_000_000)
+                ],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// Settles turns: their changed files are written, with where each one
+    /// belongs, then the turns' shares and the fact rows that follow, and so
+    /// are the turns that depend on them (docs/design/usage.md「分摊」), in one
+    /// transaction. The facts changed are in the result, like a batch's.
     pub(crate) fn finalize(
         &self,
         key: &SessionKey,
         turns: &[TurnWork],
+        reads: &dyn GitRead,
     ) -> Result<Ingested, StoreError> {
         self.transaction(|tx| {
             let session: i64 = tx
@@ -186,43 +241,112 @@ impl Store {
                     r.get(0)
                 })?;
             let frozen = cold::frozen(tx)?;
+            let mut cx = Cx::new(tx, reads);
             let mut work = Vec::new();
             for turn in turns {
-                let started: Option<(i64, i64)> = tx
+                type Row = (i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>);
+                let found: Option<Row> = tx
                     .prepare_cached(
-                        "SELECT started_at, gen FROM turn WHERE id = ?1 AND session = ?2",
+                        "SELECT started_at, gen, tid, coalesce(last_at, started_at), location,
+                                worktree, branch FROM turn WHERE id = ?1 AND session = ?2",
                     )?
-                    .query_row(params![turn.id, session], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .query_row(params![turn.id, session], |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                        ))
+                    })
                     .optional()?;
-                let Some((at, generation)) = started else {
+                let Some((at, generation, tid, last, loc, worktree, branch)) = found else {
                     continue;
                 };
+                let branch = match branch {
+                    Some(id) => {
+                        let text: Vec<u8> = tx
+                            .prepare_cached("SELECT text FROM intern WHERE id = ?1")?
+                            .query_row(params![id], |r| r.get(0))?;
+                        Some(full_ref(&String::from_utf8_lossy(&text)))
+                    }
+                    None => None,
+                };
                 tx.prepare_cached(DELETE_ITEMS)?.execute(params![turn.id])?;
+                // Where each changed file lies: as the call's own record
+                // said when it was read, else as it is now.
+                let mut places = Vec::with_capacity(turn.items.len());
                 for item in &turn.items {
-                    let cid = item.call;
                     let path = intern(tx, path_bytes(&item.path))?;
-                    let known: Option<i64> = tx
+                    let known: Option<(i64, Option<i64>)> = tx
                         .prepare_cached(
-                            "SELECT location FROM call_fact
+                            "SELECT location, worktree FROM call_fact
                              WHERE session = ?1 AND cid = ?2 AND path = ?3",
                         )?
-                        .query_row(params![session, cid, path], |r| r.get(0))
+                        .query_row(params![session, item.call, path], |r| {
+                            Ok((r.get(0)?, r.get(1)?))
+                        })
                         .optional()?;
-                    let place = match known {
-                        Some(place) => place,
+                    places.push(match known {
+                        Some(k) => k,
                         None => {
                             let place = location(tx, &item.place.place)?;
                             let worktree = match &item.place.worktree {
                                 Some(w) => Some(intern(tx, path_bytes(w))?),
                                 None => None,
                             };
-                            calls::fact(tx, session, cid, path, (place, worktree), at)?;
-                            place
+                            (place, worktree)
                         }
-                    };
+                    });
+                }
+                let refs: Vec<Option<WtRef>> = turn
+                    .items
+                    .iter()
+                    .map(|item| match (&item.place.place, &item.place.worktree) {
+                        (Place::Git(common), Some(key)) => Some(WtRef {
+                            key: key.clone(),
+                            common: common.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                let rels: Vec<String> = turn
+                    .items
+                    .iter()
+                    .map(|item| rel_path(&item.place, &item.path))
+                    .collect();
+                let items_in: Vec<ItemIn<'_>> = turn
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(|(n, item)| ItemIn {
+                        cid: item.call,
+                        path: &item.path,
+                        start: item.start,
+                        end: item.end,
+                        wt: refs[n].as_ref(),
+                        rel: &rels[n],
+                    })
+                    .collect();
+                let info = TurnInfo {
+                    id: turn.id,
+                    session,
+                    generation,
+                    tid,
+                    started_at: at,
+                    last_at: last,
+                    worktree,
+                    location: loc,
+                    branch,
+                };
+                let placed = settle_turn(&mut cx, &info, &items_in, &turn.calls, &places)?;
+                for ((item, placed), (place, _)) in turn.items.iter().zip(placed).zip(places) {
+                    let path = intern(tx, path_bytes(&item.path))?;
                     tx.prepare_cached(
-                        "INSERT INTO item (session, gen, turn, path, location, lines, at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO item (session, gen, turn, path, location, lines, at, cf)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     )?
                     .execute(params![
                         session,
@@ -231,11 +355,13 @@ impl Store {
                         path,
                         place,
                         i64::try_from(item.lines).unwrap_or(i64::MAX),
-                        at
+                        at,
+                        placed.cf
                     ])?;
                 }
                 work.push(turn.id);
             }
+            drop(cx);
             let mut deltas = Deltas::collect();
             let settled = attrib::settle_all(tx, work, &frozen, &mut deltas)?;
             let commit: i64 = tx
@@ -253,5 +379,18 @@ impl Store {
                 ..Ingested::default()
             })
         })
+    }
+}
+
+/// The path of a file below its worktree's root, slash separated.
+fn rel_path(place: &PathPlace, path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if place.rel.is_empty() {
+        name
+    } else {
+        format!("{}/{name}", place.rel)
     }
 }
