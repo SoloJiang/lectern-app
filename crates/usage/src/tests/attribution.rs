@@ -11,7 +11,7 @@ use lectern_services::session::{
     Agent, EditOp, FileEdit, Positioned, Record, Timestamp, ToolCallId, ToolFinished, ToolKind,
     ToolStarted, ToolStatus, TurnId,
 };
-use lectern_services::usage::{SessionUsage, UsageQuery, UsageSnapshot, Window};
+use lectern_services::usage::{RowKey, SessionUsage, UsageQuery, UsageSnapshot, Window};
 
 use super::support::*;
 use crate::finalize::edit_lines;
@@ -53,6 +53,21 @@ impl Log {
     pub(super) fn context(&mut self, at: i64, cwd: &str) -> &mut Log {
         let pos = self.pos;
         self.push(context(pos, at, cwd));
+        self
+    }
+
+    /// A `Context` record that names the branch the log recorded.
+    pub(super) fn context_branch(&mut self, at: i64, cwd: &str, branch: &str) -> &mut Log {
+        let pos = self.pos;
+        self.push(rec(
+            pos,
+            Record::Context {
+                at: Timestamp(at),
+                cwd: Arc::from(Path::new(cwd)),
+                logged_branch: Some(branch.into()),
+                model: None,
+            },
+        ));
         self
     }
 
@@ -117,7 +132,7 @@ impl Log {
         status: ToolStatus,
     ) -> &mut Log {
         self.fake
-            .edit_call_with(&self.id, turn, call, named, edits, status);
+            .edit_call_at(&self.id, turn, call, named, edits, status, (at, at + 1000));
         let pos = self.pos;
         self.push(rec(
             pos,
@@ -138,6 +153,75 @@ impl Log {
                 call: ToolCallId(call.into()),
                 at: Timestamp(at + 1000),
                 status,
+                exec_session: None,
+            }),
+        ));
+        self
+    }
+
+    /// A command run in `workdir` from `at` to `at + 100`.
+    pub(super) fn exec(
+        &mut self,
+        turn: &str,
+        call: &str,
+        command: &str,
+        workdir: &str,
+        at: i64,
+    ) -> &mut Log {
+        let kind = ToolKind::Execute {
+            command: command.into(),
+            workdir: Arc::from(Path::new(workdir)),
+            exec_session: None,
+            workdir_exact: true,
+        };
+        self.tool(turn, call, kind, at, at + 100)
+    }
+
+    /// Files read from `at` to `at + 100`.
+    pub(super) fn read(&mut self, turn: &str, call: &str, paths: &[&str], at: i64) -> &mut Log {
+        let kind = ToolKind::Read {
+            paths: paths.iter().map(PathBuf::from).collect::<Vec<_>>().into(),
+        };
+        self.tool(turn, call, kind, at, at + 100)
+    }
+
+    /// A search of `paths` from `at` to `at + 100`.
+    pub(super) fn search(&mut self, turn: &str, call: &str, paths: &[&str], at: i64) -> &mut Log {
+        let kind = ToolKind::Search {
+            paths: paths.iter().map(PathBuf::from).collect::<Vec<_>>().into(),
+        };
+        self.tool(turn, call, kind, at, at + 100)
+    }
+
+    /// A call of any kind, in the log and in the turn index.
+    pub(super) fn tool(
+        &mut self,
+        turn: &str,
+        call: &str,
+        kind: ToolKind,
+        start: i64,
+        end: i64,
+    ) -> &mut Log {
+        self.fake
+            .tool_call(&self.id, turn, call, kind.clone(), (start, end));
+        let pos = self.pos;
+        self.push(rec(
+            pos,
+            Record::ToolStarted(ToolStarted {
+                call: ToolCallId(call.into()),
+                turn: Some(TurnId(turn.into())),
+                at: Timestamp(start),
+                name: "Tool".into(),
+                kind,
+            }),
+        ));
+        let pos = self.pos;
+        self.push(rec(
+            pos,
+            Record::ToolFinished(ToolFinished {
+                call: ToolCallId(call.into()),
+                at: Timestamp(end),
+                status: ToolStatus::Completed,
                 exec_session: None,
             }),
         ));
@@ -180,21 +264,21 @@ fn other_of(h: &Harness) -> u64 {
     h.all(Window::D7).other.input
 }
 
-const AT: i64 = OCT_20 + 9 * HOUR;
+pub(super) const AT: i64 = OCT_20 + 9 * HOUR;
 /// Long after every record: every turn is ready.
-const LATER: i64 = OCT_20 + DAY * 2;
+pub(super) const LATER: i64 = OCT_20 + DAY * 2;
 
-fn settled(h: &Harness, fake: &FakeSessions, id: &str) {
+pub(super) fn settled(h: &Harness, fake: &FakeSessions, id: &str) {
     h.settle_all(fake, id, LATER);
 }
 
-fn conn(h: &Harness) -> rusqlite::Connection {
+pub(super) fn conn(h: &Harness) -> rusqlite::Connection {
     rusqlite::Connection::open(h.db_path()).unwrap()
 }
 
 /// The weights of a turn's share, by the paths of the places: (place path,
 /// weight), in order.
-fn share_of(h: &Harness, turn: &str) -> Vec<(String, i64)> {
+pub(super) fn share_of(h: &Harness, turn: &str) -> Vec<(String, i64)> {
     let conn = conn(h);
     let mut stmt = conn
         .prepare(
@@ -362,7 +446,8 @@ fn items_path_prefix_is_kept_in_the_call_fact() {
         )
         .unwrap();
     assert_eq!(place, b"/work/lib/.git");
-    assert_eq!(worktree, b"/work/lib");
+    // The main worktree is named by the common directory.
+    assert_eq!(worktree, b"/work/lib/.git");
     assert_eq!(path, b"/work/lib/src/a.rs");
 }
 
@@ -465,7 +550,10 @@ fn project_by_change_a_linked_worktree_is_the_same_project() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(worktree, b"/work/app-feature", "the worktree it was in");
+    assert_eq!(
+        worktree, b"/work/app/.git/worktrees/app-feature",
+        "the worktree it was in"
+    );
 }
 
 #[test]
@@ -1073,7 +1161,7 @@ fn reset_keeps_observations() {
 
 // ---- session ----
 
-fn session_usage(h: &Harness, fake: &FakeSessions, id: &str) -> SessionUsage {
+pub(super) fn session_usage(h: &Harness, fake: &FakeSessions, id: &str) -> SessionUsage {
     match h.snapshot(&UsageQuery::Session {
         session: fake.key(id),
     }) {
@@ -1106,7 +1194,12 @@ fn session_turns_are_the_tokens_counted_in_each_turn() {
         .collect();
     assert_eq!(turns, [("t1", 100), ("t2", 7)]);
     assert_eq!(s.total.input, 107);
-    assert!(s.rows.is_empty(), "the branch rows come with step 5");
+    // Nobody watched the repositories: the branch is not known.
+    assert_eq!(s.rows.len(), 1);
+    assert!(matches!(
+        &s.rows[0].key,
+        RowKey::Unassigned { unattributable } if unattributable.input == 107
+    ));
 }
 
 #[test]

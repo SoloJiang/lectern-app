@@ -19,11 +19,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use lectern_executor::{Executor, Priority};
-use lectern_fs_watch::{Coalesce, DirBatch, DirSpec, DirWatch, Sink, Watcher};
+use lectern_fs_watch::{
+    Coalesce, DirBatch, DirSpec, DirWatch, Failure, Health, RepoBatch, RepoSpec, RepoWatch, Sink,
+    Watcher,
+};
 use lectern_git::GitError;
 use lectern_kernel::{ActivationToken, BusyGuard, PluginHandle, ServiceRef, ServiceSet};
 use lectern_logging::{Ctx, Value, debug, error, info, warn};
-use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
+use lectern_services::project::{Head, ProjectEvent, ProjectKey, Projects, WorktreeKey};
 use lectern_services::session::{
     Batch, Place as SessionPlace, Record, SessionError, SessionKey, SessionSource, SessionSummary,
     SessionsChanged, SourceId, Timestamp, ToolKind,
@@ -37,13 +40,14 @@ use lectern_services::usage::{
 use crate::LocalZone;
 use crate::facts;
 use crate::finalize::{self, BATCH_TIME, BATCH_TURNS, Settling};
+use crate::gitread::{BranchLog, GitRead};
 use crate::identity::{Previous, RepoFacts};
 use crate::limits::{self, Rejected};
 use crate::paths;
 use crate::snapshot::{self, Applied, Owners, Scope, Watched};
 use crate::store::cold::{self, Month, Stepped};
 use crate::store::{
-    Aliases, Checked, Commanded, FileStamp, Ingest, Ingested, Mode, Outcome, PathPlace, Place,
+    Aliases, Arm, Checked, Commanded, FileStamp, Ingest, Ingested, Mode, Outcome, PathPlace, Place,
     ProjectRow, Recorded, SessionInfo, Store, StoreError, Totals,
 };
 use crate::time::Time;
@@ -91,6 +95,8 @@ pub(crate) struct Deps {
     pub(crate) time: Time,
     pub(crate) facts: FactsReader,
     pub(crate) exists: Exists,
+    /// What the branch observations read from a repository.
+    pub(crate) reads: Arc<dyn GitRead>,
 }
 
 /// Whether a project's path still holds anything.
@@ -198,7 +204,7 @@ struct State {
     pace: Pace,
     backfill: Backfill,
     maintenance: Maintenance,
-    places: HashMap<PathBuf, Place>,
+    places: HashMap<PathBuf, PathPlace>,
     /// Where the files of a directory lie (`Projects::resolve`, remembered).
     dirs: HashMap<PathBuf, PathPlace>,
     /// Sessions with turns to settle (docs/design/usage.md「轮次的观察与改动项」).
@@ -225,6 +231,11 @@ struct State {
     /// The wall-clock time (Unix milliseconds) the latest limits timer waits
     /// for: the earliest `resets_at` after the last snapshot.
     limits_timer: Option<i64>,
+    /// The repositories whose reflogs are watched (the open projects').
+    repos: HashMap<PathBuf, RepoWatch>,
+    /// Batches of reflog records waiting to be written, in the order they
+    /// came.
+    repo_queue: VecDeque<(PathBuf, RepoBatch, Option<BusyGuard>)>,
 }
 
 pub(crate) struct Engine {
@@ -239,6 +250,9 @@ pub(crate) struct Engine {
     stop: AtomicBool,
     /// The watch on the statusline directory; set once the database is open.
     statusline: Mutex<Option<DirWatch>>,
+    /// Held while the reflog batches are written, so that they go in the
+    /// order they came, and settling finds them all.
+    draining: Mutex<()>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -275,6 +289,22 @@ pub(crate) fn place_of_key(key: &ProjectKey, rel: &str) -> Place {
     }
 }
 
+/// The place of a path `Projects` resolved, with the worktree it is in.
+pub(crate) fn located(
+    project: &ProjectKey,
+    rel: &str,
+    worktree: Option<&WorktreeKey>,
+) -> PathPlace {
+    PathPlace {
+        place: place_of_key(project, rel),
+        worktree: worktree.map(|w| w.0.to_path_buf()),
+        rel: match project {
+            ProjectKey::Git { .. } => rel.to_owned(),
+            ProjectKey::Folder { .. } => String::new(),
+        },
+    }
+}
+
 impl Engine {
     pub(crate) fn new(
         deps: Deps,
@@ -291,6 +321,7 @@ impl Engine {
             limits: Mutex::new(Arc::new(Limits::default())),
             stop: AtomicBool::new(false),
             statusline: Mutex::new(None),
+            draining: Mutex::new(()),
         })
     }
 
@@ -322,7 +353,18 @@ impl Engine {
         // Dropping the watch ends its deliveries.
         let watch = lock(&self.statusline).take();
         drop(watch);
+        let repos: Vec<PathBuf> = {
+            let mut state = self.state();
+            state.repo_queue.clear();
+            let repos = state.repos.keys().cloned().collect();
+            state.repos.clear();
+            repos
+        };
         if let Some(store) = self.store() {
+            let at = self.deps.time.now_ms().saturating_mul(1_000_000);
+            for repo in repos {
+                let _ = store.disarm(&repo, at);
+            }
             store.close();
         }
     }
@@ -393,6 +435,10 @@ impl Engine {
                 state.recovered = opened.recovered.map(|r| r.at);
                 state.maintenance.check = true;
                 drop(state);
+                // Spans a run left open end where its records stopped.
+                if let Err(e) = store.close_stale_spans() {
+                    warn!("watch spans not closed"; sqlite = e.code());
+                }
                 self.register_open_projects(&store);
                 self.queue_unsettled(&store);
                 let keys: Vec<SessionKey> = self.summaries().into_keys().collect();
@@ -542,6 +588,9 @@ impl Engine {
         let keys = projects.open_projects();
         for key in &keys {
             self.record_open(store, key);
+            if let ProjectKey::Git { common_dir } = key {
+                self.watch_repo(common_dir);
+            }
         }
         self.state().open = keys;
     }
@@ -1244,25 +1293,38 @@ impl Engine {
         state.dirty.extend(keys);
     }
 
-    /// The place of a cwd: from the session's own placement when it is the
-    /// starting cwd, else `Projects::resolve` (remembered per path).
-    fn place(&self, summary: &SessionSummary, cwd: &Path) -> Place {
+    /// The place of a cwd, with its worktree: from the session's own
+    /// placement when it is the starting cwd, else `Projects::resolve`
+    /// (remembered per path).
+    fn place(&self, summary: &SessionSummary, cwd: &Path) -> PathPlace {
         if cwd == &*summary.cwd {
             match &summary.place {
-                SessionPlace::Located(l) => return place_of_key(&l.project, &l.rel),
-                SessionPlace::Resolved(r) => return place_of_key(&r.project, &r.rel),
+                SessionPlace::Located(l) => {
+                    return located(&l.project, &l.rel, l.worktree.as_ref());
+                }
+                SessionPlace::Resolved(r) => {
+                    return located(&r.project, &r.rel, r.worktree.as_ref());
+                }
                 SessionPlace::Pending | SessionPlace::Missing | SessionPlace::Unresolvable(_) => {}
             }
         }
         if cwd.as_os_str().is_empty() {
-            return Place::Unknown;
+            return PathPlace {
+                place: Place::Unknown,
+                worktree: None,
+                rel: String::new(),
+            };
         }
         if let Some(p) = self.state().places.get(cwd) {
             return p.clone();
         }
         let place = match self.projects.get().map(|p| p.resolve(cwd)) {
-            Some(Ok(r)) => place_of_key(&r.project, &r.rel),
-            _ => Place::Dir(cwd.to_path_buf()),
+            Some(Ok(r)) => located(&r.project, &r.rel, r.worktree.as_ref()),
+            _ => PathPlace {
+                place: Place::Dir(cwd.to_path_buf()),
+                worktree: None,
+                rel: String::new(),
+            },
         };
         let mut state = self.state();
         if state.places.len() >= PLACE_CACHE {
@@ -1272,7 +1334,7 @@ impl Engine {
         place
     }
 
-    fn places(&self, summary: &SessionSummary, batch: &Batch) -> HashMap<PathBuf, Place> {
+    fn places(&self, summary: &SessionSummary, batch: &Batch) -> HashMap<PathBuf, PathPlace> {
         let mut out = HashMap::new();
         for rec in &batch.records {
             if let Record::Context { cwd, .. } = &rec.value
@@ -1303,7 +1365,11 @@ impl Engine {
 
     /// The place of a file: `Projects::resolve` of its directory, remembered.
     fn path_place(&self, path: &Path) -> PathPlace {
-        let dir = paths::dir_of(path);
+        self.dir_place(paths::dir_of(path))
+    }
+
+    /// The place of the files of a directory, remembered.
+    fn dir_place(&self, dir: &Path) -> PathPlace {
         let cached = self.state().dirs.get(dir).cloned();
         match cached {
             Some(found) => found,
@@ -1316,6 +1382,138 @@ impl Engine {
                 }
                 state.dirs.insert(dir.to_path_buf(), found.clone());
                 found
+            }
+        }
+    }
+
+    // ---- reflogs ----
+
+    /// Watches the reflog of an open repository from now on: a span begins,
+    /// and the HEADs of its worktrees are the baselines the records that
+    /// follow are replayed from (docs/design/usage.md「分支观察」).
+    fn watch_repo(&self, common_dir: &Path) {
+        if self.store().is_none() {
+            return;
+        }
+        {
+            let state = self.state();
+            if state.stopped || state.repos.contains_key(common_dir) {
+                return;
+            }
+        }
+        let sink = Arc::new(RepoSink {
+            engine: self.me.clone(),
+            common_dir: common_dir.to_path_buf(),
+        });
+        let watch = self.deps.watcher.watch_repo(
+            RepoSpec {
+                common_dir: common_dir.to_path_buf(),
+                coalesce: Coalesce::REPO,
+            },
+            sink,
+        );
+        self.state().repos.insert(common_dir.to_path_buf(), watch);
+        let dir = common_dir.to_path_buf();
+        self.spawn(true, move |engine| engine.arm_repo(&dir));
+    }
+
+    /// The first records of a watch: the span, the HEADs, the segments of the
+    /// branches they are on.
+    pub(crate) fn arm_repo(&self, common_dir: &Path) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        if !self.state().repos.contains_key(common_dir) {
+            return;
+        }
+        let at_ns = self.deps.time.now_ms().saturating_mul(1_000_000);
+        let Some(heads) = self.deps.reads.heads(common_dir) else {
+            warn!("repository heads could not be read"; path = Value::path(common_dir));
+            // Nothing could be replayed from records without a baseline.
+            self.unwatch_repo(common_dir);
+            return;
+        };
+        let mut logs: Vec<(String, BranchLog)> = Vec::new();
+        for branch in heads.iter().filter_map(|h| h.branch.as_ref()) {
+            if logs.iter().any(|(b, _)| b == branch) {
+                continue;
+            }
+            if let Some(log) = self.deps.reads.branch_log(common_dir, branch) {
+                logs.push((branch.clone(), log));
+            }
+        }
+        let arm = Arm {
+            common_dir,
+            at_ns,
+            heads: &heads,
+            logs: &logs,
+        };
+        match store.arm(&arm) {
+            Ok(()) => {
+                debug!("repository watched"; path = Value::path(common_dir), worktrees = heads.len())
+            }
+            Err(e) => {
+                let _ = self.store_failed(&store, &e);
+            }
+        }
+    }
+
+    /// A repository is not watched any more (its project closed).
+    fn unwatch_repo(&self, common_dir: &Path) {
+        let watch = self.state().repos.remove(common_dir);
+        if watch.is_none() {
+            return;
+        }
+        drop(watch);
+        if let Some(store) = self.store() {
+            let at = self.deps.time.now_ms().saturating_mul(1_000_000);
+            if let Err(e) = store.disarm(common_dir, at) {
+                warn!("watch span not closed"; sqlite = e.code());
+            }
+        }
+    }
+
+    /// A batch of reflog records came from `fs_watch`: queued, written by a
+    /// task in the order they came.
+    pub(crate) fn on_repo_batch(
+        &self,
+        common_dir: &Path,
+        batch: RepoBatch,
+        busy: Option<BusyGuard>,
+    ) {
+        {
+            let mut state = self.state();
+            if state.stopped {
+                return;
+            }
+            state
+                .repo_queue
+                .push_back((common_dir.to_path_buf(), batch, busy));
+        }
+        self.spawn(false, |engine| engine.drain_repos());
+    }
+
+    /// Writes the batches that wait, in order. Settling calls it first.
+    pub(crate) fn drain_repos(&self) {
+        let _gate = lock(&self.draining);
+        let Some(store) = self.store() else {
+            return;
+        };
+        loop {
+            let next = self.state().repo_queue.pop_front();
+            let Some((common_dir, batch, _busy)) = next else {
+                break;
+            };
+            if let Err(e) = store.repo_batch(&common_dir, &batch) {
+                let _ = self.store_failed(&store, &e);
+            }
+            if matches!(batch.health, Some(Health::Failed(Failure::Stopped))) {
+                continue;
+            }
+            // A watch that failed cannot say what happened after.
+            if matches!(batch.health, Some(Health::Failed(_))) {
+                let at = self.deps.time.now_ms().saturating_mul(1_000_000);
+                let _ = store.disarm(&common_dir, at);
             }
         }
     }
@@ -1440,7 +1638,9 @@ impl Engine {
             .into_iter()
             .find(|s| s.id() == key.source)?;
         let summary = source.sessions().get(key).cloned()?;
-        let resolve = |p: &Path| self.path_place(p);
+        let resolve = |d: &Path| self.dir_place(d);
+        // The reflog records of the calls are written before their turns.
+        self.drain_repos();
         let settling = Settling {
             store: &store,
             source: &*source,
@@ -1448,6 +1648,7 @@ impl Engine {
             now_ms: self.deps.time.now_ms(),
             end_open: !summary.open_turn,
             resolve: &resolve,
+            reads: &*self.deps.reads,
             turns: BATCH_TURNS,
             time: BATCH_TIME,
         };
@@ -1604,6 +1805,9 @@ impl Engine {
             }
             ProjectEvent::Closed { project } => {
                 self.state().open.retain(|k| k != project);
+                if let ProjectKey::Git { common_dir } = project {
+                    self.unwatch_repo(common_dir);
+                }
                 self.mark_all_dirty();
                 self.compute();
             }
@@ -1615,6 +1819,16 @@ impl Engine {
                 let common_dir = common_dir.to_path_buf();
                 self.spawn(true, move |engine| engine.reidentify_unborn(common_dir));
             }
+            // A HEAD moved: the queries about a worktree show the branch it
+            // is on.
+            ProjectEvent::Changed { parts, .. } if parts.worktrees => {
+                for (query, interest) in self.state().interests.iter_mut() {
+                    if matches!(query, UsageQuery::Worktree { .. }) {
+                        interest.dirty = true;
+                    }
+                }
+                self.compute();
+            }
             _ => {}
         }
     }
@@ -1622,6 +1836,9 @@ impl Engine {
     fn project_opened(&self, key: ProjectKey) {
         if let Some(store) = self.store() {
             self.record_open(&store, &key);
+            if let ProjectKey::Git { common_dir } = &key {
+                self.watch_repo(common_dir);
+            }
         }
         {
             let mut state = self.state();
@@ -1886,6 +2103,26 @@ impl Engine {
     }
 }
 
+/// Batches of a repository's reflog go to the engine; it only queues them.
+struct RepoSink {
+    engine: Weak<Engine>,
+    common_dir: PathBuf,
+}
+
+impl Sink<RepoBatch> for RepoSink {
+    fn deliver(&self, batch: RepoBatch, busy: Option<BusyGuard>) {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.on_repo_batch(&self.common_dir, batch, busy);
+        }
+    }
+
+    fn busy(&self) -> Option<BusyGuard> {
+        let engine = self.engine.upgrade()?;
+        let state = engine.state();
+        state.handle.as_ref()?.busy()
+    }
+}
+
 /// Batches of the statusline directory go to the engine; it only queues a
 /// task.
 struct StatuslineSink {
@@ -1943,6 +2180,19 @@ impl Context<'_> {
             state: self.state.clone(),
             may_include_inherited,
         }
+    }
+
+    /// The worktree whose HEAD is on the branch now.
+    fn checked_out(&self, common_dir: &Path, name: &str) -> Option<WorktreeKey> {
+        let key = ProjectKey::Git {
+            common_dir: common_dir.into(),
+        };
+        let snapshot = self.projects?.snapshot(&key)?;
+        snapshot
+            .worktrees
+            .iter()
+            .find(|w| matches!(&w.head, Head::Branch(b) if &**b == name))
+            .map(|w| w.key.clone())
     }
 }
 
@@ -2023,12 +2273,34 @@ pub(crate) fn compute_full(
             let Some(totals) = cx.store.session_totals(session)? else {
                 return Ok(None);
             };
+            let checked_out = |common: &Path, name: &str| cx.checked_out(common, name);
             Ok(Some(Computed::Snapshot(UsageSnapshot::Session(
-                snapshot::session(cx.header(totals.inherited), &totals),
+                snapshot::session(cx.header(totals.inherited), &totals, &checked_out),
             ))))
         }
-        // Later steps of docs/design/usage.md「验收」.
-        UsageQuery::Worktree { .. } | UsageQuery::Mr { .. } => Ok(None),
+        UsageQuery::Worktree { project, worktree } => {
+            let ProjectKey::Git { common_dir } = project else {
+                return Ok(None);
+            };
+            let Some(found) = cx.projects.and_then(|p| p.snapshot(project)) else {
+                return Ok(None);
+            };
+            let Some(wt) = found.worktrees.iter().find(|w| &w.key == worktree) else {
+                return Ok(None);
+            };
+            let (branch, totals) = match &wt.head {
+                Head::Branch(name) => (
+                    Some((&**name, worktree.clone())),
+                    cx.store.worktree_totals(common_dir, name, cx.now_ms)?,
+                ),
+                Head::Detached(_) | Head::Unborn(_) | Head::Unknown => (None, None),
+            };
+            Ok(Some(Computed::Snapshot(UsageSnapshot::Worktree(
+                snapshot::worktree(cx.header(false), branch, totals.as_ref()),
+            ))))
+        }
+        // The merge request steps of docs/design/usage.md「验收」.
+        UsageQuery::Mr { .. } => Ok(None),
     }
 }
 
@@ -2138,6 +2410,10 @@ fn with_generation(snapshot: UsageSnapshot, generation: u64) -> UsageSnapshot {
         UsageSnapshot::Session(mut s) => {
             s.header.generation = generation;
             UsageSnapshot::Session(s)
+        }
+        UsageSnapshot::Worktree(mut w) => {
+            w.header.generation = generation;
+            UsageSnapshot::Worktree(w)
         }
         other => other,
     }

@@ -205,9 +205,9 @@ pub(crate) fn insert_facts(
     deltas: &mut Deltas,
 ) -> rusqlite::Result<()> {
     const INSERT: &str = "INSERT INTO fact (at, bucket, source, location, project, agent, model,
-                           session, turn, input, output, cache_read, cache_write)
+                           session, turn, input, output, cache_read, cache_write, segment, kind)
          SELECT s.at, (s.at - (((s.at % ?2) + ?2) % ?2)) / ?2, s.id, ?3, p.id,
-                se.agent, s.model, s.session, s.turn, ?4, ?5, ?6, ?7
+                se.agent, s.model, s.session, s.turn, ?4, ?5, ?6, ?7, nullif(?8, 0), ?9
          FROM usage_source s
          JOIN session se ON se.id = s.session
          LEFT JOIN project p ON p.id = (
@@ -242,7 +242,9 @@ pub(crate) fn insert_facts(
             micro(0),
             micro(1),
             micro(2),
-            micro(3)
+            micro(3),
+            target.segment,
+            target.kind
         ];
         if !deltas.on {
             conn.prepare_cached(INSERT)?.execute(values)?;

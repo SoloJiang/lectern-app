@@ -17,9 +17,9 @@ use lectern_services::usage::{
     Window,
 };
 
-use crate::engine::{Context, READ_BYTES, compute, place_of_key};
+use crate::engine::{Context, READ_BYTES, compute, located};
 use crate::finalize::Settled;
-use crate::store::{FileStamp, Ingest, Ingested, Place, SessionInfo, Store};
+use crate::store::{FileStamp, Ingest, Ingested, PathPlace, Place, SessionInfo, Store};
 use crate::testing::{FakeProjects, FakeSessions, TableZone};
 use crate::window;
 
@@ -159,6 +159,8 @@ pub(crate) struct Harness {
     pub(crate) open: Vec<ProjectKey>,
     /// Paths that no longer exist, for the snapshots' `PathMissing`.
     pub(crate) missing: std::cell::RefCell<Vec<PathBuf>>,
+    /// What the repositories say.
+    pub(crate) git: crate::testing::FakeGit,
 }
 
 impl Harness {
@@ -174,6 +176,7 @@ impl Harness {
             now: OCT_20 + 2 * DAY + 12 * HOUR,
             open: Vec::new(),
             missing: std::cell::RefCell::new(Vec::new()),
+            git: crate::testing::FakeGit::new(),
         }
     }
 
@@ -212,11 +215,15 @@ impl Harness {
         self.dir.path().join(crate::store::DB_FILE)
     }
 
-    fn place(&self, summary: &SessionSummary, cwd: &Path) -> Place {
+    fn place(&self, summary: &SessionSummary, cwd: &Path) -> PathPlace {
         let _ = summary;
         match self.projects.resolve(cwd) {
-            Ok(r) => place_of_key(&r.project, &r.rel),
-            Err(_) => Place::Dir(cwd.to_path_buf()),
+            Ok(r) => located(&r.project, &r.rel, r.worktree.as_ref()),
+            Err(_) => PathPlace {
+                place: Place::Dir(cwd.to_path_buf()),
+                worktree: None,
+                rel: String::new(),
+            },
         }
     }
 
@@ -286,7 +293,7 @@ impl Harness {
             .get(&key)
             .cloned()
             .expect("session");
-        let resolve = |p: &Path| self.path_place(p);
+        let resolve = |d: &Path| crate::paths::dir_place(Some(&self.projects), d);
         crate::finalize::settle(&crate::finalize::Settling {
             store: self.store(),
             source: fake,
@@ -294,6 +301,7 @@ impl Harness {
             now_ms: now,
             end_open: !summary.open_turn,
             resolve: &resolve,
+            reads: &self.git,
             turns: crate::finalize::BATCH_TURNS,
             time: crate::finalize::BATCH_TIME,
         })
@@ -478,9 +486,9 @@ pub(crate) struct PendingRead {
     pub(crate) cursor: lectern_services::session::Cursor,
     pub(crate) batch: lectern_services::session::Batch,
     pub(crate) stamp: Option<FileStamp>,
-    pub(crate) places: HashMap<PathBuf, Place>,
+    pub(crate) places: HashMap<PathBuf, PathPlace>,
     pub(crate) paths: HashMap<PathBuf, crate::store::PathPlace>,
-    pub(crate) start: Place,
+    pub(crate) start: PathPlace,
 }
 
 /// What reopening found.

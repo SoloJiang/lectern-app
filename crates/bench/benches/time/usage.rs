@@ -606,3 +606,30 @@ fn disk_day_heavy(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         ))),
     ])
 }
+
+/// `usage/rebuild_30d`: the derived tables of the 30-day fixture (the fact
+/// rows, the shares and the buckets) made again from the observations, as a
+/// change of the derived algorithm or a repaired database asks (「数据流与
+/// 线程」). Record only; the 30-day snapshot is checked to be the same
+/// afterwards.
+pub const REBUILD_30D: Bench = Bench {
+    id: "usage/rebuild_30d",
+    run: rebuild_30d,
+};
+
+fn rebuild_30d(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let heavy = heavy(ctx)?;
+    let s = copy(&heavy, &ctx.scratch().join("db"))?;
+    let query = project_30d_query();
+    let before = s.snapshot(&query)?;
+    let started = Instant::now();
+    s.rebuild_hot()?;
+    let took = started.elapsed();
+    if s.snapshot(&query)? != before {
+        return Err(BenchError::new("the rebuilt snapshot differs"));
+    }
+    Ok(vec![
+        Measured::new("usage/rebuild_30d", Value::Time(Samples(vec![took])))
+            .with_note(Some(note(&heavy))),
+    ])
+}

@@ -30,15 +30,21 @@ pub(crate) fn dir_place(projects: Option<&dyn Projects>, dir: &Path) -> PathPlac
                 ProjectKey::Git { common_dir } => Place::Git(common_dir.to_path_buf()),
                 ProjectKey::Folder { root } => Place::Dir(root.join(&rel_dir)),
             };
+            let rel = match &found.project {
+                ProjectKey::Git { .. } => rel_dir.to_string_lossy().replace('\\', "/"),
+                ProjectKey::Folder { .. } => String::new(),
+            };
             return PathPlace {
                 place,
                 worktree: found.worktree.as_ref().map(|w| w.0.to_path_buf()),
+                rel,
             };
         }
     }
     PathPlace {
         place: Place::Dir(dir.to_path_buf()),
         worktree: None,
+        rel: String::new(),
     }
 }
 

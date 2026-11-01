@@ -12,7 +12,7 @@ use lectern_services::usage::{Tokens, Window};
 use rusqlite::Connection;
 
 use super::support::*;
-use crate::store::schema::{CREATE_V5, CURRENT, Migration, Schema, V1, V2, V3, V4};
+use crate::store::schema::{CREATE_V6, CURRENT, Migration, Schema, V1, V2, V3, V4};
 use crate::store::{BACKUP_PREFIX, Checked, Mode, SALVAGE_FILE, Step, StoreError, fail_at};
 use crate::testing::FakeSessions;
 
@@ -36,16 +36,16 @@ fn add(fake: &FakeSessions, id: &str, n: u64) {
     fake.push(id, records);
 }
 
-fn raw(path: &Path) -> Connection {
+pub(super) fn raw(path: &Path) -> Connection {
     Connection::open(path).unwrap()
 }
 
-fn count(conn: &Connection, table: &str) -> i64 {
+pub(super) fn count(conn: &Connection, table: &str) -> i64 {
     let sql = format!("SELECT count(*) FROM {table}");
     conn.query_row(&sql, [], |r| r.get(0)).unwrap()
 }
 
-fn pragma(conn: &Connection, name: &str) -> i64 {
+pub(super) fn pragma(conn: &Connection, name: &str) -> i64 {
     let sql = format!("PRAGMA {name}");
     conn.query_row(&sql, [], |r| r.get(0)).unwrap()
 }
@@ -95,42 +95,78 @@ fn store_records_and_cursor_commit_together() {
     assert_eq!(count(&conn, "fact"), 30);
 }
 
-/// Versions after the current one (5), for the migration tests.
-const V6_STEPS: &[Migration] = &[Migration {
-    from: 5,
+/// Versions after the current one (6), for the migration tests.
+const V7_STEPS: &[Migration] = &[Migration {
+    from: 6,
     sql: "CREATE TABLE extra_v6 (id INTEGER PRIMARY KEY);",
 }];
-static V6: Schema = Schema {
-    version: 6,
-    create: CREATE_V5,
-    migrations: V6_STEPS,
+static V7: Schema = Schema {
+    version: 7,
+    create: CREATE_V6,
+    migrations: V7_STEPS,
 };
-const V8_STEPS: &[Migration] = &[
+const V9_STEPS: &[Migration] = &[
     Migration {
-        from: 5,
+        from: 6,
         sql: "CREATE TABLE extra_v6 (id INTEGER PRIMARY KEY);",
     },
     Migration {
-        from: 6,
+        from: 7,
         sql: "ALTER TABLE extra_v6 ADD COLUMN note TEXT;",
     },
     Migration {
-        from: 7,
+        from: 8,
         sql: "CREATE TABLE extra_v8 (id INTEGER PRIMARY KEY);",
     },
 ];
-static V7: Schema = Schema {
-    version: 7,
-    create: CREATE_V5,
-    migrations: V8_STEPS,
-};
 static V8: Schema = Schema {
     version: 8,
-    create: CREATE_V5,
-    migrations: V8_STEPS,
+    create: CREATE_V6,
+    migrations: V9_STEPS,
+};
+static V9: Schema = Schema {
+    version: 9,
+    create: CREATE_V6,
+    migrations: V9_STEPS,
 };
 
-/// Turns the current tables into version 4's: no calls, items and shares,
+/// Turns the current tables into version 5's: the branch observations gone,
+/// `share` without segments, and the columns version 6 added dropped.
+macro_rules! back_to_v5 {
+    () => {
+        "
+DROP TABLE run;
+DROP TABLE watch_span;
+DROP TABLE head_baseline;
+DROP TABLE reflog;
+DROP TABLE reflog_reset;
+DROP TABLE segment;
+DROP TABLE segment_name;
+DROP TABLE turn_obs;
+DROP TABLE call_obs;
+DROP INDEX fact_segment;
+DROP TABLE share;
+CREATE TABLE share (
+  id INTEGER PRIMARY KEY, turn INTEGER NOT NULL, location INTEGER NOT NULL,
+  kind INTEGER NOT NULL DEFAULT 0, weight INTEGER NOT NULL, total INTEGER NOT NULL,
+  at INTEGER NOT NULL, UNIQUE (turn, location, kind));
+CREATE INDEX share_at ON share (at);
+ALTER TABLE turn DROP COLUMN worktree;
+ALTER TABLE turn DROP COLUMN branch;
+ALTER TABLE session_gen DROP COLUMN worktree;
+ALTER TABLE session_gen DROP COLUMN branch;
+ALTER TABLE call DROP COLUMN wt;
+ALTER TABLE call DROP COLUMN git;
+ALTER TABLE call DROP COLUMN facts;
+ALTER TABLE call_fact DROP COLUMN segment;
+ALTER TABLE call_fact DROP COLUMN state;
+ALTER TABLE item DROP COLUMN cf;
+"
+    };
+}
+pub(super) const BACK_TO_V5: &str = back_to_v5!();
+
+/// Turns the version 5 tables into version 4's: no calls, items and shares,
 /// and the turn and session columns of version 5 gone.
 macro_rules! back_to_v4 {
     () => {
@@ -153,13 +189,14 @@ ALTER TABLE session DROP COLUMN parent_call;
 "
     };
 }
-pub(super) const BACK_TO_V4: &str = back_to_v4!();
+pub(super) const BACK_TO_V4: &str = concat!(back_to_v5!(), back_to_v4!());
 
 /// Turns the current tables into version 3's: the ones of version 4, then
 /// the `project` table with a unique location and without the columns of
 /// version 4, no identity tables, and `fact_bucket` without the project in
 /// its key.
 pub(super) const BACK_TO_V3: &str = concat!(
+    back_to_v5!(),
     back_to_v4!(),
     "
 DROP TABLE project_fact;
@@ -200,16 +237,16 @@ fn store_migration_keeps_observations_after_a_backup() {
     h.read_all(&fake, "s");
     let before = h.total();
     h.close(true);
-    let reopened = h.open_with(&V6);
-    assert_eq!(reopened.migrated_from, Some(5));
+    let reopened = h.open_with(&V7);
+    assert_eq!(reopened.migrated_from, Some(6));
     assert_eq!(h.store().mode(), Mode::Writable);
     assert_eq!(h.total(), before);
-    // The copy is the version-5 file, whole.
-    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}5")));
-    assert_eq!(pragma(&copy, "user_version"), 5);
+    // The copy is the version-6 file, whole.
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}6")));
+    assert_eq!(pragma(&copy, "user_version"), 6);
     assert_eq!(count(&copy, "usage_source"), 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 6);
+    assert_eq!(pragma(&main, "user_version"), 7);
     assert_eq!(count(&main, "usage_source"), 5);
     drop((copy, main));
     // Writing still works on the migrated file.
@@ -219,12 +256,12 @@ fn store_migration_keeps_observations_after_a_backup() {
 
     // Two more migrations: only the two most recent copies stay.
     h.close(true);
-    h.open_with(&V7);
-    h.close(true);
     h.open_with(&V8);
+    h.close(true);
+    h.open_with(&V9);
     assert_eq!(
         backups(h.dir.path()),
-        [format!("{BACKUP_PREFIX}6"), format!("{BACKUP_PREFIX}7")]
+        [format!("{BACKUP_PREFIX}7"), format!("{BACKUP_PREFIX}8")]
     );
     assert_eq!(h.total().input, 7);
 }
@@ -271,7 +308,7 @@ fn store_migration_from_version_1_adds_the_cold_tables() {
     assert_eq!(reopened.migrated_from, Some(1));
     assert_eq!(h.total(), before);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 5);
+    assert_eq!(pragma(&main, "user_version"), 6);
     for table in [
         "cold_part",
         "cold_month",
@@ -324,7 +361,7 @@ fn store_migration_from_version_2_adds_the_limit_samples() {
     assert_eq!(reopened.migrated_from, Some(2));
     assert_eq!(h.total(), before);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 5);
+    assert_eq!(pragma(&main, "user_version"), 6);
     assert_eq!(count(&main, "limit_sample"), 0);
     assert_eq!(count(&main, "usage_source"), 5);
     let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}2")));
@@ -377,7 +414,7 @@ fn store_migration_from_version_3_keeps_every_project_and_sum() {
     }
     assert_eq!(h.project(&repo, Window::D7).total.input, 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 5);
+    assert_eq!(pragma(&main, "user_version"), 6);
     assert_eq!(count(&main, "project_fact"), 0);
     assert_eq!(count(&main, "alias"), 0);
     assert_buckets(&h);
@@ -424,7 +461,7 @@ fn store_migration_from_version_4_reads_every_session_again() {
     h.read_all(&fake, "s");
     assert_eq!(h.total(), before, "nothing counted twice");
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 5);
+    assert_eq!(pragma(&main, "user_version"), 6);
     assert_eq!(count(&main, "usage_source"), 5);
     assert_buckets(&h);
     let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}4")));
@@ -439,14 +476,14 @@ fn store_failed_backup_leaves_the_old_version_read_only() {
     let before = h.total();
     h.close(true);
     // Something that cannot be replaced sits where the copy goes.
-    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}5"));
+    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}6"));
     std::fs::create_dir(&blocker).unwrap();
     std::fs::write(blocker.join("keep"), b"x").unwrap();
-    let reopened = h.open_with(&V6);
+    let reopened = h.open_with(&V7);
     assert_eq!(reopened.migrated_from, None);
     assert!(matches!(h.store().mode(), Mode::Unwritable(_)));
     let version = pragma(&raw(&h.db_path()), "user_version");
-    assert_eq!(version, 5, "not migrated");
+    assert_eq!(version, 6, "not migrated");
     // Read only: no write, the old data still readable.
     let more = session("t", 2);
     let refused = h.try_read_once(&more, "t", 1 << 20);
@@ -747,7 +784,31 @@ fn dangling(path: &Path) -> i64 {
            OR (worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern)))
       + (SELECT count(*) FROM item WHERE session NOT IN (SELECT id FROM session)
            OR turn NOT IN (SELECT id FROM turn) OR location NOT IN (SELECT id FROM location)
-           OR path NOT IN (SELECT id FROM intern))";
+           OR path NOT IN (SELECT id FROM intern)
+           OR (cf IS NOT NULL AND cf NOT IN (SELECT id FROM call_fact)))
+      + (SELECT count(*) FROM turn WHERE
+           (worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern))
+           OR (branch IS NOT NULL AND branch NOT IN (SELECT id FROM intern)))
+      + (SELECT count(*) FROM session_gen WHERE
+           (worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern))
+           OR (branch IS NOT NULL AND branch NOT IN (SELECT id FROM intern)))
+      + (SELECT count(*) FROM call_fact WHERE
+           segment IS NOT NULL AND segment NOT IN (SELECT id FROM segment))
+      + (SELECT count(*) FROM watch_span WHERE repo NOT IN (SELECT id FROM location))
+      + (SELECT count(*) FROM head_baseline WHERE repo NOT IN (SELECT id FROM location)
+           OR wt NOT IN (SELECT id FROM intern))
+      + (SELECT count(*) FROM reflog WHERE repo NOT IN (SELECT id FROM location)
+           OR run NOT IN (SELECT id FROM run)
+           OR (file != 2 AND wt NOT IN (SELECT id FROM intern)))
+      + (SELECT count(*) FROM reflog_reset WHERE repo NOT IN (SELECT id FROM location)
+           OR run NOT IN (SELECT id FROM run))
+      + (SELECT count(*) FROM segment WHERE repo NOT IN (SELECT id FROM location))
+      + (SELECT count(*) FROM segment_name WHERE segment NOT IN (SELECT id FROM segment))
+      + (SELECT count(*) FROM turn_obs WHERE session NOT IN (SELECT id FROM session)
+           OR tid NOT IN (SELECT id FROM intern)
+           OR (end_seg IS NOT NULL AND end_seg NOT IN (SELECT id FROM segment)))
+      + (SELECT count(*) FROM call_obs WHERE session NOT IN (SELECT id FROM session)
+           OR wt NOT IN (SELECT id FROM intern))";
     raw(path).query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
@@ -1036,7 +1097,7 @@ fn heavy_disk_by_table() {
         total / 3
     );
     let sql =
-        "SELECT name, sum(pgsize), count(*) FROM dbstat GROUP BY name ORDER BY 2 DESC LIMIT 24";
+        "SELECT name, sum(pgsize), count(*) FROM dbstat GROUP BY name ORDER BY 2 DESC LIMIT 30";
     match conn.prepare(sql) {
         Ok(mut stmt) => {
             let rows = stmt
@@ -1067,13 +1128,18 @@ fn heavy_disk_by_table() {
         "item",
         "share",
         "location",
+        "turn_obs",
+        "call_obs",
+        "reflog",
+        "segment",
+        "head_baseline",
     ] {
         eprintln!("rows {table:14} {}", count(&conn, table));
     }
 }
 
 /// The lines of the query plan of an SQL statement.
-fn plan(conn: &Connection, sql: &str) -> Vec<String> {
+pub(super) fn plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
     let n = stmt.parameter_count();
     let params = rusqlite::params_from_iter(std::iter::repeat_n(1i64, n));

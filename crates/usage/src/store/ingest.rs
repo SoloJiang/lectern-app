@@ -47,7 +47,7 @@ pub(crate) struct SessionInfo<'a> {
     pub(crate) inheritance_unknown: bool,
     /// The place of the session's starting cwd: the cwd until a `Context`
     /// record says otherwise.
-    pub(crate) start: &'a Place,
+    pub(crate) start: &'a PathPlace,
 }
 
 /// What [`Store::ingest`] writes.
@@ -58,8 +58,8 @@ pub(crate) struct Ingest<'a> {
     /// while the batch was being read).
     pub(crate) from: &'a Cursor,
     pub(crate) batch: &'a Batch,
-    /// The place of every cwd of the batch's `Context` records.
-    pub(crate) places: &'a HashMap<PathBuf, Place>,
+    /// The place and worktree of every cwd of the batch's `Context` records.
+    pub(crate) places: &'a HashMap<PathBuf, PathPlace>,
     /// Where every file named by an `Edit` call of the batch lies.
     pub(crate) paths: &'a HashMap<PathBuf, PathPlace>,
     /// The log file as it was just before the read; kept when the batch
@@ -241,6 +241,10 @@ pub(crate) fn location(conn: &Connection, place: &Place) -> rusqlite::Result<i64
 /// The reading state of one generation, kept between batches.
 struct GenState {
     cwd: i64,
+    /// The worktree the cwd is in (an `intern` ID of its key).
+    worktree: Option<i64>,
+    /// The branch the log named (an `intern` ID of its name).
+    branch: Option<i64>,
     model: Option<i64>,
     turn: Option<i64>,
 }
@@ -373,13 +377,30 @@ fn ingest(
 
     for rec in &batch.records {
         match &rec.value {
-            Record::Context { cwd, model, .. } => {
-                let place = input
+            Record::Context {
+                cwd,
+                model,
+                logged_branch,
+                ..
+            } => {
+                let found = input
                     .places
                     .get(cwd.as_ref())
                     .cloned()
-                    .unwrap_or_else(|| Place::Dir(cwd.to_path_buf()));
-                state.cwd = ids.place(tx, &place)?;
+                    .unwrap_or(PathPlace {
+                        place: Place::Dir(cwd.to_path_buf()),
+                        worktree: None,
+                        rel: String::new(),
+                    });
+                state.cwd = ids.place(tx, &found.place)?;
+                state.worktree = match &found.worktree {
+                    Some(w) => Some(ids.text(tx, path_bytes(w))?),
+                    None => None,
+                };
+                state.branch = match logged_branch {
+                    Some(b) => Some(ids.text(tx, b.as_bytes())?),
+                    None => None,
+                };
                 if let Some(m) = model {
                     state.model = Some(ids.text(tx, m.as_bytes())?);
                 }
@@ -400,14 +421,28 @@ fn ingest(
                 };
                 next_seq = Some(seq + 1);
                 let tid = ids.text(tx, turn.0.as_bytes())?;
-                // A location a salvage could not keep (NULL) is filled in.
+                // A location a salvage could not keep (NULL) is filled in, and
+                // the worktree and branch of a turn stored before the tables
+                // had them.
                 tx.prepare_cached(
-                    "INSERT INTO turn (session, gen, tid, seq, started_at, location)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT (session, gen, tid) DO UPDATE SET location = excluded.location
-                     WHERE turn.location IS NULL",
+                    "INSERT INTO turn (session, gen, tid, seq, started_at, location, worktree, branch)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT (session, gen, tid) DO UPDATE SET
+                       location = coalesce(turn.location, excluded.location),
+                       worktree = coalesce(turn.worktree, excluded.worktree),
+                       branch = coalesce(turn.branch, excluded.branch)
+                     WHERE turn.location IS NULL OR turn.worktree IS NULL OR turn.branch IS NULL",
                 )?
-                .execute(params![row.id, target, tid, seq, at.0, state.cwd])?;
+                .execute(params![
+                    row.id,
+                    target,
+                    tid,
+                    seq,
+                    at.0,
+                    state.cwd,
+                    state.worktree,
+                    state.branch
+                ])?;
                 let (turn_id, location) = turn_of(tx, row.id, target, tid)?
                     .map_or((0, state.cwd), |(id, loc)| (id, loc.unwrap_or(state.cwd)));
                 turns.insert(&turn.0, (turn_id, location));
@@ -580,11 +615,21 @@ fn ingest(
 
     touch.write(tx)?;
     tx.prepare_cached(
-        "INSERT INTO session_gen (session, gen, cwd, model, turn) VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO session_gen (session, gen, cwd, model, turn, worktree, branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT (session, gen) DO UPDATE SET
-           cwd = excluded.cwd, model = excluded.model, turn = excluded.turn",
+           cwd = excluded.cwd, model = excluded.model, turn = excluded.turn,
+           worktree = excluded.worktree, branch = excluded.branch",
     )?
-    .execute(params![row.id, target, state.cwd, state.model, state.turn])?;
+    .execute(params![
+        row.id,
+        target,
+        state.cwd,
+        state.model,
+        state.turn,
+        state.worktree,
+        state.branch
+    ])?;
 
     if batch.at_end
         && let Some(replay) = row.replay
@@ -773,20 +818,48 @@ fn gen_state(
     ids: &mut Ids,
     session: i64,
     generation: i64,
-    start: &Place,
+    start: &PathPlace,
 ) -> rusqlite::Result<GenState> {
-    let found: Option<(Option<i64>, Option<i64>, Option<i64>)> = tx
-        .prepare_cached("SELECT cwd, model, turn FROM session_gen WHERE session = ?1 AND gen = ?2")?
+    type Found = (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
+    let found: Option<Found> = tx
+        .prepare_cached(
+            "SELECT cwd, model, turn, worktree, branch FROM session_gen
+             WHERE session = ?1 AND gen = ?2",
+        )?
         .query_row(params![session, generation], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })
         .optional()?;
-    let (cwd, model, turn) = found.unwrap_or((None, None, None));
-    let cwd = match cwd {
-        Some(c) => c,
-        None => ids.place(tx, start)?,
-    };
-    Ok(GenState { cwd, model, turn })
+    match found {
+        Some((Some(cwd), model, turn, worktree, branch)) => Ok(GenState {
+            cwd,
+            worktree,
+            branch,
+            model,
+            turn,
+        }),
+        other => {
+            let (model, turn, worktree, branch) =
+                other.map_or((None, None, None, None), |(_, m, t, w, b)| (m, t, w, b));
+            Ok(GenState {
+                cwd: ids.place(tx, &start.place)?,
+                worktree: match (worktree, &start.worktree) {
+                    (Some(w), _) => Some(w),
+                    (None, Some(w)) => Some(ids.text(tx, path_bytes(w))?),
+                    (None, None) => None,
+                },
+                branch,
+                model,
+                turn,
+            })
+        }
+    }
 }
 
 /// The latest record time of each turn a batch touched, and the turns it

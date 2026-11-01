@@ -197,6 +197,7 @@ const BENCHES: &[Bench] = &[
     usage::ARCHIVE_MONTH,
     usage::COLD_READ_MONTH,
     usage::DISK_DAY_HEAVY,
+    usage::REBUILD_30D,
     terminal::PARSE_PLAIN,
     terminal::PARSE_SGR,
     terminal::FRAME_FULL,
