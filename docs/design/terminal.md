@@ -642,7 +642,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 | `terminal/input` | 只记录，目标中位数 ≤ 6 µs（[ADR 0058](../adr/0058.md)，原来 ≤ 2 µs） | 主线程上的一次 `input`：入队与唤醒字节；终端线程睡在 `poll` 上时，写唤醒字节本身就要 3 µs 以上 |
 | `terminal/parse_plain` | 中位数 ≤ 14 ms（[ADR 0055](../adr/0055.md)） | 1 MiB 纯 ASCII、每行 120 列，120×40，`vt_write` 到解析完成 |
 | `terminal/parse_sgr` | 中位数 ≤ 25 ms | 1 MiB、每 8 个字符换一次 24 位色的输出 |
-| `terminal/frame_full` | 中位数 ≤ 300 µs | 120×40 全部行脏，生成一帧 |
+| `terminal/frame_full` | 中位数 ≤ 520 µs（[ADR 0055](../adr/0055.md)，原来 ≤ 300 µs） | 120×40 全部行脏，生成一帧 |
 | `terminal/frame_echo` | 中位数 ≤ 30 µs | 只有一行脏（输入回显），生成一帧 |
 | `terminal/echo_latency` | 中位数 ≤ 1 ms，p95 ≤ 3 ms | 真实 PTY：`Input::Text("x")` 到回显程序的输出出现在新帧里（假程序见「测试」）；只在 macOS 判定 |
 | `terminal/idle_footprint` | ≤ 4 MB | 子进程：一个终端，120×40，输出 4 KiB 后生成一帧，常驻增量 |
