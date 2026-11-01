@@ -15,18 +15,19 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-use lectern_services::project::ProjectKey;
-use lectern_services::session::{Agent, TurnId};
+use lectern_services::project::{ProjectKey, WorktreeKey};
+use lectern_services::session::{Agent, Timestamp, TurnId};
 use lectern_services::usage::{
-    AliasId, AllUsage, DayTotals, HistoryUsage, LocalDate, ProjectInfo, ProjectStatus,
-    ProjectUsage, SessionUsage, SnapshotHeader, Tokens, UsageSnapshot, UsageState, Window,
+    AliasId, AllUsage, BranchLabel, DayTotals, HistoryUsage, LocalDate, ProjectInfo, ProjectStatus,
+    ProjectUsage, RowKey, SessionRow, SessionUsage, SnapshotHeader, Tokens, UsageSnapshot,
+    UsageState, UseId, Window, WorktreeUsage,
 };
 
 use crate::round::largest_remainder;
 use crate::store::cold::{self, HistoryTotals};
 use crate::store::under;
 use crate::store::{
-    Aliases, FactDelta, FolderRoot, ProjectRow, SessionTotals, Totals, temporary_of,
+    Aliases, FactDelta, FolderRoot, ProjectRow, SessionTotals, Totals, WorktreeTotals, temporary_of,
 };
 use crate::window::BUCKET_MS;
 
@@ -344,7 +345,11 @@ fn signed(m: &[u64; 4]) -> [i64; 4] {
 /// sub-agents' facts rounded to whole tokens; the branch rows come with the
 /// branches (step 5). The turns are the tokens of the usage counted in each,
 /// not divided between targets.
-pub(crate) fn session(header: SnapshotHeader, totals: &SessionTotals) -> SessionUsage {
+pub(crate) fn session(
+    header: SnapshotHeader,
+    totals: &SessionTotals,
+    checked_out: &dyn Fn(&Path, &str) -> Option<WorktreeKey>,
+) -> SessionUsage {
     let total = round_rows(&[totals.micro])[0];
     let turns = totals
         .turns
@@ -361,11 +366,85 @@ pub(crate) fn session(header: SnapshotHeader, totals: &SessionTotals) -> Session
             )
         })
         .collect::<Vec<_>>();
+    // The session's part of each branch adds up to its total; a branch's
+    // cumulative is rounded alone.
+    let parts = round_rows(&totals.branches.iter().map(|b| b.mine).collect::<Vec<_>>());
+    let rows = totals
+        .branches
+        .iter()
+        .zip(parts)
+        .map(|(b, part)| {
+            let cumulative = round_rows(&[b.all])[0];
+            if b.unassigned {
+                return SessionRow {
+                    key: RowKey::Unassigned {
+                        unattributable: round_rows(&[b.unattributable])[0],
+                    },
+                    worktree: None,
+                    cumulative: part,
+                    session_part: part,
+                    shared: false,
+                };
+            }
+            let name: Arc<str> = b.name.as_deref().unwrap_or_default().into();
+            let worktree = b
+                .repo
+                .as_deref()
+                .zip(b.name.as_deref())
+                .and_then(|(repo, name)| checked_out(repo, name));
+            SessionRow {
+                key: RowKey::Branch {
+                    use_id: UseId(b.sid),
+                    branch: BranchLabel {
+                        name,
+                        worktree: worktree.clone(),
+                    },
+                },
+                worktree,
+                cumulative,
+                session_part: part,
+                shared: false,
+            }
+        })
+        .collect::<Vec<_>>();
     SessionUsage {
         header,
         total,
-        rows: Arc::from(Vec::new()),
+        rows: rows.into(),
         turns: turns.into(),
+    }
+}
+
+/// A worktree's current branch (`UsageQuery::Worktree`): `branch` is the
+/// branch HEAD is on; the cumulative is its tokens, unless it is the default
+/// branch (which belongs to no merge request, so has no cumulative).
+pub(crate) fn worktree(
+    header: SnapshotHeader,
+    branch: Option<(&str, WorktreeKey)>,
+    totals: Option<&WorktreeTotals>,
+) -> WorktreeUsage {
+    let Some((name, key)) = branch else {
+        return WorktreeUsage {
+            header,
+            branch: None,
+            mrs: Arc::from(Vec::new()),
+            cumulative: None,
+            review: Tokens::default(),
+            since: None,
+        };
+    };
+    let label = BranchLabel {
+        name: name.into(),
+        worktree: Some(key),
+    };
+    let shown = totals.filter(|t| !t.default);
+    WorktreeUsage {
+        header,
+        branch: Some(label),
+        mrs: Arc::from(Vec::new()),
+        cumulative: shown.map(|t| round_rows(&[t.all])[0]),
+        review: shown.map_or_else(Tokens::default, |t| round_rows(&[t.review])[0]),
+        since: shown.and_then(|t| t.since).map(Timestamp),
     }
 }
 

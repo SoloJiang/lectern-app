@@ -26,6 +26,35 @@ pub(crate) struct Schema {
 
 /// The tables this version writes.
 pub(crate) const CURRENT: Schema = Schema {
+    version: 6,
+    create: CREATE_V6,
+    migrations: &[
+        Migration {
+            from: 1,
+            sql: COLD_V2,
+        },
+        Migration {
+            from: 2,
+            sql: LIMITS_V3,
+        },
+        Migration {
+            from: 3,
+            sql: IDENTITY_V4,
+        },
+        Migration {
+            from: 4,
+            sql: CALLS_V5,
+        },
+        Migration {
+            from: 5,
+            sql: BRANCHES_V6,
+        },
+    ],
+};
+
+/// Version 5 alone, for the migration tests.
+#[cfg(test)]
+pub(crate) const V5: Schema = Schema {
     version: 5,
     create: CREATE_V5,
     migrations: &[
@@ -135,6 +164,15 @@ pub(crate) const OBSERVATION_TABLES: &[&str] = &[
     "call",
     "call_fact",
     "item",
+    "run",
+    "watch_span",
+    "head_baseline",
+    "reflog",
+    "reflog_reset",
+    "segment",
+    "segment_name",
+    "turn_obs",
+    "call_obs",
 ];
 
 /// The hot / cold split (docs/design/usage.md「冷热分层」), table version 2.
@@ -592,6 +630,196 @@ UPDATE session SET cursor = X'01', reached_end = 0, end_stamp = NULL;
     };
 }
 
+/// Branch observation and attribution (docs/design/usage.md「分支观察」「分摊」),
+/// table version 6.
+///
+/// - `run`: the fs_watch `RunId` of each run of the watcher, in the order
+///   they were first seen (`id`); records of different runs are ordered by it.
+/// - `watch_span`: the time (nanoseconds, wall clock) a repository was
+///   watched from; `end_ns` is NULL while the watch lasts, `last_ns` the
+///   time of the last record read in it (a start finds the spans of a run
+///   that did not end cleanly and ends them there).
+/// - `head_baseline`: the branch (the full reference name,
+///   NULL when detached) a worktree's HEAD was on when the watch began. `wt`
+///   is the worktree key (the path of its administrative directory) as an
+///   `intern` ID.
+/// - `reflog`: the records `fs_watch` delivered, parsed: `file` 0 is a
+///   worktree's HEAD (`wt` its key), 1 a branch (`wt` the interned reference
+///   name), 2 the stash. `at` is the line's own time in milliseconds,
+///   `obs_ns` / `aft_ns` the end of the read that found it and the start of
+///   the one before (nanoseconds). `act` classifies the line
+///   (`store::repo`), `a` / `b` are the names of a switch or rename.
+///   The raw line is not kept: the rows hold what the replay reads.
+/// - `reflog_reset`: a file got shorter, was removed or could not be read.
+/// - `segment`, `segment_name`: a branch's (or a detached HEAD's) stretch of
+///   existence, with its names over time; `is_default` is set when an
+///   observation found the branch to be the default branch.
+/// - `turn_obs`: what was observed about the worktree a turn ran in and the
+///   worktrees it went into (`enter`: pairs of location and segment); fixed
+///   when the turn is settled, not per generation.
+/// - `call_obs`: where HEAD stayed during a command that mentions git, per
+///   worktree it touched.
+/// - `call` gets the commands that mention git (`git`: a bit mask of what
+///   they do, `facts` the targets, never the text).
+/// - `call_fact` gets the state of the changed file when its call was
+///   observed (`segment`, `state`); `item.cf` is its `call_fact` row.
+/// - `share` is rebuilt: its target is a place and a segment (0 for none) or
+///   a kind.
+/// - `turn` and `session_gen` get the worktree the session ran in and the
+///   branch its log named.
+///
+/// The migration settles every turn again and reads every session again (the
+/// turns need their worktree and branch).
+macro_rules! branches_sql {
+    () => {
+        "
+ALTER TABLE turn ADD COLUMN worktree INTEGER;
+ALTER TABLE turn ADD COLUMN branch INTEGER;
+ALTER TABLE session_gen ADD COLUMN worktree INTEGER;
+ALTER TABLE session_gen ADD COLUMN branch INTEGER;
+ALTER TABLE call ADD COLUMN wt INTEGER;
+ALTER TABLE call ADD COLUMN git INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE call ADD COLUMN facts BLOB;
+ALTER TABLE call_fact ADD COLUMN segment INTEGER;
+ALTER TABLE call_fact ADD COLUMN state INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE item ADD COLUMN cf INTEGER;
+CREATE INDEX fact_segment ON fact (segment) WHERE segment IS NOT NULL;
+
+DROP TABLE share;
+CREATE TABLE share (
+  id       INTEGER PRIMARY KEY,
+  turn     INTEGER NOT NULL,
+  location INTEGER NOT NULL,
+  segment  INTEGER NOT NULL DEFAULT 0,
+  kind     INTEGER NOT NULL DEFAULT 0,
+  weight   INTEGER NOT NULL,
+  total    INTEGER NOT NULL,
+  at       INTEGER NOT NULL,
+  UNIQUE (turn, location, segment, kind)
+);
+CREATE INDEX share_at ON share (at);
+
+CREATE TABLE run (
+  id  INTEGER PRIMARY KEY,
+  run INTEGER NOT NULL UNIQUE
+);
+
+CREATE TABLE watch_span (
+  id       INTEGER PRIMARY KEY,
+  repo     INTEGER NOT NULL,
+  begin_ns INTEGER NOT NULL,
+  last_ns  INTEGER NOT NULL,
+  end_ns   INTEGER,
+  at       INTEGER NOT NULL
+);
+CREATE INDEX watch_span_repo ON watch_span (repo, begin_ns);
+CREATE INDEX watch_span_open ON watch_span (id) WHERE end_ns IS NULL;
+CREATE INDEX watch_span_at ON watch_span (at);
+
+CREATE TABLE head_baseline (
+  id     INTEGER PRIMARY KEY,
+  repo   INTEGER NOT NULL,
+  wt     INTEGER NOT NULL,
+  at_ns  INTEGER NOT NULL,
+  branch TEXT,
+  at     INTEGER NOT NULL
+);
+CREATE INDEX head_baseline_wt ON head_baseline (repo, wt, at_ns);
+CREATE INDEX head_baseline_at ON head_baseline (at);
+
+CREATE TABLE reflog (
+  id     INTEGER PRIMARY KEY,
+  repo   INTEGER NOT NULL,
+  file   INTEGER NOT NULL,
+  wt     INTEGER NOT NULL,
+  run    INTEGER NOT NULL,
+  seq    INTEGER NOT NULL,
+  off    INTEGER NOT NULL,
+  at     INTEGER NOT NULL,
+  obs_ns INTEGER NOT NULL,
+  aft_ns INTEGER,
+  origin INTEGER NOT NULL,
+  old    BLOB,
+  new    BLOB,
+  act    INTEGER NOT NULL,
+  a      TEXT,
+  b      TEXT
+);
+CREATE INDEX reflog_file ON reflog (repo, file, wt, obs_ns);
+CREATE INDEX reflog_at ON reflog (at);
+
+CREATE TABLE reflog_reset (
+  id     INTEGER PRIMARY KEY,
+  repo   INTEGER NOT NULL,
+  file   INTEGER NOT NULL,
+  wt     INTEGER NOT NULL,
+  run    INTEGER NOT NULL,
+  seq    INTEGER NOT NULL,
+  reason INTEGER NOT NULL,
+  obs_ns INTEGER NOT NULL,
+  at     INTEGER NOT NULL
+);
+CREATE INDEX reflog_reset_file ON reflog_reset (repo, file, wt, obs_ns);
+CREATE INDEX reflog_reset_at ON reflog_reset (at);
+
+CREATE TABLE segment (
+  id           INTEGER PRIMARY KEY,
+  sid          BLOB NOT NULL UNIQUE,
+  repo         INTEGER NOT NULL,
+  kind         INTEGER NOT NULL,
+  prev         INTEGER,
+  wt           INTEGER,
+  begin_reason INTEGER NOT NULL,
+  begin_at     INTEGER,
+  end_reason   INTEGER,
+  end_at       INTEGER,
+  is_default   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX segment_repo ON segment (repo, kind, id);
+
+CREATE TABLE segment_name (
+  id      INTEGER PRIMARY KEY,
+  segment INTEGER NOT NULL,
+  name    TEXT NOT NULL,
+  at      INTEGER
+);
+CREATE INDEX segment_name_name ON segment_name (name, segment);
+CREATE INDEX segment_name_segment ON segment_name (segment);
+
+CREATE TABLE turn_obs (
+  id        INTEGER PRIMARY KEY,
+  session   INTEGER NOT NULL,
+  tid       INTEGER NOT NULL,
+  at        INTEGER NOT NULL,
+  flags     INTEGER NOT NULL,
+  start_seg INTEGER,
+  end_seg   INTEGER,
+  stays     BLOB,
+  enter     BLOB,
+  UNIQUE (session, tid)
+);
+CREATE INDEX turn_obs_at ON turn_obs (at);
+
+CREATE TABLE call_obs (
+  id      INTEGER PRIMARY KEY,
+  session INTEGER NOT NULL,
+  cid     INTEGER NOT NULL,
+  wt      INTEGER NOT NULL,
+  at      INTEGER NOT NULL,
+  flags   INTEGER NOT NULL,
+  end_seg INTEGER,
+  stays   BLOB,
+  UNIQUE (session, cid, wt)
+);
+CREATE INDEX call_obs_at ON call_obs (at);
+
+UPDATE turn SET done = 0, changed = 0;
+DELETE FROM item;
+UPDATE session SET cursor = X'01', reached_end = 0, end_stamp = NULL;
+"
+    };
+}
+
 /// Version 1 (step 1 of docs/design/usage.md「验收」, first part).
 #[cfg(test)]
 pub(crate) const CREATE_V1: &str = v1_sql!();
@@ -610,6 +838,7 @@ pub(crate) const CREATE_V3: &str = concat!(v1_sql!(), cold_sql!(), limits_sql!()
 pub(crate) const CREATE_V4: &str = concat!(v1_sql!(), cold_sql!(), limits_sql!(), identity_sql!());
 
 /// Version 5: version 4 and the calls, items and shares.
+#[cfg(test)]
 pub(crate) const CREATE_V5: &str = concat!(
     v1_sql!(),
     cold_sql!(),
@@ -618,8 +847,21 @@ pub(crate) const CREATE_V5: &str = concat!(
     calls_sql!()
 );
 
+/// Version 6: version 5 and the branch observations.
+pub(crate) const CREATE_V6: &str = concat!(
+    v1_sql!(),
+    cold_sql!(),
+    limits_sql!(),
+    identity_sql!(),
+    calls_sql!(),
+    branches_sql!()
+);
+
 /// The step from version 4 to 5.
 pub(crate) const CALLS_V5: &str = calls_sql!();
+
+/// The step from version 5 to 6.
+pub(crate) const BRANCHES_V6: &str = branches_sql!();
 
 /// The step from version 1 to 2.
 pub(crate) const COLD_V2: &str = cold_sql!();

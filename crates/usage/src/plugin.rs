@@ -17,6 +17,7 @@ use lectern_services::usage::Usage;
 
 use crate::LocalZone;
 use crate::engine::{Deps, Engine, Exists, FactsReader, git_facts, path_exists};
+use crate::gitread::{DiskGit, GitRead};
 use crate::time::Time;
 
 /// The plugin ID.
@@ -45,6 +46,7 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin) {
             time: Time::system(),
             facts: git_facts(),
             exists: Arc::new(path_exists),
+            reads: Arc::new(DiskGit::new()),
             #[cfg(test)]
             engine: Arc::default(),
         },
@@ -56,6 +58,7 @@ pub struct UsagePlugin {
     time: Time,
     facts: FactsReader,
     exists: Exists,
+    reads: Arc<dyn GitRead>,
     /// The engine of the latest activation, for this crate's tests.
     #[cfg(test)]
     pub(crate) engine: Arc<std::sync::Mutex<Option<Arc<Engine>>>>,
@@ -72,6 +75,12 @@ impl UsagePlugin {
     /// Replaces the check whether a project's path exists (tests).
     pub(crate) fn with_exists(mut self, exists: Exists) -> UsagePlugin {
         self.exists = exists;
+        self
+    }
+
+    /// Replaces what is read from the repositories (tests).
+    pub(crate) fn with_reads(mut self, reads: Arc<dyn GitRead>) -> UsagePlugin {
+        self.reads = reads;
         self
     }
 }
@@ -106,6 +115,7 @@ impl Plugin for UsagePlugin {
                 time: self.time.clone(),
                 facts: self.facts.clone(),
                 exists: self.exists.clone(),
+                reads: self.reads.clone(),
             },
             ctx.service_set::<dyn SessionSource>(),
             ctx.service::<dyn Projects>(),

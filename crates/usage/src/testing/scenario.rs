@@ -17,7 +17,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
+use lectern_fs_watch::{
+    Origin, ReadStamp, ReflogFile, ReflogRecord, RepoBatch, RunId, WorktreeName,
+};
 use lectern_services::project::ProjectKey;
 use lectern_services::session::{
     Agent, EditOp, FileEdit, Positioned, RawTokens, Record, SessionSource, Timestamp, ToolCallId,
@@ -27,12 +31,15 @@ use lectern_services::usage::{
     HistoryUsage, LocalDate, ProjectRef, UsageQuery, UsageSnapshot, UsageState,
 };
 
-use super::{FakeProjects, FakeSessions, TableZone};
-use crate::engine::{Computed, Context, READ_BYTES, compute, compute_full, place_of_key};
+use super::{FakeGit, FakeProjects, FakeSessions, TableZone};
+use crate::engine::{Computed, Context, READ_BYTES, compute, compute_full, located};
 use crate::finalize::{self, BATCH_TIME, BATCH_TURNS, Settling};
+use crate::gitread::WorktreeHead;
 use crate::snapshot::{Applied, Watched};
 use crate::store::cold::{self, Stepped};
-use crate::store::{DB_FILE, FileStamp, Ingest, Ingested, PathPlace, Place, SessionInfo, Store};
+use crate::store::{
+    Arm, DB_FILE, FileStamp, Ingest, Ingested, PathPlace, Place, SessionInfo, Store,
+};
 
 fn io_error(what: &str, e: impl std::fmt::Debug) -> io::Error {
     io::Error::other(format!("{what}: {e:?}"))
@@ -132,6 +139,11 @@ pub struct Scenario {
     open: Vec<ProjectKey>,
     claude: FakeSessions,
     codex: FakeSessions,
+    git: FakeGit,
+    /// The `seq` of the next reflog record.
+    reflog_seq: u64,
+    /// The heavy fixture's repositories are watched.
+    armed: bool,
     watched: Vec<(UsageQuery, Watched, Arc<UsageSnapshot>)>,
 }
 
@@ -148,6 +160,9 @@ impl Scenario {
             open: Vec::new(),
             claude: FakeSessions::new("session-claude-code", Agent::ClaudeCode),
             codex: FakeSessions::new("session-codex", Agent::Codex),
+            git: FakeGit::new(),
+            reflog_seq: 0,
+            armed: false,
             watched: Vec::new(),
         })
     }
@@ -173,6 +188,7 @@ impl Scenario {
     /// `root/.git`), opened.
     pub fn repo(&mut self, root: &Path) -> io::Result<ProjectKey> {
         let key = self.projects.repo(root, &root.join(".git"));
+        self.git.set_default(&root.join(".git"), "refs/heads/main");
         self.projects.set_open(&key, true);
         let name = root
             .file_name()
@@ -208,10 +224,14 @@ impl Scenario {
         crate::paths::dir_place(Some(&self.projects), crate::paths::dir_of(path))
     }
 
-    fn place(&self, cwd: &Path) -> Place {
+    fn place(&self, cwd: &Path) -> PathPlace {
         match lectern_services::project::Projects::resolve(&self.projects, cwd) {
-            Ok(r) => place_of_key(&r.project, &r.rel),
-            Err(_) => Place::Dir(cwd.to_path_buf()),
+            Ok(r) => located(&r.project, &r.rel, r.worktree.as_ref()),
+            Err(_) => PathPlace {
+                place: Place::Dir(cwd.to_path_buf()),
+                worktree: None,
+                rel: String::new(),
+            },
         }
     }
 
@@ -413,7 +433,8 @@ impl Scenario {
         for n in 0..calls {
             let path = roots[n % roots.len()].join(format!("src/file{n}.rs"));
             let call = format!("{id}-c{n}");
-            fake.edit_call(
+            let started = at + 5000 + 100 * n as i64;
+            fake.edit_call_at(
                 id,
                 &tid,
                 &call,
@@ -425,8 +446,9 @@ impl Scenario {
                         created: true,
                     },
                 }],
+                ToolStatus::Completed,
+                (started, started + 50),
             );
-            let started = at + 5000 + 100 * n as i64;
             records.push(record(
                 pos,
                 Record::ToolStarted(ToolStarted {
@@ -472,7 +494,7 @@ impl Scenario {
             .cloned()
             .ok_or_else(|| io_error("session", id))?;
         let settled = {
-            let resolve = |p: &Path| self.path_place(p);
+            let resolve = |d: &Path| crate::paths::dir_place(Some(&self.projects), d);
             finalize::settle(&Settling {
                 store: &self.store,
                 source: fake,
@@ -480,6 +502,7 @@ impl Scenario {
                 now_ms: self.now_ms,
                 end_open: !summary.open_turn,
                 resolve: &resolve,
+                reads: &self.git,
                 turns: BATCH_TURNS,
                 time: BATCH_TIME,
             })
@@ -654,6 +677,83 @@ impl Scenario {
         std::fs::metadata(name).map_or(0, |m| m.len())
     }
 
+    /// The reflog of the repository at `root` is watched from `at_ms` on,
+    /// its main worktree on `branch` (a full reference name); `main` is the
+    /// default branch.
+    pub fn watch_repo(&mut self, root: &Path, branch: &str, at_ms: i64) -> io::Result<()> {
+        let common = root.join(".git");
+        self.git.set_heads(&common, &[(&common, Some(branch))]);
+        self.git.set_default(&common, "refs/heads/main");
+        let heads = vec![WorktreeHead {
+            key: common.clone(),
+            branch: Some(branch.to_owned()),
+        }];
+        self.store
+            .arm(&Arm {
+                common_dir: &common,
+                at_ns: at_ms.saturating_mul(1_000_000),
+                heads: &heads,
+                logs: &[],
+            })
+            .map_err(|e| io_error("arm", e))
+    }
+
+    /// HEAD of the main worktree of the repository at `root` goes from
+    /// branch `from` to branch `to` (full reference names) at `at_ms`.
+    pub fn switch(&mut self, root: &Path, from: &str, to: &str, at_ms: i64) -> io::Result<()> {
+        let short = |name: &str| name.strip_prefix("refs/heads/").unwrap_or(name).to_owned();
+        let message = format!("checkout: moving from {} to {}", short(from), short(to));
+        self.reflog(root, &message, at_ms)
+    }
+
+    /// A commit is made at HEAD of the main worktree of the repository at
+    /// `root` at `at_ms`.
+    pub fn commit(&mut self, root: &Path, at_ms: i64) -> io::Result<()> {
+        self.reflog(root, "commit: work", at_ms)
+    }
+
+    /// A line written to the HEAD reflog at `written_ms`, found a little
+    /// later.
+    fn reflog(&mut self, root: &Path, message: &str, written_ms: i64) -> io::Result<()> {
+        let common = root.join(".git");
+        let seq = self.reflog_seq;
+        self.reflog_seq += 1;
+        let stamp = |ms: i64| ReadStamp {
+            run: RunId(1),
+            read: u64::try_from(ms).unwrap_or(0),
+            at: UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0)),
+        };
+        let line = format!(
+            "{:040x} {:040x} Dev <dev@example.org> {} +0000\t{message}",
+            seq,
+            seq + 1,
+            written_ms.div_euclid(1000)
+        );
+        let record = ReflogRecord {
+            file: ReflogFile::Head(WorktreeName::Main),
+            offset: seq * 100,
+            line: Arc::from(line.into_bytes()),
+            seq,
+            observed: stamp(written_ms + 100),
+            after: None,
+            origin: Origin::Appended,
+        };
+        let batch = RepoBatch {
+            worktrees: Vec::new(),
+            worktree_list: false,
+            refs: false,
+            config: false,
+            reflog: vec![record],
+            reflog_resets: Vec::new(),
+            rescan: false,
+            health: None,
+        };
+        self.store
+            .repo_batch(&common, &batch)
+            .map(|_| ())
+            .map_err(|e| io_error("reflog", e))
+    }
+
     /// Marks the database closed normally.
     pub fn close(self) {
         self.store.close();
@@ -798,7 +898,13 @@ pub fn synthetic_turns(
                     paths: vec![heavy_edit_path(cwd, t, i)].into(),
                 },
                 1 => ToolKind::Execute {
-                    command: "cargo check".into(),
+                    // One turn in three looks at the repository.
+                    command: if t % 3 == 0 {
+                        "git status"
+                    } else {
+                        "cargo check"
+                    }
+                    .into(),
                     workdir: Arc::from(cwd),
                     exec_session: None,
                     workdir_exact: true,
@@ -860,26 +966,80 @@ fn heavy_edit_path(cwd: &Path, t: usize, i: usize) -> PathBuf {
     cwd.join(format!("f{}.rs", (t + i) % 8))
 }
 
-/// Gives the source of a synthetic session the content of its `Edit` calls
-/// (six lines each), as the session's turn index and `load` would.
-pub fn heavy_edits(fake: &FakeSessions, prefix: &str, cwd: &Path, turns: std::ops::Range<usize>) {
+/// Gives the source of a synthetic session the calls of its turns as its
+/// turn index and `load` would: the content of the `Edit` calls (six lines
+/// each) and the commands, reads and searches.
+pub fn heavy_edits(
+    fake: &FakeSessions,
+    prefix: &str,
+    cwd: &Path,
+    start_ms: i64,
+    turns: std::ops::Range<usize>,
+) {
     let content: String = (0..6).map(|i| format!("line {i}\n")).collect();
     for t in turns {
-        for i in (0..HEAVY_CALLS).step_by(5) {
-            let path = heavy_edit_path(cwd, t, i);
-            fake.edit_call(
-                prefix,
-                &format!("{prefix}-t{t}"),
-                &heavy_call(prefix, t, i),
-                std::slice::from_ref(&path),
-                vec![FileEdit {
-                    path: path.clone(),
-                    op: EditOp::Write {
-                        content: content.as_str().into(),
-                        created: true,
+        let at = start_ms + t as i64 * 6 * 60_000;
+        for i in 0..HEAVY_CALLS {
+            let started = at + 65_000 + 3_000 * i as i64;
+            let times = (started, started + 400);
+            let turn = format!("{prefix}-t{t}");
+            let call = heavy_call(prefix, t, i);
+            match i % 5 {
+                0 => {
+                    let path = heavy_edit_path(cwd, t, i);
+                    fake.edit_call_at(
+                        prefix,
+                        &turn,
+                        &call,
+                        std::slice::from_ref(&path),
+                        vec![FileEdit {
+                            path: path.clone(),
+                            op: EditOp::Write {
+                                content: content.as_str().into(),
+                                created: true,
+                            },
+                        }],
+                        ToolStatus::Completed,
+                        times,
+                    );
+                }
+                1 => fake.tool_call(
+                    prefix,
+                    &turn,
+                    &call,
+                    ToolKind::Execute {
+                        command: if t % 3 == 0 {
+                            "git status"
+                        } else {
+                            "cargo check"
+                        }
+                        .into(),
+                        workdir: Arc::from(cwd),
+                        exec_session: None,
+                        workdir_exact: true,
                     },
-                }],
-            );
+                    times,
+                ),
+                2 => fake.tool_call(
+                    prefix,
+                    &turn,
+                    &call,
+                    ToolKind::Read {
+                        paths: vec![heavy_edit_path(cwd, t, i)].into(),
+                    },
+                    times,
+                ),
+                3 => fake.tool_call(
+                    prefix,
+                    &turn,
+                    &call,
+                    ToolKind::Search {
+                        paths: vec![cwd.to_path_buf()].into(),
+                    },
+                    times,
+                ),
+                _ => {}
+            }
         }
     }
 }
@@ -932,15 +1092,46 @@ pub fn heavy_open(dir: &Path) -> io::Result<Scenario> {
     Ok(s)
 }
 
+/// The two branches each heavy repository alternates between, day by day.
+pub const HEAVY_BRANCHES: [&str; 2] = ["refs/heads/feat-a", "refs/heads/feat-b"];
+
 /// Writes `days` heavy days into the scenario: every session read to its
 /// end, day by day (its records dropped from the source afterwards).
 pub fn heavy_fill(s: &mut Scenario, days: u32) -> io::Result<()> {
+    if !s.armed {
+        // Watched from two hours before the first day, HEAD on the first
+        // branch.
+        let first = (HEAVY_NOW.div_euclid(DAY_MS) - i64::from(days)) * DAY_MS;
+        for root in heavy_roots() {
+            s.watch_repo(&root, HEAVY_BRANCHES[0], first - 2 * 3_600_000)?;
+        }
+        s.armed = true;
+    }
     for day in 0..days {
+        // The day's reflog: HEAD goes to the other branch at 08:00 (after
+        // the first day), and three commits are made in the afternoon.
+        let day_start = (HEAVY_NOW.div_euclid(DAY_MS) - i64::from(days - day)) * DAY_MS;
+        for root in heavy_roots() {
+            if day > 0 {
+                let from = HEAVY_BRANCHES[(day as usize - 1) % 2];
+                let to = HEAVY_BRANCHES[day as usize % 2];
+                s.switch(&root, from, to, day_start + 8 * 3_600_000)?;
+            }
+            for k in 0..3 {
+                s.commit(&root, day_start + (10 + 2 * k) * 3_600_000)?;
+            }
+        }
         for h in heavy_sessions(days, day) {
             let records =
                 synthetic_turns(&h.agent, &h.id, &h.cwd, h.start_ms, 0..HEAVY_TURNS, h.model);
             s.session(&h.agent, &h.id, &h.cwd, records);
-            heavy_edits(s.sessions(&h.agent), &h.id, &h.cwd, 0..HEAVY_TURNS);
+            heavy_edits(
+                s.sessions(&h.agent),
+                &h.id,
+                &h.cwd,
+                h.start_ms,
+                0..HEAVY_TURNS,
+            );
             s.read_all(&h.agent, &h.id)?;
             // Every turn of the day has ended: they are settled, their
             // changed files read.

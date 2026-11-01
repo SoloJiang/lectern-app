@@ -110,6 +110,48 @@ const TABLES: &[Table] = &[
         key: "id",
         at: "at",
     },
+    Table {
+        name: "turn_obs",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
+    Table {
+        name: "call_obs",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
+    Table {
+        name: "reflog",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
+    Table {
+        name: "reflog_reset",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
+    Table {
+        name: "head_baseline",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
+    Table {
+        name: "watch_span",
+        month: "at >= ?1 AND at < ?2",
+        order: "at, id",
+        key: "id",
+        at: "at",
+    },
     // Derived, like `fact`; after the observations it is derived from.
     Table {
         name: "share",

@@ -597,6 +597,53 @@ fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
             OR turn NOT IN (SELECT id FROM turn)
             OR session NOT IN (SELECT id FROM session)")?;
 
+    // The branch observations (step 5): the worktree and branch of a turn,
+    // the reflog and the spans of the repositories that are gone, segments
+    // and what points at them.
+    for table in ["turn", "session_gen"] {
+        run(&format!(
+            "UPDATE {table} SET worktree = NULL
+             WHERE worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern)"
+        ))?;
+        run(&format!(
+            "UPDATE {table} SET branch = NULL
+             WHERE branch IS NOT NULL AND branch NOT IN (SELECT id FROM intern)"
+        ))?;
+    }
+    run("UPDATE call SET wt = NULL
+         WHERE wt IS NOT NULL AND wt NOT IN (SELECT id FROM intern)")?;
+    run("DELETE FROM watch_span WHERE repo NOT IN (SELECT id FROM location)")?;
+    run("DELETE FROM head_baseline
+         WHERE repo NOT IN (SELECT id FROM location) OR wt NOT IN (SELECT id FROM intern)")?;
+    for table in ["reflog", "reflog_reset"] {
+        run(&format!(
+            "DELETE FROM {table}
+             WHERE repo NOT IN (SELECT id FROM location)
+                OR run NOT IN (SELECT id FROM run)
+                OR (file != 2 AND wt NOT IN (SELECT id FROM intern))"
+        ))?;
+    }
+    run("DELETE FROM segment WHERE repo NOT IN (SELECT id FROM location)")?;
+    run("DELETE FROM segment_name WHERE segment NOT IN (SELECT id FROM segment)")?;
+    run("UPDATE segment SET prev = NULL
+         WHERE prev IS NOT NULL AND prev NOT IN (SELECT id FROM segment)")?;
+    run("UPDATE call_fact SET segment = NULL
+         WHERE segment IS NOT NULL AND segment NOT IN (SELECT id FROM segment)")?;
+    run("UPDATE item SET cf = NULL
+         WHERE cf IS NOT NULL AND cf NOT IN (SELECT id FROM call_fact)")?;
+    run("DELETE FROM turn_obs
+         WHERE session NOT IN (SELECT id FROM session) OR tid NOT IN (SELECT id FROM intern)")?;
+    for column in ["start_seg", "end_seg"] {
+        run(&format!(
+            "UPDATE turn_obs SET {column} = NULL
+             WHERE {column} IS NOT NULL AND {column} NOT IN (SELECT id FROM segment)"
+        ))?;
+    }
+    run("DELETE FROM call_obs
+         WHERE session NOT IN (SELECT id FROM session) OR wt NOT IN (SELECT id FROM intern)")?;
+    run("UPDATE call_obs SET end_seg = NULL
+         WHERE end_seg IS NOT NULL AND end_seg NOT IN (SELECT id FROM segment)")?;
+
     let strings = missing(
         conn,
         "intern",

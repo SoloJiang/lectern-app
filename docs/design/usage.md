@@ -1,6 +1,6 @@
 # usage 设计
 
-状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#178](https://github.com/SoloJiang/lectern-app/pull/178)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现。第 1 步已实现：前一部分（数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计、时间窗口、取整、`Project` / `AllProjects` 查询、插件与读取节奏，[#183](https://github.com/SoloJiang/lectern-app/pull/183)），后一部分（冷热分层与 `History` 查询、窗口快照的增量更新、`testing::Scenario` 与 `heavy_days`、第 1 步的 bench 条目，[#187](https://github.com/SoloJiang/lectern-app/pull/187)）。前置条件 C 的 `app` 部分（构造 `UsageDeps`、放进 `PluginSet`，[#247](https://github.com/SoloJiang/lectern-app/pull/247)）已实现。第 2 步已实现：额度快照（Codex 日志里的 `RateLimits`、statusline JSON、`limits()`、`UsageEvent::Limits`、`limit_sample` 与表结构版本 3、`UsageDeps::watcher`，statusline 的字段名已按公开文档核对）。第 3 步已实现：项目标识（`identity::identify` 与判定表的每一行、从仓库读出的标识事实、位置与固定 ID、别名与 `Usage::command`、文件夹的认领、「其他」、表结构版本 4）。第 4 步已实现：改动项与按改动的项目归属（表结构版本 5 的 `call`、`call_fact`、`item`、`share`，轮次的结束与定稿、`turns_unretained` + `load` 读出的改动、分摊规则 1、4、5、6、7 的项目部分、子 agent、`cold_anchor`、`Session` 查询的总数与每轮 token、`usage/finalize_turn_20`）。前置条件 C 的 statusline 脚本部分（`platform`，#32）与第 5–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#178](https://github.com/SoloJiang/lectern-app/pull/178)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现。第 1 步已实现：前一部分（数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计、时间窗口、取整、`Project` / `AllProjects` 查询、插件与读取节奏，[#183](https://github.com/SoloJiang/lectern-app/pull/183)），后一部分（冷热分层与 `History` 查询、窗口快照的增量更新、`testing::Scenario` 与 `heavy_days`、第 1 步的 bench 条目，[#187](https://github.com/SoloJiang/lectern-app/pull/187)）。前置条件 C 的 `app` 部分（构造 `UsageDeps`、放进 `PluginSet`，[#247](https://github.com/SoloJiang/lectern-app/pull/247)）已实现。第 2 步已实现：额度快照（Codex 日志里的 `RateLimits`、statusline JSON、`limits()`、`UsageEvent::Limits`、`limit_sample` 与表结构版本 3、`UsageDeps::watcher`，statusline 的字段名已按公开文档核对）。第 3 步已实现：项目标识（`identity::identify` 与判定表的每一行、从仓库读出的标识事实、位置与固定 ID、别名与 `Usage::command`、文件夹的认领、「其他」、表结构版本 4）。第 4 步已实现：改动项与按改动的项目归属（表结构版本 5 的 `call`、`call_fact`、`item`、`share`，轮次的结束与定稿、`turns_unretained` + `load` 读出的改动、分摊规则 1、4、5、6、7 的项目部分、子 agent、`cold_anchor`、`Session` 查询的总数与每轮 token、`usage/finalize_turn_20`）。第 5 步已实现：分支观察与按分支的归属（`command::parse`、reflog 与监听时刻的入库、片段、定稿时的 `call_obs` / `turn_obs`、改动项的片段与去向、分摊规则 2、3、6 与 7 的分支部分、`Worktree` 与 `Session` 查询的分支行、表结构版本 6、`usage/rebuild_30d`）。前置条件 C 的 statusline 脚本部分（`platform`，#32）与第 6–8 步尚未实现。
 
 对应 issue [#31](https://github.com/SoloJiang/lectern-app/issues/31)，[#32](https://github.com/SoloJiang/lectern-app/issues/32) 的 Usage 页与额度读本文定义的快照。`usage` 把 `agents` 交来的用量记录去重、规范化后落进自己的 SQLite，把每一轮的 token 归属到项目、分支的「一次使用」和 MR，按时间窗口聚合，并保存额度快照（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)、[ADR 0022](../adr/0022.md)、[交互规范「用量」](interaction.md#用量)）。改动权重的来源按 [ADR 0047](../adr/0047.md)，数据库按 [ADR 0027](../adr/0027.md)，位置按 [ADR 0044](../adr/0044.md) 的应用数据目录。
 
@@ -598,7 +598,7 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 - `CodexTokenCount` 只计 `superseded` 为 false 的，`CodexResponse` 全计（agents 设计「只用一路用量」）。
 - 子 agent 会话的用量属于它自己的会话，按它自己的轮次归属；会话的合计（`SessionUsage::total`）加上全部子孙会话（ADR 0014「计入父会话」）。
 - Analyze 的计量不经日志（辅助会话不写入用户的会话目录，ADR 0019），与日志里的用量没有共同的键。
-- `Batch::reset`：回放的记录写进这个会话的新一代，旧一代照常计数；读到 `at_end` 的那一批，在同一个事务里删除旧一代的来源和分代的轮次观察、把新一代设为当前，受影响的键重新选出计数的那一份（agents 设计「游标与批量读取」）。不分代的观察（`call_fact`、`call_obs`、`turn_obs`、`item_state`）保留，新一代按调用 ID 沿用（「轮次的观察与改动项」）。
+- `Batch::reset`：回放的记录写进这个会话的新一代，旧一代照常计数；读到 `at_end` 的那一批，在同一个事务里删除旧一代的来源和分代的轮次观察、把新一代设为当前，受影响的键重新选出计数的那一份（agents 设计「游标与批量读取」）。不分代的观察（`call_fact`、`call_obs`、`turn_obs`）保留，新一代按调用 ID 沿用（「轮次的观察与改动项」）。
 - ccusage 的 `--json` 只在测试里对照（`ccusage_*`）。
 
 ### 数据库
@@ -627,20 +627,20 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 | `session` | O | 来源 ID、会话 ID、agent、父会话、派出它的调用、当前代与回放中的代、游标（`Cursor::to_bytes`）、`inheritance_unknown`、是否读到过末尾；最后一批读到末尾时、读之前日志文件的大小、修改时间与 inode（`end_stamp`，别的批次清空） | 每批读取的事务里 |
 | `session_gen` | O | 会话、代：读到这一批末尾时的 cwd 位置、模型、所在轮次（下一批从这里接着读） | 每批读取的事务里 |
 | `turn` | O | 会话、代、`TurnId`、序号、开始与结束时刻、cwd 的位置与 worktree、日志记录的分支、是否已定稿、跟踪中或导入 | 读到 `TurnStarted`；定稿时更新一次 |
-| `call` | O | 会话、代、调用 ID、轮次、开始与结果时刻、种类、状态、工作目录、进入的 worktree、git 子命令的事实（「命令文本」）、改动路径 | 读到 `ToolStarted` / `ToolFinished` |
+| `call` | O | 会话、代、调用的键（调用 ID 的哈希）、轮次、开始与结果时刻、种类、状态。派出子 agent 的调用读到 `ToolStarted` 时写；提到 git 的 `Execute` 定稿时写，另有工作目录的 worktree、`git` 位掩码和 `facts`（推送的远端名与分支、被拣选的提交、stash 的名字，不含命令原文，也不含可能带令牌的地址）。只有带事实、进入过目录、或观察到 HEAD 动过或不确定的命令有行，只看一眼仓库的（`git status`）没有 | 读到 `ToolStarted`（子 agent）；定稿时（命令） |
 | `usage_source` | O | 键（`UsageKey` 的规范编码）、会话、代、`pos`、`seq`、份（0 为记录本身、1 为 advisor）、时间戳、轮次、记录所在轮次的 cwd 位置、模型、四类 token、`sidechain`、`superseded`、`inherited`；`repaired`（抢救补全过引用，等同一条记录重读时换上重读的结果） | 每批读取的事务里 |
 | `limit_sample` | O | agent 标签、来源、`limit_id`（没有为空串）、窗口种类、百分比、窗口分钟数、重置时刻、采样时刻；每个（agent、来源、`limit_id`、窗口种类）只留采样时刻最新的一条；agent 和 `limit_id` 存文本，不引用 `intern`（抢救丢了驻留行时不会指向别的字符串） | `RateLimits` 记录（与入库在同一个事务里）、statusline 文件变化 |
-| `watch_span` | O | 仓库、运行序号、arm 之后第一批的读取戳、结束的读取戳（句柄 drop、`Failed`） | `RepoWatch` 的批次 |
-| `reflog`、`reflog_reset` | O | 仓库、文件（HEAD 与 worktree / 分支 / stash）、偏移、行、`seq`、`observed` 与 `after`（运行序号、读取编号、纳秒时刻）、`origin`；重置的原因 | `RepoBatch` 到达时 |
-| `head_baseline` | O | 仓库、worktree、读取戳、`HeadState` | arm 之后读一次每个 worktree 的 HEAD |
+| `watch_span` | O | 仓库、开始的时刻（arm，纳秒）、最后一条记录的时刻（`last_ns`）、结束的时刻（句柄 drop、`Failed`、停止；没有正常结束的在下次打开数据库时结束在 `last_ns`）。不记运行序号：回放按时刻取这个 span 里的记录 | arm、`RepoBatch` 的批次、停止 |
+| `reflog`、`reflog_reset` | O | 仓库、文件（HEAD 与 worktree / 分支 / stash）、运行序号与 `seq`、偏移、行里的时刻、`observed` 与 `after` 的纳秒时刻、`origin`；旧值与新值（OID）、动作的分类（切换到分支、切换到提交、提交、创建、改名、重置）和切换或改名的分支名。不存原行：它带提交者的名字、邮箱和提交说明。重置的原因 | `RepoBatch` 到达时 |
+| `head_baseline` | O | 仓库、worktree、时刻（纳秒）、分支的完整引用名（detached 为空） | arm 之后读一次每个 worktree 的 HEAD；之后每个带切换的批次再写一行（该批最后一条记录读到的时刻、切换后的 HEAD），回放从最近的一行开始，到下一行为止 |
 | `call_fact` | O | 会话、调用 ID、路径（不分代）：位置、worktree、相对路径、进入的 worktree | 读到这个调用时，只写一次 |
-| `call_obs` | O | 会话、调用 ID、worktree（不分代）：片段（或 detached 的提交）、HEAD 的提交、确定性（确定 / 不确定）、调用期间确定停留过的片段；`Execute` 解析出 `git push <远端> HEAD:<分支>` 时另有推送观察：远端跟踪引用名、匹配的推送记录（新 OID、行时刻、说明文字）或「没有」「读不到」；`Read`、`Search` 的连续相同观察合成一行 | 结果时刻之后 2 秒，或定稿时补算（「轮次的观察与改动项」「分支观察」） |
-| `turn_obs` | O | 会话、`TurnId`（不分代）：轮次的最后时刻 L、cwd 的 worktree、片段、确定性 | L 之后 2 秒，或定稿时补算 |
-| `segment`、`segment_name` | O | 片段 ID（16 字节）、仓库、开始的原因与时刻、前一个片段、结束的原因与时刻；片段的分支名与生效时刻（改名） | reflog 的创建、改名、删除、重置记录到达时 |
+| `call_obs` | O | 会话、调用的键、worktree（不分代）：时刻、是否不确定、是否换过分支、调用结束时的片段、调用期间停留过的各个片段。只有 HEAD 在调用期间动过、或观察不确定的命令有行；`Read`、`Search` 与没留下改动的写不存行，它们的观察合成 `turn_obs.enter`。推送观察（`git push <远端> HEAD:<分支>` 时读远端跟踪引用的 reflog）随第 6 步 | 定稿时（「轮次的观察与改动项」「分支观察」） |
+| `turn_obs` | O | 会话、`TurnId`（不分代）：轮次的最后时刻 L、标志（跟踪中、不确定、换过分支）、开始与 L 时 cwd 的 worktree 的片段、命令在这个 worktree 上停留过的另外的片段（`stays`）、轮次进入过的 worktree 当时的（位置、片段）对（`enter`，规则 2）。什么都没说的轮次（没人监听、日志没有记录分支）没有行 | 定稿时 |
+| `segment`、`segment_name` | O | 片段 ID（16 字节）、仓库、种类（分支、detached、只有名字）、前一个片段、开始的原因与时刻（空为向过去开放）、结束的原因与时刻、是否被观察到是默认分支；片段的分支名与生效时刻（改名） | reflog 的创建、改名、删除记录和 HEAD 的切换到达时；用到只有名字的片段时（定稿） |
 | `boundary_obs` | O | 前后两个片段、种类（删除重建、丢弃独有提交的重置、回到起点）、新旧位置的提交关系、改写的证据、当时有没有挂起的 stash | 边界发生时（「一次使用」） |
 | `worktree_obs` | O | worktree、读取戳、种类（干净 / 切换分支时的未提交路径）、路径集合 | 分支切换记录到达、回到起点的候选出现时 |
 | `stash_obs` | O | stash 提交、仓库、来源 worktree 与片段、创建时刻、改动块的摘要；恢复：目标 worktree 与片段、证据种类、是否匹配、时刻 | stash 创建与恢复的候选出现时 |
-| `item` | O | 会话、代、轮次、调用、路径、改动行数；依赖状态的部分（片段、是否为默认分支、去向）放在按（会话、调用 ID、路径）不分代的 `item_state` 里，重放时沿用 | 轮次定稿时（「轮次的观察与改动项」） |
+| `item` | O | 会话、代、轮次、路径、位置、改动行数、`cf`（指向 `call_fact` 的行）；依赖状态的部分（片段、是否为默认分支、去向）放在按（会话、调用的键、路径）不分代的 `call_fact` 里（`segment`、`state`；设计原来叫 `item_state`，键相同，并入 `call_fact` 少一张表和一个索引），重放时沿用 | 轮次定稿时（「轮次的观察与改动项」） |
 | `transfer` | O | 被转移的改动项或轮次、从哪个片段到哪个片段、规则（`switch -c`、切到已有分支、stash 恢复、cherry-pick、推送） | 转移的证据成立时 |
 | `analysis`、`meter` | O | 分析 ID、agent、对象、开始时解析出的归属（片段或 MR 与权重）；请求序号、状态、模型、四类 token、是否估算 | `begin_analysis`、`meter` |
 | `usage_value` | D | 每个键当前计数的那个来源 | 来源增删时 |
@@ -653,9 +653,9 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 | `cold_anchor` | O | 会话、已归档的最后一个有改动轮次及其份额；派出仍有热数据的子会话的父轮次及其份额 | 同上（有改动的轮次随第 4 步出现，第 1 步不写） |
 | `cold_seen` | O | 会话、UTC 月：这个会话在这个月有已归档的来源 | 来源的段归档时，与 `cold_part` 同一事务 |
 
-表结构版本 2 在版本 1 之上加冷数据的五张表、`fact_bucket`（迁移时从 `fact` 算出）和下面两个按时刻的索引（迁移前照常写副本）。冷数据的三张汇总表和 `cold_seen` 在抢救时与观察一起复制（都是 rowid 表）。表结构版本 3 在版本 2 之上加 `limit_sample`（迁移前照常写副本），抢救时与观察一起复制；它是小的实体表，一直是热的，不归档。表结构版本 4 在版本 3 之上重建 `project`（`location` 不再唯一，加 `since`、`reason`、`candidate`，行连同 ID 照搬）、加 `project_fact` 和 `alias`，并重建 `fact_bucket`（主键加 `project`，从 `fact` 算出；迁移前照常写副本）。抢救时 `project_fact`、`alias` 与观察一起复制；`project` 等表按两边都有的列复制，所以版本 3 的文件抢救进版本 4 的表时新列取默认值。表结构版本 5 在版本 4 之上加 `call`、`call_fact`、`item`、`share`，`turn` 的 `last_at`、`closed`、`done`、`changed`、`edits` 和 `session.parent_call`，以及下面的索引（迁移前照常写副本；版本 4 没有存工具调用，迁移把每个会话的游标退回开头，每个会话从头重读一次，用量不会重复）。`call`、`call_fact`、`item` 与观察一起复制，`share` 是派生表、抢救后由 `item` 重新定稿；`item_state` 与 `turn` 的其余列随第 5 步。各列的取值见「与设计的差异」第 4 步。
+表结构版本 2 在版本 1 之上加冷数据的五张表、`fact_bucket`（迁移时从 `fact` 算出）和下面两个按时刻的索引（迁移前照常写副本）。冷数据的三张汇总表和 `cold_seen` 在抢救时与观察一起复制（都是 rowid 表）。表结构版本 3 在版本 2 之上加 `limit_sample`（迁移前照常写副本），抢救时与观察一起复制；它是小的实体表，一直是热的，不归档。表结构版本 4 在版本 3 之上重建 `project`（`location` 不再唯一，加 `since`、`reason`、`candidate`，行连同 ID 照搬）、加 `project_fact` 和 `alias`，并重建 `fact_bucket`（主键加 `project`，从 `fact` 算出；迁移前照常写副本）。抢救时 `project_fact`、`alias` 与观察一起复制；`project` 等表按两边都有的列复制，所以版本 3 的文件抢救进版本 4 的表时新列取默认值。表结构版本 5 在版本 4 之上加 `call`、`call_fact`、`item`、`share`，`turn` 的 `last_at`、`closed`、`done`、`changed`、`edits` 和 `session.parent_call`，以及下面的索引（迁移前照常写副本；版本 4 没有存工具调用，迁移把每个会话的游标退回开头，每个会话从头重读一次，用量不会重复）。`call`、`call_fact`、`item` 与观察一起复制，`share` 是派生表、抢救后由 `item` 重新定稿；`item_state` 与 `turn` 的其余列随第 5 步。各列的取值见「与设计的差异」第 4 步。表结构版本 6 在版本 5 之上加 `run`、`watch_span`、`head_baseline`、`reflog`、`reflog_reset`、`segment`、`segment_name`、`turn_obs`、`call_obs`，`turn` 与 `session_gen` 的 `worktree`、`branch`，`call` 的 `wt`、`git`、`facts`，`call_fact` 的 `segment`、`state`，`item.cf`，重建 `share`（目标加片段和种类）并加 `fact (segment)` 的部分索引（迁移前照常写副本）；迁移把每个会话的游标退回开头（轮次要有 worktree 与日志记录的分支）、清空 `item`、把所有轮次标为没定稿，读到末尾之后重新定稿。抢救时新表与观察一起复制，`share` 照旧由 `item` 重新定稿。
 
-索引：`fact` 按（时刻）、（片段）、（会话）；`usage_source` 按（键）、（会话、代）、（时刻）；`turn` 按（开始时刻）；`reflog` 按（仓库、文件、`seq`）；`call` 按（会话、代、轮次）。按时刻的索引让归档按月找到行。表结构版本 5 另加：`turn` 按（会话、代、序号），以及两个部分索引，`done = 0` 的（待定稿的轮次）和 `done = 1 AND changed = 1` 的（找之前或之后最近的有改动轮次）；`usage_source` 按（轮次）；`session` 按（父会话）；`call` 按（开始时刻）；`call_fact` 按（时刻）；`item` 按（轮次）、（时刻）；`share` 按（时刻）。
+索引：`fact` 按（时刻）、（片段）、（会话）；`usage_source` 按（键）、（会话、代）、（时刻）；`turn` 按（开始时刻）；`reflog` 按（仓库、文件、worktree、读到的时刻），读出后按（运行序号、`seq`）排序；`call` 按（会话、代、轮次）。按时刻的索引让归档按月找到行。表结构版本 5 另加：`turn` 按（会话、代、序号），以及两个部分索引，`done = 0` 的（待定稿的轮次）和 `done = 1 AND changed = 1` 的（找之前或之后最近的有改动轮次）；`usage_source` 按（轮次）；`session` 按（父会话）；`call` 按（开始时刻）；`call_fact` 按（时刻）；`item` 按（轮次）、（时刻）；`share` 按（时刻）。
 
 ### 冷热分层
 
@@ -705,9 +705,9 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 一轮的生命周期：
 
 1. 读到 `TurnStarted` 时写 `turn`；之后的 `Usage` 记录先按「临时归属」写事实行：跟随同一会话里最近一个已定稿轮次的份额，会话还没有已定稿的轮次时按 cwd 的位置和 cwd 所在 worktree 的当前片段，快照里立即可见。
-2. 读到 `ToolStarted` / `ToolFinished` 时写 `call`。`Execute` 的命令文本当场按「命令文本」解析，只保存解析出的事实和提到 git 的命令原文（前 4 KiB），其余命令只保存进入的 worktree；`Read`、`Search` 只保存目标路径所在的 worktree。路径到 worktree 的映射用 `Projects::locate`，不在打开的项目里时用 `Projects::resolve`（按目录去重缓存），结果写进 `call_fact`。
-3. 结果时刻之后 2 秒（等 fs_watch 读到这段时间的 reflog），为 `Edit`、`Execute`、`Read`、`Search` 调用在它们涉及的 worktree 上算 `call_obs`（「分支观察」）：`Edit` 是改动路径所在的 worktree，`Execute` 是工作目录和进入的 worktree，`Read`、`Search` 是目标所在的 worktree。`Read`、`Search` 在同一轮、同一个 worktree 上结果相同的连续观察合成一行（带调用数），所以频繁的读文件不让表变大。导入的轮次没有 `call_obs`。
-4. 轮次的最后时刻 L：Codex 是 `TurnEnded` 的时刻；Claude Code 是属于这一轮的最后一条记录的时刻（下一个 `TurnStarted` 之前的那一条，不是下一个 `TurnStarted` 本身）。L 之后 2 秒为 cwd 所在的 worktree 算一条 `turn_obs`（与 `call_obs` 同样的回放，S = T = L）。
+2. 读到 `ToolStarted` 时只为派出子 agent 的调用写 `call`，为 `Edit` 调用写 `call_fact`（第 4 步）。`Execute`、`Read`、`Search` 读到时不存行：定稿时从轮次索引（`turns_unretained`，已在内存里，有命令文本）取这一轮的调用，`Execute` 的命令文本当场按「命令文本」解析，**命令文本不存、不记日志**，只保存解析出的事实（`call.git`、`call.facts`）；`Read`、`Search` 只取目标路径所在的 worktree。路径到 worktree 的映射用 `Projects::resolve`（按目录去重缓存）。只在这一轮所在的仓库被监听过（`watch_span` 与 [这一轮的开始 − 1 秒, L + 2 秒] 有交）时才读调用、解析命令：补读的旧轮次不付这个代价。
+3. 在定稿的事务里为这些调用算观察（「分支观察」）：`Edit` 是改动路径所在的 worktree，`Execute` 是工作目录和进入的 worktree，`Read`、`Search` 是目标所在的 worktree。同一轮、同一个 worktree 上连续的 `Read`（或 `Search`）合成一次观察。每次观察要 `watch_span` 覆盖 [S − 1 秒, T + 2 秒]，否则这一次按导入的轮次处理。观察的结果落在 `call_fact`（改动项的片段）、`call_obs`（HEAD 动过或不确定的命令）、`turn_obs`（进入的 worktree 与 cwd 的片段）。设计原来让 `call_obs` 在结果后 2 秒由定时器算、定稿时补算；这里只在定稿时算一次（定稿本来就等到最后一个结果加 2 秒），不为每个调用排定时器。
+4. 轮次的最后时刻 L：Codex 是 `TurnEnded` 的时刻；Claude Code 是属于这一轮的最后一条记录的时刻（下一个 `TurnStarted` 之前的那一条，不是下一个 `TurnStarted` 本身）。定稿时为 cwd 所在的 worktree 算开始时刻和 L 两处的观察（S = T），写进 `turn_obs`。导入的轮次没有观察：`turn_obs` 的片段取日志记录的分支。
 5. 定稿：两个条件都满足时进行：读到结束的标志（Codex 的 `TurnEnded`；Claude Code 的下一个 `TurnStarted`，或会话的 `open_turn` 为 false），并且当前时刻不早于「这一轮最后一个结果时刻与 L 中较晚者加 2 秒」。不满足第二条时由定时器在那个时刻再试，所以结束记录与最后一个 `ToolFinished` 在同一批里到达时也要等满 2 秒；定稿任务先在同一个事务里补算还缺的 `call_obs`、`turn_obs`，再写这一轮的 `item`、`share`，用它们替换临时的事实行。导入的轮次没有观察要等，读到结束的标志即可定稿（补读时见下面的「补读的定稿」）。
 
 **固定下来的观察**（ADR 0020「观察先落盘，之后不再修改」）：依赖当时状态的事实按（会话、调用 ID、路径）或（会话、`TurnId`）保存，不属于任何一代：`call_fact`（位置、worktree、相对路径、进入的 worktree）、`call_obs`、`turn_obs`、改动项的片段、是否为默认分支和去向。会话日志重放（`Batch::reset`，如适配器升级）时，新一代里调用 ID 已有记录的调用沿用这些值，只重算与状态无关的部分（行数、份额）；只有新出现的调用才按当时的状态计算。所以合并之后被删除的 worktree、已经改变的默认分支不会改写以前的归属。ADR 0047 写明了这一点。
@@ -739,7 +739,7 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 | `git reset …`、`git branch -f`、`git checkout -B`、`git switch -C` | 可能丢弃独有提交的重置 |
 | `git switch -c`、`git checkout -b`、`git worktree add -b` | 新分支的创建 |
 
-`stash@{n}` 按调用开始之前 `refs/stash` 的 reflog（已入库的记录）解析，只认它指向的那一条。
+`stash@{n}` 按调用开始之前 `refs/stash` 的 reflog（已入库的记录）解析，只认它指向的那一条（第 6 步）。命令文本只在内存里读：保存的是 `call.git`（位掩码）和 `call.facts`（上表里的目标；推送的远端只有是配置过的名字时才记，地址不记，因为地址可能带令牌）。
 
 ### 分支观察
 
@@ -858,7 +858,7 @@ ADR 0020「已知限制」照旧：同一个提交被 cherry-pick 到几个分�
 | cwd 的 worktree 换了分支、最近的改动在这个 worktree | `call_obs` | 规则 3 | `follow_switched_*` | 5 |
 | 没有改动的会话按每轮观察到的 cwd 分支、调用期间停留过的分支平均分摊 | `call_obs`、`turn` | 规则 6 | `cwd_branch_*` | 5 |
 | 导入的旧会话用日志记录的分支，确定不了时「无法归属」；分支已删除时用名称片段 | `turn` 的日志分支、名称片段 | 规则 6、7 | `imported_*`（含 `imported_deleted_branch`、`imported_pruned_reflog`） | 5 |
-| 观察写下之后不再修改，重放时按调用 ID 沿用 | `call_fact`、`call_obs`、`turn_obs`、`item_state` | 「轮次的观察与改动项」 | `reset_keeps_observations`、`finalize_*` | 4、5 |
+| 观察写下之后不再修改，重放时按调用 ID 沿用 | `call_fact`（含原来的 `item_state`）、`call_obs`、`turn_obs` | 「轮次的观察与改动项」 | `reset_keeps_observations`、`finalize_*` | 4、5 |
 | 观察里写固定的片段标识，改名沿用 | `segment`、`segment_name` | 「分支观察」 | `segment_*` | 5 |
 | 一轮结束后写入 cwd、改动路径、「文件 × 分支」的行数、是否为默认分支；重建以记录为准 | `item` | 定稿 | `rebuild_*` | 5 |
 | 删除重建、丢弃独有提交的重置、回到起点开始新的一次使用；提交关系与改写的证据；stash 只是挂起 | `boundary_obs`、`worktree_obs`、`stash_obs` | `uses` | `use_boundary_*`、`use_stash_suspend_*` | 6 |
@@ -884,8 +884,8 @@ ADR 0020「已知限制」照旧：同一个提交被 cherry-pick 到几个分�
 ```
 SessionsChanged ─▶ [Background] read(游标, 8 MiB) ─▶ 规范化、去重、call、turn、usage_source、游标：一个事务
                  ─▶ 定稿的轮次：turns_unretained + load ─▶ item、share、fact：一个事务 ─▶ 受影响的快照
-RepoBatch ─▶ [Background] reflog、reflog_reset、watch_span、head_baseline、segment、boundary_obs、worktree_obs、stash_obs
-定时器 ─▶ 结果后 2 秒：call_obs；L 后 2 秒：turn_obs；定稿等到最后的结果或 L 加 2 秒；补读的节奏；本地零点
+RepoBatch ─▶ [Background] 排队，一个任务按序写：reflog、reflog_reset、watch_span、head_baseline、segment（boundary_obs、worktree_obs、stash_obs 属于第 6 步）
+定时器 ─▶ 定稿等到最后的结果或 L 加 2 秒（定稿的事务里算 call_obs、turn_obs，不另排定时器）；补读的节奏；本地零点
 ProjectEvent::Opened ─▶ [Background] RepoFacts ─▶ identify ─▶ project、alias ─▶ watch_repo
 watch(query) ─▶ [Background] SQL 按桶求和 + 内存里的映射（别名、uses、MR 区间）─▶ 取整 ─▶ 快照 ─▶ UsageEvent
 command ─▶ [Background] alias ─▶ 重算受影响的快照
@@ -920,7 +920,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 | 空闲内存：空窗口 < 60 MB | 页缓存 ≤ 2 MiB 加本 crate 的常驻 ≤ 2 MB（驻留表、会话与片段的索引、额度、没有关注者时没有快照），`usage/resident_bytes` |
 | 空闲内存：打开 monorepo / 10 万文件（ADR 0035 的余量） | 每个打开的项目 < 0.5 MB（侧栏的 7 天快照、片段表）；`RepoWatch` 的状态归 `fs_watch` 的份额。从 ADR 0035 的余量里分配，review 之后的 7 MB 余量剩 6.5 MB |
 | UI 线程不做 IO | `snapshot`、`limits` 只复制 `Arc` |
-| 磁盘 | 「重度一天」（50 个会话、2000 轮、6000 条用量、2 万次工具调用，其中 4000 次 `Edit`，轮次都已定稿）实测约 3.5 MB 的热数据（第 4 步，`usage/disk_day_heavy`：30 个重度日的数据库 106 MB，每天 3.54 MB），其中用量记录、事实行和它们的索引约 2.8 MB（用量记录的键存了三份，见「未决问题」2），第 4 步的工具调用、改动项和份额约 0.7 MB。工具调用 ID 不放进 `intern`（那里的字符串永远不会被清掉，归档之后还留在热库里，按每次调用约 145 字节、每天 2 万次算，396 天约 1.1 GB）：只有派出子 agent 的调用有 `call` 行，键是调用 ID 的 64 位哈希；`Edit` 调用是所在轮次上的一个标志加每个文件一行 `call_fact`；其余的调用不存行，第 5 步需要时再加。热窗口 365 到 396 天，重度使用约 1.35 GB（3.54 MB 乘以 396），一般使用约为它的五分之一；原来的估算（每天约 1 MB，合计约 400 MB）只算了一次用量记录的存储，没有算键的三份存储和各表的索引。冷数据是按列编码的整数和驻留 ID，实测压缩比 7.1:1（`usage/archive_month`：30 个重度日 41 MB 编码为 5.8 MB，其中 `call_fact`、`item`、`share` 约 1.3 MB），每年重度使用约 70 MB；汇总表每年 < 1 MB。数据全部保留，不提供手动清除（「冷热分层」）；空闲页的回收规则同上。迁移之前的副本（「数据库」，最多两份）在迁移时临时多占一到两倍数据库的大小。 |
+| 磁盘 | 「重度一天」（50 个会话、2000 轮、6000 条用量、2 万次工具调用，其中 4000 次 `Edit`，轮次都已定稿）实测约 3.5 MB 的热数据（第 4 步，`usage/disk_day_heavy`：30 个重度日的数据库 106 MB，每天 3.54 MB），其中用量记录、事实行和它们的索引约 2.8 MB（用量记录的键存了三份，见「未决问题」2），第 4 步的工具调用、改动项和份额约 0.7 MB。工具调用 ID 不放进 `intern`（那里的字符串永远不会被清掉，归档之后还留在热库里，按每次调用约 145 字节、每天 2 万次算，396 天约 1.1 GB）：只有派出子 agent 的调用有 `call` 行，键是调用 ID 的 64 位哈希；`Edit` 调用是所在轮次上的一个标志加每个文件一行 `call_fact`；其余的调用不存行，第 5 步需要时再加。热窗口 365 到 396 天，重度使用约 1.35 GB（3.54 MB 乘以 396），一般使用约为它的五分之一；原来的估算（每天约 1 MB，合计约 400 MB）只算了一次用量记录的存储，没有算键的三份存储和各表的索引。冷数据是按列编码的整数和驻留 ID，实测压缩比 7.1:1（`usage/archive_month`：30 个重度日 41 MB 编码为 5.8 MB，其中 `call_fact`、`item`、`share` 约 1.3 MB），每年重度使用约 70 MB；汇总表每年 < 1 MB。第 5 步加了 reflog、片段、`turn_obs`、`call_fact` 的片段与状态、`fact (segment)` 的部分索引和提到 git 的命令的行，重度日的夹具现在是被监听的（每个仓库两个分支，每天一次切换、三次提交，每三个轮次一次 `git status`）：三个重度日 11.33 MB，每天 3.78 MB，第 4 步的代码在同一夹具上是 10.36 MB、每天 3.45 MB（同一台机器、同一个测量 `heavy_disk_by_table`），多 9.3%，其中 `turn_obs` 与它的两个索引约 0.15 MB / 天，`fact (segment)` 约 0.06 MB / 天。只看一眼仓库的命令（`git status`）和普通命令没有 `call` 行，`call_obs` 只在 HEAD 动过或不确定时写：这是为了把磁盘压在这个数以内，不是实现的省略。数据全部保留，不提供手动清除（「冷热分层」）；空闲页的回收规则同上。迁移之前的副本（「数据库」，最多两份）在迁移时临时多占一到两倍数据库的大小。 |
 
 `bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增，夹具由 `testing::heavy_days` 和 `testing::Scenario` 生成，`git` 的 `TestRepo` 写仓库：
 
@@ -972,6 +972,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
   - warn：上次的抢救被中断（打开时发现 `usage.db.salvage`）、目录的 `fsync` 被文件系统拒绝（附 IO 错误）、statusline JSON 读不了或认不出（只记类别：读不了、太大、不是 JSON、没有可用的窗口，不记内容和解析器的错误文本）、`Batch::reset` 回放、reflog 的 `Unreadable` 缺口、`MrSource` 返回的错误（离线只记第一次）、命令文本里无法解析的片段让一次调用为「不确定」。
   - 冷热分层：error 记冷数据段的解码核对失败（UTC 月）、解码不了的段（抢救时的段数、`History` 读到的段 ID、完整重建时的月份）；warn 记归档计划、归档一步、空间回收的失败（SQLite 扩展错误码）；info 记有月份要归档（月数）、一个月归档完、之后到达的旧记录在归档时计入（月份、键数）、回放时因已有冷数据没有写入的记录数、完整重建放回的月数。
   - info：数据库打开与版本、补读开始与完成（字节数、会话数、耗时）、适配器版本变化让一个来源的会话全部重读、派生表重建、项目识别的结果（新项目、别名、临时项目及其原因）、用户的合并与撤销、轮次因「不确定」或「无法归属」进入「不属于任何 MR」、重启时计量的结算（结算与作废的请求数）。
+- 第 5 步实际记的（都是计数和路径，没有分支名、提交说明、命令）：debug 记「reflog 的一批」（记录数、重置数、跳过数）、「开始监听一个仓库」（路径、worktree 数）、定稿的调用数；warn 记读不出仓库的 HEAD。
 - 详细级别（用户打开时）：每一轮定稿时的分摊决定（用了哪条规则、目标与权重）、每次 `call_obs` 用到的 reflog 记录（文件、偏移、时刻区间）与结果、片段的新建与边界、`uses` 与 MR 区间的计算结果、每批读取的游标前后位置、读取期间遇到抢救而丢弃的一批（游标偏移）、每写一段冷数据（月份、表、行数、编码与压缩后的字节数）、空间回收的每一批（页数）。
 - 关联用的标识：项目 ID（`UsageProjectId` 的十六进制）、来源 ID 与会话 ID、`TurnId`、调用 ID、片段 ID、分析 ID 与请求序号；仓库与 worktree 写规范路径。
 - 不得记录：prompt、agent 说明、工具输入与输出、文件内容和改动内容、命令原文（只记解析出的事实）、statusline JSON 的原文和解析器的错误文本（会引用值）、Codex 的 `limit_id` 与 `plan_type`，以及任何凭据和访问令牌。路径可以记录；token 计数是用量数据，可以记录。
@@ -984,7 +985,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
   - `records/`：`services::session` 的 serde 形式写的 `Record` 序列，按 [agents 设计「外部格式」](agents.md#外部格式)、ADR 0014 和 `crates/agents/tests/fixtures/` 里已有的合成样本描述的形状手工构造（同一响应多行同一份 usage、sidechain 重放、跨文件的同一个键、Codex 两路用量的切换、子 agent 的继承前缀、`info` 为 null 的 `token_count`）。不依赖 `agents`（插件之间不得有 dev-dependency）；日志到这些类型的映射已由 agents 的测试覆盖。
   - `statusline/`：按第 2 步核对过的公开文档写的 JSON，含缺少窗口、多余字段（`spend_limit` 等）、越界和类型不对的值、不是 JSON 对象的文件；超过 1 MiB 的文件由测试生成，不入库；`SOURCE.md` 写明文档地址和核对日期。
   - `ccusage/`：对 `records/` 的合成记录手写的、ccusage `--json` 日汇总形状的期望值。
-  - 仓库：`lectern-git` 的 `TestRepo` 在临时目录里写提交、分支、stash、worktree 和 reflog；reflog 的监听时刻由 `fs_watch` 的 `FakeBackend` 和假时钟给出，或由 `testing::Scenario` 直接注入 `RepoBatch`。
+  - 仓库：`lectern-git` 的 `TestRepo` 在临时目录里写提交、分支、stash、worktree 和 reflog；reflog 的监听时刻由 `fs_watch` 的 `FakeBackend` 和假时钟给出，或由 `testing::Scenario` 直接注入 `RepoBatch`。第 5 步的测试不读仓库：reflog 记录手写（`ReadStamp` 给出写入与读到的时刻），读仓库的函数是 `testing::FakeGit` 的表（`GitRead`：worktree 的 HEAD、默认分支、分支的 reflog、一个提交改的路径）；`TestRepo` 留给第 6 步的 `is_ancestor`、`patch_id` 和 stash。
   - 场景：`testing::Scenario` 的构造在 `tests/scenarios/` 里，每条归属规则一个或几个场景，名字与「规则对照」的测试前缀相同。
 - 场景（前缀即测试名的前缀；结构化输出——去重结果、改动项、份额、片段到使用的映射、MR 区间、快照——都用 insta 快照验收）：
   - `normalize_*`、`dedup_claude_*`、`dedup_codex_*`、`ccusage_*`、`reset_*`（回放期间旧一代可见、读完时替换、同一个键在另一个会话里仍计数）。
@@ -1177,6 +1178,22 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - `just check`（整个工作区的 clippy，含 `app` 与 `lectern-bench` 的目标）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过；`python3 scripts/check_architecture.py` 在 `just check` 里通过；没有依赖变化，两个 `Cargo.lock`（含 `tools/automation/Cargo.lock`）没有改。`just test -p lectern-bench budgets`（预算表与基准清单的一致性）通过。
 - 没有运行：`app` 的会开窗口的测试、`startup`、探针和 `bench_probe` 测试、`--profile windows`、`just bench`（只运行了上面两条进程内的 `usage/` 基准）、`app/*` 与 `plugin/*` 基准；整个工作区的 `just test`；真实的 FSEvents 后端；真实的会话适配器（`turns_unretained` 在大会话上的解析次数，设计的「`usage/backfill_large_session` 适配器解析的字节合计 ≤ 文件大小的 1.2 倍」只在 `FakeSessions` 上检查了调用次数：每批一次）；`Projects::resolve` 在真实目录上对不存在的目录向上找（`paths::dir_place` 只在 `FakeProjects` 上测）；迁移真实的第 4 版数据库（只在 `BACK_TO_V4` 退回的文件上测）。
 
+### 第 5 步
+
+在 macOS（aarch64）上运行，不开任何窗口：
+
+- `just test -p lectern-usage`：295 个测试通过（另有 3 个手动运行的测量），比第 4 步多 80 个：
+  - `src/command.rs` 的 `command_*` 11 个（`cd` / `pushd` / `popd` / `git -C` 进入的目录、含变量的目录不跟、stash 的各种写法、推送只记配置过的远端名而不记带令牌的地址、拣选、改写、重置、新分支、wrapper 与赋值与 here-document、不相干的命令什么也不说、位掩码）；`src/observe.rs` 的 `replay_*` 8 个（调用之前的切换只定状态、调用里的切换、调用之后的不计、跨过 T 的让调用不确定、跨过 S 的一条计入目标、几条不确定、缺口、同一分支连续两次是一次停留）。
+  - `src/tests/branches.rs`：`segment_*` 6 个（第一次见到向过去开放、reflog 给出创建时刻、HEAD 先到的切换与随后的创建记录是同一个片段、改名保留片段与名字且旧名字的删除不算结束、删除结束片段而同名新分支是另一个、detached 的开始与结束）；`repo_*` 2 个（记录存解析后的字段、表里没有行文本；span 在 `disarm` 与崩溃后各自的结束）；`observe_*` 5 个（编辑属于 HEAD 所在分支、默认分支与 detached 是「不属于任何 MR」、没人监听的调用是导入的且无法归属、arm 之前不到 1 秒的调用不算被监听、调用之前的切换设定分支）；`order_*` 3 个（跨过结果时刻的切换使编辑无法归属、上一次读取的开始收窄记录的时刻、读取缺口）；`multi_switch_*` 2 个（没提交的工作跟 HEAD 到最后的分支、提交把它的文件留在提交所在的分支且 `tree_changes` 一个提交只读一次）；`branch_by_change_*` 3 个（多个分支按行数加文件数、跨 worktree、`Worktree` 查询的累计与默认分支、detached 没有累计）；`enter_*` 6 个（`cd`、`git -C`、读与搜索各自的 worktree 平均、没留下改动的写、优先于跟随、不相干的命令没有 `call` 行）；`follow_switched_*` 1 个、`cwd_branch_*` 1 个；`imported_*` 6 个（已删除的分支是只有名字的片段、reflog 被截断时向过去开放且只读一次、创建晚于轮次时是只有名字的片段、日志的分支只对它所在 worktree 里的文件算、默认分支）；`rebuild_*` 2 个（删掉派生表重建后分支行相同、分支删除与默认分支改变之后重建仍用当时的观察）。
+  - `src/tests/branch_checks.rs`：`log_canary_never_reaches_a_record_of_the_branch_observations`（金丝雀在命令里（含带令牌的推送地址）、reflog 的提交说明与分支名里；日志和表里都没有）；`store_statements_of_the_branch_tables_use_an_index`（新表的语句和带 `call_fact` 的权重语句，没有对大表的扫描，每条用指定的索引）；`store_migration_from_version_5_settles_every_turn_again`（版本 5 的文件与 `CREATE_V5` 的表结构相同，迁移后合计不变、游标回到开头、轮次未定稿、`item` 清空，重读重定稿后合计不重复、副本是版本 5）；`store_salvage_copies_the_branch_observations`；`archive_moves_the_branch_observations_and_keeps_the_segment_totals`；`reset_keeps_branch_observations`（spans 与 reflog 都删掉之后重放，片段与 `turn_obs` 沿用）。
+  - 评审之后加的 `src/tests/branch_fixes.rs`：`observe_*` 3 个（当前分支改名后的调用归新名字、别的分支改名不动 HEAD、只在分支 reflog 里看到的改名）、`segment_*` 1 个（叫 `20261101` 的分支不是 detached）、`repo_*` 4 个（基线随切换前进、写不进的批次让附近的调用不确定、直到基线越过它之前的调用都不确定、被改写的 HEAD 日志在读 HEAD 之后调用重新确定而跨过重置的仍不确定）；`plugin_*` 另有 2 个（被改写的日志让引擎读一次 HEAD、读不出时继续等并在下一个批次恢复、一个批次里几个重置只读一次；写不进的批次同样恢复）；`observe_*` 另有 2 个（一个调用跨两个切换批次时两次切换都算，编辑去调用结束时的分支；后一批里的提交把文件留在那个分支上）、`disk_git_*` 5 个（`TestRepo` 写出的仓库上的 `heads`、`default_branch`、`branch_log`、`commit_paths` 与取消，和提交、切换、改名、检出的顺序）。
+  - `plugin_watches_an_open_repository_and_writes_its_reflog_before_settling`、`plugin_ends_the_spans_when_it_stops_and_a_crash_ends_them_at_the_last_record`（监听、arm、排队的批次、项目关闭、停止与崩溃后的 span）。
+  - 第 4 步的测试做了这些修改：worktree 的键是管理目录（`items_path_prefix_is_kept_in_the_call_fact`、`project_by_change_a_linked_worktree_is_the_same_project`）；`session_turns_are_the_tokens_counted_in_each_turn` 现在检查 `Unassigned` 行；迁移与表结构的测试加 `BACK_TO_V5`（`BACK_TO_V4`、`BACK_TO_V3` 先退回版本 5）；`store_page_cache_is_bounded` 的 `user_version` 为 6（`INSTA_UPDATE=always` 重写后看过两行的差异，之后用 `INSTA_UPDATE=no`，没有 `.snap.new`）。
+- `cargo bench --locked -p lectern-bench --all-features --bench time -- usage/`（进程内，不开窗口）全部在预算内，预算没有改，只加了 `usage/rebuild_30d`（只记录）：`ingest_append_4k` 333 µs、`backfill_batch` 90.3 ms、`backfill_large_session` 最大 113 ms 中位 4.7 ms、`finalize_turn_20` 764 µs（现在含观察：20 个编辑、3 个 worktree，都被监听）、`project_30d` 985 µs、`all_projects_30d` 5.63 ms、`snapshot_increment` 486 µs、`archive_month` 63 ms、`cold_read_month` 15.2 ms、`disk_day_heavy` 一个重度日写入后 7 MB（含没有检查点的 `-wal`）、`rebuild_30d` 18.1 s（一个写事务，见「与设计的差异」第 5 步）（30 个重度日，每个轮次的份额和 18 万条事实行重算；只记录）。`--bench memory -- usage/`：`resident_bytes` 118 KB（第 4 步 91.6 KB，预算 2 MB；多出来的是监听的 20 个仓库的片段表与 span）。
+- 磁盘（`heavy_disk_by_table`，发布构建，三个重度日，同一台机器、同一夹具——监听的夹具在第 4 步的代码上是没有观察的）：第 4 步的代码 10 362 880 字节（每天 3.45 MB），本步 11 325 440 字节（每天 3.78 MB），多 9.3%。按表：`turn_obs` 258 KB 加 `turn_obs_at` 98 KB 加唯一索引，`fact_segment` 188 KB，`call_fact`、`item`、`turn`、`share` 各多 12 到 95 KB；`reflog` 220 行、`segment` 40 行、`head_baseline` 20 行，可以忽略。夹具里没有 `call` 与 `call_obs` 行（`git status` 与普通命令不写行）。第一次实现时每个命令都写 `call` 与 `call_obs` 行，三个重度日是 11.96 MB，去掉没有信息的 `turn_obs` 行和 `call_obs` 行后是 11.68 MB，再不为只看一眼仓库的命令写 `call` 行后是 11.33 MB（每次的差在每天 0.06 到 0.11 MB）。
+- `just check`（整个工作区的 clippy，含 `app` 与 `lectern-bench` 的目标）、`just test -p lectern-bench budgets`、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过；没有依赖变化，两个 `Cargo.lock`（含 `tools/automation/Cargo.lock`）没有改。
+- 没有运行：`app` 的会开窗口的测试、`startup`、探针和 `bench_probe` 测试、`--profile windows`、`just bench`（只运行了上面两条进程内的 `usage/` 基准）、`app/*` 与 `plugin/*` 基准；整个工作区的 `just test`、`just doctest`；真实的 FSEvents 后端和真实仓库上的 `fs_watch` 交付（reflog 的批次是手写的，`DiskGit` 只在 `TestRepo` 写出的仓库上测，没有在用户的真实仓库上、也没有对 git 自己写的 reflog 测）；有几千个分支的合成仓库上的 arm（arm 只读当前分支的 reflog，没有量）；迁移真实的第 5 版数据库（只在 `BACK_TO_V5` 退回的文件上测）；真实的会话适配器给出的轮次索引里 `Execute` 的命令文本和调用时刻（只在 `FakeSessions` 上测）。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -1285,3 +1302,25 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - **日志。** 每个轮次定稿记 debug（`turn settled`：来源码、位置数、权重和）、每批记 debug（`turns settled`：轮次数、改动数、事实行数），读不出轮次索引或改动正文记 warn（不带原因和内容）。字段都是计数；不记路径之外的位置，不记调用 ID、轮次 ID、改动内容。`log_canary_never_reaches_a_record` 加了一次带金丝雀正文的 `Edit` 调用，并检查两条定稿的记录确实写过。
 - **索引。** 设计的索引一行（`fact`、`usage_source`、`turn`、`reflog`、`call`）加了这一步需要的：`turn (session, gen, seq)`（跟随和依赖的范围查询）、部分索引 `turn (session, gen, seq) WHERE done = 1 AND changed = 1`（找之前或之后最近的有改动轮次；没有它，临时归属对每条用量扫描之前的全部轮次，200 MB 的会话读取批次从 82 ms 涨到 414 ms）、部分索引 `turn ... WHERE done = 0`（待定稿的轮次，包括还没有结束的）、`usage_source (turn)`（定稿时找轮次的来源）、`session (parent_source, parent_sid)`（子会话）、`call (started_at)`、`call_fact (at)`、`item (turn)`、`item (at)`、`share (at)`（改动的子树按 `turn` 找 `item`，所以没有 `item (session, gen)`：回放删一代的 `item` 和 `share` 也按这一代的 `turn` 找（`drop_generation`、`restart_sessions`，先于 `turn` 删），不扫表。`item` 有 200 万行时 `drop_generation` 是 1 ms，按会话和代删的旧写法是 33 ms 而且随表变大；`store_statements_on_item_and_share_use_an_index` 用 `EXPLAIN QUERY PLAN` 检查这些语句和 `item`、`share` 的其他查找都走索引，不扫 `item`、`share`）。`call (started_at)` 留着：归档按它找 `call` 的行。
 - **调用 ID 不进 `intern`。** 评审指出：`intern` 的字符串不会被清掉，每次调用约 145 字节（字符串行、唯一索引、引用），每天 2 万次、396 天约 1.1 GB，归档之后其中约 0.65 GB 还留在热库里。现在调用用调用 ID 的 64 位哈希（`calls::hash`，FNV-1a，各版本相同）作键：`session.parent_call`、`call.cid`、`call_fact.cid`。只有派出子 agent 的调用有 `call` 行；`Edit` 调用在 `turn.edits` 和每个文件一行 `call_fact`，哪些 `Edit` 调用完成了、改了什么由轮次索引（`ToolCall::finished`）和 `load` 决定，不由 `call` 的状态决定；其余的调用（`Execute`、`Read`、`Search`、`Other`）不存行，它们的结果只更新当时进行中的轮次的 `last_at`。第 5 步需要 `Execute`、`Read`、`Search` 的行时再加（按设计它们带工作目录和 git 事实），到那时同样要算它们的体积。键的碰撞规则：同一个会话里两个调用 ID 的哈希相同（约十的十次方分之一的概率）时，第二个调用的开始发现同键的行有另一个 `started_at`，把那一行标为不明确（`status = 9`，之后不被结果改写），第二个调用不存行；不明确的行不用来找子 agent 的父轮次，子会话改按开始时刻落到父轮次；`Edit` 的碰撞没有后果（改动靠轮次索引，`call_fact` 以 `(会话, 调用键, 路径)` 为键，同键同路径的两次读到同一个位置）。`items_calls_with_one_key_are_marked_and_their_children_still_count` 用测试里的接缝（`calls::COLLIDE`）造出碰撞。
+
+### 第 5 步
+
+- **`Execute`、`Read`、`Search` 读到时不存行，定稿时从轮次索引取。** 设计原来在读到调用时写 `call`（带工作目录、git 事实、提到 git 的命令原文前 4 KiB），结果后 2 秒由定时器算 `call_obs`。第 4 步评审的教训是每次调用的行不能进热库，命令文本不能存也不能记；所以：（1）定稿时从 `turns_unretained` 给出的索引读这一轮的调用（索引在内存里，有命令文本和调用的开始、结果时刻），命令当场解析，文本不留；（2）只有这一轮所在的仓库被监听过才读调用，补读的旧轮次不解析命令；（3）`call` 行只给带事实（stash、推送、拣选、改写、重置、新分支）、进入过目录、或观察到 HEAD 动过或不确定的命令，`git status` 这类只看一眼的命令没有行；（4）`Read`、`Search`、没留下改动的写合成每个轮次的 `turn_obs.enter`（位置、片段对），不存行；（5）`call_obs` 同样只在 HEAD 动过或不确定时写；（6）观察只在定稿的事务里算一次，不为每个调用排定时器。设计「命令文本」里「提到 git 的命令原文（前 4 KiB）」那句删掉。放弃的做法：读到时写全部调用的行再合并（热库的体积是第 4 步的教训）；为每个调用排 2 秒的定时器（定稿本来就等到最后一个结果加 2 秒，同一次读 reflog）。后果：定稿之后才到达的 reflog 批次不再改变这个轮次（与「观察先落盘，之后不再修改」一致）；引擎在定稿之前先把排队的批次写完（`drain_repos`）。
+- **`item_state` 并入 `call_fact`。** 键相同（会话、调用的键、路径），加 `segment`、`state`（已观察、默认分支、无法归属、不在任何 worktree），`item.cf` 指向它；少一张表和一个索引，重放时 `call_fact` 本来就沿用。
+- **reflog 存解析后的字段，不存原行。** 行里有提交者的名字、邮箱和提交说明；回放只要时刻、旧新 OID、动作的分类和分支名。stash 的记录也存（第 6 步用）。`watch_span` 不记运行序号而记 `last_ns`；回放按时刻取 span 里的记录，按（运行序号、`seq`）排序。基线之后读到的记录才回放（`obs_ns` 大于基线的时刻）：arm 与读基线之间发生的切换基线已经含有。基线会前进：每个带切换的批次在结尾写一行 `head_baseline`（该批在这个 worktree 上最后一条记录读到的时刻，切换后的 HEAD；批次里有读不了或被改写的缺口、或改名后不知道 HEAD 在哪时不写），回放取不晚于调用开始的最近一行，读到「下一行的时刻」和「调用结束后 2 秒」中较晚的为止（一个调用可以跨几个批次，后面批次里的切换也是它的；缓存的键带上这个上界，较长的调用不会拿到较短的列表），所以一次定稿读的记录数是调用那段时间的，不随监听的时间变长。基线之后、调用结束之前出现的任何读不了或被改写的重置（包括写不进的批次留下的）都让调用不确定，不管它离调用多远，直到下一个基线越过它。重置之后不等下一次切换：引擎在写完批次的任务里（不在写事务里）用 `GitRead::heads` 把这个 worktree 的 HEAD 读一次，在读之前的时刻写一行 `head_baseline`（`Store::rebaseline`），这行越过重置，之后的调用重新确定；重置到这次读之间的调用，和跨过重置的调用，仍不确定。读一次对应一个仓库里所有等待的 worktree，不管一个批次里有几个重置；读不出（`heads` 给不出）时这些 worktree 继续等，下一次写批次或定稿前的写批次时再读；监听结束或项目关闭时不再等。`git gc` 的 `reflog expire` 因此只让一小段时间不确定，不是此后所有调用。HEAD 切换里的目标是不是 detached：名字像十六进制，并且是这条记录的新提交的缩写（旧值同理）才算；叫 `20261101` 的分支不是提交。
+- **回放只看切换和改名。** 当前分支被改名（`git branch -m`，HEAD 的 reflog 有 `Branch: renamed` 一行）时，HEAD 跟着改名，不是新的切换；别的分支的改名不动 HEAD。回放之外，`Cx::segment` 在按名字找不到片段时再找「用过这个名字、在那一刻还开着」的片段，所以只在分支 reflog 里看到的改名也不会产生只有名字的片段。跨过 T 的记录让调用不确定，只算会改变分支的记录（切换、改名）；一次提交跨过 T 不影响调用在哪个分支。其余按设计：跨过 S 的一条切换计入它的目标，几条让调用不确定，`reflog_reset` 里读不了或被改写的缺口让落在其中的调用不确定。
+- **片段：第 5 步只有创建、第一次见到、改名、删除后重建、detached。** 丢弃独有提交的重置、`branch -f`、`checkout -B`、回到起点的边界要 `is_ancestor`、`boundary_obs`、`worktree_obs`，属于第 6 步（规则对照里它们的测试在第 6 步）。arm 时只读 worktree 当前所在分支的 reflog，不是每个分支：有几千个分支的仓库在 `BusyGuard` 下读几千个文件是教训里的路径。其余分支第一次见到时（HEAD 切过去、导入的轮次用到）开始时刻空（向过去开放），导入的轮次用到时才读那个分支的 reflog 补上创建时刻（`GitRead::branch_log`，一个分支读一次，4 MiB 上限）。HEAD 切换里的目标是不是 detached：已知的分支名是分支，否则要名字是新提交的缩写才算 detached，其余当分支（标签会被当成分支，已知限制）。
+- **监听范围只有打开的 git 项目。** 项目打开（启动时已打开的、`ProjectEvent::Opened`）时 `watch_repo`，`Closed` 时放掉；设计里「活跃会话 cwd 或改动所在、项目没打开的仓库，最多 16 个」没做，这些轮次按导入处理。监听里发来 `Failed` 时结束 span。linked worktree 在监听开始之后才出现时没有基线，它的调用按导入处理（`worktree_list` 的批次还没用）。
+- **去向在事务里读 `tree_changes`。** 一个编辑之后、同一轮里同一个 worktree 上的命令切换了分支时，调用期间的提交（HEAD 的 `commit` / `cherry-pick` 记录）经 `GitRead::commit_paths`（`Repo::tree_changes`）读它们改的路径，按（仓库、新提交）缓存，只在这种少见的情况读；没有提交改这个文件时归调用结束时的片段。默认分支名每个仓库每个事务读一次（远端跟踪的默认分支映射成同名的本地分支），观察到的默认分支记在 `segment.is_default`，`Session` 与 `Worktree` 查询用它。
+- **临时归属不带片段。** 读到用量时还没定稿的轮次的事实行仍按 cwd 的位置，没有片段（种类 1：无法归属，普通文件夹种类 2：不在分支上）。设计写的「cwd 所在 worktree 的当前片段」要读读取当时的 HEAD，读取路径上不做；定稿时换成真正的目标。
+- **目标与种类。** `share` / `fact` 的目标是（位置、片段或 0、种类）：种类 0 片段，1 无法归属（含第 4 步及以前没有片段的行），2 不在任何 worktree 里（文件夹、worktree 之外的文件）。`cold_anchor.shares` 的编码加版本字节并存片段与种类（旧的 16 字节一项的读出来是无法归属）。`share` 因唯一键变了而重建。`DERIVED_VERSION` 没变：迁移自己把轮次标为没定稿、清空 `item`，读到末尾后重新定稿。
+- **查询。** `Session` 的分支行是这个会话（含子 agent）在热数据里用过的片段：`Branch`（`UseId` 就是片段 ID，因为第 5 步没有边界，每个片段是一次使用）或一行 `Unassigned`（默认分支、detached、种类 1 与 2 的合计，`unattributable` 是种类 1 的部分）；`cumulative` 是片段在热事实加 `cold_total`（种类 1）里的全部，`Unassigned` 的 `cumulative` 等于会话的部分。已归档月份里这个会话的份额不在分支行里（冷汇总按会话、按片段分开，没有二者的交叉；已知限制）。`Worktree` 的 `branch` 来自 `ProjectSnapshot` 里这个 worktree 的 HEAD，默认分支与 detached 没有 `cumulative`，`mrs` 为空。`Project` 的 `rows` 仍为空（`RowKey::Unassigned` 的项目行属于第 6 步）。`ProjectEvent::Changed` 的 `worktrees` 让 `Worktree` 查询重算。
+- **worktree 的键是它的管理目录。** `WorktreeKey` 在真实的 `project` 里是主 worktree 的公共目录、linked 的 `<公共目录>/worktrees/<名字>`（不是根目录）；`call_fact.worktree`、`turn.worktree`、reflog 的 HEAD 文件都用它。`testing::FakeProjects` 现在也这样命名，并有 `set_head`；`PathPlace` 多了 `rel`（文件所在目录相对 worktree 根的路径，去向比较提交里的路径用）。第 4 步写的「worktree 内的相对路径是路径去掉 worktree 的前缀」按这个键是不对的，没有被用到，现在用 `rel`。
+- **写不进的批次。** `repo_batch` 失败时引擎记 warn（记录数、重置数、SQLite 码），并经 `Store::batch_lost` 为批次涉及的每个 HEAD 文件写一条读不了的重置：这些记录丢了，丢了的时间里的调用按不确定处理（这一条又写不进时只剩 warn），随后同样重读这些 worktree 的 HEAD 作为新的基线（「分支观察」的缺口规则）。
+- **`DiskGit`。** 停止时 `GitRead::stop` 置位 `DiskGit` 的取消标志，`tree_changes` 因此提前结束（返回未知）。`DiskGit` 的四个读用 `TestRepo` 写出的仓库测了（有 linked worktree、`packed-refs`、detached HEAD、远端的默认分支、手写的分支 reflog），并有一个从磁盘上的仓库经入库和定稿的提交、切换、改名、检出的顺序（`disk_git_*`）；`TestRepo` 不写 reflog 文件，reflog 记录是手写的，仓库里没有真的执行 git。
+- **重建是一个写事务。** 生产里的 `dedup::rebuild` 和 `rebuild_in` 在一个写事务里重算全部热的事实行和份额，不是设计「数据流与线程」写的按会话分批（每批 ≤ 50 ms）；`usage/rebuild_30d` 是 18.5 s，这段时间写连接被占住。现在只有恢复、开库时派生算法版本不同才走到它，而 `DERIVED_VERSION` 这一步没有变（迁移自己重新定稿）；任何提高 `DERIVED_VERSION` 的改动之前必须先把重建改成分批。
+- **仍没做的。** 第 4 步差异里留给这一步的「日志里的 cwd 与规范 cwd 之间的前缀替换」没有做（路径照日志里的原样放到位置上），是已知限制，随真实适配器的路径行为再定；`imported_*` 的测试名按本步的写法（`imported_a_branch_that_was_deleted_is_a_segment_of_its_name` 对应 `imported_deleted_branch`，`imported_a_branch_with_a_log_is_open_to_the_past_when_the_log_is_cut` 对应 `imported_pruned_reflog`）。迁移后第 4 步及以前写下的 `fact` 行是片段为空、种类 0，直到它们的轮次重新定稿（没有轮次的来源一直如此），查询把它们当作无法归属。读不出仓库的 HEAD 时（`arm_repo`）放掉监听，这个仓库的轮次按导入处理，下一次打开再试。
+- **抢救。** 新表与观察一起复制；`repair_references` 把指向丢失的字符串、位置、会话、片段的行删掉或置空（`call_fact.segment` 置空后该文件算无法归属）；`dangling` 检查加了这些表。
+- **归档。** `turn_obs`、`call_obs`、`reflog`、`reflog_reset`、`head_baseline`、`watch_span` 按各自的时刻进归档清单（`archive_moves_the_branch_observations_and_keeps_the_segment_totals`）；`segment` 与 `segment_name` 是小的实体表，留热。一个超过一年仍开着的 span 会被归档走（连续运行一年以上才会遇到）。
+- **测试台。** `FakeSessions::edit_call_at`、`tool_call` 登记带时刻的调用；`Scenario::watch_repo` / `switch` / `commit` 注入 reflog，重度夹具在第一个重度日的两小时前开始监听、每个仓库在 `feat-a` 与 `feat-b` 之间每天切换一次、每天三次提交、每三个轮次一次 `git status`（共 40 个片段，每个重度日 220 条 reflog 记录之内）。`Harness` 与 `Rig` 带 `FakeGit`。第 4 步的测试里 `store_page_cache_is_bounded` 的 `user_version` 改为 6，三个假的更新版本改为 7 到 9。
+

@@ -6,17 +6,25 @@
 //! sources get their fact rows again. Until then its usage is attributed
 //! provisionally (see [`source_targets`]).
 //!
-//! The rules in this step, in order (the first that applies decides; the
-//! branch parts of the design's rules come with step 5):
+//! The rules, in order (the first that applies decides):
 //!
 //! 1. the turn's own changes, and its sub-agents' (the weights of the files
-//!    changed, per place);
+//!    changed, per place and segment);
+//! 2. the turn went into worktrees (a command, a file read or searched, a
+//!    file written without a change): their segments, equally;
+//! 3. the worktree the session ran in changed branch during the turn, and
+//!    the nearest changes of the session are in it: the segments it was on;
 //! 4. the nearest turn of the session that has changes, before it, else after;
 //! 5. a session without changes of its own follows the turn of its parent
 //!    that spawned it;
-//! 6. 7. the place of the turn's cwd.
+//! 6. the segment the turn was observed in (or, for a turn nobody watched,
+//!    the branch its log named);
+//! 7. the place of the turn's cwd, with no segment.
 //!
-//! `turn.changed` says which: 0 the cwd, 1 changes of its own, 2 followed.
+//! `turn.changed` says which: 0 the cwd or an observation, 1 changes of its
+//! own, 2 followed. A target is a place with a segment (`segment` 0 for
+//! none) and a kind: 0 a segment, 1 a branch that could not be told, 2 no
+//! branch at all (a file or a cwd outside any worktree).
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,49 +33,97 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::cold::Frozen;
 use super::dedup::{self, Deltas};
+use super::observe::{OBS_SWITCHED, OBS_TRACKED, get_ids, get_pairs};
 
 /// Where a turn's attribution comes from (`turn.changed`).
 pub(crate) const FROM_CWD: i64 = 0;
 pub(crate) const FROM_CHANGES: i64 = 1;
 pub(crate) const FROM_FOLLOWED: i64 = 2;
 
-/// A place with its weight in a turn's share.
+/// `share.kind` / `fact.kind`.
+pub(crate) const KIND_SEGMENT: i64 = 0;
+pub(crate) const KIND_UNATTRIBUTABLE: i64 = 1;
+pub(crate) const KIND_NONE: i64 = 2;
+
+/// A place and segment with its weight in a turn's share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Target {
     pub(crate) location: i64,
+    /// The segment; 0 for none.
+    pub(crate) segment: i64,
+    pub(crate) kind: i64,
     pub(crate) weight: u64,
 }
 
-/// The rows of `share` of a turn, by place.
+impl Target {
+    fn seg(location: i64, segment: i64) -> Target {
+        Target {
+            location,
+            segment,
+            kind: KIND_SEGMENT,
+            weight: 1,
+        }
+    }
+}
+
+/// The rows of `share` of a turn.
 pub(crate) fn shares(conn: &Connection, turn: i64) -> rusqlite::Result<Vec<Target>> {
-    let mut stmt = conn
-        .prepare_cached("SELECT location, weight FROM share WHERE turn = ?1 ORDER BY location")?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT location, segment, kind, weight FROM share WHERE turn = ?1
+         ORDER BY location, segment, kind",
+    )?;
     let rows = stmt.query_map(params![turn], |r| {
         Ok(Target {
             location: r.get(0)?,
-            weight: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+            segment: r.get(1)?,
+            kind: r.get(2)?,
+            weight: u64::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
         })
     })?;
     rows.collect()
 }
 
-/// A share as `cold_anchor.shares` keeps it: the place and the weight, 8
-/// little-endian bytes each.
+/// The first byte of a share as `cold_anchor.shares` keeps it now.
+const ANCHOR_V2: u8 = 2;
+
+/// A share as `cold_anchor.shares` keeps it: a version byte, then for each
+/// target the place, the segment, the kind and the weight, 8 little-endian
+/// bytes each. (The first version had the place and the weight only.)
 pub(crate) fn encode(targets: &[Target]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(targets.len() * 16);
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(1 + targets.len() * 32);
+    out.push(ANCHOR_V2);
     for t in targets {
         out.extend_from_slice(&t.location.to_le_bytes());
+        out.extend_from_slice(&t.segment.to_le_bytes());
+        out.extend_from_slice(&t.kind.to_le_bytes());
         out.extend_from_slice(&t.weight.to_le_bytes());
     }
     out
 }
 
 fn decode(bytes: &[u8]) -> Vec<Target> {
+    let word = |c: &[u8]| i64::from_le_bytes(c.try_into().unwrap_or([0; 8]));
+    if bytes.first() == Some(&ANCHOR_V2) && (bytes.len() - 1).is_multiple_of(32) {
+        return bytes[1..]
+            .chunks_exact(32)
+            .map(|c| Target {
+                location: word(&c[..8]),
+                segment: word(&c[8..16]),
+                kind: word(&c[16..24]),
+                weight: u64::try_from(word(&c[24..])).unwrap_or(0),
+            })
+            .collect();
+    }
     bytes
         .chunks_exact(16)
         .map(|c| Target {
-            location: i64::from_le_bytes(c[..8].try_into().unwrap_or([0; 8])),
-            weight: u64::from_le_bytes(c[8..].try_into().unwrap_or([0; 8])),
+            location: word(&c[..8]),
+            segment: 0,
+            kind: KIND_UNATTRIBUTABLE,
+            weight: u64::try_from(word(&c[8..])).unwrap_or(0),
         })
         .collect()
 }
@@ -89,13 +145,15 @@ struct TurnRow {
     seq: i64,
     started_at: i64,
     location: Option<i64>,
+    worktree: Option<i64>,
     done: bool,
     changed: i64,
 }
 
 fn turn_row(conn: &Connection, id: i64) -> rusqlite::Result<Option<TurnRow>> {
     conn.prepare_cached(
-        "SELECT id, session, gen, seq, started_at, location, done, changed FROM turn WHERE id = ?1",
+        "SELECT id, session, gen, seq, started_at, location, done, changed, worktree
+         FROM turn WHERE id = ?1",
     )?
     .query_row(params![id], |r| {
         Ok(TurnRow {
@@ -107,6 +165,7 @@ fn turn_row(conn: &Connection, id: i64) -> rusqlite::Result<Option<TurnRow>> {
             location: r.get(5)?,
             done: r.get(6)?,
             changed: r.get(7)?,
+            worktree: r.get(8)?,
         })
     })
     .optional()
@@ -138,17 +197,11 @@ pub(crate) fn source_targets(
     turn: Option<i64>,
     fallback: i64,
 ) -> rusqlite::Result<Vec<Target>> {
-    let one = || {
-        vec![Target {
-            location: fallback,
-            weight: 1,
-        }]
-    };
     let Some(turn) = turn else {
-        return Ok(one());
+        return Ok(vec![fallback_target(conn, fallback)?]);
     };
     let Some(t) = turn_row(conn, turn)? else {
-        return Ok(one());
+        return Ok(vec![fallback_target(conn, fallback)?]);
     };
     let found = if t.done {
         shares(conn, t.id)?
@@ -158,7 +211,30 @@ pub(crate) fn source_targets(
             None => anchor(conn, t.session)?.unwrap_or_default(),
         }
     };
-    Ok(if found.is_empty() { one() } else { found })
+    Ok(if found.is_empty() {
+        vec![fallback_target(conn, fallback)?]
+    } else {
+        found
+    })
+}
+
+/// The place alone, with no segment: a repository whose branch is not known,
+/// or a directory outside any repository.
+fn fallback_target(conn: &Connection, location: i64) -> rusqlite::Result<Target> {
+    let kind: Option<i64> = conn
+        .prepare_cached("SELECT kind FROM location WHERE id = ?1")?
+        .query_row(params![location], |r| r.get(0))
+        .optional()?;
+    Ok(Target {
+        location,
+        segment: 0,
+        kind: if kind == Some(0) {
+            KIND_UNATTRIBUTABLE
+        } else {
+            KIND_NONE
+        },
+        weight: 1,
+    })
 }
 
 /// The changed files of a set of turns, weighted per place: the changed
@@ -172,10 +248,12 @@ fn weights(conn: &Connection, turn: i64, sessions: &[i64]) -> rusqlite::Result<V
     let sql = weights_sql(&list);
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![turn], |r| {
-        let lines: i64 = r.get(1)?;
-        let files: i64 = r.get(2)?;
+        let lines: i64 = r.get(3)?;
+        let files: i64 = r.get(4)?;
         Ok(Target {
             location: r.get(0)?,
+            segment: r.get(1)?,
+            kind: r.get(2)?,
             weight: u64::try_from(lines.max(0) + files.max(0)).unwrap_or(0),
         })
     })?;
@@ -183,18 +261,61 @@ fn weights(conn: &Connection, turn: i64, sessions: &[i64]) -> rusqlite::Result<V
 }
 
 /// The statement behind [`weights`]: `?1` the turn, `list` the sessions
-/// below it, as comma separated IDs.
+/// below it, as comma separated IDs. A file's target is the place and
+/// segment its `call_fact` says; one without a segment is a branch not
+/// known, or none (`state` 8).
 pub(crate) fn weights_sql(list: &str) -> String {
+    let columns = "i.location AS location, coalesce(f.segment, 0) AS segment,
+                   CASE WHEN f.state & 8 != 0 THEN 2 WHEN f.segment IS NULL THEN 1 ELSE 0 END AS kind,
+                   i.lines AS lines, i.path AS path";
     format!(
-        "SELECT location, sum(lines), count(DISTINCT path) FROM (
-           SELECT location, lines, path FROM item WHERE turn = ?1
+        "SELECT location, segment, kind, sum(lines), count(DISTINCT path) FROM (
+           SELECT {columns} FROM item i LEFT JOIN call_fact f ON f.id = i.cf WHERE i.turn = ?1
            UNION ALL
-           SELECT i.location, i.lines, i.path FROM turn t
+           SELECT {columns} FROM turn t
              JOIN session s ON s.id = t.session AND s.gen = t.gen
              JOIN item i ON i.turn = t.id
+             LEFT JOIN call_fact f ON f.id = i.cf
              WHERE t.session IN ({list}) )
-         GROUP BY location ORDER BY location"
+         GROUP BY location, segment, kind ORDER BY location, segment, kind"
     )
+}
+
+/// What was observed about a turn (`turn_obs`), fixed when it was settled.
+struct Observed {
+    flags: i64,
+    start_seg: Option<i64>,
+    end_seg: Option<i64>,
+    stays: Vec<i64>,
+    enter: Vec<(i64, i64)>,
+}
+
+fn observed(conn: &Connection, turn: i64) -> rusqlite::Result<Option<Observed>> {
+    conn.prepare_cached(
+        "SELECT o.flags, o.start_seg, o.end_seg, o.stays, o.enter FROM turn t
+         JOIN turn_obs o ON o.session = t.session AND o.tid = t.tid WHERE t.id = ?1",
+    )?
+    .query_row(params![turn], |r| {
+        let stays: Option<Vec<u8>> = r.get(3)?;
+        let enter: Option<Vec<u8>> = r.get(4)?;
+        Ok(Observed {
+            flags: r.get(0)?,
+            start_seg: r.get(1)?,
+            end_seg: r.get(2)?,
+            stays: stays.map(|b| get_ids(&b)).unwrap_or_default(),
+            enter: enter.map(|b| get_pairs(&b)).unwrap_or_default(),
+        })
+    })
+    .optional()
+}
+
+/// Whether a turn changed a file in a worktree.
+fn changed_in(conn: &Connection, turn: i64, worktree: i64) -> rusqlite::Result<bool> {
+    conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM item i JOIN call_fact f ON f.id = i.cf
+                        WHERE i.turn = ?1 AND f.worktree = ?2)",
+    )?
+    .query_row(params![turn, worktree], |r| r.get(0))
 }
 
 /// The turn of the parent session a child session was spawned from: the
@@ -295,6 +416,45 @@ fn resolve(conn: &Connection, t: &TurnRow) -> rusqlite::Result<(Vec<Target>, i64
     if !own.is_empty() {
         return Ok((own, FROM_CHANGES));
     }
+    let seen = observed(conn, t.id)?;
+    // 2. The worktrees the turn went into, as they were then.
+    if let Some(o) = &seen
+        && !o.enter.is_empty()
+    {
+        let targets = o.enter.iter().map(|&(l, g)| Target::seg(l, g)).collect();
+        return Ok((targets, FROM_CWD));
+    }
+    // 3. The worktree the session ran in changed branch during the turn, and
+    // the session's nearest changes are in it.
+    if let Some(o) = &seen
+        && o.flags & OBS_TRACKED != 0
+        && o.flags & OBS_SWITCHED != 0
+        && let (Some(wt), Some(location)) = (t.worktree, t.location)
+    {
+        let mut near = nearest(conn, t, true)?;
+        if near.is_none() {
+            near = nearest(conn, t, false)?;
+        }
+        if let Some(near) = near
+            && changed_in(conn, near, wt)?
+        {
+            let mut segs: Vec<i64> = Vec::new();
+            for seg in o
+                .start_seg
+                .into_iter()
+                .chain(o.end_seg)
+                .chain(o.stays.iter().copied())
+            {
+                if !segs.contains(&seg) {
+                    segs.push(seg);
+                }
+            }
+            if !segs.is_empty() {
+                let targets = segs.into_iter().map(|g| Target::seg(location, g)).collect();
+                return Ok((targets, FROM_CWD));
+            }
+        }
+    }
     // 4. The nearest turn of the session with changes: before, then after.
     for before in [true, false] {
         match nearest(conn, t, before)? {
@@ -324,7 +484,7 @@ fn resolve(conn: &Connection, t: &TurnRow) -> rusqlite::Result<(Vec<Target>, i64
             return Ok((share, FROM_FOLLOWED));
         }
     }
-    // 6. 7. The cwd's place.
+    // 6. The segment the turn was observed in, or the log's branch.
     let place = match t.location {
         Some(l) => Some(l),
         None => conn
@@ -332,16 +492,23 @@ fn resolve(conn: &Connection, t: &TurnRow) -> rusqlite::Result<(Vec<Target>, i64
             .query_row(params![t.id], |r| r.get(0))
             .optional()?,
     };
-    Ok((
-        place
-            .map(|location| Target {
-                location,
-                weight: 1,
-            })
-            .into_iter()
-            .collect(),
-        FROM_CWD,
-    ))
+    let Some(place) = place else {
+        return Ok((Vec::new(), FROM_CWD));
+    };
+    if let Some(o) = &seen {
+        let mut segs: Vec<i64> = o.end_seg.into_iter().collect();
+        for seg in &o.stays {
+            if !segs.contains(seg) {
+                segs.push(*seg);
+            }
+        }
+        if !segs.is_empty() {
+            let targets = segs.into_iter().map(|g| Target::seg(place, g)).collect();
+            return Ok((targets, FROM_CWD));
+        }
+    }
+    // 7. The branch is not known: the place of the cwd alone.
+    Ok((vec![fallback_target(conn, place)?], FROM_CWD))
 }
 
 /// Settles turns: `work` holds the turns to settle; a turn whose
@@ -410,11 +577,14 @@ fn settle(
         let total: u64 = dist.iter().map(|d| d.weight).sum();
         for target in dist {
             conn.prepare_cached(
-                "INSERT INTO share (turn, location, weight, total, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO share (turn, location, segment, kind, weight, total, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?
             .execute(params![
                 t.id,
                 target.location,
+                target.segment,
+                target.kind,
                 i64::try_from(target.weight).unwrap_or(i64::MAX),
                 i64::try_from(total).unwrap_or(i64::MAX),
                 t.started_at

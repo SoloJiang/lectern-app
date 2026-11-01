@@ -25,9 +25,13 @@ pub(crate) struct PathPlace {
     pub(crate) place: Place,
     /// The worktree (or folder root) the file is in, when it is in one.
     pub(crate) worktree: Option<PathBuf>,
+    /// The directory of the file below the worktree's root, slash separated
+    /// (empty at the root).
+    pub(crate) rel: String,
 }
 
 /// `call.kind`.
+pub(crate) const KIND_EXECUTE: i64 = 1;
 pub(crate) const KIND_SPAWN: i64 = 4;
 
 /// Whether a kind of call has a row.

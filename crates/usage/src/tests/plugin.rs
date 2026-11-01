@@ -19,7 +19,7 @@ use lectern_services::usage::{
 
 use super::support::*;
 use crate::engine::{Engine, FactsReader, PACE, git_facts};
-use crate::testing::{FakeProjects, FakeSessions, ManualTime, TableZone};
+use crate::testing::{FakeGit, FakeProjects, FakeSessions, ManualTime, TableZone};
 use crate::time::WALL_CHECK;
 use crate::{UsageDeps, plugin};
 
@@ -36,6 +36,8 @@ pub(crate) struct Rig {
     pub(crate) sessions: Arc<FakeSessions>,
     pub(crate) projects: Arc<FakeProjects>,
     pub(crate) engine: Arc<Engine>,
+    /// What the repositories say.
+    pub(crate) git: Arc<FakeGit>,
     facts: FactsReader,
     /// Paths that do not exist for the plugin; none at first (the paths of
     /// the fake projects are not on the disk).
@@ -46,6 +48,25 @@ impl Rig {
     /// `setup` declares projects before the plugin starts.
     pub(crate) fn new(sessions: FakeSessions, setup: impl FnOnce(&FakeProjects)) -> Rig {
         Rig::with_facts(sessions, setup, git_facts())
+    }
+
+    /// The same with a table of what the repositories say.
+    pub(crate) fn with_git(
+        sessions: FakeSessions,
+        setup: impl FnOnce(&FakeProjects),
+        git: Arc<FakeGit>,
+    ) -> Rig {
+        let projects = Arc::new(FakeProjects::new());
+        setup(&projects);
+        Rig::build(
+            Arc::new(sessions),
+            projects,
+            tempfile::tempdir().unwrap(),
+            ManualTime::new(NOW),
+            git_facts(),
+            Arc::default(),
+            git,
+        )
     }
 
     /// The same with another reader of what identifies a repository.
@@ -63,6 +84,7 @@ impl Rig {
             ManualTime::new(NOW),
             facts,
             Arc::default(),
+            Arc::default(),
         )
     }
 
@@ -79,9 +101,16 @@ impl Rig {
             time,
             facts,
             vanished,
-            ..
+            git,
+            kernel,
+            driver,
+            backend,
+            engine,
         } = self;
-        Rig::build(sessions, projects, dir, time, facts, vanished)
+        // The first run is gone (its engine has stopped) before the second
+        // begins.
+        drop((kernel, driver, backend, engine));
+        Rig::build(sessions, projects, dir, time, facts, vanished, git)
     }
 
     fn build(
@@ -91,6 +120,7 @@ impl Rig {
         time: ManualTime,
         facts: FactsReader,
         vanished: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        git: Arc<FakeGit>,
     ) -> Rig {
         let executor = Executor::manual();
         let backend = FakeBackend::new();
@@ -105,6 +135,7 @@ impl Rig {
         let usage = usage
             .with_time(&time)
             .with_facts(facts.clone())
+            .with_reads(git.clone())
             .with_exists(Arc::new(move |path| {
                 !gone.lock().unwrap().iter().any(|p| p == path)
             }));
@@ -123,6 +154,7 @@ impl Rig {
             sessions,
             projects,
             engine,
+            git,
             facts,
             vanished,
         }
@@ -992,4 +1024,123 @@ fn plugin_stops_reading_an_index_that_keeps_failing() {
     }
     let all = rig.all();
     assert_eq!(project_input(&all, "lib"), 7);
+}
+
+/// A repository directory that exists (a watch of one that does not fails),
+/// with a table of what the repository says.
+fn real_repo() -> (tempfile::TempDir, PathBuf, Arc<FakeGit>) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("app");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let reads = Arc::new(FakeGit::new());
+    reads.set_heads(
+        &root.join(".git"),
+        &[(&root.join(".git"), Some("refs/heads/feature"))],
+    );
+    (dir, root, reads)
+}
+
+#[test]
+fn plugin_watches_an_open_repository_and_writes_its_reflog_before_settling() {
+    use super::branches::{Repo, batch};
+    let (_dir, root, reads) = real_repo();
+    let common = root.join(".git");
+    let setup = |p: &FakeProjects| {
+        let key = p.repo(&root, &common);
+        p.set_open(&key, true);
+    };
+    let rig = Rig::with_git(sources(), setup, reads);
+    rig.settle();
+    let conn = rusqlite::Connection::open(rig.db()).unwrap();
+    let count = |table: &str| -> i64 {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    // The watch began: a span, the HEAD it started from, the branch's segment.
+    assert_eq!(count("watch_span"), 1);
+    assert_eq!(count("head_baseline"), 1);
+    assert_eq!(count("segment"), 1);
+    assert!(!rig.backend.targets().is_empty());
+    let open = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM watch_span WHERE end_ns IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(open(&conn), 1);
+    // A batch of the reflog is queued and written.
+    let repo = Repo::new(common.to_str().unwrap());
+    let record = repo.commit(&lectern_fs_watch::WorktreeName::Main, 1, 2, NOW + 1000);
+    rig.engine
+        .on_repo_batch(&repo.common, batch(vec![record], vec![]), None);
+    rig.settle();
+    assert_eq!(count("reflog"), 1);
+    let last: i64 = conn
+        .query_row("SELECT last_ns FROM watch_span", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(last, (NOW + 1100) * 1_000_000);
+    // Closing the project ends the span and the watch.
+    rig.kernel().emitter().emit(ProjectEvent::Closed {
+        project: ProjectKey::Git {
+            common_dir: common.as_path().into(),
+        },
+    });
+    rig.settle();
+    assert_eq!(open(&conn), 0);
+}
+
+#[test]
+fn plugin_ends_the_spans_when_it_stops_and_a_crash_ends_them_at_the_last_record() {
+    use super::branches::{Repo, batch};
+    let (_dir, root, reads) = real_repo();
+    let common = root.join(".git");
+    let setup = |p: &FakeProjects| {
+        let key = p.repo(&root, &common);
+        p.set_open(&key, true);
+    };
+    let rig = Rig::with_git(sources(), setup, reads);
+    rig.settle();
+    let repo = Repo::new(common.to_str().unwrap());
+    let record = repo.commit(&lectern_fs_watch::WorktreeName::Main, 1, 2, NOW + 1000);
+    rig.engine
+        .on_repo_batch(&repo.common, batch(vec![record], vec![]), None);
+    rig.settle();
+    let db = rig.db();
+    let spans = |db: &Path| -> Vec<(i64, Option<i64>)> {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.prepare("SELECT last_ns, end_ns FROM watch_span ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let last = (NOW + 1100) * 1_000_000;
+    assert_eq!(spans(&db), [(last, None)]);
+    // Stopping ends the span where Lectern was (the clock), restarting
+    // opens another.
+    let rig = rig.restart(|_| {});
+    rig.settle();
+    let found = spans(&db);
+    assert_eq!(found.len(), 2);
+    assert_eq!(found[0], (last, Some(NOW * 1_000_000)));
+    assert_eq!(found[1].1, None);
+    // A run that did not end its span (a crash) leaves it open: the next
+    // start ends it at the last record read in it.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE watch_span SET end_ns = NULL", [])
+        .unwrap();
+    drop(conn);
+    let opened = crate::store::Store::open(db.parent().unwrap(), NOW)
+        .unwrap()
+        .store;
+    assert_eq!(opened.close_stale_spans().unwrap(), 2);
+    let found = spans(&db);
+    assert!(
+        found.iter().all(|(last, end)| *end == Some(*last)),
+        "{found:?}"
+    );
+    drop(rig);
 }

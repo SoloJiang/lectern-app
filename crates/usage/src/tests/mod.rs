@@ -2,6 +2,9 @@
 
 mod archive;
 mod attribution;
+mod branch_checks;
+mod branch_fixes;
+mod branches;
 mod dedup;
 mod identity;
 mod limits;
