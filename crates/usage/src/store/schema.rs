@@ -26,12 +26,18 @@ pub(crate) struct Schema {
 
 /// The tables this version writes.
 pub(crate) const CURRENT: Schema = Schema {
-    version: 2,
-    create: CREATE_V2,
-    migrations: &[Migration {
-        from: 1,
-        sql: COLD_V2,
-    }],
+    version: 3,
+    create: CREATE_V3,
+    migrations: &[
+        Migration {
+            from: 1,
+            sql: COLD_V2,
+        },
+        Migration {
+            from: 2,
+            sql: LIMITS_V3,
+        },
+    ],
 };
 
 /// Version 1 alone, for the migration tests.
@@ -40,6 +46,17 @@ pub(crate) const V1: Schema = Schema {
     version: 1,
     create: CREATE_V1,
     migrations: &[],
+};
+
+/// Version 2 alone, for the migration tests.
+#[cfg(test)]
+pub(crate) const V2: Schema = Schema {
+    version: 2,
+    create: CREATE_V2,
+    migrations: &[Migration {
+        from: 1,
+        sql: COLD_V2,
+    }],
 };
 
 /// Location kinds.
@@ -66,6 +83,7 @@ pub(crate) const OBSERVATION_TABLES: &[&str] = &[
     "cold_total",
     "cold_anchor",
     "cold_seen",
+    "limit_sample",
 ];
 
 /// The hot / cold split (docs/design/usage.md「冷热分层」), table version 2.
@@ -301,12 +319,43 @@ CREATE INDEX fact_session ON fact (session);
     };
 }
 
+/// The limit samples (docs/design/usage.md「额度快照」), table version 3: the
+/// newest sample of each (agent, source, limit ID, kind), nothing else. A
+/// small entity table that stays hot: it is not archived. `agent` is the
+/// agent label and `limit_id` the text itself ("" for none), not `intern`
+/// IDs, so that a salvage never leaves a sample pointing at a lost string.
+macro_rules! limits_sql {
+    () => {
+        "
+CREATE TABLE limit_sample (
+  id             INTEGER PRIMARY KEY,
+  agent          TEXT NOT NULL,
+  source         INTEGER NOT NULL,
+  limit_id       TEXT NOT NULL,
+  kind           INTEGER NOT NULL,
+  used_percent   REAL NOT NULL,
+  window_minutes INTEGER,
+  resets_at      INTEGER,
+  sampled_at     INTEGER NOT NULL,
+  UNIQUE (agent, source, limit_id, kind)
+);
+"
+    };
+}
+
 /// Version 1 (step 1 of docs/design/usage.md「验收」, first part).
 #[cfg(test)]
 pub(crate) const CREATE_V1: &str = v1_sql!();
 
 /// Version 2: version 1 and the cold tables.
+#[cfg(test)]
 pub(crate) const CREATE_V2: &str = concat!(v1_sql!(), cold_sql!());
+
+/// Version 3: version 2 and the limit samples.
+pub(crate) const CREATE_V3: &str = concat!(v1_sql!(), cold_sql!(), limits_sql!());
 
 /// The step from version 1 to 2.
 pub(crate) const COLD_V2: &str = cold_sql!();
+
+/// The step from version 2 to 3.
+pub(crate) const LIMITS_V3: &str = limits_sql!();

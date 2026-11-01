@@ -18,12 +18,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use lectern_executor::{Executor, Priority};
-use lectern_kernel::{ActivationToken, PluginHandle, ServiceRef, ServiceSet};
+use lectern_fs_watch::{Coalesce, DirBatch, DirSpec, DirWatch, Sink, Watcher};
+use lectern_kernel::{ActivationToken, BusyGuard, PluginHandle, ServiceRef, ServiceSet};
 use lectern_logging::{Ctx, Value, debug, error, info, warn};
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
 use lectern_services::session::{
     Batch, Place as SessionPlace, Record, SessionError, SessionKey, SessionSource, SessionSummary,
-    SessionsChanged, SourceId,
+    SessionsChanged, SourceId, Timestamp,
 };
 use lectern_services::usage::{
     AnalysisId, AnalysisStart, Limits, LocalDate, MeterEvent, MrSource, MrSourceRegistration,
@@ -32,6 +33,7 @@ use lectern_services::usage::{
 };
 
 use crate::LocalZone;
+use crate::limits::{self, Rejected};
 use crate::snapshot::{self, Applied, Owners, Watched};
 use crate::store::cold::{self, Month, Stepped};
 use crate::store::{
@@ -55,6 +57,7 @@ const PLACE_CACHE: usize = 4096;
 
 pub(crate) struct Deps {
     pub(crate) executor: Executor,
+    pub(crate) watcher: Watcher,
     pub(crate) data_dir: PathBuf,
     pub(crate) zone: Arc<dyn LocalZone>,
     pub(crate) time: Time,
@@ -163,6 +166,11 @@ struct State {
     needs_check: bool,
     checking: bool,
     recovered: Option<i64>,
+    /// A task reading the statusline file is queued.
+    statusline_pending: bool,
+    /// The wall-clock time (Unix milliseconds) the latest limits timer waits
+    /// for: the earliest `resets_at` after the last snapshot.
+    limits_timer: Option<i64>,
 }
 
 pub(crate) struct Engine {
@@ -172,7 +180,9 @@ pub(crate) struct Engine {
     projects: ServiceRef<dyn Projects>,
     db: Mutex<Db>,
     state: Mutex<State>,
-    limits: Arc<Limits>,
+    limits: Mutex<Arc<Limits>>,
+    /// The watch on the statusline directory; set once the database is open.
+    statusline: Mutex<Option<DirWatch>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -222,7 +232,8 @@ impl Engine {
             projects,
             db: Mutex::new(Db::Closed),
             state: Mutex::new(State::default()),
-            limits: Arc::new(Limits::default()),
+            limits: Mutex::new(Arc::new(Limits::default())),
+            statusline: Mutex::new(None),
         })
     }
 
@@ -250,6 +261,9 @@ impl Engine {
             state.stopped = true;
             state.handle = None;
         }
+        // Dropping the watch ends its deliveries.
+        let watch = lock(&self.statusline).take();
+        drop(watch);
         if let Some(store) = self.store() {
             store.close();
         }
@@ -325,6 +339,7 @@ impl Engine {
                 let keys: Vec<SessionKey> = self.summaries().into_keys().collect();
                 self.state().unverified.extend(keys);
                 self.verify_now();
+                self.start_limits();
             }
             Err(e) => {
                 let reason = e.reason();
@@ -335,6 +350,130 @@ impl Engine {
         self.mark_all_dirty();
         self.compute();
         self.pump();
+    }
+
+    /// The directory the statusline script writes into (prerequisite C).
+    fn statusline_dir(&self) -> PathBuf {
+        self.deps.data_dir.join("statusline")
+    }
+
+    /// After the database opened: loads the stored samples, watches the
+    /// statusline directory and reads its file once (it may be older than
+    /// this run). Runs in the task that opened the database.
+    fn start_limits(&self) {
+        self.refresh_limits();
+        let watch = self.deps.watcher.watch_dir(
+            DirSpec {
+                root: self.statusline_dir(),
+                coalesce: Coalesce::DIR,
+            },
+            Arc::new(StatuslineSink {
+                engine: self.me.clone(),
+            }),
+        );
+        *lock(&self.statusline) = Some(watch);
+        self.read_statusline();
+    }
+
+    /// A batch of the statusline directory arrived: queue a read, unless
+    /// one is already queued.
+    fn on_statusline(&self, batch: &DirBatch) {
+        let file = self.statusline_dir().join(limits::STATUSLINE_FILE);
+        if !(batch.rescan || batch.root.is_some() || batch.paths.contains(&file)) {
+            return;
+        }
+        {
+            let mut state = self.state();
+            if state.stopped || state.statusline_pending {
+                return;
+            }
+            state.statusline_pending = true;
+        }
+        if !self.spawn(true, |engine| engine.read_statusline()) {
+            self.state().statusline_pending = false;
+        }
+    }
+
+    /// Reads the statusline file into the samples. A file that is too
+    /// large, not JSON or without the windows leaves them as they were.
+    fn read_statusline(&self) {
+        self.state().statusline_pending = false;
+        let Some(store) = self.store() else {
+            return;
+        };
+        let path = self.statusline_dir().join(limits::STATUSLINE_FILE);
+        let now = Timestamp(self.deps.time.now_ms());
+        match limits::read_statusline(&path, now) {
+            Ok(samples) => match store.put_samples(&samples) {
+                Ok(true) => {
+                    debug!("statusline samples stored"; windows = samples.len());
+                    self.refresh_limits();
+                }
+                Ok(false) => {}
+                Err(e) => warn!("statusline samples could not be stored"; code = e.code()),
+            },
+            Err(Rejected::Missing) => debug!("statusline file not there yet"),
+            Err(reason) => warn!("statusline file ignored"; reason = reason.name()),
+        }
+    }
+
+    /// Builds the snapshot from the stored samples at the current time,
+    /// replaces it and emits `UsageEvent::Limits` when the windows or the
+    /// tightest one changed, and arms the timer for the next `resets_at`.
+    fn refresh_limits(&self) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        let samples = match store.samples() {
+            Ok(samples) => samples,
+            Err(e) => {
+                warn!("limit samples could not be read"; code = e.code());
+                return;
+            }
+        };
+        let now = self.deps.time.now_ms();
+        let generation = {
+            let mut current = lock(&self.limits);
+            let next = limits::build(&samples, now, current.generation + 1);
+            if current.windows == next.windows && current.tightest == next.tightest {
+                None
+            } else {
+                let generation = next.generation;
+                *current = Arc::new(next);
+                Some(generation)
+            }
+        };
+        if let Some(generation) = generation {
+            let emitter = self.state().handle.as_ref().map(PluginHandle::emitter);
+            if let Some(emitter) = emitter {
+                emitter.emit(UsageEvent::Limits { generation });
+            }
+        }
+        if let Some(at) = limits::next_reset(&samples, now) {
+            self.arm_limits_timer(at);
+        }
+    }
+
+    /// A timer for the moment a window expires: the snapshot then changes
+    /// without a new sample.
+    fn arm_limits_timer(&self, at: i64) {
+        {
+            let mut state = self.state();
+            if state.limits_timer == Some(at) {
+                return;
+            }
+            state.limits_timer = Some(at);
+        }
+        let fire = self.timer(move |engine| {
+            {
+                let mut state = engine.state();
+                if state.limits_timer == Some(at) {
+                    state.limits_timer = None;
+                }
+            }
+            engine.spawn(false, |engine| engine.refresh_limits());
+        });
+        self.deps.time.at_wall(at, fire);
     }
 
     fn register_open_projects(&self, store: &Store) {
@@ -586,7 +725,12 @@ impl Engine {
         self.log_backfill(&mut state);
         drop(state);
         match stored {
-            Some(out) => self.apply_facts(&out),
+            Some(out) => {
+                if out.limits_changed {
+                    self.refresh_limits();
+                }
+                self.apply_facts(&out);
+            }
             None => self.mark_all_dirty(),
         }
         // Only now may the next read start: its deltas come after these.
@@ -1333,6 +1477,26 @@ impl Engine {
     }
 }
 
+/// Batches of the statusline directory go to the engine; it only queues a
+/// task.
+struct StatuslineSink {
+    engine: Weak<Engine>,
+}
+
+impl Sink<DirBatch> for StatuslineSink {
+    fn deliver(&self, batch: DirBatch, _busy: Option<BusyGuard>) {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.on_statusline(&batch);
+        }
+    }
+
+    fn busy(&self) -> Option<BusyGuard> {
+        let engine = self.engine.upgrade()?;
+        let state = engine.state();
+        state.handle.as_ref()?.busy()
+    }
+}
+
 fn range_of(days: &[(LocalDate, Range<i64>)]) -> Range<i64> {
     match (days.first(), days.last()) {
         (Some(first), Some(last)) => first.1.start..last.1.end,
@@ -1607,7 +1771,7 @@ impl Usage for Engine {
     }
 
     fn limits(&self) -> Arc<Limits> {
-        self.limits.clone()
+        lock(&self.limits).clone()
     }
 
     fn command(&self, command: UsageCommand) {

@@ -13,10 +13,12 @@ use std::path::{Path, PathBuf};
 
 use lectern_logging::{debug, info, warn};
 use lectern_services::session::{Agent, Batch, Cursor, Record, SessionKey, UsageRecord};
+use lectern_services::usage::{LimitKind, LimitSource};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use super::cold::{self, Frozen};
 use super::dedup::{Deltas, FactDelta};
+use super::limits::{self, Sample};
 use super::schema::{LOCATION_DIR, LOCATION_GIT, PROJECT_GIT};
 use super::{Store, StoreError, dedup};
 use crate::key;
@@ -126,6 +128,8 @@ pub(crate) struct Ingested {
     pub(crate) facts_unknown: bool,
     /// The session may include inherited usage (`inheritance_unknown`).
     pub(crate) inheritance_unknown: bool,
+    /// A `RateLimits` record changed a stored limit sample.
+    pub(crate) limits_changed: bool,
     /// The ingest commit counter (`meta.commits`) of this batch.
     pub(crate) commit: i64,
     /// Cursor offsets before and after.
@@ -137,7 +141,7 @@ pub(crate) struct Ingested {
 /// an SQLite integer.
 const MAX_TOKENS: u64 = (i64::MAX as u64) / MICRO;
 
-fn agent_label(agent: &Agent) -> String {
+pub(crate) fn agent_label(agent: &Agent) -> String {
     match agent {
         Agent::ClaudeCode => "agent:claude-code".to_owned(),
         Agent::Codex => "agent:codex".to_owned(),
@@ -466,7 +470,28 @@ fn ingest(
                 }
                 keys.insert(main);
             }
-            Record::ToolStarted(_) | Record::ToolFinished(_) | Record::RateLimits(_) => {}
+            Record::RateLimits(sample) => {
+                for (window, kind) in [
+                    (&sample.primary, LimitKind::Primary),
+                    (&sample.secondary, LimitKind::Secondary),
+                ] {
+                    let Some(window) = window else { continue };
+                    out.limits_changed |= limits::put(
+                        tx,
+                        &Sample {
+                            agent: info.agent.clone(),
+                            source: LimitSource::SessionLog,
+                            limit_id: sample.limit_id.clone(),
+                            kind,
+                            used_percent: window.used_percent,
+                            window_minutes: window.window_minutes,
+                            resets_at: window.resets_at,
+                            sampled_at: sample.at,
+                        },
+                    )?;
+                }
+            }
+            Record::ToolStarted(_) | Record::ToolFinished(_) => {}
         }
     }
 

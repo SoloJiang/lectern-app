@@ -4,12 +4,12 @@
 
 use std::path::Path;
 
-use lectern_services::session::{Agent, Positioned, Record};
+use lectern_services::session::{Agent, Positioned, Record, Timestamp};
 use lectern_services::usage::{Tokens, Window};
 use rusqlite::Connection;
 
 use super::support::*;
-use crate::store::schema::{CREATE_V2, CURRENT, Migration, Schema, V1};
+use crate::store::schema::{CREATE_V3, CURRENT, Migration, Schema, V1, V2};
 use crate::store::{BACKUP_PREFIX, Checked, Mode, SALVAGE_FILE, Step, StoreError, fail_at};
 use crate::testing::FakeSessions;
 
@@ -92,39 +92,39 @@ fn store_records_and_cursor_commit_together() {
     assert_eq!(count(&conn, "fact"), 30);
 }
 
-/// Versions after the current one (2), for the migration tests.
-const V3_STEPS: &[Migration] = &[Migration {
-    from: 2,
-    sql: "CREATE TABLE extra_v3 (id INTEGER PRIMARY KEY);",
+/// Versions after the current one (3), for the migration tests.
+const V4_STEPS: &[Migration] = &[Migration {
+    from: 3,
+    sql: "CREATE TABLE extra_v4 (id INTEGER PRIMARY KEY);",
 }];
-static V3: Schema = Schema {
-    version: 3,
-    create: CREATE_V2,
-    migrations: V3_STEPS,
+static V4: Schema = Schema {
+    version: 4,
+    create: CREATE_V3,
+    migrations: V4_STEPS,
 };
-const V5_STEPS: &[Migration] = &[
-    Migration {
-        from: 2,
-        sql: "CREATE TABLE extra_v3 (id INTEGER PRIMARY KEY);",
-    },
+const V6_STEPS: &[Migration] = &[
     Migration {
         from: 3,
-        sql: "ALTER TABLE extra_v3 ADD COLUMN note TEXT;",
+        sql: "CREATE TABLE extra_v4 (id INTEGER PRIMARY KEY);",
     },
     Migration {
         from: 4,
-        sql: "CREATE TABLE extra_v5 (id INTEGER PRIMARY KEY);",
+        sql: "ALTER TABLE extra_v4 ADD COLUMN note TEXT;",
+    },
+    Migration {
+        from: 5,
+        sql: "CREATE TABLE extra_v6 (id INTEGER PRIMARY KEY);",
     },
 ];
-static V4: Schema = Schema {
-    version: 4,
-    create: CREATE_V2,
-    migrations: V5_STEPS,
-};
 static V5: Schema = Schema {
     version: 5,
-    create: CREATE_V2,
-    migrations: V5_STEPS,
+    create: CREATE_V3,
+    migrations: V6_STEPS,
+};
+static V6: Schema = Schema {
+    version: 6,
+    create: CREATE_V3,
+    migrations: V6_STEPS,
 };
 
 fn backups(dir: &Path) -> Vec<String> {
@@ -144,16 +144,16 @@ fn store_migration_keeps_observations_after_a_backup() {
     h.read_all(&fake, "s");
     let before = h.total();
     h.close(true);
-    let reopened = h.open_with(&V3);
-    assert_eq!(reopened.migrated_from, Some(2));
+    let reopened = h.open_with(&V4);
+    assert_eq!(reopened.migrated_from, Some(3));
     assert_eq!(h.store().mode(), Mode::Writable);
     assert_eq!(h.total(), before);
-    // The copy is the version-2 file, whole.
-    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}2")));
-    assert_eq!(pragma(&copy, "user_version"), 2);
+    // The copy is the version-3 file, whole.
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}3")));
+    assert_eq!(pragma(&copy, "user_version"), 3);
     assert_eq!(count(&copy, "usage_source"), 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 3);
+    assert_eq!(pragma(&main, "user_version"), 4);
     assert_eq!(count(&main, "usage_source"), 5);
     drop((copy, main));
     // Writing still works on the migrated file.
@@ -163,12 +163,12 @@ fn store_migration_keeps_observations_after_a_backup() {
 
     // Two more migrations: only the two most recent copies stay.
     h.close(true);
-    h.open_with(&V4);
-    h.close(true);
     h.open_with(&V5);
+    h.close(true);
+    h.open_with(&V6);
     assert_eq!(
         backups(h.dir.path()),
-        [format!("{BACKUP_PREFIX}3"), format!("{BACKUP_PREFIX}4")]
+        [format!("{BACKUP_PREFIX}4"), format!("{BACKUP_PREFIX}5")]
     );
     assert_eq!(h.total().input, 7);
 }
@@ -186,7 +186,7 @@ fn store_migration_from_version_1_adds_the_cold_tables() {
     conn.execute_batch(
         "DROP TABLE cold_part; DROP TABLE cold_month; DROP TABLE cold_total;
          DROP TABLE cold_anchor; DROP TABLE cold_seen; DROP TABLE fact_bucket;
-         DROP INDEX usage_source_at; DROP INDEX turn_started;
+         DROP INDEX usage_source_at; DROP INDEX turn_started; DROP TABLE limit_sample;
          PRAGMA user_version = 1;",
     )
     .unwrap();
@@ -214,13 +214,14 @@ fn store_migration_from_version_1_adds_the_cold_tables() {
     assert_eq!(reopened.migrated_from, Some(1));
     assert_eq!(h.total(), before);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 2);
+    assert_eq!(pragma(&main, "user_version"), 3);
     for table in [
         "cold_part",
         "cold_month",
         "cold_total",
         "cold_anchor",
         "cold_seen",
+        "limit_sample",
     ] {
         assert_eq!(count(&main, table), 0, "{table}");
     }
@@ -232,6 +233,41 @@ fn store_migration_from_version_1_adds_the_cold_tables() {
 }
 
 #[test]
+fn store_migration_from_version_2_adds_the_limit_samples() {
+    let mut h = Harness::new();
+    let fake = session("s", 5);
+    h.read_all(&fake, "s");
+    let before = h.total();
+    h.close(true);
+    // A version-2 file: the same rows, without the limit samples.
+    let conn = raw(&h.db_path());
+    conn.execute_batch("DROP TABLE limit_sample; PRAGMA user_version = 2;")
+        .unwrap();
+    drop(conn);
+    let fresh = tempfile::tempdir().unwrap();
+    drop(crate::store::Store::open_with(fresh.path(), &V2, h.now).unwrap());
+    let names = |path: &Path| -> String {
+        raw(path)
+            .query_row(
+                "SELECT group_concat(name) FROM (SELECT name FROM sqlite_schema ORDER BY name)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(names(&h.db_path()), names(&fresh.path().join("usage.db")));
+    let reopened = h.open_with(&CURRENT);
+    assert_eq!(reopened.migrated_from, Some(2));
+    assert_eq!(h.total(), before);
+    let main = raw(&h.db_path());
+    assert_eq!(pragma(&main, "user_version"), 3);
+    assert_eq!(count(&main, "limit_sample"), 0);
+    assert_eq!(count(&main, "usage_source"), 5);
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}2")));
+    assert_eq!(pragma(&copy, "user_version"), 2);
+}
+
+#[test]
 fn store_failed_backup_leaves_the_old_version_read_only() {
     let mut h = Harness::new();
     let fake = session("s", 5);
@@ -239,14 +275,14 @@ fn store_failed_backup_leaves_the_old_version_read_only() {
     let before = h.total();
     h.close(true);
     // Something that cannot be replaced sits where the copy goes.
-    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}2"));
+    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}3"));
     std::fs::create_dir(&blocker).unwrap();
     std::fs::write(blocker.join("keep"), b"x").unwrap();
-    let reopened = h.open_with(&V3);
+    let reopened = h.open_with(&V4);
     assert_eq!(reopened.migrated_from, None);
     assert!(matches!(h.store().mode(), Mode::Unwritable(_)));
     let version = pragma(&raw(&h.db_path()), "user_version");
-    assert_eq!(version, 2, "not migrated");
+    assert_eq!(version, 3, "not migrated");
     // Read only: no write, the old data still readable.
     let more = session("t", 2);
     let refused = h.try_read_once(&more, "t", 1 << 20);
@@ -346,6 +382,13 @@ fn store_salvage_keeps_every_readable_row() {
     }
     h.read_every(&fake);
     let before = h.total();
+    // A limit sample is an observation: the salvage copies it.
+    let limit = crate::limits::parse_statusline(
+        br#"{"rate_limits": {"five_hour": {"used_percentage": 42, "resets_at": 1792680000}}}"#,
+        Timestamp(OCT_20),
+    )
+    .unwrap();
+    assert!(h.store().put_samples(&limit).unwrap());
     h.close(false);
     let (size, root) = root_page(&h.db_path(), "usage_source");
     let leaf = first_child(&h.db_path(), size, root);
@@ -372,6 +415,11 @@ fn store_salvage_keeps_every_readable_row() {
     // start give back every usage, once.
     let p = h.project(&repo, Window::D7);
     assert!(p.project.key.is_some());
+    assert_eq!(
+        h.store().samples().unwrap(),
+        limit,
+        "the limit sample survived"
+    );
     h.read_every(&fake);
     assert_eq!(h.total(), before);
     assert_eq!(count(&raw(&h.db_path()), "usage_source"), 900);
