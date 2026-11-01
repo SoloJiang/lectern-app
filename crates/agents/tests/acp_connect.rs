@@ -427,8 +427,12 @@ fn acp_a_handshake_that_takes_over_30_seconds_fails() {
         h.clock.advance(Duration::from_secs(29));
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(h.snapshot(&session).link, Link::Connecting, "{script}");
-        h.clock.advance(Duration::from_secs(2));
-        h.wait_link(&session, Link::Failed(LinkError::Protocol));
+        // The link reads the clock after the fake process has announced itself, so
+        // the 29 seconds above may fall before the deadline is set: keep advancing.
+        h.wait(&session, "the handshake to fail", |s| {
+            h.clock.advance(Duration::from_secs(2));
+            s.link == Link::Failed(LinkError::Protocol)
+        });
         wait_dead(record);
     }
 }
