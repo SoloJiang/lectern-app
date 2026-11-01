@@ -1,5 +1,5 @@
 //! Step 2 of the design's acceptance: highlighting on the executor, the
-//! handoff plugin, the side-by-side diff, folds that expand and the Analyze
+//! handoff and usage plugins, the side-by-side diff, folds that expand and the Analyze
 //! commands (docs/design/review_view.md「测试」「验收」第 2 步).
 
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use lectern_services::usage::{
 };
 use lectern_services::workspace::WorkspaceCommand;
 use lectern_syntax::TokenKind;
+use lectern_ui::semantic::Record;
 
 use crate::highlight::Half;
 use crate::items::{DiffMode, Item, ItemKey};
@@ -535,6 +536,13 @@ fn space_opens_the_context_panel_on_the_selected_row(cx: &mut TestAppContext) {
 
 // ----- usage -----------------------------------------------------------------
 
+/// A `SessionUsage` in the shape `usage` gives it (docs/design/usage.md
+/// 「接口」, `snapshot::session`): the branch rows with the session's most
+/// first, each naming the worktree that has the branch checked out and
+/// carrying the full reference name; the "unassigned" row last, with no
+/// worktree and the session's part as its cumulative; `shared` false (a
+/// branch in several MRs comes with the MR steps); the turns of the
+/// session's own that have usage, by the `TurnId` the log gave them.
 pub fn session_usage() -> UsageSnapshot {
     let tokens = |n: u64| Tokens {
         input: n,
@@ -554,6 +562,16 @@ pub fn session_usage() -> UsageSnapshot {
         rows: Arc::from(vec![
             SessionRow {
                 key: RowKey::Branch {
+                    use_id: UseId([2; 16]),
+                    branch: branch("refs/heads/feat", "/fake"),
+                },
+                worktree: Some(worktree()),
+                cumulative: tokens(12_000),
+                session_part: tokens(3_000),
+                shared: false,
+            },
+            SessionRow {
+                key: RowKey::Branch {
                     use_id: UseId([1; 16]),
                     branch: branch("refs/heads/other", "/elsewhere"),
                 },
@@ -563,14 +581,13 @@ pub fn session_usage() -> UsageSnapshot {
                 shared: false,
             },
             SessionRow {
-                key: RowKey::Branch {
-                    use_id: UseId([2; 16]),
-                    branch: branch("refs/heads/feat", "/fake"),
+                key: RowKey::Unassigned {
+                    unattributable: tokens(100),
                 },
-                worktree: Some(worktree()),
-                cumulative: tokens(12_000),
-                session_part: tokens(3_000),
-                shared: true,
+                worktree: None,
+                cumulative: tokens(1_000),
+                session_part: tokens(1_000),
+                shared: false,
             },
         ]),
         turns: Arc::from(vec![(
@@ -580,10 +597,21 @@ pub fn session_usage() -> UsageSnapshot {
     })
 }
 
+fn has_usage_rows(records: &[Record]) -> bool {
+    records.iter().any(|record| {
+        record
+            .semantic
+            .id
+            .as_str()
+            .starts_with("review.brief.usage")
+    })
+}
+
 #[gpui::test]
 fn usage_rows_and_turn_tokens(cx: &mut TestAppContext) {
+    // The usage plugin alone: the reader and the code navigation are absent.
     let rig = Rig::new(cx);
-    rig.enable_handoff(cx);
+    rig.enable_usage(cx);
     locate(&rig);
     let query = UsageQuery::Session {
         session: session_key(),
@@ -592,7 +620,7 @@ fn usage_rows_and_turn_tokens(cx: &mut TestAppContext) {
     let opened = open_sample(cx, &rig);
     assert_eq!(rig.usage.watched(), std::slice::from_ref(&query));
     let records = opened.record(cx);
-    // The branch under review comes first.
+    // The branch under review comes first, the rows without a branch last.
     let rows: Vec<&str> = records
         .iter()
         .filter(|record| {
@@ -608,16 +636,20 @@ fn usage_rows_and_turn_tokens(cx: &mut TestAppContext) {
         rows,
         [
             "review.brief.usage.item[feat]",
-            "review.brief.usage.item[other]"
+            "review.brief.usage.item[other]",
+            "review.brief.usage.item[Not on any branch]"
         ]
     );
     let feat = must(&records, "review.brief.usage.item[feat]");
     assert_eq!(attr(feat, "tokens").as_deref(), Some("12000"));
     assert_eq!(attr(feat, "percent").as_deref(), Some("25"));
-    assert_eq!(attr(feat, "shared").as_deref(), Some("true"));
+    assert_eq!(attr(feat, "shared").as_deref(), Some("false"));
     let other = must(&records, "review.brief.usage.item[other]");
     assert_eq!(attr(other, "percent").as_deref(), Some("10"));
     assert_eq!(attr(other, "shared").as_deref(), Some("false"));
+    let unassigned = must(&records, "review.brief.usage.item[Not on any branch]");
+    assert_eq!(attr(unassigned, "tokens").as_deref(), Some("1000"));
+    assert_eq!(attr(unassigned, "percent").as_deref(), Some("100"));
     let turn = must(&records, "review.turn.item[0:1]");
     assert_eq!(attr(turn, "tokens").as_deref(), Some("1234"));
     // The toolbar's second line names the agent, the branch of the worktree
@@ -630,6 +662,14 @@ fn usage_rows_and_turn_tokens(cx: &mut TestAppContext) {
         subtitle.as_deref(),
         Some("Claude Code \u{00B7} feat \u{00B7} 1 turn")
     );
+    // The handoff is absent and the screen says so; usage did not need it.
+    assert!(
+        must(&records, "review.step.item[0].open")
+            .semantic
+            .state
+            .disabled
+    );
+    assert!(rig.code_intel.focus().is_empty());
 
     // A change of the snapshot reaches the screen through the event.
     let UsageSnapshot::Session(mut changed) = session_usage() else {
@@ -644,7 +684,7 @@ fn usage_rows_and_turn_tokens(cx: &mut TestAppContext) {
     )]);
     rig.usage
         .set(query.clone(), UsageSnapshot::Session(changed));
-    rig.handoff
+    rig.usage_kernel
         .inner()
         .expect("the kernel runs")
         .emitter()
@@ -666,8 +706,11 @@ fn usage_rows_and_turn_tokens(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn without_the_handoff_there_is_no_usage(cx: &mut TestAppContext) {
+fn without_the_usage_plugin_there_is_no_usage(cx: &mut TestAppContext) {
+    // The handoff is there; the usage plugin is not.
     let rig = Rig::new(cx);
+    rig.enable_handoff(cx);
+    locate(&rig);
     rig.usage.set(
         UsageQuery::Session {
             session: session_key(),
@@ -677,20 +720,93 @@ fn without_the_handoff_there_is_no_usage(cx: &mut TestAppContext) {
     let opened = open_sample(cx, &rig);
     assert!(rig.usage.watched().is_empty());
     let records = opened.record(cx);
-    assert!(!records.iter().any(|record| {
-        record
-            .semantic
-            .id
-            .as_str()
-            .starts_with("review.brief.usage")
-    }));
+    assert!(!has_usage_rows(&records));
     assert!(attr(must(&records, "review.turn.item[0:1]"), "tokens").is_none());
+    // The buttons of the handoff work all the same.
+    assert!(
+        !must(&records, "review.step.item[0].open")
+            .semantic
+            .state
+            .disabled
+    );
+}
+
+#[gpui::test]
+fn usage_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    rig.enable_handoff(cx);
+    rig.enable_usage(cx);
+    locate(&rig);
+    let query = UsageQuery::Session {
+        session: session_key(),
+    };
+    rig.usage.set(query.clone(), session_usage());
+    let opened = open_sample(cx, &rig);
+    assert!(has_usage_rows(&opened.record(cx)));
+    assert_eq!(rig.usage.released(), 0);
+
+    rig.usage_kernel.deactivate();
+    rig.settle(cx);
+    // The screen goes on; the rows and the tokens are gone; the watch is let
+    // go; the handoff is untouched.
+    let records = opened.record(cx);
+    assert!(!has_usage_rows(&records));
+    assert!(attr(must(&records, "review.turn.item[0:1]"), "tokens").is_none());
+    assert!(find(&records, "review.brief").is_some());
+    assert_eq!(rig.usage.released(), 1);
+    assert!(
+        !must(&records, "review.step.item[0].open")
+            .semantic
+            .state
+            .disabled
+    );
+    assert_eq!(rig.reader.live(), 2);
+    assert_eq!(rig.contributions.released(), 0);
+
+    // It comes back: the screen watches again.
+    rig.enable_usage(cx);
+    let records = opened.record(cx);
+    assert!(has_usage_rows(&records));
+    assert_eq!(
+        attr(must(&records, "review.turn.item[0:1]"), "tokens").as_deref(),
+        Some("1234")
+    );
+    assert_eq!(rig.usage.watched().len(), 2);
+    close(cx, opened);
+    assert_eq!(rig.usage.released(), 2);
+}
+
+#[gpui::test]
+fn usage_that_arrives_after_the_screen_is_read_when_it_does(cx: &mut TestAppContext) {
+    // The screen is open before the usage plugin has started (the plugins
+    // activate after the first frame; a screen may be first).
+    let rig = Rig::new(cx);
+    locate(&rig);
+    rig.usage.set(
+        UsageQuery::Session {
+            session: session_key(),
+        },
+        session_usage(),
+    );
+    let opened = open_sample(cx, &rig);
+    assert!(rig.usage.watched().is_empty());
+    rig.enable_usage(cx);
+    assert_eq!(rig.usage.watched().len(), 1);
+    let records = opened.record(cx);
+    assert!(has_usage_rows(&records));
+    assert_eq!(
+        attr(must(&records, "review.turn.item[0:1]"), "tokens").as_deref(),
+        Some("1234")
+    );
+    close(cx, opened);
+    assert_eq!(rig.usage.released(), 1);
 }
 
 #[gpui::test]
 fn handoff_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
     let rig = Rig::new(cx);
     rig.enable_handoff(cx);
+    rig.enable_usage(cx);
     locate(&rig);
     rig.usage.set(
         UsageQuery::Session {
@@ -710,7 +826,7 @@ fn handoff_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
 
     rig.handoff.deactivate();
     rig.settle(cx);
-    // The screen goes on; the buttons are grey; the usage watch is let go.
+    // The screen goes on; the buttons are grey; the usage is not touched.
     let records = opened.record(cx);
     assert!(
         must(&records, "review.step.item[0].open")
@@ -719,14 +835,12 @@ fn handoff_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
             .disabled
     );
     assert!(find(&records, "review.brief").is_some());
-    assert!(!records.iter().any(|record| {
-        record
-            .semantic
-            .id
-            .as_str()
-            .starts_with("review.brief.usage")
-    }));
-    assert_eq!(rig.usage.released(), 1);
+    assert!(has_usage_rows(&records));
+    assert_eq!(
+        attr(must(&records, "review.turn.item[0:1]"), "tokens").as_deref(),
+        Some("1234")
+    );
+    assert_eq!(rig.usage.released(), 0);
     select(&opened, cx, row_key(&step_key(), Some(1), None));
     let mut visual = opened.visual(cx);
     visual.dispatch_action(crate::actions::OpenFile);
@@ -735,7 +849,7 @@ fn handoff_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
     // The review-view plugin is still active: registrations are held.
     assert_eq!(rig.contributions.released(), 0);
 
-    // It comes back: everything is done again.
+    // It comes back: everything is done again, the usage watch stays one.
     rig.enable_handoff(cx);
     assert!(
         !must(&opened.record(cx), "review.step.item[0].open")
@@ -743,7 +857,7 @@ fn handoff_plugin_deactivates_on_its_own(cx: &mut TestAppContext) {
             .state
             .disabled
     );
-    assert_eq!(rig.usage.watched().len(), 2);
+    assert_eq!(rig.usage.watched().len(), 1);
 }
 
 // ----- side by side ---------------------------------------------------------------

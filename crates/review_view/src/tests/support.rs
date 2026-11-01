@@ -340,6 +340,9 @@ pub struct Rig {
     /// "review-view-handoff", a kernel of its own (a `TestKernel` holds one
     /// plugin); not active until `enable_handoff`.
     pub handoff: TestKernel,
+    /// "review-view-usage", a kernel of its own; not active until
+    /// `enable_usage`.
+    pub usage_kernel: TestKernel,
     /// The highlight tasks run when the test says so (`run_tasks`).
     pub executor: Executor,
     pub review: Arc<FakeReview>,
@@ -387,7 +390,7 @@ impl Rig {
         let contributions_service: Arc<dyn Contributions> = contributions.clone();
         let sessions_service: Arc<dyn SessionSource> = sessions.clone();
         let executor = Executor::manual();
-        let (review_view, handoff_plugin) = plugins(executor.clone());
+        let (review_view, handoff_plugin, usage_plugin) = plugins(executor.clone());
         let kernel = TestKernel::new(review_view)
             .mock::<dyn Contributions>(contributions_service)
             .mock::<dyn Review>(review_service)
@@ -400,11 +403,12 @@ impl Rig {
         let usage_service: Arc<dyn Usage> = usage.clone();
         let handoff = TestKernel::new(handoff_plugin)
             .mock::<dyn Reader>(reader_service)
-            .mock::<dyn CodeIntel>(code_intel_service)
-            .mock::<dyn Usage>(usage_service);
+            .mock::<dyn CodeIntel>(code_intel_service);
+        let usage_kernel = TestKernel::new(usage_plugin).mock::<dyn Usage>(usage_service);
         Rig {
             kernel,
             handoff,
+            usage_kernel,
             executor,
             review,
             contributions,
@@ -420,6 +424,14 @@ impl Rig {
         self.handoff
             .activate()
             .expect("the handoff plugin activates");
+        self.settle(cx);
+    }
+
+    /// Activates "review-view-usage".
+    pub fn enable_usage(&self, cx: &mut TestAppContext) {
+        self.usage_kernel
+            .activate()
+            .expect("the usage plugin activates");
         self.settle(cx);
     }
 
@@ -444,6 +456,9 @@ impl Rig {
             kernel.barrier();
         }
         if let Some(kernel) = self.handoff.inner() {
+            kernel.barrier();
+        }
+        if let Some(kernel) = self.usage_kernel.inner() {
             kernel.barrier();
         }
         cx.run_until_parked();

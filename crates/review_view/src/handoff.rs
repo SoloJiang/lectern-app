@@ -1,10 +1,11 @@
 //! What the model hands to other plugins (docs/design/review_view.md「接口」
 //! 「界面」): the open file in the reader (⇧⌘O), the focus for code
 //! navigation (the files of the review, the file the agent touched, the
-//! selected row), the session's usage, and Space for the context panel. All
-//! of it goes through `Shared`'s handoff services; when the plugin
-//! "review-view-handoff" is not there, none of it happens and the screen
-//! works without it.
+//! selected row) and Space for the context panel. All of it goes through
+//! `Shared`'s handoff services; when the plugin "review-view-handoff" is not
+//! there, none of it happens and the screen works without it. The session's
+//! usage (the last section) comes from the plugin "review-view-usage" and
+//! does not need the handoff.
 
 use std::sync::Arc;
 
@@ -393,12 +394,11 @@ impl ReviewModel {
     }
 
     /// The handoff services arrived or left: everything that depends on
-    /// them is done again, or let go.
+    /// them is done again, or let go. The usage is not among them
+    /// (`usage_changed`).
     pub(crate) fn handoff_changed(&mut self, cx: &mut Context<ReviewModel>) {
         self.handed_off = HandedOff::default();
         if self.can_hand_off() {
-            self.usage_interest = None;
-            self.attach_usage();
             self.sync_focus();
             self.sync_current();
             let held: Vec<_> = self
@@ -410,10 +410,20 @@ impl ReviewModel {
                 self.after_rows(&key, &rows);
             }
         } else {
-            self.usage_interest = None;
+            self.shares.clear();
+        }
+        cx.notify();
+    }
+
+    /// The usage service arrived or left: the watch is made again on the
+    /// service that is there, or let go.
+    pub(crate) fn usage_changed(&mut self, cx: &mut Context<ReviewModel>) {
+        self.usage_interest = None;
+        if self.shared.has_usage() {
+            self.attach_usage();
+        } else {
             self.usage_query = None;
             self.usage = None;
-            self.shares.clear();
         }
         self.list
             .remeasure_items(crate::model::BRIEF_ITEM..crate::model::BRIEF_ITEM + 1);

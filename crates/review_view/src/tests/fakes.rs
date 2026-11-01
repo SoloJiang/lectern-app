@@ -1,5 +1,5 @@
-//! The fakes of the three handoff services: they record what the screens
-//! hand over and answer from what the test sets.
+//! The fakes of the three services of the handoff and usage plugins: they
+//! record what the screens hand over and answer from what the test sets.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

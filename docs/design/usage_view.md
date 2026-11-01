@@ -72,7 +72,7 @@ pub const DATA_PLUGIN_ID: &str = "usage-view-data";
 
 ### 插件
 
-kernel 没有可选依赖，所以与 [project_home](project_home.md#本-crate-的公开项) 的 `project-home-usage`、[review_view](review_view.md) 的 `review-view-handoff` 相同，拆成两个插件：`usage` 插件失败或停用时，侧栏底部的 Usage 标签照常显示，点进来是「现在无法显示用量」，statusline 的开关照常可用。
+kernel 没有可选依赖，所以与 [project_home](project_home.md#本-crate-的公开项) 的 `project-home-usage`、[review_view](review_view.md) 的 `review-view-usage` 相同，拆成两个插件：`usage` 插件失败或停用时，侧栏底部的 Usage 标签照常显示，点进来是「现在无法显示用量」，statusline 的开关照常可用。
 
 | 插件 | 提供 | 依赖 | 激活 | 职责 |
 |---|---|---|---|---|

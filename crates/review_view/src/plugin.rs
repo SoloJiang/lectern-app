@@ -40,6 +40,9 @@ pub const PLUGIN_ID: &str = "review-view";
 /// The ID of "review-view-handoff" in the `PluginSet`.
 pub const HANDOFF_ID: &str = "review-view-handoff";
 
+/// The ID of "review-view-usage" in the `PluginSet`.
+pub const USAGE_ID: &str = "review-view-usage";
+
 /// The ID of the inspector page of the Progress list.
 pub const FILES_TAB: &str = "files";
 
@@ -65,8 +68,11 @@ pub(crate) enum Job {
     Usage {
         query: UsageQuery,
     },
-    /// The handoff services arrived or left.
+    /// The handoff services (the reader and the code navigation) arrived or
+    /// left.
     Handoff,
+    /// The usage service arrived or left.
+    UsageService,
     /// A highlight task finished: the spans of a window.
     Spans {
         key: SpanKey,
@@ -91,14 +97,13 @@ pub(crate) enum Job {
 pub(crate) type JobSender = mpsc::UnboundedSender<Job>;
 pub(crate) type JobReceiver = mpsc::UnboundedReceiver<Job>;
 
-/// The three services of "review-view-handoff". Taken from `Shared` by copy
-/// (a clone of the references); `ServiceRef::get` is None once a provider is
+/// The two services of "review-view-handoff". Taken from `Shared` by copy (a
+/// clone of the references); `ServiceRef::get` is None once a provider is
 /// deactivated.
 #[derive(Clone)]
 pub(crate) struct Handoff {
     pub reader: ServiceRef<dyn Reader>,
     pub code_intel: ServiceRef<dyn CodeIntel>,
-    pub usage: ServiceRef<dyn Usage>,
 }
 
 /// Shared by the plugins and every screen. `Mutex`es of options: the plugins
@@ -109,6 +114,9 @@ pub(crate) struct Shared {
     sessions: Mutex<Option<ServiceSet<dyn SessionSource>>>,
     /// Filled by "review-view-handoff"; the screens work without it.
     handoff: Mutex<Option<Handoff>>,
+    /// Filled by "review-view-usage"; the screens work without it, and
+    /// without the handoff the other way round.
+    usage: Mutex<Option<ServiceRef<dyn Usage>>>,
     /// The handle of this activation of "review-view": the highlight tasks
     /// are submitted through it.
     handle: Mutex<Option<PluginHandle>>,
@@ -135,6 +143,7 @@ impl Shared {
             review: Mutex::new(None),
             sessions: Mutex::new(None),
             handoff: Mutex::new(None),
+            usage: Mutex::new(None),
             handle: Mutex::new(None),
             executor,
             warned: Mutex::new(HashSet::new()),
@@ -147,6 +156,11 @@ impl Shared {
     /// Whether the handoff services are there (their plugin is active).
     pub(crate) fn has_handoff(&self) -> bool {
         lock(&self.handoff).is_some()
+    }
+
+    /// Whether the usage service is there (its plugin is active).
+    pub(crate) fn has_usage(&self) -> bool {
+        lock(&self.usage).is_some()
     }
 
     pub(crate) fn with_reader<R>(&self, f: impl FnOnce(&dyn Reader) -> R) -> Option<R> {
@@ -162,7 +176,7 @@ impl Shared {
     }
 
     pub(crate) fn with_usage<R>(&self, f: impl FnOnce(&dyn Usage) -> R) -> Option<R> {
-        let usage = lock(&self.handoff).as_ref()?.usage.clone();
+        let usage = lock(&self.usage).as_ref()?.clone();
         let admitted = usage.get()?;
         Some(f(&*admitted))
     }
@@ -313,6 +327,13 @@ impl Shared {
         }
     }
 
+    fn usage_changed(&self) {
+        let screens = lock(&self.screens);
+        for (_, _, tx) in screens.iter() {
+            let _ = tx.unbounded_send(Job::UsageService);
+        }
+    }
+
     fn clear(&self) {
         *lock(&self.contributions) = None;
         *lock(&self.review) = None;
@@ -328,16 +349,19 @@ pub struct ReviewViewPlugin {
     shared: Arc<Shared>,
 }
 
-/// The two plugins, to be put in the `PluginSet` by `app`: "review-view" and
-/// "review-view-handoff". They share one [`Shared`]. `executor` is the
-/// process's, for the highlight tasks. Does no IO.
-pub fn plugins(executor: Executor) -> (ReviewViewPlugin, HandoffPlugin) {
+/// The three plugins, to be put in the `PluginSet` by `app`: "review-view",
+/// "review-view-handoff" and "review-view-usage". They share one [`Shared`].
+/// `executor` is the process's, for the highlight tasks. Does no IO.
+pub fn plugins(executor: Executor) -> (ReviewViewPlugin, HandoffPlugin, ReviewViewUsagePlugin) {
     let shared = Arc::new(Shared::new(executor));
     (
         ReviewViewPlugin {
             shared: shared.clone(),
         },
-        HandoffPlugin { shared },
+        HandoffPlugin {
+            shared: shared.clone(),
+        },
+        ReviewViewUsagePlugin { shared },
     )
 }
 
@@ -439,10 +463,10 @@ impl Drop for ReviewViewActive {
     }
 }
 
-/// The plugin "review-view-handoff": requires `dyn Reader`, `dyn CodeIntel`
-/// and `dyn Usage`, activates after the first frame. The review screens work
+/// The plugin "review-view-handoff": requires `dyn Reader` and
+/// `dyn CodeIntel`, activates after the first frame. The review screens work
 /// without it; with it they hand off to the reader and the code navigation
-/// and show the session's usage (docs/design/review_view.md「接口」「插件」).
+/// (docs/design/review_view.md「接口」「插件」).
 pub struct HandoffPlugin {
     shared: Arc<Shared>,
 }
@@ -451,11 +475,7 @@ impl Plugin for HandoffPlugin {
     fn manifest(&self) -> Manifest {
         Manifest {
             provides: Vec::new(),
-            requires: vec![
-                service::<dyn Reader>(),
-                service::<dyn CodeIntel>(),
-                service::<dyn Usage>(),
-            ],
+            requires: vec![service::<dyn Reader>(), service::<dyn CodeIntel>()],
             activation: vec![Activation::AfterFirstFrame],
         }
     }
@@ -464,10 +484,7 @@ impl Plugin for HandoffPlugin {
         let handoff = Handoff {
             reader: ctx.service::<dyn Reader>(),
             code_intel: ctx.service::<dyn CodeIntel>(),
-            usage: ctx.service::<dyn Usage>(),
         };
-        let shared = self.shared.clone();
-        ctx.on::<UsageEvent>(move |event, _| shared.on_usage(event));
         Ok(Box::new(HandoffActive {
             shared: self.shared.clone(),
             handoff: Some(handoff),
@@ -494,6 +511,62 @@ impl Drop for HandoffActive {
         let had = lock(&self.shared.handoff).take().is_some();
         if had {
             self.shared.handoff_changed();
+        }
+    }
+}
+
+/// The plugin "review-view-usage": requires `dyn Usage` only, activates after
+/// the first frame. The review screens work without it; with it they show the
+/// session's usage in the brief and in the turn titles. It does not depend
+/// on "review-view-handoff", nor the other way round (docs/design/review_view.md
+/// 「接口」「插件」), the way `ProjectHomeUsagePlugin` and `WorktreesUsagePlugin`
+/// stand apart from their screens.
+pub struct ReviewViewUsagePlugin {
+    shared: Arc<Shared>,
+}
+
+impl Plugin for ReviewViewUsagePlugin {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            provides: Vec::new(),
+            requires: vec![service::<dyn Usage>()],
+            activation: vec![Activation::AfterFirstFrame],
+        }
+    }
+
+    /// Takes the service reference and subscribes. `Shared` is written in
+    /// `started`: `activate` has no side effects.
+    fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        let usage = ctx.service::<dyn Usage>();
+        let shared = self.shared.clone();
+        ctx.on::<UsageEvent>(move |event, _| shared.on_usage(event));
+        Ok(Box::new(UsageActive {
+            shared: self.shared.clone(),
+            usage: Some(usage),
+        }))
+    }
+}
+
+struct UsageActive {
+    shared: Arc<Shared>,
+    usage: Option<ServiceRef<dyn Usage>>,
+}
+
+impl Active for UsageActive {
+    fn started(&mut self, _: PluginHandle) {
+        if let Some(usage) = self.usage.take() {
+            *lock(&self.shared.usage) = Some(usage);
+            self.shared.usage_changed();
+        }
+    }
+}
+
+impl Drop for UsageActive {
+    /// The screens let go of their watches when they hear of it.
+    fn drop(&mut self) {
+        let had = lock(&self.shared.usage).take().is_some();
+        if had {
+            self.shared.usage_changed();
         }
     }
 }

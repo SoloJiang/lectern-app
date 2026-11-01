@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。`worktrees` 的两个插件已装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，见「worktrees 的装配」），`Driver::open(Worktree)` 与 `app/switch_worktree` 随之生效。`terminal` 插件已装配（[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「terminal 的装配」）。`conversation` 的三个插件与 `agents` 的 `conversations` 已装配（[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#24](https://github.com/SoloJiang/lectern-app/issues/24)，见「conversation 的装配」），`project_home` 的 `project-home-waiting`（会话行的等待标记，conversation 设计的 H）也已装配，共 20 个插件（见「project_home 的等待标记」）。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查等 `review-view-handoff` 装配后再做（「与设计的差异」）。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装；会话用量拆成的 `review-view-usage` 也已装配（`Refs #31`），简报的用量行和轮次标题的 token 因此生效。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。`worktrees` 的两个插件已装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，见「worktrees 的装配」），`Driver::open(Worktree)` 与 `app/switch_worktree` 随之生效。`terminal` 插件已装配（[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「terminal 的装配」）。`conversation` 的三个插件与 `agents` 的 `conversations` 已装配（[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#24](https://github.com/SoloJiang/lectern-app/issues/24)，见「conversation 的装配」），`project_home` 的 `project-home-waiting`（会话行的等待标记，conversation 设计的 H）也已装配，共 20 个插件（见「project_home 的等待标记」），`review-view-usage` 再加一个，共 21 个。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查等 `review-view-handoff` 装配后再做（「与设计的差异」）。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -467,17 +467,19 @@ target 为 `app`。
 
 ## review_view 的装配
 
-[#15](https://github.com/SoloJiang/lectern-app/issues/15)，[review_view 设计「对其他 crate 的要求」](review_view.md#对其他-crate-的要求)的 C（插件部分；bench 的 `Driver::open(OpenTarget::Session)` 与 `Milestone::DiffShown` 随 review_view 第 3 步的基准）。desktop 与 probe profile 多一个插件，共 11 个；test profile 不变。
+[#15](https://github.com/SoloJiang/lectern-app/issues/15)，[review_view 设计「对其他 crate 的要求」](review_view.md#对其他-crate-的要求)的 C（插件部分；bench 的 `Driver::open(OpenTarget::Session)` 与 `Milestone::DiffShown` 随 review_view 第 3 步的基准）。desktop 与 probe profile 多一个插件，共 11 个；test profile 不变。后来会话用量拆成第三个插件 `review-view-usage`（`Refs #31`），desktop 与 probe 再多一个，现在共 21 个。
 
 | 插件 ID | 构造 | 提供 | 依赖 |
 |---|---|---|---|
 | `review-view` | `lectern_review_view::plugins(executor)` 的第一个 | 无 | `dyn Contributions`、`dyn Review`、`dyn SessionSource` |
+| `review-view-usage` | `lectern_review_view::plugins(executor)` 的第三个 | 无 | `dyn Usage` |
 
-- `plugins(executor)` 同时返回 `review-view-handoff`。它依赖 `dyn Reader`、`dyn CodeIntel`、`dyn Usage`；现在的 desktop 表里没有插件提供前两项，放进 `PluginSet` 会让图校验报 `MissingProvider`，所以 `profile::desktop` 丢掉它。审阅屏幕不依赖它：交接按钮置灰，不显示会话的用量行（review_view 设计「状态与异常」）。`file_reader` 与 `code_intel` 装配之后，同一处把它放进表里。
+- `plugins(executor)` 同时返回 `review-view-handoff`（第二个）。它依赖 `dyn Reader`、`dyn CodeIntel`；现在的 desktop 表里没有插件提供这两项，放进 `PluginSet` 会让图校验报 `MissingProvider`，所以 `profile::desktop` 丢掉它。审阅屏幕不依赖它：交接按钮置灰（review_view 设计「状态与异常」）。`file_reader` 与 `code_intel` 装配之后，同一处把它放进表里。
+- `review-view-usage` 只依赖 `dyn Usage`（`usage` 插件提供，已在表里）：它把服务引用放进 review_view 的共享状态并订阅 `UsageEvent`，屏幕据此对 `Session` 查询 `watch`，简报显示每个分支的用量行、每轮标题显示 token。`usage` 失败或停用时它随之停用，屏幕照常、只少这两处（`dyn Usage` 可能不存在，kernel 没有可选依赖，所以与 `project-home-usage`、`worktrees-usage` 一样单独成一个插件）。它与 `review-view-handoff` 互不依赖，放在 `review-view` 之后；构造只建空的共享状态，不做 IO，`AfterFirstFrame` 激活，`activate` 只取服务、订阅事件。
 - 依赖都在表里：`workspace` 提供 `dyn Contributions`，`review` 提供 `dyn Review`，`agents` 的两个插件提供 `dyn SessionSource`。
 - 冷启动：`plugins` 只建空的共享状态，不做 IO，在 `release` 里、屏障放开之后运行；`activate` 在首帧之后，只登记屏幕、检查器页和快捷键。
-- 日志：`plugins assembled` 的 `plugins` 为 11。其余记录由 `review_view` 写（target `review_view`）。
-- 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 11；`tests/startup.rs` 的 `plugins` 为 11，并检查 `first frame drawn` 之前没有 target 为 `review_view` 的记录。
+- 日志：`plugins assembled` 的 `plugins` 在 `review-view` 装配时为 11，加上 `review-view-usage` 后现在是 21。其余记录由 `review_view` 写（target `review_view`）。
+- 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数（现在为 21）；`tests/startup.rs` 的 `plugins`（现在为 21），并检查 `first frame drawn` 之前没有 target 为 `review_view` 的记录。
 
 ## worktrees 的装配
 
@@ -532,7 +534,7 @@ target 为 `app`。
 
 ## project_home 的等待标记
 
-[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#24](https://github.com/SoloJiang/lectern-app/issues/24)，[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求)的 H，[project_home 设计](project_home.md)的「验收」第 4 步。desktop 与 probe profile 多一个插件，共 20 个；test profile 不变。
+[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#24](https://github.com/SoloJiang/lectern-app/issues/24)，[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求)的 H，[project_home 设计](project_home.md)的「验收」第 4 步。desktop 与 probe profile 多一个插件，共 20 个（之后 `review-view-usage` 再加一个，共 21 个）；test profile 不变。
 
 | 插件 ID | 构造 | 提供 | 依赖 |
 |---|---|---|---|
@@ -540,8 +542,8 @@ target 为 `app`。
 
 - `profile::desktop` 里再构造一个 `WaitingSlot::default()`，一份交给 `ProjectHomeDeps::waiting`，一份交给 `ProjectHomeWaitingPlugin::new`，与 `UsageSlot` 同一种做法；插件放在 `project-home-usage` 之后。
 - 构造不做 IO、不建线程、不提交任务；`AfterFirstFrame` 激活，`activate` 只取服务引用、订阅 `ConversationEvent`，所以首帧之前没有它的代码运行。没有 `dyn Conversations` 的提供者（`conversations` 插件失败或停用）时本插件随之停用，项目主页照常显示，只是没有标记。
-- 日志：`plugins assembled` 的 `plugins` 为 20。本插件只写 trace 级别的 `home event`（target `project_home`）。
-- 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 20；`tests/startup.rs` 的 `plugins` 为 20；`tests/bench_probe.rs` 的 `Plugins` 应答为 20 个（后两个需要图形会话）。
+- 日志：`plugins assembled` 的 `plugins` 在本插件装配时为 20（现在是 21）。本插件只写 trace 级别的 `home event`（target `project_home`）。
+- 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数、`tests/startup.rs` 的 `plugins`、`tests/bench_probe.rs` 的 `Plugins` 应答数（后两个需要图形会话）在本插件装配时为 20，现在为 21（`review-view-usage`）。
 - 依赖：`app` 的依赖没有变（它已依赖 `lectern-project-home`），`Cargo.lock` 和 `tools/automation/Cargo.lock` 都没有变化。
 
 ## 自动化构建的装配
@@ -915,7 +917,15 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 ### project_home 的等待标记
 
-在 macOS（arm64）上运行，没有打开真实窗口：`just check`、`just test -p lectern-app`（56 个通过；默认 profile 跳过 `tests/startup.rs`、`probe.rs`、`bench_probe.rs`；`every_profile_graph_validates` 的 desktop 与 probe 插件数为 20，图校验通过，临时目录之后仍是空的）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过，`Cargo.lock` 与 `tools/automation/Cargo.lock` 都没有变化。没有验证：`tests/startup.rs`（`plugins` 为 20）、`tests/bench_probe.rs`（20 个应答）、`tests/probe.rs` 都要图形会话，已改好，没有在本机运行，结果以 macOS CI 为准；冷启动与 `app/idle_empty` 没有测。
+（插件数为 20 的验证；`review-view-usage` 之后为 21，见下一节。）在 macOS（arm64）上运行，没有打开真实窗口：`just check`、`just test -p lectern-app`（56 个通过；默认 profile 跳过 `tests/startup.rs`、`probe.rs`、`bench_probe.rs`；`every_profile_graph_validates` 的 desktop 与 probe 插件数为 20，图校验通过，临时目录之后仍是空的）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过，`Cargo.lock` 与 `tools/automation/Cargo.lock` 都没有变化。没有验证：`tests/startup.rs`（`plugins` 为 20）、`tests/bench_probe.rs`（20 个应答）、`tests/probe.rs` 都要图形会话，已改好，没有在本机运行，结果以 macOS CI 为准；冷启动与 `app/idle_empty` 没有测。
+
+### review_view 的用量插件（`Refs #31`）
+
+在 macOS（arm64）上运行，没有打开真实窗口：`profile::desktop` 多装 `review-view-usage`，desktop 与 probe 的插件数由 20 变 21。
+
+- `just test -p lectern-app`：56 个测试通过（默认 profile 跳过 `tests/startup.rs`、`probe.rs`、`bench_probe.rs`）；`every_profile_graph_validates` 的 desktop 与 probe 插件数为 21，图校验通过，临时目录之后仍是空的。
+- `tests/startup.rs`（`plugins` 为 21，首帧之前没有 target 为 `review_view` 的记录）、`tests/bench_probe.rs`（21 个应答）、`tests/probe.rs` 要图形会话，已改好，没有在本机运行，结果以 macOS CI 为准；冷启动与 `app/idle_empty` 没有测。
+- 对照 `usage` 的真实输出与 review_view 的测试、`Cargo.lock` 与 `tools/automation/Cargo.lock` 的情况见 [review_view 设计「实际验证」](review_view.md#实际验证)的「用量插件」。真实窗口里的简报用量行与轮次标题没有看过。
 
 ## 与设计的差异
 
@@ -963,7 +973,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 `review_view` 的装配：
 
-- **只装 `review-view`。** review_view 设计的 C 要求两个插件都放进 `PluginSet`；`dyn Reader`、`dyn CodeIntel` 还没有提供者，`review-view-handoff` 放进去图校验就失败，所以先丢掉它（「review_view 的装配」）。
+- **只装 `review-view`，再装 `review-view-usage`。** review_view 设计的 C 要求两个插件都放进 `PluginSet`；`dyn Reader`、`dyn CodeIntel` 还没有提供者，`review-view-handoff` 放进去图校验就失败，所以先丢掉它（「review_view 的装配」）。用量原来也在它里面，一起被丢掉，简报没有用量行；现在 review_view 把用量拆成第三个插件 `review-view-usage`（只要 `dyn Usage`），装进 `PluginSet`，`plugins(executor)` 返回三个，`app` 只丢第二个。
 
 `worktrees` 的装配：
 

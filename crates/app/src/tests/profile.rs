@@ -69,13 +69,13 @@ fn every_profile_graph_validates(cx: &mut TestAppContext) {
         let expected = match profile {
             // project, two session sources, review, usage, workspace,
             // welcome, welcome-discovery, welcome-review, project-home,
-            // project-home-usage, project-home-waiting, review-view, worktrees,
-            // worktrees-usage, terminal,
+            // project-home-usage, project-home-waiting, review-view,
+            // review-view-usage, worktrees, worktrees-usage, terminal,
             // conversations, conversation, conversation-live, conversation-terminal.
-            Profile::Desktop => 20,
+            Profile::Desktop => 21,
             // The probe is not a plugin: the same set as desktop.
             #[cfg(feature = "ui-probe")]
-            Profile::Probe => 20,
+            Profile::Probe => 21,
             Profile::Test => 0,
         };
         assert_eq!(count, expected, "{profile:?}");
