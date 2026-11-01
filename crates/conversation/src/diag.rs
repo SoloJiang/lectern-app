@@ -7,6 +7,7 @@
 
 use lectern_logging::Ctx;
 use lectern_services::conversation::{CallKind, Link, LinkError, OptionKind, PermissionDetail};
+use lectern_services::terminal::{LaunchError, RunState};
 
 /// A length as a log field.
 pub(crate) fn count(n: usize) -> u32 {
@@ -72,6 +73,31 @@ pub(crate) fn detail_name(detail: &PermissionDetail) -> &'static str {
         PermissionDetail::Command { .. } => "command",
         PermissionDetail::Edits(_) => "edits",
         PermissionDetail::None => "none",
+    }
+}
+
+/// The state of a terminal: the `state` of `terminal closed` and the `state`
+/// attribute of the Terminal page's node. `none` is no terminal.
+pub(crate) fn run_state_name(state: Option<&RunState>) -> &'static str {
+    match state {
+        None => "none",
+        Some(RunState::Starting) => "starting",
+        Some(RunState::Running { .. }) => "running",
+        Some(RunState::Exited { .. }) => "exited",
+        Some(RunState::Failed(_)) => "failed",
+    }
+}
+
+/// Why `Terminals::open` refused, for `terminal resume requested`.
+pub(crate) fn launch_error_name(error: &LaunchError) -> &'static str {
+    match error {
+        LaunchError::AlreadyRunning(_) => "already_running",
+        LaunchError::UnknownSession => "unknown_session",
+        LaunchError::UntrustedSource => "untrusted_source",
+        LaunchError::NotResumable => "not_resumable",
+        LaunchError::InvalidSessionId => "invalid_session_id",
+        LaunchError::OutsideProject => "outside_project",
+        LaunchError::TooMany => "too_many",
     }
 }
 

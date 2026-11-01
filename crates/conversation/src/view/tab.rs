@@ -2,9 +2,9 @@
 //! 「视图」). It follows the review on the screen (`Shared::current`), holds
 //! the Messages page of that session, and takes what the listeners send
 //! (route changes, new snapshots, services coming and going, terminals
-//! listed) from a channel on the main thread. The Terminal page is not here
-//! yet: its place says the terminal is not available, which is what the page
-//! says without `dyn Terminals`.
+//! listed, drawn) from a channel on the main thread. The Terminal page of the
+//! session is built the first time it is shown and held with the Messages
+//! page until the session changes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,17 +19,18 @@ use lectern_i18n::keys;
 use lectern_logging::debug;
 use lectern_services::conversation::OptionKind;
 use lectern_services::session::SessionKey;
+use lectern_services::terminal::{TerminalEvent, TerminalId};
 use lectern_ui::motion::Transition;
 use lectern_ui::semantic::{Role, Semantic, semantic_interactive};
 use lectern_ui::{Segmented, Text, strings};
 
 use crate::actions::{
-    self, AllowAlways, AllowOnce, Dismiss, LoadEarlier, RejectAlways, RejectOnce, Send,
-    ShowMessages, ShowTerminal, Stop, ToggleMoreRequests, TogglePlan,
+    self, AllowAlways, AllowOnce, CloseTerminal, Dismiss, LoadEarlier, RejectAlways, RejectOnce,
+    ResumeInTerminal, Send, ShowMessages, ShowTerminal, Stop, ToggleMoreRequests, TogglePlan,
 };
 use crate::nodes;
 use crate::plugin::{Current, Job, Shared};
-use crate::view::{MessagesEvent, MessagesModel, text_line};
+use crate::view::{MessagesEvent, MessagesModel, TerminalPage, text_line};
 
 /// The page's inner padding and the gap between its parts.
 const PADDING: gpui::Pixels = px(12.0);
@@ -68,6 +69,9 @@ pub struct ConversationTab {
     page_slider: Transition,
     /// Built when `current` is a session, replaced when it changes.
     messages: Option<Entity<MessagesModel>>,
+    /// The Terminal page of the session: built the first time it is shown,
+    /// replaced with the session.
+    terminal: Option<Entity<TerminalPage>>,
     /// What the Messages page asks of this page (shows the Terminal page).
     _messages_events: Option<Subscription>,
     focus: FocusHandle,
@@ -113,11 +117,15 @@ impl ConversationTab {
             page: Page::Messages,
             page_slider: Transition::new(0.0),
             messages: None,
+            terminal: None,
             _messages_events: None,
             focus: cx.focus_handle(),
             _jobs: task,
             shared,
         };
+        // The leave guard of the terminals shows its confirmation in this
+        // window, from a task of its own (it outlives the page).
+        tab.shared.serve_leave_asks(window, cx);
         let current = tab.shared.current();
         tab.set_current(current, window, cx);
         tab
@@ -131,6 +139,11 @@ impl ConversationTab {
     #[cfg(test)]
     pub(crate) fn page(&self) -> Page {
         self.page
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal(&self) -> Option<&Entity<TerminalPage>> {
+        self.terminal.as_ref()
     }
 
     #[cfg(test)]
@@ -161,6 +174,7 @@ impl ConversationTab {
         self.remember_page();
         self.current = current;
         self._messages_events = None;
+        self.terminal = None;
         self.messages = match &self.current {
             Current::Session(key) => {
                 let shared = self.shared.clone();
@@ -171,18 +185,35 @@ impl ConversationTab {
                 self.page = page;
                 self.page_slider = Transition::new(page.index() as f32);
                 let model = cx.new(|cx| MessagesModel::new(shared, key, window, cx));
-                model.read(cx).log_shown();
-                self._messages_events = Some(cx.subscribe(
+                model.read(cx).log_shown(page.name());
+                self._messages_events = Some(cx.subscribe_in(
                     &model,
-                    |this, _, event: &MessagesEvent, cx| match event {
-                        MessagesEvent::ShowTerminal => this.show(Page::Terminal, cx),
+                    window,
+                    |this, _, event: &MessagesEvent, window, cx| match event {
+                        MessagesEvent::ShowTerminal => this.show(Page::Terminal, window, cx),
                     },
                 ));
                 Some(model)
             }
             Current::None | Current::NotSession => None,
         };
+        if self.messages.is_some() && self.page == Page::Terminal {
+            self.ensure_terminal(window, cx);
+        }
         cx.notify();
+    }
+
+    /// The session's Terminal page, built when it is first needed.
+    fn ensure_terminal(&mut self, window: &mut Window, cx: &mut Context<ConversationTab>) {
+        if self.terminal.is_some() {
+            return;
+        }
+        let Current::Session(key) = &self.current else {
+            return;
+        };
+        let (shared, key) = (self.shared.clone(), key.clone());
+        let shown = self.page == Page::Terminal;
+        self.terminal = Some(cx.new(|cx| TerminalPage::new(shared, key, shown, window, cx)));
     }
 
     /// What the listeners sent since the last time. Route changes first, so
@@ -191,13 +222,18 @@ impl ConversationTab {
     fn apply(&mut self, jobs: Vec<Job>, window: &mut Window, cx: &mut Context<ConversationTab>) {
         let mut route = None;
         let mut services = false;
+        let mut listed = false;
+        let mut frames: Vec<TerminalId> = Vec::new();
         let mut changes: HashMap<SessionKey, u64> = HashMap::new();
         for job in jobs {
             match job {
                 Job::Route(current) => route = Some(current),
                 Job::Services => services = true,
-                // The page reads the state of the terminal when it draws.
-                Job::Terminal => {}
+                // The pages read the state of the terminal when they draw;
+                // the Terminal page reads it again and refreshes its pane.
+                Job::Terminal(TerminalEvent::Listed { .. }) => listed = true,
+                Job::Terminal(TerminalEvent::Frame { id, .. }) => frames.push(id),
+                Job::Terminal(_) => {}
                 Job::Conversation {
                     session,
                     generation,
@@ -220,11 +256,17 @@ impl ConversationTab {
                 model.update(cx, |model, cx| model.changed(generation, cx));
             }
         }
+        if let Some(terminal) = self.terminal.clone() {
+            terminal.update(cx, |terminal, cx| {
+                terminal.on_events(listed || services, &frames, window, cx);
+            });
+        }
         cx.notify();
     }
 
-    /// The page switch.
-    fn show(&mut self, page: Page, cx: &mut Context<ConversationTab>) {
+    /// The page switch. The Terminal page watches its terminal's frames only
+    /// while it is shown.
+    fn show(&mut self, page: Page, window: &mut Window, cx: &mut Context<ConversationTab>) {
         if self.page == page {
             return;
         }
@@ -232,7 +274,27 @@ impl ConversationTab {
         self.page = page;
         self.remember_page();
         debug!("page switched"; page = page.name());
+        match (self.terminal.clone(), page) {
+            (Some(terminal), page) => {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.set_shown(page == Page::Terminal, cx);
+                });
+            }
+            (None, Page::Terminal) if self.messages.is_some() => self.ensure_terminal(window, cx),
+            (None, _) => {}
+        }
         cx.notify();
+    }
+
+    fn with_terminal_in(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<ConversationTab>,
+        f: impl FnOnce(&mut TerminalPage, &mut Window, &mut Context<TerminalPage>),
+    ) {
+        if let Some(terminal) = self.terminal.clone() {
+            terminal.update(cx, |terminal, cx| f(terminal, window, cx));
+        }
     }
 
     fn with_messages(
@@ -268,12 +330,17 @@ impl ConversationTab {
         };
         match self.page {
             Page::Messages => model.update(cx, |model, cx| model.render_page(window, cx)),
-            Page::Terminal => text_line(
-                nodes::area("notice"),
-                keys::conversation::TERMINAL_UNAVAILABLE,
-                window,
-                cx,
-            ),
+            Page::Terminal => match self.terminal.clone() {
+                Some(terminal) => {
+                    terminal.update(cx, |terminal, cx| terminal.render_page(window, cx))
+                }
+                None => text_line(
+                    nodes::area("notice"),
+                    keys::conversation::TERMINAL_UNAVAILABLE,
+                    window,
+                    cx,
+                ),
+            },
         }
     }
 }
@@ -300,13 +367,13 @@ impl Render for ConversationTab {
         )
         .fill()
         .slider(slider)
-        .on_select(move |index, _, cx| {
+        .on_select(move |index, window, cx| {
             let page = if index == 0 {
                 Page::Messages
             } else {
                 Page::Terminal
             };
-            tab.update(cx, |tab, cx| tab.show(page, cx));
+            tab.update(cx, |tab, cx| tab.show(page, window, cx));
         });
         let body = self.body(window, cx);
         let root = div()
@@ -339,8 +406,18 @@ impl Render for ConversationTab {
             .on_action(cx.listener(|this, _: &ToggleMoreRequests, _, cx| {
                 this.with_messages(cx, |m, cx| m.toggle_more(cx));
             }))
-            .on_action(cx.listener(|this, _: &ShowMessages, _, cx| this.show(Page::Messages, cx)))
-            .on_action(cx.listener(|this, _: &ShowTerminal, _, cx| this.show(Page::Terminal, cx)))
+            .on_action(cx.listener(|this, _: &ShowMessages, window, cx| {
+                this.show(Page::Messages, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| {
+                this.show(Page::Terminal, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ResumeInTerminal, window, cx| {
+                this.with_terminal_in(window, cx, |page, window, cx| page.resume(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &CloseTerminal, window, cx| {
+                this.with_terminal_in(window, cx, |page, window, cx| page.close(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &LoadEarlier, _, cx| {
                 this.with_messages(cx, |m, cx| m.load_earlier(cx));
             }))

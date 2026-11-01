@@ -77,17 +77,7 @@ impl MessagesModel {
         if !drive::elsewhere(&summary, &snapshot.link, in_terminal, drive::now()) {
             return None;
         }
-        let line = Text::key(strings, keys::conversation::ELSEWHERE);
-        Some(
-            semantic(
-                Semantic::new(nodes::area("elsewhere"), Role::Text).label(&line),
-                div()
-                    .w_full()
-                    .text_role(TextRole::Caption, window, cx)
-                    .child(line.shared()),
-            )
-            .into_any_element(),
-        )
+        Some(crate::view::elsewhere_line(strings, window, cx))
     }
 
     /// The box with its button, or what stands in its place. None before the

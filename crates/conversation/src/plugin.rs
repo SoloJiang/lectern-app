@@ -4,15 +4,17 @@
 //! subscribes; nothing is read, submitted or drawn before the inspector shows
 //! the page (ADR 0017). The kernel has no optional dependencies, so what the
 //! page can do without a service is a separate plugin: "conversation-live"
-//! brings `dyn Conversations`, and the page works (and says so) without it.
+//! brings `dyn Conversations`, "conversation-terminal" brings `dyn Terminals`
+//! with the terminal's key bindings and leave guard, and the page works (and
+//! says so) without either.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::channel::mpsc;
 use gpui::{App, AppContext, Window};
 use lectern_kernel::{
-    Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, ServiceRef,
-    ServiceSet, service,
+    Activation, ActivationToken, Active, Context, Manifest, Name, Plugin, PluginError,
+    PluginHandle, ServiceRef, ServiceSet, service,
 };
 use lectern_logging::{debug, info, warn};
 use lectern_services::conversation::{ConversationEvent, Conversations};
@@ -27,6 +29,7 @@ use lectern_ui::contrib::{InspectorTab, KeyBindings};
 
 use crate::actions;
 use crate::diag;
+use crate::guard::{AskReceiver, AskSender, LeaveAsk, TerminalGuard};
 use crate::memory::Memory;
 use crate::view::ConversationTab;
 
@@ -41,6 +44,9 @@ pub const TERMINAL_ID: &str = "conversation-terminal";
 
 /// The ID of the inspector's page.
 pub const TAB_ID: &str = "conversation";
+
+/// The ID of the terminal's `KeyBindings` contribution.
+const TERMINAL_KEY_BINDINGS_ID: &str = "conversation-terminal";
 
 /// The page comes after the Files page (whose `order` is 0).
 const TAB_ORDER: u16 = 10;
@@ -89,9 +95,11 @@ pub(crate) enum Job {
     },
     /// "conversation-live" or "conversation-terminal" started or stopped.
     Services,
-    /// A terminal event the page cares about (`Listed`): the state of the
-    /// terminal that may drive the session is read again.
-    Terminal,
+    /// A terminal event the page cares about: `Listed` (the state of the
+    /// terminal that may drive the session is read again) and `Frame` (the
+    /// pane of the terminal on the Terminal page is refreshed). `Bell` is not
+    /// forwarded.
+    Terminal(TerminalEvent),
 }
 
 pub(crate) type JobSender = mpsc::UnboundedSender<Job>;
@@ -104,6 +112,13 @@ pub(crate) struct Shared {
     sessions: Mutex<Option<ServiceSet<dyn SessionSource>>>,
     conversations: Mutex<Option<ServiceRef<dyn Conversations>>>,
     terminals: Mutex<Option<ServiceRef<dyn Terminals>>>,
+    /// The handle of this activation of "conversation-terminal":
+    /// the terminal grid's view needs its token (the copy of a selection is
+    /// handed to the terminal with it).
+    terminal_handle: Mutex<Option<PluginHandle>>,
+    /// Where the leave guard sends its question: the foreground task that
+    /// the page started in its window. None until a page is built.
+    asker: Mutex<Option<AskSender>>,
     /// The review on the screen on top.
     current: Mutex<Current>,
     /// `Conversations::waiting()` as of the last `WaitingChanged`: the sessions
@@ -127,6 +142,8 @@ impl Shared {
             sessions: Mutex::new(None),
             conversations: Mutex::new(None),
             terminals: Mutex::new(None),
+            terminal_handle: Mutex::new(None),
+            asker: Mutex::new(None),
             current: Mutex::new(Current::None),
             waiting: Mutex::new(Arc::from([])),
             memory: Mutex::new(Memory::new()),
@@ -149,6 +166,48 @@ impl Shared {
         lock(&self.conversations)
             .as_ref()
             .is_some_and(|conversations| conversations.get().is_some())
+    }
+
+    /// The terminal service, if its plugin is active: a copy of the
+    /// reference (for the terminal grid's view, which keeps it).
+    pub(crate) fn terminals(&self) -> Option<ServiceRef<dyn Terminals>> {
+        let terminals = lock(&self.terminals).clone()?;
+        terminals.get().is_some().then_some(terminals)
+    }
+
+    /// The token of the activation of "conversation-terminal" that is live.
+    pub(crate) fn terminal_token(&self) -> Option<ActivationToken> {
+        lock(&self.terminal_handle)
+            .as_ref()
+            .filter(|handle| handle.is_active())
+            .map(PluginHandle::token)
+    }
+
+    /// Runs `f` with the terminal service.
+    pub(crate) fn with_terminals<R>(&self, f: impl FnOnce(&dyn Terminals) -> R) -> Option<R> {
+        let terminals = lock(&self.terminals).clone()?;
+        let admitted = terminals.get()?;
+        Some(f(&*admitted))
+    }
+
+    /// Starts the task that shows the leave guard's confirmations in the
+    /// window of the page that was just built, and replaces the one of an
+    /// earlier page (its sender is dropped, so it ends). Main thread.
+    pub(crate) fn serve_leave_asks(&self, window: &mut Window, cx: &mut App) {
+        let (sender, receiver): (AskSender, AskReceiver) = mpsc::unbounded();
+        *lock(&self.asker) = Some(sender);
+        window
+            .spawn(cx, async move |cx| crate::guard::serve(receiver, cx).await)
+            .detach();
+    }
+
+    /// Hands a question to the page's task. Any thread. Gives the question
+    /// back when there is no task, or its window is gone.
+    pub(crate) fn ask_leave(&self, ask: LeaveAsk) -> Result<(), LeaveAsk> {
+        match lock(&self.asker).as_ref() {
+            Some(asker) => asker.unbounded_send(ask).map_err(|e| e.into_inner()),
+            None => Err(ask),
+        }
     }
 
     /// The state of the terminal that holds the session, if there is one
@@ -225,6 +284,12 @@ impl Shared {
             WorkspaceEvent::ScreenChanged { window, to, .. } if *window == WindowId(0) => {
                 self.set_current(Current::of(to));
             }
+            // The window the confirmations are shown in is gone; its task
+            // ends with the sender. A page built in the window that a Dock
+            // reopen makes starts a new one.
+            WorkspaceEvent::WindowClosed { window } if *window == WindowId(0) => {
+                *lock(&self.asker) = None;
+            }
             _ => {}
         }
     }
@@ -281,10 +346,13 @@ impl Shared {
     }
 
     /// Runs on the terminal's thread: only forwards what changes the state
-    /// of a terminal.
+    /// of a terminal or its picture.
     fn on_terminal(&self, event: &TerminalEvent) {
-        if matches!(event, TerminalEvent::Listed { .. }) {
-            self.broadcast(Job::Terminal);
+        if matches!(
+            event,
+            TerminalEvent::Listed { .. } | TerminalEvent::Frame { .. }
+        ) {
+            self.broadcast(Job::Terminal(event.clone()));
         }
     }
 
@@ -307,9 +375,10 @@ pub struct LivePlugin {
     shared: Arc<Shared>,
 }
 
-/// The plugin "conversation-terminal": requires `dyn Terminals`. Until the
-/// Terminal page exists (step 3) it only brings the service into [`Shared`],
-/// so that the reply box knows when a terminal drives the session.
+/// The plugin "conversation-terminal": requires `dyn Terminals` and
+/// `dyn Contributions`. It brings the terminal service into [`Shared`] (the
+/// Terminal page and the reply box use it), registers the terminal's key
+/// bindings and the leave guard, and forwards the terminal's events.
 pub struct TerminalPagePlugin {
     shared: Arc<Shared>,
 }
@@ -328,6 +397,15 @@ pub fn plugins() -> (ConversationPlugin, LivePlugin, TerminalPagePlugin) {
         },
         TerminalPagePlugin { shared },
     )
+}
+
+impl ConversationPlugin {
+    /// The state the plugins share (tests read the token that the Terminal
+    /// page hands to the pane).
+    #[cfg(test)]
+    pub(crate) fn shared(&self) -> Arc<Shared> {
+        self.shared.clone()
+    }
 }
 
 impl Plugin for ConversationPlugin {
@@ -495,13 +573,30 @@ impl Plugin for TerminalPagePlugin {
     fn manifest(&self) -> Manifest {
         Manifest {
             provides: Vec::new(),
-            requires: vec![service::<dyn Terminals>()],
+            requires: vec![service::<dyn Terminals>(), service::<dyn Contributions>()],
             activation: vec![Activation::AfterFirstFrame],
         }
     }
 
     fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
         let terminals = ctx.service::<dyn Terminals>();
+        let contributions = ctx.service::<dyn Contributions>();
+        let Some(admitted) = contributions.get() else {
+            return Err(PluginError::DependencyUnavailable);
+        };
+        // The key bindings and the guard come and go with the terminal: no
+        // `dyn Terminals`, no key to bind and nothing to ask about.
+        ctx.own_staged(admitted.register(
+            Contribution {
+                kind: ContributionKind::KeyBindings,
+                id: Name::Borrowed(TERMINAL_KEY_BINDINGS_ID),
+                order: 0,
+                payload: KeyBindings(lectern_terminal_view::key_bindings()).into_payload(),
+            },
+            None,
+        ));
+        let guard = TerminalGuard::new(terminals.clone(), self.shared.clone());
+        ctx.own_staged(admitted.register_leave_guard(Arc::new(guard), None));
         let shared = self.shared.clone();
         ctx.on::<TerminalEvent>(move |event, _| shared.on_terminal(event));
         Ok(Box::new(TerminalActive {
@@ -517,9 +612,11 @@ struct TerminalActive {
 }
 
 impl Active for TerminalActive {
-    /// The service is written in `started`: `activate` has no side effects.
-    fn started(&mut self, _: PluginHandle) {
+    /// The service and the handle are written in `started`: `activate` has
+    /// no side effects.
+    fn started(&mut self, handle: PluginHandle) {
         if let Some(terminals) = self.terminals.take() {
+            *lock(&self.shared.terminal_handle) = Some(handle);
             *lock(&self.shared.terminals) = Some(terminals);
             self.shared.broadcast(Job::Services);
         }
@@ -529,6 +626,10 @@ impl Active for TerminalActive {
 impl Drop for TerminalActive {
     fn drop(&mut self) {
         let had = lock(&self.shared.terminals).take().is_some();
+        *lock(&self.shared.terminal_handle) = None;
+        // The task that shows the guard's confirmations stays (it serves the
+        // window until the window or a newer page ends it); the guard itself
+        // goes with the registration.
         if had {
             self.shared.broadcast(Job::Services);
         }

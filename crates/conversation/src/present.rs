@@ -13,6 +13,7 @@ use lectern_services::conversation::{
     Unavailable,
 };
 use lectern_services::session::Agent;
+use lectern_services::terminal::{FailReason, LaunchError, RunState};
 use lectern_ui::Text;
 
 use crate::items::shown_tools;
@@ -298,6 +299,65 @@ pub(crate) fn unavailable_text(
         Unavailable::TooMany => Text::key(strings, keys::conversation::UNAVAILABLE_TOO_MANY),
         Unavailable::Busy => return None,
     })
+}
+
+/// The command the Terminal page runs for a session of this agent. It is a
+/// command line, not interface text, so it is not translated; an agent
+/// without a resume command has none.
+pub(crate) fn resume_command(agent: &Agent) -> Option<&'static str> {
+    match agent {
+        Agent::ClaudeCode => Some("claude --resume"),
+        Agent::Codex => Some("codex resume"),
+        Agent::Other(_) => None,
+    }
+}
+
+/// The one line about the terminal's state: starting, running, exited (with
+/// the code, or "ended by a signal") or why it did not start.
+pub(crate) fn terminal_status(strings: &Strings, state: &RunState) -> Text {
+    match state {
+        RunState::Starting => Text::key(strings, keys::conversation::TERMINAL_STARTING),
+        RunState::Running { .. } => Text::key(strings, keys::conversation::TERMINAL_RUNNING),
+        RunState::Exited { signaled: true, .. } => {
+            Text::key(strings, keys::conversation::TERMINAL_SIGNALED)
+        }
+        RunState::Exited { code, .. } => Text::fmt(
+            strings,
+            keys::conversation::TERMINAL_EXITED,
+            &Args::new().num("code", *code),
+        ),
+        RunState::Failed(FailReason::NotInstalled(agent)) => Text::fmt(
+            strings,
+            keys::conversation::TERMINAL_NOT_INSTALLED,
+            &Args::new().str("program", agent.program()),
+        ),
+        RunState::Failed(FailReason::CwdMissing) => {
+            Text::key(strings, keys::conversation::TERMINAL_CWD_MISSING)
+        }
+        RunState::Failed(FailReason::OutsideProject) => {
+            Text::key(strings, keys::conversation::TERMINAL_OUTSIDE_PROJECT)
+        }
+        RunState::Failed(FailReason::NoShell)
+        | RunState::Failed(FailReason::Spawn { .. })
+        | RunState::Failed(FailReason::Internal) => {
+            Text::key(strings, keys::conversation::TERMINAL_FAILED)
+        }
+    }
+}
+
+/// The line under the resume button when `open` refused. `AlreadyRunning`
+/// has none (the page uses that terminal).
+pub(crate) fn terminal_refusal(strings: &Strings, error: &LaunchError) -> Option<Text> {
+    let key = match error {
+        LaunchError::AlreadyRunning(_) => return None,
+        LaunchError::UnknownSession
+        | LaunchError::UntrustedSource
+        | LaunchError::NotResumable
+        | LaunchError::InvalidSessionId => keys::conversation::TERMINAL_NOT_RESUMABLE,
+        LaunchError::OutsideProject => keys::conversation::TERMINAL_OUTSIDE_PROJECT,
+        LaunchError::TooMany => keys::conversation::TERMINAL_TOO_MANY,
+    };
+    Some(Text::key(strings, key))
 }
 
 /// The reply box's placeholder: the resource text with the agent's name.

@@ -34,11 +34,21 @@ actions!(
         TogglePlan,
         /// "Dismiss" on the notice about a failed link.
         Dismiss,
+        /// The Terminal page's resume button: runs the agent's resume command
+        /// in a terminal (after disconnecting the ACP link when it is idle or
+        /// failed). Ignored while a connection starts or a turn runs.
+        ResumeInTerminal,
+        /// The Terminal page's Close button: closes the session's terminal.
+        CloseTerminal,
     ]
 );
 
 /// The key context of the page's root.
 pub(crate) const CONTEXT: &str = "conversation";
+
+/// The key context of the Terminal page (the terminal grid's own context,
+/// `terminal`, is inside it).
+pub(crate) const TERMINAL_CONTEXT: &str = "conversation-terminal";
 
 /// The ID of the `KeyBindings` contribution.
 pub(crate) const KEY_BINDINGS_ID: &str = "conversation";
