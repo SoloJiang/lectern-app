@@ -497,11 +497,11 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 |---|---|
 | 冷启动 20 ms（`app/cold_start`） | 首帧之前没有代码运行；`plugin/conversation/activate`、`plugin/conversation-live/activate`、`plugin/conversation-terminal/activate` 各 < 1 ms，只登记 |
 | 空闲内存 60 MB（ADR 0017） | 没有打开 Conversation 页时只有 `Shared`（几百字节）。ACP agent 与终端进程空闲时不运行，也不计入（ADR 0050）；草稿至多 16 × 256 KiB，只在用户写过时存在 |
-| 帧预算 8.3 ms（120 Hz） | 应用一次流式更新只重新排版最后一项（≤ 64 KiB）：新基准 `conversation/stream_apply` 的 p95 ≤ 2 ms；列表是虚拟的，只排版可见项 |
+| 帧预算 8.3 ms（120 Hz） | 应用一次流式更新只重新排版最后一项（≤ 64 KiB）：新基准 `conversation/stream_apply` 的 p95 ≤ 4.8 ms（[ADR 0055](../adr/0055.md)）；列表是虚拟的，只排版可见项 |
 | 打开页 | 快照已有时下一帧画出；历史窗口还在读时按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `conversation-loading` |
 | 安装包 80 MB（ADR 0018） | 不新增外部 crate；适配器不随安装包分发（ADR 0050） |
 
-新基准（「对其他 crate 的要求」K）：`conversation/stream_apply`：40 轮、正文合计 1 MiB 的快照，连续应用 200 个快照，每个让最后一段 agent 说明多 200 字节，测每次 `items::build` 加 `splice` 加这一项的排版，p95 ≤ 2 ms。夹具是本 crate 的 `fixture::StreamApply`（`test-support` feature）：一个真实的 `MessagesModel` 在 GPUI 测试平台的窗口里（不开真实窗口），每一步应用下一个快照并画一帧；一个周期 200 步，最后一段从 16 KiB 长到约 55 KiB，周期结束后回到开头（`generation` 继续增加）。帧是测试平台的帧，没有 GPU，文字排版比真实的简单，所以这个基准量的是本 crate 的工作（建项、比较、`splice`、渲染可见的项），不是真实的文字排版；真实帧的预算由帧记录的基准判定（`workspace` 记录帧之后）。
+新基准（「对其他 crate 的要求」K）：`conversation/stream_apply`：40 轮、正文合计 1 MiB 的快照，连续应用 200 个快照，每个让最后一段 agent 说明多 200 字节，测每次 `items::build` 加 `splice` 加这一项的排版，p95 ≤ 4.8 ms（[ADR 0055](../adr/0055.md)）。夹具是本 crate 的 `fixture::StreamApply`（`test-support` feature）：一个真实的 `MessagesModel` 在 GPUI 测试平台的窗口里（不开真实窗口），每一步应用下一个快照并画一帧；一个周期 200 步，最后一段从 16 KiB 长到约 55 KiB，周期结束后回到开头（`generation` 继续增加）。帧是测试平台的帧，没有 GPU，文字排版比真实的简单，所以这个基准量的是本 crate 的工作（建项、比较、`splice`、渲染可见的项），不是真实的文字排版；真实帧的预算由帧记录的基准判定（`workspace` 记录帧之后）。
 
 ## 界面
 
@@ -903,7 +903,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 **第 4 步：`app` 装配、基准、真机验证（`Closes #23`、`Closes #24`；`terminal`、`terminal_view` 的 PR 都已合并时写 `Closes #12`，否则 `Refs #12`；前置 C、H、J、K）。**
 
 - `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加四（本 crate 三个、`agents` 一个）；启动测试里首帧之前没有 `conversation` 的记录。
-- `just bench conversation/stream_apply`：p95 ≤ 2 ms。
+- `just bench conversation/stream_apply`：p95 ≤ 4.8 ms。
 - 在 macOS 上运行发布构建，用户已安装两个适配器并已登录：打开一个有 Claude Code 会话的仓库，进入审阅，⌘\ 打开 Conversation：历史显示，没有 agent 进程（`ps` 里没有适配器）；回复一句后状态变为「运行中」，agent 请求运行命令时出现卡片、显示命令文本，点「允许」后继续；这一轮结束后审阅页出现新一轮；空闲 10 分钟后适配器进程退出；切到 Terminal 页恢复会话，终端显示 `claude --resume` 的界面，回复框换成「在终端页中运行」。Codex 会话重复一遍。
 
 ## 实际验证
