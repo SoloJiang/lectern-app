@@ -36,6 +36,12 @@ lectern-terminal-view = { path = "../terminal_view" }
 # Colours, text, controls, motion and the probe's semantic nodes (ADR 0015).
 lectern-ui = { path = "../ui" }
 
+[features]
+# `fixture`: the input of the `conversation/stream_apply` benchmark
+# (docs/design/conversation.md「性能」), for `lectern-bench`. It builds a
+# window of GPUI's test platform, so it turns on GPUI's `test-support`.
+test-support = ["gpui/test-support"]
+
 [dev-dependencies]
 # `TestAppContext`, `VisualTestContext`, `#[gpui::test]`.
 gpui = { workspace = true, features = ["test-support"] }

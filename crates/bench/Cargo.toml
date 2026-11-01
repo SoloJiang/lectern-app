@@ -90,6 +90,10 @@ lectern-worktrees = { path = "../worktrees", features = ["test-support"] }
 # of glyphs and the draw list are pure, but the crate depends on GPUI. A
 # non-plugin view library, which a tool crate may depend on (ADR 0025).
 lectern-terminal-view = { path = "../terminal_view", features = ["test-support"] }
+# `conversation/stream_apply` (docs/design/conversation.md「性能」): a real
+# `MessagesModel` in a window of GPUI's test platform. A plugin crate, as
+# above.
+lectern-conversation = { path = "../conversation", features = ["test-support"] }
 # The `empty_window` example: the GPUI platform.
 gpui_platform.workspace = true
 

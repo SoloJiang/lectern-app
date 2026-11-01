@@ -1,6 +1,6 @@
 # terminal_view 设计
 
-状态：实现中。第 1 步（`ui::terminal_colors` 与 `terminal.ftl`）已实现；第 2 步（`TerminalPane`、字形与方框绘制、键盘、输入法、鼠标、复制粘贴、`testing`、基准 `terminal_view/snap_full`）已实现（本 PR），窗口里的真实显示与输入法还没有验证；第 3 步（装配与真机验证）尚未实现。
+状态：实现中。第 1 步（`ui::terminal_colors` 与 `terminal.ftl`）已实现；第 2 步（`TerminalPane`、字形与方框绘制、键盘、输入法、鼠标、复制粘贴、`testing`、基准 `terminal_view/snap_full`）已实现（本 PR），窗口里的真实显示与输入法还没有验证；第 3 步（装配与真机验证）的装配一半已实现：`conversation` 的 Terminal 页嵌入 `TerminalPane`（`conversation` 第 3 步），`conversation-terminal` 与 `terminal` 已由 `app` 装配（`conversation` 第 4 步，[app 设计「conversation 的装配」](app.md#conversation-的装配)）；`app` 的 `terminal_keys_reach_the_terminal`、`app/input_frames`、`app/terminal_output_frames` 和真机验证还没有做。
 
 对应 issue [#5](https://github.com/SoloJiang/lectern-app/issues/5)（libghostty-vt 接入与 GPUI 网格绘制）的视图部分和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的终端视图。`terminal_view` 把 `terminal` 给出的网格快照（[terminal 设计「帧」](terminal.md#帧)）画在 GPUI 里，把键盘、输入法、鼠标、滚轮、焦点、剪贴板和尺寸变化转成 `Input` 发回 `terminal`。它是 Conversation 的 Terminal 页里的终端视图，在界面的「收起」一层（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。
 

@@ -4530,9 +4530,12 @@ dependencies = [
  "lectern-cache",
  "lectern-executor",
  "lectern-fs-watch",
+ "lectern-git",
  "lectern-kernel",
  "lectern-logging",
+ "lectern-platform",
  "lectern-services",
+ "rustix",
  "ruzstd",
  "serde",
  "serde_json",
@@ -4547,6 +4550,7 @@ dependencies = [
  "gpui-pre-platform",
  "lectern-agents",
  "lectern-cache",
+ "lectern-conversation",
  "lectern-executor",
  "lectern-fs-watch",
  "lectern-i18n",
@@ -4585,6 +4589,20 @@ dependencies = [
  "rusqlite",
  "ruzstd",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "lectern-conversation"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-pre",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-terminal-view",
+ "lectern-ui",
 ]
 
 [[package]]
@@ -4760,6 +4778,19 @@ dependencies = [
  "libghostty-vt-sys",
  "portable-pty",
  "rustix",
+]
+
+[[package]]
+name = "lectern-terminal-view"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-pre",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-ui",
 ]
 
 [[package]]

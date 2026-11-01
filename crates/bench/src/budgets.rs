@@ -188,6 +188,7 @@ const REVIEW_VIEW: &str = "docs/design/review_view.md#性能";
 const PROJECT_HOME: &str = "docs/design/project_home.md#性能";
 const WORKTREES: &str = "docs/design/worktrees.md#性能";
 const TERMINAL_VIEW: &str = "docs/design/terminal_view.md#性能";
+const CONVERSATION: &str = "docs/design/conversation.md#性能";
 /// The frame-time budgets of the screens wait for `workspace` to record
 /// frames (`FrameRecord::frames` is always empty, workspace design
 /// 「已知限制」) and for `app` to hand the records to the probe.
@@ -2192,6 +2193,16 @@ pub static BUDGETS: &[Budget] = &[
         REVIEW_VIEW,
         FRAMES_RECORDED,
         Process,
+    ),
+    // `conversation/*` (docs/design/conversation.md「性能」): GPUI, so macOS
+    // alone. A frame of the test platform, not a presented one: the real
+    // frame budget is the 8.3 ms of the screens.
+    share_macos(
+        "conversation/stream_apply",
+        &[p95(Limit::TimeAtMost(ms(2)))],
+        CONVERSATION,
+        ACTIVE,
+        Time,
     ),
     // `project_home/*` (docs/design/project_home.md「性能」): GPUI, so macOS
     // alone.

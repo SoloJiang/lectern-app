@@ -180,12 +180,12 @@ impl MessagesModel {
         &self.composer
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn snapshot(&self) -> Option<&Arc<ConversationSnapshot>> {
         self.snapshot.as_ref()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn spliced(&self) -> (usize, Option<Splice>) {
         (self.spliced, self.last_splice)
     }
@@ -201,7 +201,7 @@ impl MessagesModel {
         self.items.get(ix).map(|item| item.key.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn item_count(&self) -> usize {
         self.items.len()
     }
@@ -284,7 +284,11 @@ impl MessagesModel {
 
     /// A snapshot arrived. An older one than the one shown is dropped; the
     /// list keeps what did not change and lays out only the stretch that did.
-    fn apply(&mut self, snapshot: Arc<ConversationSnapshot>, cx: &mut Context<MessagesModel>) {
+    pub(crate) fn apply(
+        &mut self,
+        snapshot: Arc<ConversationSnapshot>,
+        cx: &mut Context<MessagesModel>,
+    ) {
         if let Some(shown) = &self.snapshot
             && (snapshot.generation < shown.generation || Arc::ptr_eq(shown, &snapshot))
         {
@@ -640,7 +644,11 @@ impl MessagesModel {
 
     /// The list, or what stands in its place while the history loads, failed
     /// or is empty.
-    fn render_body(&mut self, window: &mut Window, cx: &mut Context<MessagesModel>) -> AnyElement {
+    pub(crate) fn render_body(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<MessagesModel>,
+    ) -> AnyElement {
         let Some(snapshot) = self.snapshot.clone() else {
             return self.render_loading(window, cx);
         };

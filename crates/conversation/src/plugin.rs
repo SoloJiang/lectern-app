@@ -136,7 +136,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
-    fn new() -> Shared {
+    pub(crate) fn new() -> Shared {
         Shared {
             contributions: Mutex::new(None),
             sessions: Mutex::new(None),

@@ -26,6 +26,8 @@
 mod actions;
 mod diag;
 mod drive;
+#[cfg(feature = "test-support")]
+pub mod fixture;
 mod guard;
 mod items;
 mod memory;

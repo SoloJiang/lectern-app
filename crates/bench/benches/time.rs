@@ -18,6 +18,9 @@ mod code_intel_names;
 mod code_intel_query;
 #[path = "fixtures/code_intel_virtual.rs"]
 mod code_intel_virtual;
+#[cfg(target_os = "macos")]
+#[path = "time/conversation.rs"]
+mod conversation;
 #[path = "time/executor.rs"]
 mod executor;
 #[path = "time/fs_watch.rs"]
@@ -203,9 +206,9 @@ const BENCHES: &[Bench] = &[
 ];
 
 fn main() -> ExitCode {
-    // `ui/*`, `review_view/*`, `project_home/*`, `worktrees/*` and
-    // `terminal_view/*` need GPUI, which only builds on macOS in this
-    // workspace.
+    // `ui/*`, `review_view/*`, `project_home/*`, `worktrees/*`,
+    // `terminal_view/*` and `conversation/*` need GPUI, which only builds on
+    // macOS in this workspace.
     #[cfg(target_os = "macos")]
     let benches: Vec<Bench> = {
         let mut all = BENCHES.to_vec();
@@ -214,6 +217,7 @@ fn main() -> ExitCode {
         all.extend_from_slice(project_home::BENCHES);
         all.extend_from_slice(worktrees::BENCHES);
         all.extend_from_slice(terminal_view::BENCHES);
+        all.extend_from_slice(conversation::BENCHES);
         all
     };
     #[cfg(not(target_os = "macos"))]

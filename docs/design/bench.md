@@ -807,6 +807,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `review/open_session_settled`、`review/cutoffs_cold`、`review/attribute_session_50` | 只记录（同一夹具：缓存全空时从 `open` 到最后一份快照；300 条记录的 `tree_changes` 全部未命中时建出截止时刻表；其余 49 个文件的改动链与归因，每一步都 `load`，不含缓存的读写） | [review](review.md#性能) | `review` 第 3 步 |
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 的全部 5000 行；进程内，不开窗口，只在 macOS 编译） | [review_view](review_view.md#性能) | `review_view` 第 1 步 |
 | `review_view/scroll_5000` | p95 ≤ 8.3 ms（每帧工作时间：滚过 5000 行的 diff；`Process`，`WorkspaceHost::record_frames` 的记录）。计划中：`workspace` 还不记录帧，`on_frames` 的记录总是空的 | [review_view](review_view.md#性能) | `workspace` 的帧记录 |
+| `conversation/stream_apply` | p95 ≤ 2 ms（40 轮、正文合计 1 MiB 的快照；连续应用 200 个快照，每个让最后一段 agent 说明多 200 字节，测每次 `items::build`、新旧项的比较、`ListState::splice` 加这一帧里这一项的排版；夹具是 `lectern_conversation::fixture::StreamApply`，一个真实的 `MessagesModel` 在 GPUI 测试平台的窗口里；进程内，不开真实窗口，只在 macOS 编译。帧是测试平台的帧：没有 GPU，文字排版比真实的简单） | [conversation](conversation.md#性能) | `conversation` 第 4 步 |
 | `project_home/build_1000` | 中位数 < 3 ms（[ADR 0055](../adr/0055.md)；`snapshot::build` 对 `lectern_project_home::fixture::BuildFixture`：1000 个会话、50 个概览条目、17 个 worktree、2000 个子项目；进程内，不开窗口，只在 macOS 编译） | [project_home](project_home.md#性能) | `project_home` 第 3 步 |
 | `project_home/resident_bytes` | 存活字节 < 1 MB（同一夹具的 `HomeSnapshot` 与两个视图的状态；`Memory`）。计划中：视图的状态要在窗口里建 | [project_home](project_home.md#性能) | 视图的内存测量 |
 | `worktrees/build_1000` | 中位数 < 2 ms（`snapshot::build` 对 `lectern_worktrees::fixture::fixture_1000`：17 个 worktree、1000 个会话、每个 worktree 8 个重叠项和一份分支用量；进程内，不开窗口，只在 macOS 编译） | [worktrees](worktrees.md#性能) | `worktrees` 第 3 步 |
@@ -1250,6 +1251,11 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - `just test -p lectern-bench`：181 个通过，跳过 6 个。预算表加了 `worktrees/build_1000`、`worktrees/resident_bytes`（`macos_only`），`app/switch_worktree` 从计划中改为生效。
 - `cargo bench --locked -p lectern-bench --all-features --bench time --bench memory -- worktrees/`：`worktrees/build_1000` 中位数 358 µs（< 2 ms）；`worktrees/resident_bytes` 中位数 43.8 KB（< 256 KiB）。`-- review/resident`：`review/resident_100k_bytes` 8.86 KB、`review/resident_cloudprint_bytes` 84.8 KB，都 < 1 MB。
 - 没有在本机运行：`app/switch_worktree`（`process` 目标，启动带探针的 `lectern` 并打开窗口，已写好）。
+
+`conversation` 的基准（[conversation 设计](conversation.md#性能)的前置条件 K，`Refs #23`，同一台机器，没有打开真实窗口）：
+
+- `just test -p lectern-bench`：181 个通过，跳过 6 个。预算表加了 `conversation/stream_apply`（`share_macos`，`Time`，p95 ≤ 2 ms）。
+- `cargo bench --locked -p lectern-bench --all-features --bench time -- conversation/`：p95 655 µs，中位数 459 µs，最大 749 µs，721 个样本，`ok`（报告标 noisy）。夹具 `lectern_conversation::fixture::StreamApply` 是一个真实的 `MessagesModel` 在 GPUI 测试平台的窗口里，帧是测试平台的帧（没有 GPU，文字排版比真实的简单），细节见 conversation 设计「性能」。
 
 ## 与设计的差异
 
