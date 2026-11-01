@@ -328,6 +328,7 @@ fn heads_of(key: &str, branch: &str) -> Vec<crate::gitread::WorktreeHead> {
     vec![crate::gitread::WorktreeHead {
         key: PathBuf::from(key),
         branch: Some(branch.to_owned()),
+        rebasing: false,
     }]
 }
 

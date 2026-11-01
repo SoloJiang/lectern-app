@@ -28,6 +28,12 @@ pub struct WorktreeHead {
     pub(crate) key: PathBuf,
     /// The full reference name of the branch; None when detached.
     pub(crate) branch: Option<String>,
+    /// A rebase is in progress in the worktree (`rebase-merge` or
+    /// `rebase-apply` is in its administrative directory): git has detached
+    /// HEAD for the stretch and puts it back on the branch when the rebase
+    /// ends, so this HEAD is not where the worktree is, to the branch
+    /// observations.
+    pub(crate) rebasing: bool,
 }
 
 /// What a branch's reflog says about its segments.
@@ -106,6 +112,8 @@ impl GitRead for DiskGit {
             worktrees
                 .into_iter()
                 .map(|w| WorktreeHead {
+                    rebasing: w.git_dir.join("rebase-merge").exists()
+                        || w.git_dir.join("rebase-apply").exists(),
                     key: w.git_dir,
                     branch: match w.head {
                         HeadState::Branch { name, .. } => Some(name.as_str().to_owned()),

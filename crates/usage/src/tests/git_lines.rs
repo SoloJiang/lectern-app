@@ -261,6 +261,7 @@ fn lines_a_detach_written_as_a_switch_is_corrected_by_the_head_that_is_read() {
     let heads = [WorktreeHead {
         key: key.clone(),
         branch: None,
+        rebasing: false,
     }];
     h.store()
         .reconcile(&repo.common, (AT + 8 * SEC) * 1_000_000, &heads, &what)
@@ -310,6 +311,7 @@ fn lines_a_head_that_is_where_the_records_left_it_adds_nothing() {
     let heads = [WorktreeHead {
         key: PathBuf::from("/work/app/.git"),
         branch: Some("refs/heads/br".to_owned()),
+        rebasing: false,
     }];
     h.store()
         .reconcile(&repo.common, (AT + 8 * SEC) * 1_000_000, &heads, &what)
@@ -355,10 +357,12 @@ fn lines_a_worktree_made_while_the_watch_runs_is_on_its_branch_once_it_is_read()
         WorktreeHead {
             key: PathBuf::from("/work/app/.git"),
             branch: Some("refs/heads/main".to_owned()),
+            rebasing: false,
         },
         WorktreeHead {
             key,
             branch: Some("refs/heads/wtb".to_owned()),
+            rebasing: false,
         },
     ];
     h.store()
@@ -562,10 +566,231 @@ fn lines_reconcile_does_not_run_for_a_repository_that_is_not_watched() {
             &[WorktreeHead {
                 key: other.to_path_buf(),
                 branch: Some("refs/heads/x".to_owned()),
+                rebasing: false,
             }],
             &what,
         )
         .unwrap();
     assert_eq!(baselines_of(&h), 1);
     let _ = repo;
+}
+
+// ---- a rebase in progress ----
+
+// `git switch feat`, then `git rebase main` stopping on a conflict, then
+// `git add` and `git rebase --continue`, in one worktree: HEAD is detached
+// (`rebase-merge` exists) from the start line to the finish line.
+const REBASE_SWITCH: &str = "88c522627fdd35e74eccf930edf2a3fc50df7345 263dff551fe37b65a03d4a366bb138d1e67efb2b Dev <dev@example.org> 1793542742 +0800\tcheckout: moving from main to feat";
+const REBASE_START: &str = "263dff551fe37b65a03d4a366bb138d1e67efb2b 88c522627fdd35e74eccf930edf2a3fc50df7345 Dev <dev@example.org> 1793542742 +0800\trebase (start): checkout main";
+const REBASE_CONTINUE: &str = "88c522627fdd35e74eccf930edf2a3fc50df7345 b0c8435d809e56a2ce33b792cc583e8330dde899 Dev <dev@example.org> 1793542742 +0800\trebase (continue): featwork";
+const REBASE_FINISH: &str = "b0c8435d809e56a2ce33b792cc583e8330dde899 b0c8435d809e56a2ce33b792cc583e8330dde899 Dev <dev@example.org> 1793542742 +0800\trebase (finish): returning to refs/heads/feat";
+// `git switch -` and `git checkout -` write the names they resolve to.
+const SWITCH_BACK: &str = "b0c8435d809e56a2ce33b792cc583e8330dde899 88c522627fdd35e74eccf930edf2a3fc50df7345 Dev <dev@example.org> 1793542742 +0800\tcheckout: moving from feat to main";
+
+fn corrections(rig: &super::plugin::Rig) -> i64 {
+    rusqlite::Connection::open(rig.db())
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM reflog_reset WHERE reason = 4",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// The branches of the baselines of a worktree, oldest first.
+fn baseline_branches(rig: &super::plugin::Rig, key: &Path) -> Vec<Option<String>> {
+    let c = rusqlite::Connection::open(rig.db()).unwrap();
+    let mut stmt = c
+        .prepare(
+            "SELECT b.branch FROM head_baseline b JOIN intern i ON i.id = b.wt
+             WHERE i.text = ?1 ORDER BY b.at_ns, b.id",
+        )
+        .unwrap();
+    stmt.query_map([key.to_str().unwrap().as_bytes()], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn line_at(
+    rig: &super::plugin::Rig,
+    repo: &Repo,
+    line: &str,
+    ms_after: i64,
+) -> lectern_fs_watch::ReflogRecord {
+    let now = rig.time.now_ms();
+    repo.literal(
+        ReflogFile::Head(main()),
+        &at(line, now + ms_after),
+        now + ms_after + 100,
+        Origin::Appended,
+    )
+}
+
+#[test]
+fn lines_plugin_does_not_take_a_head_read_in_a_rebase_for_fact() {
+    let (rig, _dir, repo, reads) = rig_with_repo();
+    let common = repo.common.clone();
+    reads.set_branches(&common, &["refs/heads/main", "refs/heads/feat"]);
+    // The rebase stops on a conflict: HEAD reads detached.
+    reads.set_heads(&common, &[(&common, None)]);
+    reads.set_rebasing(&common, true);
+    let switch = line_at(&rig, &repo, REBASE_SWITCH, 1_000);
+    let start = line_at(&rig, &repo, REBASE_START, 1_500);
+    rig.engine
+        .on_repo_batch(&common, batch(vec![switch, start], vec![]), None);
+    rig.settle();
+    // No correction, the predicted baseline stands.
+    assert_eq!(corrections(&rig), 0);
+    assert_eq!(
+        baseline_branches(&rig, &common).last(),
+        Some(&Some("refs/heads/feat".to_owned()))
+    );
+    // Still in the rebase, the read is tried again and again writes nothing.
+    let before = reads.head_reads();
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert!(reads.head_reads() > before);
+    assert_eq!(corrections(&rig), 0);
+    // `--continue` ends it; its lines arrive, HEAD is back on the branch.
+    reads.set_rebasing(&common, false);
+    reads.set_heads(&common, &[(&common, Some("refs/heads/feat"))]);
+    let cont = line_at(&rig, &repo, REBASE_CONTINUE, 1_000);
+    let finish = line_at(&rig, &repo, REBASE_FINISH, 1_500);
+    rig.engine
+        .on_repo_batch(&common, batch(vec![cont, finish], vec![]), None);
+    rig.settle();
+    assert_eq!(corrections(&rig), 0);
+    assert_eq!(
+        baseline_branches(&rig, &common).last(),
+        Some(&Some("refs/heads/feat".to_owned()))
+    );
+    // Nothing waits any more: the read stops.
+    let after = reads.head_reads();
+    rig.advance(crate::engine::REBASE_RETRY);
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert_eq!(reads.head_reads(), after);
+    // A detach written as a switch, with no rebase, is still corrected.
+    let back = line_at(&rig, &repo, SWITCH_BACK, -500);
+    reads.set_heads(&common, &[(&common, None)]);
+    rig.engine
+        .on_repo_batch(&common, batch(vec![back], vec![]), None);
+    rig.settle();
+    assert_eq!(corrections(&rig), 1);
+    assert_eq!(baseline_branches(&rig, &common).last(), Some(&None));
+}
+
+#[test]
+fn lines_plugin_waits_for_the_end_of_a_rebase_when_the_batch_comes_first() {
+    let (rig, _dir, repo, reads) = rig_with_repo();
+    let common = repo.common.clone();
+    reads.set_branches(&common, &["refs/heads/main", "refs/heads/feat"]);
+    reads.set_heads(&common, &[(&common, None)]);
+    reads.set_rebasing(&common, true);
+    let switch = line_at(&rig, &repo, REBASE_SWITCH, 1_000);
+    rig.engine
+        .on_repo_batch(&common, batch(vec![switch], vec![]), None);
+    rig.settle();
+    // The finish line is drained while the directory is still there (it is
+    // removed after the line); nothing else comes. The timer reads HEAD.
+    let finish = line_at(&rig, &repo, REBASE_FINISH, 1_000);
+    rig.engine
+        .on_repo_batch(&common, batch(vec![finish], vec![]), None);
+    rig.settle();
+    reads.set_rebasing(&common, false);
+    reads.set_heads(&common, &[(&common, Some("refs/heads/feat"))]);
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert_eq!(corrections(&rig), 0);
+    let after = reads.head_reads();
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert_eq!(reads.head_reads(), after);
+}
+
+#[test]
+fn lines_plugin_gives_a_worktree_made_in_a_rebase_its_baseline_when_the_rebase_ends() {
+    let (rig, _dir, repo, reads) = rig_with_repo();
+    let common = repo.common.clone();
+    let key = common.join("worktrees/wt");
+    assert_eq!(baselines(&rig), 1);
+    reads.set_heads(
+        &common,
+        &[(&common, Some("refs/heads/feature")), (&key, None)],
+    );
+    reads.set_rebasing(&key, true);
+    let now = rig.time.now_ms();
+    let file = ReflogFile::Head(WorktreeName::Linked("wt".into()));
+    let first = repo.literal(
+        file.clone(),
+        &at(LINKED_FIRST, now + 1_000),
+        now + 1_100,
+        Origin::NewFile,
+    );
+    let reset = repo.literal(
+        file,
+        &at(LINKED_RESET, now + 1_000),
+        now + 1_100,
+        Origin::NewFile,
+    );
+    rig.engine
+        .on_repo_batch(&common, batch(vec![first, reset], vec![]), None);
+    rig.settle();
+    // The detached HEAD of the rebase is not a baseline.
+    assert!(baseline_branches(&rig, &key).is_empty());
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert!(baseline_branches(&rig, &key).is_empty());
+    // The rebase ends: the branch is the baseline, once.
+    reads.set_rebasing(&key, false);
+    reads.set_heads(
+        &common,
+        &[
+            (&common, Some("refs/heads/feature")),
+            (&key, Some("refs/heads/wtb")),
+        ],
+    );
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert_eq!(
+        baseline_branches(&rig, &key),
+        [Some("refs/heads/wtb".to_owned())]
+    );
+    let after = reads.head_reads();
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert_eq!(reads.head_reads(), after);
+}
+
+#[test]
+fn lines_plugin_does_not_arm_a_baseline_in_a_rebase() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("app");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let common = root.join(".git");
+    let reads = Arc::new(crate::testing::FakeGit::new());
+    reads.set_heads(&common, &[(&common, None)]);
+    reads.set_rebasing(&common, true);
+    let setup = |p: &crate::testing::FakeProjects| {
+        let key = p.repo(&root, &common);
+        p.set_open(&key, true);
+    };
+    let rig = super::plugin::Rig::with_git(
+        crate::testing::FakeSessions::new(
+            "session-claude-code",
+            lectern_services::session::Agent::ClaudeCode,
+        ),
+        setup,
+        reads.clone(),
+    );
+    rig.settle();
+    // The watch began, with no baseline: the detached HEAD is the rebase's.
+    assert_eq!(baselines(&rig), 0);
+    let spans: i64 = rusqlite::Connection::open(rig.db())
+        .unwrap()
+        .query_row("SELECT count(*) FROM watch_span", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(spans, 1);
+    reads.set_rebasing(&common, false);
+    reads.set_heads(&common, &[(&common, Some("refs/heads/feature"))]);
+    rig.advance(crate::engine::REBASE_RETRY);
+    assert_eq!(
+        baseline_branches(&rig, &common),
+        [Some("refs/heads/feature".to_owned())]
+    );
 }

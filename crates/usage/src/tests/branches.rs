@@ -246,6 +246,7 @@ impl Harness {
             .map(|(key, branch)| WorktreeHead {
                 key: PathBuf::from(key),
                 branch: branch.map(str::to_owned),
+                rebasing: false,
             })
             .collect();
         let logs: Vec<(String, BranchLog)> = heads
