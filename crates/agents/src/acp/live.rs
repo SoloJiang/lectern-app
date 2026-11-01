@@ -373,15 +373,19 @@ impl Live {
     /// 序号：它们的历史项暂时不显示，实时项更全。
     ///
     /// 认法：窗口里序号比前一个认出的轮次大、开始时刻不早于发出的时刻（留 2 秒余地）、prompt 的第一行
-    /// 相同的第一轮。时刻挡住别人在 CLI 里先前说过同样的话的轮次，序号保证两个相同的 prompt 各认各的。
+    /// 相同、并且开始时刻早于下一个 prompt 发出的时刻的第一轮。时刻挡住别人在 CLI 里先前说过同样的话的
+    /// 轮次；同一时间只有一个 prompt 在跑，所以上界挡住失败的 prompt 认走重试的那一轮；序号保证两个相同的
+    /// prompt 各认各的。
     pub(crate) fn settle(&mut self, marks: &[Mark]) -> Vec<u32> {
         let mut hidden = Vec::new();
         let mut retire = Vec::new();
         let mut after = 0u32;
-        for group in &self.groups {
+        for (index, group) in self.groups.iter().enumerate() {
+            let next_sent = self.groups.get(index + 1).map(|next| next.sent_at);
             let found = marks.iter().find(|mark| {
                 mark.ordinal > after
                     && mark.started_at.0.saturating_add(SENT_SLACK_MS) >= group.sent_at
+                    && next_sent.is_none_or(|sent| mark.started_at.0 < sent)
                     && mark.preview == group.first_line
             });
             let Some(mark) = found else { continue };
@@ -975,15 +979,39 @@ mod tests {
         assert!(live.settle(&marks).is_empty());
         assert_eq!(live.pending_groups(), 0);
 
-        // Two identical prompts, only one of them in the log so far: the first is retired, the second
+        // Two identical prompts, only the first in the log so far: the first is retired, the second
         // stays live, even though the same mark would also fit it.
         let mut live = Live::default();
         live.begin_prompt("go on", PromptOrigin::User, 10_000);
         live.finish(Stop::EndTurn);
         live.begin_prompt("go on", PromptOrigin::User, 10_100);
         live.finish(Stop::EndTurn);
-        assert!(live.settle(&[mark(4, 10_200, "go on")]).is_empty());
+        assert!(live.settle(&[mark(4, 10_050, "go on")]).is_empty());
         assert_eq!(live.pending_groups(), 1);
+    }
+
+    #[test]
+    fn a_failed_prompt_does_not_take_the_turn_of_its_retry() {
+        let mut live = Live::default();
+        live.begin_prompt("go on", PromptOrigin::User, 10_000);
+        live.agent_text("failed");
+        live.abort();
+        live.begin_prompt("go on", PromptOrigin::User, 11_000);
+        live.agent_text("worked");
+        live.finish(Stop::EndTurn);
+        // Only the retry reached the log. It goes; the failed prompt, within the two seconds of slack too,
+        // stays on screen.
+        assert!(live.settle(&[mark(1, 11_100, "go on")]).is_empty());
+        assert_eq!(live.pending_groups(), 1);
+        let entries = live.entries();
+        assert!(entries.iter().any(|e| matches!(
+            &e.body,
+            EntryBody::AgentText { text, .. } if &*text.text == "failed"
+        )));
+        assert!(!entries.iter().any(|e| matches!(
+            &e.body,
+            EntryBody::AgentText { text, .. } if &*text.text == "worked"
+        )));
     }
 
     #[test]
