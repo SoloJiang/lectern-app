@@ -142,6 +142,7 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
     });
     let (usage_id, usage) = lectern_usage::plugin(UsageDeps {
         executor: r.executor.clone(),
+        watcher: r.watcher.clone(),
         data_dir: r.app_data.join("usage"),
         zone: Arc::new(SystemZone),
     });

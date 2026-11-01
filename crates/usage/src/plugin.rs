@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lectern_executor::Executor;
+use lectern_fs_watch::Watcher;
 use lectern_kernel::{
     Activation, Active, Busy, Context, Manifest, Name, Plugin, PluginError, PluginHandle,
     Quiescent, service,
@@ -24,6 +25,9 @@ pub const PLUGIN_ID: &str = "usage";
 /// What `app` hands the plugin. Building it does no IO.
 pub struct UsageDeps {
     pub executor: Executor,
+    /// `app`'s watcher; the plugin watches `<data_dir>/statusline/` with it
+    /// once the database is open.
+    pub watcher: Watcher,
     /// `app` passes `platform::dirs::app_data()` joined with `usage/`
     /// (ADR 0044). The database is `usage.db` in it; the directory is
     /// created by the first open, after the first frame.
@@ -77,6 +81,7 @@ impl Plugin for UsagePlugin {
         let engine = Engine::new(
             Deps {
                 executor: self.deps.executor.clone(),
+                watcher: self.deps.watcher.clone(),
                 data_dir: self.deps.data_dir.clone(),
                 zone: self.deps.zone.clone(),
                 time: self.time.clone(),

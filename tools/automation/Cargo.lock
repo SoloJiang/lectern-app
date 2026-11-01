@@ -4812,11 +4812,14 @@ name = "lectern-usage"
 version = "0.0.0"
 dependencies = [
  "lectern-executor",
+ "lectern-fs-watch",
  "lectern-kernel",
  "lectern-logging",
  "lectern-services",
  "rusqlite",
  "ruzstd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

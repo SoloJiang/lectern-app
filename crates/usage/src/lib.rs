@@ -11,6 +11,7 @@
 
 mod engine;
 mod key;
+mod limits;
 mod plugin;
 mod snapshot;
 mod store;

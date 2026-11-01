@@ -2,6 +2,7 @@
 
 mod archive;
 mod dedup;
+mod limits;
 mod log;
 mod plugin;
 mod pure;

@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 use lectern_bench::{Bench, BenchError, CountingAlloc, Ctx, Measured, Value};
 use lectern_executor::Executor;
+use lectern_fs_watch::Config;
+use lectern_fs_watch::testing::{FakeBackend, manual};
 use lectern_kernel::testing::TestKernel;
 use lectern_kernel::{Activation, Active, Context, Manifest, Plugin, PluginError, service};
 use lectern_services::project::Projects;
@@ -123,11 +125,15 @@ fn at_rest(f: &Fixture, data: Option<std::path::PathBuf>) -> Result<u64, BenchEr
     let before_reads = reads();
     let before = CountingAlloc::live();
     let executor = Executor::manual();
+    // Both runs have the manual watcher; only the `usage` run registers the
+    // statusline directory in it. Its queue runs with the executor.
+    let (watcher, driver) = manual(FakeBackend::new(), executor.clone(), Config::default());
     let time = ManualTime::new(HEAVY_NOW);
     let kernel = match &data {
         Some(dir) => {
             let (_, usage) = plugin(UsageDeps {
                 executor: executor.clone(),
+                watcher: watcher.clone(),
                 data_dir: dir.clone(),
                 zone: Arc::new(TableZone::fixed(0)),
             });
@@ -154,7 +160,7 @@ fn at_rest(f: &Fixture, data: Option<std::path::PathBuf>) -> Result<u64, BenchEr
                     f.sessions
                 )));
             }
-            executor.run_until_idle();
+            driver.run_until_idle();
             if inner.is_quiescent() {
                 time.advance(PACE);
             } else {
@@ -163,11 +169,11 @@ fn at_rest(f: &Fixture, data: Option<std::path::PathBuf>) -> Result<u64, BenchEr
         }
         // The archive check and the reclaim check after the backfill.
         for _ in 0..4 {
-            executor.run_until_idle();
+            driver.run_until_idle();
             time.advance(PACE);
         }
     }
-    while executor.run_until_idle() > 0 || !inner.is_quiescent() {
+    while driver.run_until_idle() > 0 || !inner.is_quiescent() {
         if Instant::now() > deadline {
             return Err(BenchError::new("the kernel did not come to rest"));
         }
@@ -176,6 +182,6 @@ fn at_rest(f: &Fixture, data: Option<std::path::PathBuf>) -> Result<u64, BenchEr
     let held = CountingAlloc::live().saturating_sub(before) as u64;
     drop(inner);
     drop(kernel);
-    executor.run_until_idle();
+    driver.run_until_idle();
     Ok(held)
 }

@@ -6,6 +6,7 @@
 pub(crate) mod cold;
 mod dedup;
 mod ingest;
+pub(crate) mod limits;
 mod query;
 mod recover;
 pub(crate) mod schema;

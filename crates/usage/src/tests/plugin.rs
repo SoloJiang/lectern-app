@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lectern_executor::Executor;
+use lectern_fs_watch::Config;
+use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
 use lectern_kernel::testing::TestKernel;
 use lectern_kernel::{Busy, Kernel};
 use lectern_services::project::{OpenRequest, ProjectEvent, ProjectKey, Projects};
@@ -26,7 +28,9 @@ const NOW: i64 = OCT_20 + 2 * DAY + 12 * HOUR;
 
 pub(crate) struct Rig {
     pub(crate) kernel: TestKernel,
-    pub(crate) executor: Executor,
+    /// Runs the watcher's queue and the executor.
+    pub(crate) driver: Driver,
+    pub(crate) backend: Arc<FakeBackend>,
     pub(crate) time: ManualTime,
     pub(crate) dir: tempfile::TempDir,
     pub(crate) sessions: Arc<FakeSessions>,
@@ -70,8 +74,11 @@ impl Rig {
         time: ManualTime,
     ) -> Rig {
         let executor = Executor::manual();
+        let backend = FakeBackend::new();
+        let (watcher, driver) = manual(backend.clone(), executor.clone(), Config::default());
         let (_, usage) = plugin(UsageDeps {
             executor: executor.clone(),
+            watcher,
             data_dir: dir.path().join("usage"),
             zone: Arc::new(TableZone::fixed(0)),
         });
@@ -84,7 +91,8 @@ impl Rig {
         let engine = slot.lock().unwrap().clone().unwrap();
         Rig {
             kernel,
-            executor,
+            driver,
+            backend,
             time,
             dir,
             sessions,
@@ -107,7 +115,7 @@ impl Rig {
     pub(crate) fn settle(&self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
-            if self.executor.run_until_idle() > 0 {
+            if self.driver.run_until_idle() > 0 {
                 continue;
             }
             match self.kernel().quiescent_epoch() {

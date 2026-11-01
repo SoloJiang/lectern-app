@@ -400,7 +400,7 @@ target 为 `app`。
 - `slot` 是 `UsageSlot::default()`，`profile::desktop` 里建一个，克隆给两个 `project_home` 插件。
 - `zone` 是 `profile.rs` 里的 `SystemZone`：`LocalZone::offset_at(unix_ms)` 取 `platform::time::utc_offset(unix_ms.div_euclid(1000))`（向下取整，不用截断除法，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)的「规则」）。`utc_offset` 返回 None 时按 UTC（0）处理：毫秒时间戳除以 1000 后总有偏移，这一支不会走到，所以不记日志。构造 `SystemZone` 不做 IO；第一次 `localtime_r`（读时区文件）发生在 `usage` 的后台任务里，不在 UI 线程、不在首帧之前。
 - `UsageDeps::data_dir` 只拼路径，不创建；`usage.db` 由 `usage` 在 `started` 提交的后台任务里打开，目录在第一次打开时创建（[usage 设计「数据流与线程」](usage.md#数据流与线程)）。
-- 现在的 `UsageDeps` 只有 `executor`、`data_dir`、`zone`。usage 设计「依赖」里的 `watcher`、`git_ceilings` 要到 usage 的第 2、5 步才加；`Resources::git_ceilings` 已在，加字段时 `app` 照 `review` 的做法传入（「与设计的差异」）。
+- 现在的 `UsageDeps` 有 `executor`、`watcher`（usage 的第 2 步加入，传 `Resources::watcher`）、`data_dir`、`zone`。usage 设计「依赖」里的 `git_ceilings` 要到 usage 的第 5 步才加；`Resources::git_ceilings` 已在，加字段时 `app` 照 `review` 的做法传入（「与设计的差异」）。
 - `project-home` 现在不登记任何贡献（它的视图随 project_home 的第 2 步）。装配之后，打开（或从 `window.json` 恢复）一个项目时它会取概览的关注、取用量的关注，并在后台合成快照，而窗口里没有视图读这些快照：这是过渡状态，视图合并后消失（「已知限制」）。没有项目打开时（首次启动）这两个插件什么也不做。
 
 ### 性能
@@ -956,7 +956,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 `usage` 与 `project_home` 的装配：
 
-- **`UsageDeps` 只有三个字段。** usage 设计「依赖」写 `watcher`、`git_ceilings` 要在 `app` 构造插件前补齐；第 1 步的代码没有这两项（它们要到第 2、5 步才用到），`app` 按现有的三个字段构造，不添加没有用处的字段。加字段的 PR 同时改 `profile.rs`，传 `r.watcher.clone()` 和 `r.git_ceilings.clone()`（usage 设计「与设计的差异」前置条件 C）。
+- **`UsageDeps` 先只有三个字段，现在多了 `watcher`。** usage 设计「依赖」写 `watcher`、`git_ceilings` 要在 `app` 构造插件前补齐；第 1 步的代码没有这两项（它们要到第 2、5 步才用到），`app` 按当时的三个字段构造，不添加没有用处的字段。加字段的 PR 同时改 `profile.rs`：usage 的第 2 步已加 `watcher`（传 `r.watcher.clone()`），第 5 步加 `git_ceilings`（传 `r.git_ceilings.clone()`，usage 设计「与设计的差异」前置条件 C）。
 - **`project_home` 提前装配。** project_home 设计把 D 放在第 3 步（视图之后）；它的第 1 步已有两个插件和 `UsageSlot`，`dyn Usage` 现在有了提供者，`project-home` 又不登记贡献，所以图校验通过、空 `Workspace` 的启动不受影响。代价是「已知限制」里的过渡状态。bench 的 `Driver` 的 `home` 场景（D 的另一半）仍随探针。
 - **`welcome` 随它的视图装配**（见「welcome 的装配」）。
 - **`LocalZone` 的 None 按 UTC。** platform 设计把 None 的处理交给 `app`；毫秒时间戳总有偏移，取 0 不记日志。

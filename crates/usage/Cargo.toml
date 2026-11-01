@@ -15,13 +15,13 @@ plugin = true
 # testing::FakeSessions, FakeProjects, TableZone, ManualTime, Scenario and the
 # heavy_days fixture, for the tests of this crate and for lectern-bench.
 test-support = [
-    "dep:serde",
-    "dep:serde_json",
     "lectern-kernel/test-support",
     "lectern-executor/test-support",
 ]
 
 [dependencies]
+# The statusline directory's watch (`watch_dir`).
+lectern-fs-watch = { path = "../fs_watch" }
 # Background tasks (reading, snapshots, the database). Timers are not tasks:
 # they are waker callbacks on the kernel's `Clock` (see src/time.rs).
 lectern-executor = { path = "../executor" }
@@ -35,17 +35,18 @@ lectern-services = { path = "../services" }
 rusqlite.workspace = true
 # The cold segments' compression (docs/design/usage.md「冷热分层」, ADR 0026).
 ruzstd.workspace = true
-# The JSON record scripts of testing::FakeSessions.
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+# The statusline file's JSON (src/limits.rs) and the record scripts of
+# testing::FakeSessions.
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 lectern-logging = { path = "../logging", features = ["test-support"] }
-serde.workspace = true
-serde_json.workspace = true
+# FakeBackend and the manually driven watcher.
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]
