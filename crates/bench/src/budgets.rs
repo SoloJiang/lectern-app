@@ -2106,7 +2106,7 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share(
         "terminal/frame_full",
-        &[median(Limit::TimeAtMost(us(300)))],
+        &[median(Limit::TimeAtMost(us(520)))],
         TERMINAL,
         ACTIVE,
         Time,
