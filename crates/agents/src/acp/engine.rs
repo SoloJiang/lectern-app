@@ -17,8 +17,10 @@ use lectern_services::session::{
     Agent, Place, ResumeCommand, SessionKey, SessionSource, SessionsChanged,
 };
 
+use super::conn::Conn;
 use super::history::{self, Window};
 use super::link::{Effects, Run};
+use super::preview::Previews;
 use super::program::{Env, is_canonical_uuid, program_of_source};
 use crate::diag;
 
@@ -132,6 +134,9 @@ pub(super) struct State {
     pub(super) unsupported: HashSet<AcpProgram>,
     /// 连接 ID 到会话：进程被回收之前一直有（退出的记录要带会话的作用域）。
     pub(super) by_conn: HashMap<u64, SessionKey>,
+    /// 已经和会话脱钩、关闭的任务还排在 executor 队列里的连接，到进程被回收为止。插件停用时队列里没跑的
+    /// 关闭任务被丢弃，这里的连接由 `stop` 补上关闭。
+    pub(super) closing: HashMap<u64, Arc<Conn>>,
     pub(super) next_interest: u64,
     pub(super) next_attempt: u64,
     pub(super) next_conn: u64,
@@ -145,6 +150,8 @@ pub(crate) struct Engine {
     pub(super) setup: Setup,
     pub(super) host: OnceLock<PluginHandle>,
     pub(super) state: Mutex<State>,
+    /// 权限请求的改动预览（自己的锁，算 diff 时不持有引擎的锁）。
+    pub(super) previews: Previews,
 }
 
 impl State {
@@ -182,6 +189,7 @@ impl Engine {
                 programs: HashMap::new(),
                 unsupported: HashSet::new(),
                 by_conn: HashMap::new(),
+                closing: HashMap::new(),
                 next_interest: 0,
                 next_attempt: 1,
                 next_conn: 1,
@@ -189,6 +197,7 @@ impl Engine {
                 stopped: false,
                 waiting: Arc::from([]),
             }),
+            previews: Previews::default(),
         })
     }
 
@@ -321,13 +330,30 @@ impl Engine {
         };
         let can_prompt = Self::can_prompt(state, conv);
         let conv = state.sessions.get_mut(key).expect("checked above");
+        // 轮次索引里已有的实时项换成历史项：这一轮的 `session/prompt` 返回了就去掉实时项，还没返回就先不
+        // 显示它的历史项。同一次换快照里做，同一轮不出现两次。
+        let hidden = conv.run.live.settle(&conv.window.marks);
+        let window: std::borrow::Cow<'_, [Entry]> = if hidden.is_empty() {
+            std::borrow::Cow::Borrowed(&conv.window.entries[..])
+        } else {
+            std::borrow::Cow::Owned(
+                conv.window
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        !history::turn_number(entry).is_some_and(|n| hidden.contains(&n))
+                    })
+                    .cloned()
+                    .collect(),
+            )
+        };
         // 历史窗口为实时项让出空间，使正文合计不超过 1 MiB。
-        let (start, extra) = history::fit(&conv.window.entries, conv.run.live.text_bytes());
+        let (start, extra) = history::fit(&window, conv.run.live.text_bytes());
         let live = conv.run.live.entries();
-        let entries: Arc<[Entry]> = if start == 0 && live.is_empty() {
+        let entries: Arc<[Entry]> = if start == 0 && live.is_empty() && hidden.is_empty() {
             conv.window.entries.clone()
         } else {
-            let mut all = conv.window.entries[start..].to_vec();
+            let mut all = window[start..].to_vec();
             all.extend(live);
             all.into()
         };
@@ -362,6 +388,28 @@ impl Engine {
             if Self::rebuild(state, &key) {
                 events.extend(Self::changed(state, &key));
             }
+        }
+        Self::update_waiting(state, events);
+    }
+
+    /// 有待确认的权限请求的会话，按最早的请求排序（`PermissionId` 随到达递增）。集合变了就发
+    /// `WaitingChanged`；只是先后变了（先到的请求答完了）只更新，不发事件。
+    pub(super) fn update_waiting(state: &mut State, events: &mut Vec<ConversationEvent>) {
+        let mut asked: Vec<(u64, &SessionKey)> = state
+            .sessions
+            .iter()
+            .filter_map(|(key, conv)| Some((conv.run.first_permission()?.0, key)))
+            .collect();
+        asked.sort_by_key(|(id, _)| *id);
+        let list: Vec<SessionKey> = asked.into_iter().map(|(_, key)| key.clone()).collect();
+        if *state.waiting == *list {
+            return;
+        }
+        let same_set =
+            state.waiting.len() == list.len() && state.waiting.iter().all(|key| list.contains(key));
+        state.waiting = list.into();
+        if !same_set {
+            events.push(ConversationEvent::WaitingChanged);
         }
     }
 
@@ -419,6 +467,7 @@ impl Engine {
                     fx.events.extend(Self::changed(&state, &key));
                 }
             }
+            Self::update_waiting(&mut state, &mut fx.events);
         }
         fx.lookups = true;
         self.run(fx);
@@ -860,6 +909,24 @@ impl Engine {
             Self::rebuild_all(&mut state, &mut events);
         }
         self.emit(events);
+    }
+
+    /// 改一个会话的实时项（测试里代替连接上的消息），然后像连接上的消息那样换出快照。
+    pub(crate) fn with_live<R>(
+        &self,
+        key: &SessionKey,
+        change: impl FnOnce(&mut super::live::Live) -> R,
+    ) -> R {
+        let mut events = Vec::new();
+        let result = {
+            let mut state = self.state();
+            let conv = state.sessions.get_mut(key).expect("a watched session");
+            let result = change(&mut conv.run.live);
+            Self::rebuild_all(&mut state, &mut events);
+            result
+        };
+        self.emit(events);
+        result
     }
 
     /// 把一个程序的查找状态设为「正在查找」，模拟查找还没完成。

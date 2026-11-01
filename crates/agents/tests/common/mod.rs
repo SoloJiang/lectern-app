@@ -260,7 +260,7 @@ impl Harness {
     pub fn turn(&self, session: &SessionKey, text: &str) -> Arc<ConversationSnapshot> {
         self.prompt(session, text);
         self.wait(session, "the turn to end", |s| {
-            s.link == Link::Idle && s.entries.iter().any(|e| is_live_prompt(&e.body, text))
+            s.link == Link::Idle && s.entries.iter().any(|e| is_prompt_with_text(&e.body, text))
         })
     }
 
@@ -314,7 +314,7 @@ impl Harness {
     }
 }
 
-fn is_live_prompt(body: &EntryBody, text: &str) -> bool {
+fn is_prompt_with_text(body: &EntryBody, text: &str) -> bool {
     matches!(body, EntryBody::Prompt { text: t, .. } if &*t.text == text)
 }
 

@@ -3,7 +3,11 @@
 //!
 //! 纯数据，不做 IO、不取锁。实时项的键是 `l:<发出的序号>:<项序号>`，prompt 是 0。正文放在可增长的
 //! `String` 里，只在换快照时冻结成 `Arc<str>`（`session/update` 合并后至多每 50 ms 换一次），所以一段
-//! 回复的每个文字块不重新分配整段。第 8 步把实时项换成历史项。
+//! 回复的每个文字块不重新分配整段。
+//!
+//! 实时项换成历史项（第 8 步）：每个 prompt 是一个组。组的 `session/prompt` 返回了（`done`），并且历史
+//! 窗口里有了它这一轮（[`Live::settle`] 按发出的时刻和 prompt 的第一行认），这一组的项就整组去掉，
+//! 项数和正文字节数随之回到去掉之前的值，之后的回复不会因为前几轮占着上限而被截断。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -13,7 +17,9 @@ use lectern_services::conversation::{
     PromptOrigin, StepState, ToolEntry,
 };
 
+use super::history::Mark;
 use super::wire::{PlanItem, Stop, ToolInfo};
+use crate::index::preview;
 
 /// 单段正文的上限。
 const PASSAGE_MAX: usize = 64 << 10;
@@ -21,6 +27,14 @@ const PASSAGE_MAX: usize = 64 << 10;
 pub(crate) const TEXT_MAX: usize = 1 << 20;
 /// 实时项的个数上限；再多的丢弃并计数。
 const ITEMS_MAX: usize = 4096;
+/// 工具行里存的标题、命令、每个路径的字节数上限（只用来写 `summary`，`summary` 自己至多 160 个字符），
+/// 和存的路径个数上限（`summary` 至多列 3 个）。agent 一次更新里给得再多也不会撑大实时项。
+pub(crate) const LIVE_FIELD_MAX: usize = 4 << 10;
+const PATHS_MAX: usize = 16;
+/// 认「这一轮已经在轮次索引里」时，日志里的开始时刻可以比我们发出 prompt 的时刻早多少（毫秒）：
+/// 两边都取自本机的时钟，只留一点取整的余地。
+const SENT_SLACK_MS: i64 = 2000;
+
 /// `summary` 的字符数上限、列出的文件数。
 const SUMMARY_CHARS: usize = 160;
 const SUMMARY_FILES: usize = 3;
@@ -45,6 +59,8 @@ pub(crate) struct Live {
     denied: HashSet<String>,
     plan: Option<Arc<[PlanStep]>>,
     context: Option<ContextUsage>,
+    /// 还没有换成历史项的 prompt，按发出的先后。
+    groups: Vec<Group>,
     /// 跳过的更新（不认识的种类、形状不对、回放、不在一轮之内）与因上限丢弃的项。
     skipped: u64,
     dropped: u64,
@@ -52,7 +68,30 @@ pub(crate) struct Live {
 
 struct Item {
     key: EntryKey,
+    /// 所在的 prompt 的序号（`Group::seq`）。
+    group: u32,
     body: Body,
+}
+
+impl Item {
+    fn text_len(&self) -> usize {
+        match &self.body {
+            Body::Prompt { text, .. } => text.text.len(),
+            Body::Text { buf, .. } => buf.len(),
+            Body::Tool { .. } | Body::Ended(_) => 0,
+        }
+    }
+}
+
+/// 一个发出的 prompt，和认它在轮次索引里的依据。
+struct Group {
+    seq: u32,
+    /// 发出的时刻（UTC 毫秒）。
+    sent_at: i64,
+    /// prompt 的第一行，与轮次索引里的 `Turn::prompt_preview` 同一个函数算出。
+    first_line: Arc<str>,
+    /// `session/prompt` 已经返回（有结果、出错，或连接在这一轮中间结束）。
+    done: bool,
 }
 
 enum Body {
@@ -79,19 +118,24 @@ enum Body {
 }
 
 impl Live {
-    /// 新的一个 prompt：之后的更新归在它名下。
-    pub(crate) fn begin_prompt(&mut self, text: &str, origin: PromptOrigin) {
+    /// 新的一个 prompt（`sent_at` 是发出的时刻，UTC 毫秒）：之后的更新归在它名下。
+    pub(crate) fn begin_prompt(&mut self, text: &str, origin: PromptOrigin, sent_at: i64) {
         self.end_streaming();
         self.group = self.next_seq;
         self.next_seq += 1;
         self.item = 1;
-        let text = passage(text);
-        self.bytes += text.text.len();
-        let key = self.key(0);
-        self.push(Item {
-            key,
-            body: Body::Prompt { text, origin },
+        self.groups.push(Group {
+            seq: self.group,
+            sent_at,
+            first_line: preview(text),
+            done: false,
         });
+        let text = passage(text);
+        let key = self.key(0);
+        let len = text.text.len();
+        if self.push(key, Body::Prompt { text, origin }).is_some() {
+            self.bytes += len;
+        }
     }
 
     fn key(&self, item: u32) -> EntryKey {
@@ -104,12 +148,16 @@ impl Live {
         key
     }
 
-    fn push(&mut self, item: Item) -> Option<usize> {
+    fn push(&mut self, key: EntryKey, body: Body) -> Option<usize> {
         if self.items.len() >= ITEMS_MAX {
             self.dropped += 1;
             return None;
         }
-        self.items.push(item);
+        self.items.push(Item {
+            key,
+            group: self.group,
+            body,
+        });
         Some(self.items.len() - 1)
     }
 
@@ -153,15 +201,15 @@ impl Live {
         let room = PASSAGE_MAX.min(TEXT_MAX.saturating_sub(self.bytes));
         let (take, cut) = clip_bytes(chunk, room);
         let key = self.next_key();
-        let pushed = self.push(Item {
+        let pushed = self.push(
             key,
-            body: Body::Text {
+            Body::Text {
                 buf: take.to_owned(),
                 truncated: cut,
                 streaming: true,
                 frozen: None,
             },
-        });
+        );
         if pushed.is_some() {
             self.bytes += take.len();
         }
@@ -193,13 +241,13 @@ impl Live {
                     };
                 }
                 if info.title.is_some() {
-                    *title = info.title;
+                    *title = info.title.map(cap);
                 }
                 if !info.paths.is_empty() {
-                    *paths = info.paths;
+                    *paths = capped_paths(info.paths);
                 }
                 if info.command.is_some() {
-                    *command = info.command;
+                    *command = info.command.map(cap);
                 }
                 *summary = summarize(*kind, title.as_deref(), paths, command.as_deref());
             }
@@ -211,25 +259,23 @@ impl Live {
             Some(state) => state,
             None => CallState::Pending,
         };
-        let summary = summarize(
-            kind,
-            info.title.as_deref(),
-            &info.paths,
-            info.command.as_deref(),
-        );
+        let title = info.title.map(cap);
+        let paths = capped_paths(info.paths);
+        let command = info.command.map(cap);
+        let summary = summarize(kind, title.as_deref(), &paths, command.as_deref());
         let key = self.next_key();
         let id = info.id;
-        if let Some(at) = self.push(Item {
+        if let Some(at) = self.push(
             key,
-            body: Body::Tool {
+            Body::Tool {
                 kind,
                 state,
-                title: info.title,
-                paths: info.paths,
-                command: info.command,
+                title,
+                paths,
+                command,
                 summary,
             },
-        }) {
+        ) {
             self.tools.insert(id, at);
         }
     }
@@ -293,6 +339,7 @@ impl Live {
     /// 一轮结束（`session/prompt` 回复了）。
     pub(crate) fn finish(&mut self, stop: Stop) {
         self.end_streaming();
+        self.finish_group();
         if stop == Stop::Cancelled {
             self.cancel_unfinished();
         }
@@ -304,16 +351,83 @@ impl Live {
             Stop::Cancelled => EndReason::Cancelled,
         };
         let key = self.next_key();
-        self.push(Item {
-            key,
-            body: Body::Ended(reason),
-        });
+        self.push(key, Body::Ended(reason));
     }
 
-    /// 连接在一轮中间结束：没有结果的工具调用是「已取消」。
+    /// 连接在一轮中间结束，或 `session/prompt` 回复了错误：没有结果的工具调用是「已取消」。
     pub(crate) fn abort(&mut self) {
         self.end_streaming();
+        self.finish_group();
         self.cancel_unfinished();
+    }
+
+    /// 最后一个 prompt 不会再有更新：它这一组可以在轮次索引里有了这一轮之后换成历史项。
+    fn finish_group(&mut self) {
+        if let Some(group) = self.groups.last_mut() {
+            group.done = true;
+        }
+    }
+
+    /// 历史窗口读新了（或实时项有变）：已返回、并且轮次索引里已有这一轮的 prompt，它的项整组去掉
+    /// （在同一次换快照里，所以同一轮不会出现两次）。返回还没返回、但轮次索引里已经有了的那些轮的
+    /// 序号：它们的历史项暂时不显示，实时项更全。
+    ///
+    /// 认法：窗口里序号比前一个认出的轮次大、开始时刻不早于发出的时刻（留 2 秒余地）、prompt 的第一行
+    /// 相同的第一轮。时刻挡住别人在 CLI 里先前说过同样的话的轮次，序号保证两个相同的 prompt 各认各的。
+    pub(crate) fn settle(&mut self, marks: &[Mark]) -> Vec<u32> {
+        let mut hidden = Vec::new();
+        let mut retire = Vec::new();
+        let mut after = 0u32;
+        for group in &self.groups {
+            let found = marks.iter().find(|mark| {
+                mark.ordinal > after
+                    && mark.started_at.0.saturating_add(SENT_SLACK_MS) >= group.sent_at
+                    && mark.preview == group.first_line
+            });
+            let Some(mark) = found else { continue };
+            after = mark.ordinal;
+            if group.done {
+                retire.push(group.seq);
+            } else {
+                hidden.push(mark.ordinal);
+            }
+        }
+        self.retire(&retire);
+        hidden
+    }
+
+    /// 去掉这些组的全部项，重排 `tools` 里的位置，正文字节数减去它们的。
+    fn retire(&mut self, seqs: &[u32]) {
+        if seqs.is_empty() {
+            return;
+        }
+        let mut remap: Vec<Option<usize>> = Vec::with_capacity(self.items.len());
+        let mut kept = Vec::with_capacity(self.items.len());
+        for item in std::mem::take(&mut self.items) {
+            if seqs.contains(&item.group) {
+                self.bytes = self.bytes.saturating_sub(item.text_len());
+                remap.push(None);
+            } else {
+                remap.push(Some(kept.len()));
+                kept.push(item);
+            }
+        }
+        self.items = kept;
+        self.tools.retain(|_, at| match remap[*at] {
+            Some(now) => {
+                *at = now;
+                true
+            }
+            None => false,
+        });
+        self.denied.retain(|id| self.tools.contains_key(id));
+        self.groups.retain(|group| !seqs.contains(&group.seq));
+    }
+
+    /// 还没有换成历史项的 prompt 数。
+    #[cfg(test)]
+    pub(crate) fn pending_groups(&self) -> usize {
+        self.groups.len()
     }
 
     fn cancel_unfinished(&mut self) {
@@ -329,6 +443,7 @@ impl Live {
     /// 连接关闭：实时项、计划和上下文占用都不再有（历史窗口重读后带上这一轮）。
     pub(crate) fn clear(&mut self) {
         self.items.clear();
+        self.groups.clear();
         self.bytes = 0;
         self.tools.clear();
         self.denied.clear();
@@ -424,6 +539,18 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or_default()
 }
 
+/// 一个字段至多 [`LIVE_FIELD_MAX`] 字节（在字符边界上截断）。
+fn cap(text: String) -> String {
+    if text.len() <= LIVE_FIELD_MAX {
+        return text;
+    }
+    clip_bytes(&text, LIVE_FIELD_MAX).0.to_owned()
+}
+
+fn capped_paths(paths: Vec<String>) -> Vec<String> {
+    paths.into_iter().take(PATHS_MAX).map(cap).collect()
+}
+
 /// 至多 `chars` 个字符。
 pub(crate) fn clip(text: &str, chars: usize) -> Arc<str> {
     match text.char_indices().nth(chars) {
@@ -472,13 +599,13 @@ mod tests {
     #[test]
     fn a_prompt_and_its_reply_get_ordered_keys() {
         let mut live = Live::default();
-        live.begin_prompt("question", PromptOrigin::User);
+        live.begin_prompt("question", PromptOrigin::User, 0);
         live.agent_text("an ");
         live.agent_text("answer");
         live.tool(tool("t1", Some(CallKind::Read), Some(CallState::Pending)));
         live.agent_text("more");
         live.finish(Stop::EndTurn);
-        live.begin_prompt("again", PromptOrigin::User);
+        live.begin_prompt("again", PromptOrigin::User, 0);
         assert_eq!(
             keys(&mut live),
             ["l:0:0", "l:0:1", "l:0:2", "l:0:3", "l:1:0"]
@@ -498,7 +625,7 @@ mod tests {
     #[test]
     fn only_the_last_text_of_a_running_turn_streams() {
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         live.agent_text("a");
         let entries = live.entries();
         assert!(matches!(
@@ -520,7 +647,7 @@ mod tests {
     #[test]
     fn tool_calls_update_in_place_and_denials_stick() {
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         let mut call = tool("t1", Some(CallKind::Edit), Some(CallState::Pending));
         call.paths = vec!["/a/b/one.rs".into(), "/a/two.rs".into()];
         live.tool(call);
@@ -591,7 +718,7 @@ mod tests {
     #[test]
     fn finishing_a_turn_cancels_unfinished_tools_and_records_why() {
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         live.tool(tool(
             "t1",
             Some(CallKind::Execute),
@@ -620,12 +747,12 @@ mod tests {
             (Stop::Refusal, EndReason::Refusal),
         ] {
             let mut live = Live::default();
-            live.begin_prompt("q", PromptOrigin::User);
+            live.begin_prompt("q", PromptOrigin::User, 0);
             live.finish(stop);
             assert!(matches!(&live.entries()[1].body, EntryBody::Ended(r) if *r == reason));
         }
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         live.finish(Stop::EndTurn);
         assert_eq!(live.entries().len(), 1);
     }
@@ -657,7 +784,7 @@ mod tests {
     #[test]
     fn text_is_capped_per_passage_and_in_total() {
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         // 3-byte characters: the cap is not a multiple of 3.
         let chunk = "界".repeat(PASSAGE_MAX / 3 + 10);
         live.agent_text(&chunk);
@@ -670,7 +797,7 @@ mod tests {
         assert!(text.text.len() <= PASSAGE_MAX && text.text.len() > PASSAGE_MAX - 3);
         // Many passages stop at the total.
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         for _ in 0..40 {
             live.agent_text(&"x".repeat(PASSAGE_MAX));
             live.tool(tool("t", Some(CallKind::Think), None));
@@ -686,7 +813,7 @@ mod tests {
     #[test]
     fn items_beyond_the_cap_are_counted() {
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         for n in 0..ITEMS_MAX + 10 {
             live.tool(tool(&format!("t{n}"), Some(CallKind::Think), None));
         }
@@ -699,7 +826,7 @@ mod tests {
     #[test]
     fn aborting_cancels_what_was_running() {
         let mut live = Live::default();
-        live.begin_prompt("q", PromptOrigin::User);
+        live.begin_prompt("q", PromptOrigin::User, 0);
         live.tool(tool("t", Some(CallKind::Execute), Some(CallState::Running)));
         live.agent_text("x");
         live.abort();
@@ -712,5 +839,161 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn tool_fields_are_clipped_on_creation_and_on_update() {
+        let long = "é".repeat(LIVE_FIELD_MAX);
+        let mut call = tool("t", Some(CallKind::Edit), Some(CallState::Pending));
+        call.title = Some(long.clone());
+        call.command = Some(long.clone());
+        call.paths = (0..PATHS_MAX + 20).map(|n| format!("/{long}{n}")).collect();
+        let mut live = Live::default();
+        live.begin_prompt("q", PromptOrigin::User, 0);
+        live.tool(call.clone());
+        live.tool(call);
+        let Body::Tool {
+            title,
+            command,
+            paths,
+            ..
+        } = &live.items[1].body
+        else {
+            panic!("a tool");
+        };
+        assert_eq!(title.as_ref().map(String::len), Some(LIVE_FIELD_MAX));
+        assert_eq!(command.as_ref().map(String::len), Some(LIVE_FIELD_MAX));
+        assert_eq!(paths.len(), PATHS_MAX);
+        assert!(paths.iter().all(|path| path.len() <= LIVE_FIELD_MAX));
+        // Short fields stay as they are.
+        assert_eq!(cap("short".into()), "short");
+    }
+
+    fn mark(ordinal: u32, started_at: i64, preview: &str) -> Mark {
+        Mark {
+            ordinal,
+            started_at: lectern_services::session::Timestamp(started_at),
+            preview: preview.into(),
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_that_is_in_the_log_is_retired_and_the_counts_reset() {
+        let mut live = Live::default();
+        let marks = [mark(7, 5_000, "second question")];
+        live.begin_prompt("first question", PromptOrigin::User, 1_000);
+        live.agent_text("an answer");
+        live.tool(tool("t1", Some(CallKind::Read), Some(CallState::Running)));
+        live.finish(Stop::EndTurn);
+        live.begin_prompt("second question\nmore lines", PromptOrigin::User, 4_000);
+        live.tool(tool("t2", Some(CallKind::Edit), Some(CallState::Running)));
+        live.tool(tool("t3", Some(CallKind::Edit), Some(CallState::Running)));
+        live.agent_text("working");
+        // Nothing in the log yet for the first turn: it stays. The second is running and in the log:
+        // its history is hidden and the live items stay.
+        assert_eq!(live.settle(&marks), [7]);
+        assert_eq!(live.pending_groups(), 2);
+        assert_eq!(live.entries().len(), 7);
+
+        // The second turn returns: it is retired, the first one is not in the log and stays.
+        live.finish(Stop::EndTurn);
+        assert_eq!(live.settle(&marks), Vec::<u32>::new());
+        assert_eq!(live.pending_groups(), 1);
+        let entries = live.entries();
+        assert_eq!(
+            entries.iter().map(|e| &*e.key.0).collect::<Vec<_>>(),
+            ["l:0:0", "l:0:1", "l:0:2"]
+        );
+        assert_eq!(
+            live.text_bytes(),
+            "first question".len() + "an answer".len()
+        );
+        // The tool of the retired turn is forgotten; the one that stays still updates in place.
+        assert_eq!(live.tool_kind("t2"), None);
+        live.tool(tool("t1", None, Some(CallState::Completed)));
+        let entries = live.entries();
+        assert!(matches!(&entries[2].body, EntryBody::Tool(t) if t.state == CallState::Completed));
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn retired_turns_give_the_caps_back() {
+        let mut live = Live::default();
+        let mut marks = Vec::new();
+        // Each turn is 640 KiB of text and 21 items. Without the retirement the second one would run
+        // into the 1 MiB total, and the 4096 items fill up long before the last one.
+        for n in 0..300u32 {
+            let sent = i64::from(n) * 1_000;
+            live.begin_prompt(&format!("turn {n}"), PromptOrigin::User, sent);
+            for i in 0..10 {
+                live.agent_text(&"x".repeat(PASSAGE_MAX));
+                live.tool(tool(&format!("t{n}-{i}"), Some(CallKind::Think), None));
+            }
+            let entries = live.entries();
+            let reply = entries
+                .iter()
+                .rev()
+                .find_map(|e| match &e.body {
+                    EntryBody::AgentText { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("a reply");
+            assert!(!reply.truncated, "turn {n}");
+            assert_eq!(reply.text.len(), PASSAGE_MAX, "turn {n}");
+            assert_eq!(live.dropped(), 0, "turn {n}");
+            live.finish(Stop::EndTurn);
+            marks.push(mark(n + 1, sent + 100, &format!("turn {n}")));
+            assert!(live.settle(&marks).is_empty());
+            assert_eq!(live.pending_groups(), 0, "turn {n}");
+            assert_eq!(live.text_bytes(), 0, "turn {n}");
+            assert!(live.entries().is_empty(), "turn {n}");
+        }
+    }
+
+    #[test]
+    fn a_turn_is_told_by_time_and_first_line_and_each_mark_belongs_to_one_prompt() {
+        let mut live = Live::default();
+        live.begin_prompt("go on", PromptOrigin::User, 10_000);
+        live.finish(Stop::EndTurn);
+        live.begin_prompt("  go on  ", PromptOrigin::User, 20_000);
+        live.finish(Stop::EndTurn);
+        // An older turn with the same words, a turn with other words, and a turn that began before the
+        // prompt was sent (two seconds of slack): none is ours.
+        let marks = [
+            mark(1, 1_000, "go on"),
+            mark(2, 12_000, "something else"),
+            mark(3, 7_000, "go on"),
+        ];
+        assert!(live.settle(&marks).is_empty());
+        assert_eq!(live.pending_groups(), 2);
+        // The first prompt gets the first mark after its time, the second the next one.
+        let marks = [
+            mark(1, 1_000, "go on"),
+            mark(2, 8_500, "go on"),
+            mark(3, 20_100, "go on"),
+        ];
+        assert!(live.settle(&marks).is_empty());
+        assert_eq!(live.pending_groups(), 0);
+
+        // Two identical prompts, only one of them in the log so far: the first is retired, the second
+        // stays live, even though the same mark would also fit it.
+        let mut live = Live::default();
+        live.begin_prompt("go on", PromptOrigin::User, 10_000);
+        live.finish(Stop::EndTurn);
+        live.begin_prompt("go on", PromptOrigin::User, 10_100);
+        live.finish(Stop::EndTurn);
+        assert!(live.settle(&[mark(4, 10_200, "go on")]).is_empty());
+        assert_eq!(live.pending_groups(), 1);
+    }
+
+    #[test]
+    fn a_turn_cut_short_counts_as_returned() {
+        let mut live = Live::default();
+        live.begin_prompt("q", PromptOrigin::User, 1_000);
+        live.agent_text("half");
+        // The connection died, or the prompt failed.
+        live.abort();
+        assert!(live.settle(&[mark(1, 1_100, "q")]).is_empty());
+        assert!(live.entries().is_empty());
     }
 }

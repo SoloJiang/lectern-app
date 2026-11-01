@@ -6,7 +6,9 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use lectern_services::conversation::{ConversationCommand, EntryBody, Link, Unavailable};
+use lectern_services::conversation::{
+    ConversationCommand, EntryBody, Link, LinkError, Unavailable,
+};
 
 #[test]
 fn acp_an_idle_connection_closes_after_ten_minutes() {
@@ -253,4 +255,79 @@ fn acp_a_process_that_dies_while_idle_is_reported_and_the_next_prompt_restarts_i
         &h.snapshot(&session).entries.last().unwrap().body,
         EntryBody::AgentText { text, .. } if &*text.text == "Hello world"
     ));
+}
+
+#[test]
+fn acp_deactivating_the_plugin_also_ends_a_connection_that_was_closed_before() {
+    let h = Harness::new("stubborn.jsonl");
+    let session = h.session(1);
+    h.watch(&session);
+    h.turn(&session, "hello");
+    let pid = h.records()[0].pid;
+    wait_for("the helper child", || {
+        (!h.children().is_empty()).then_some(())
+    });
+    let child = h.children()[0];
+
+    // The connection is no longer the session's, but its process ignores SIGTERM and the clock does not
+    // move, so only the deactivation can end it, whether or not the queued close task has run.
+    h.command(&session, ConversationCommand::Disconnect);
+    h.wait_link(&session, Link::None);
+    h.kernel.deactivate();
+    wait_dead(pid);
+    wait_dead(child);
+}
+
+#[test]
+fn acp_an_adapter_that_ignores_cancel_is_failed_and_closed_after_thirty_seconds() {
+    let h = Harness::new("hold.jsonl");
+    let session = h.session(1);
+    h.watch(&session);
+    h.prompt(&session, "hello");
+    // Text updates reach the snapshot at most every 50 ms of the (manual) clock.
+    wait_for("the reply to start", || {
+        h.clock.advance(Duration::from_millis(60));
+        h.snapshot(&session)
+            .entries
+            .iter()
+            .any(|e| {
+                matches!(&e.body, EntryBody::AgentText { text, .. } if &*text.text == "working")
+            })
+            .then_some(())
+    });
+    let pid = h.started_pid();
+
+    h.command(&session, ConversationCommand::Cancel);
+    assert_eq!(h.snapshot(&session).link, Link::Stopping);
+    h.clock.advance(Duration::from_secs(29));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        h.snapshot(&session).link,
+        Link::Stopping,
+        "the adapter may still answer"
+    );
+    assert!(alive(pid));
+
+    h.clock.advance(Duration::from_secs(2));
+    let failed = h.wait_link(&session, Link::Failed(LinkError::Protocol));
+    assert!(failed.permissions.is_empty());
+    wait_dead(pid);
+    // The way out of `Failed` is the usual one.
+    h.command(&session, ConversationCommand::Dismiss);
+    h.wait_link(&session, Link::None);
+}
+
+#[test]
+fn acp_a_cancel_that_is_answered_in_time_is_not_failed_later() {
+    let h = Harness::new("permission_cancel.jsonl");
+    let session = h.session(1);
+    h.watch(&session);
+    h.prompt(&session, "run it");
+    h.wait(&session, "a request", |s| s.permissions.len() == 1);
+    h.command(&session, ConversationCommand::Cancel);
+    h.wait_link(&session, Link::Idle);
+    // The timer of the cancel is still set; it finds the turn over.
+    h.clock.advance(Duration::from_secs(60));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.snapshot(&session).link, Link::Idle);
 }

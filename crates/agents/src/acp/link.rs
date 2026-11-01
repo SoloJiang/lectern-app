@@ -13,8 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lectern_executor::Priority;
 use lectern_services::conversation::{
-    CallKind, ConversationEvent, Link, LinkError, OptionId, OptionKind, PermissionDetail,
-    PermissionId, PermissionOption, PermissionRequest, PromptOrigin,
+    CallKind, ConversationEvent, EditPreview, Link, LinkError, OptionId, OptionKind,
+    PermissionDetail, PermissionId, PermissionOption, PermissionRequest, PromptOrigin,
 };
 use lectern_services::project::ProjectKey;
 use lectern_services::session::{Place, SessionKey, Timestamp};
@@ -23,11 +23,15 @@ use serde_json::value::RawValue;
 use super::conn::{self, Conn, End, Exit, Sink, Spec};
 use super::engine::{COALESCE, Engine, IDLE, Lookup, State, ignored};
 use super::live::{self, Live};
-use super::wire::{self, AUTH_REQUIRED, Id, Incoming, Method, Restore, Stop, Update};
+use super::wire::{
+    self, AUTH_REQUIRED, Id, Incoming, Malformed, Method, PermissionAsk, Restore, Stop, Update,
+};
 use crate::diag;
 
 /// `initialize` 和恢复会话各有这么久。
 const HANDSHAKE: Duration = Duration::from_secs(30);
+/// `session/cancel` 发出之后，适配器这么久还没有回复 `session/prompt`，连接以 `Protocol` 失败并关闭。
+const CANCEL_WAIT: Duration = Duration::from_secs(30);
 /// 关闭 stdin 并发 SIGTERM 之后，这么久还没退出就 SIGKILL。
 const KILL_AFTER: Duration = Duration::from_secs(2);
 /// Lectern 退出时等进程退出的时间上限。
@@ -38,6 +42,9 @@ const PERMISSIONS_MAX: usize = 16;
 const COMMAND_MAX: usize = 16 << 10;
 const TITLE_CHARS: usize = 512;
 const MESSAGE_MAX: usize = 1 << 10;
+
+/// 读线程在取锁之前备好的权限请求：参数，和工具调用内容里的改动预览。
+type Prepared = Result<(PermissionAsk, Option<Arc<[EditPreview]>>), Malformed>;
 
 /// 握手走到哪一步。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,6 +82,8 @@ pub(super) struct Run {
     pub(super) attempt: u64,
     pub(super) phase: Phase,
     phase_seq: u64,
+    /// `Cancel` 的次数：取消超时的计时器据此认出自己是不是这一次的。
+    stop_seq: u64,
     requests: HashMap<i64, (Request, Instant)>,
     next_request: i64,
     /// 握手完成后发出的 prompt（它的实时项已经在列表里）。
@@ -99,6 +108,7 @@ impl Run {
             attempt: 0,
             phase: Phase::Down,
             phase_seq: 0,
+            stop_seq: 0,
             requests: HashMap::new(),
             next_request: 1,
             queued: None,
@@ -125,6 +135,11 @@ impl Run {
             && self.permissions.is_empty()
             && self.idle_since.is_some()
             && matches!(self.link, Link::Idle | Link::Failed(_))
+    }
+
+    /// 最早的待确认请求（`waiting()` 的排序依据）。
+    pub(super) fn first_permission(&self) -> Option<PermissionId> {
+        self.permissions.iter().map(|ask| ask.request.id).min()
     }
 
     pub(super) fn permission_requests(&self) -> Arc<[PermissionRequest]> {
@@ -197,6 +212,12 @@ impl Closed {
 pub(super) enum Timer {
     /// 握手超时：这个连接仍停在第 `seq` 步。
     Phase {
+        key: SessionKey,
+        conn: u64,
+        seq: u64,
+    },
+    /// `Cancel` 之后适配器一直没有回复：这个连接仍停在第 `seq` 次取消的 `Stopping`。
+    Stop {
         key: SessionKey,
         conn: u64,
         seq: u64,
@@ -382,6 +403,20 @@ impl Engine {
                 self.fail(&mut state, &key, LinkError::Protocol, &mut fx);
                 self.publish(&mut state, &key, true, &mut fx);
             }
+            Timer::Stop { key, conn, seq } => {
+                let mut state = self.state();
+                let stale = state.sessions.get(&key).is_none_or(|c| {
+                    c.run.conn.as_ref().is_none_or(|x| x.id != conn)
+                        || c.run.stop_seq != seq
+                        || c.run.link != Link::Stopping
+                });
+                if stale {
+                    return;
+                }
+                let _scope = lectern_logging::scope(diag::session_ctx(&key.id));
+                self.fail(&mut state, &key, LinkError::Protocol, &mut fx);
+                self.publish(&mut state, &key, true, &mut fx);
+            }
             Timer::Idle { key, conn } => {
                 let mut state = self.state();
                 let now = self.setup.clock.now();
@@ -480,7 +515,7 @@ impl Engine {
             );
             if reuse {
                 let conv = state.sessions.get_mut(session).expect("checked above");
-                conv.run.live.begin_prompt(text, origin);
+                conv.run.live.begin_prompt(text, origin, now_ms().0);
                 Self::dispatch_prompt(session, &mut conv.run, text, &mut fx);
             } else {
                 if state.connections_full()
@@ -489,7 +524,7 @@ impl Engine {
                     Self::close_session(&mut state, &oldest, Closed::Evicted, &mut fx);
                 }
                 let conv = state.sessions.get_mut(session).expect("checked above");
-                conv.run.live.begin_prompt(text, origin);
+                conv.run.live.begin_prompt(text, origin, now_ms().0);
                 conv.run.link = Link::Connecting;
                 conv.run.queued = Some(text.into());
                 Self::plan_start(&mut state, session, &mut fx);
@@ -568,6 +603,7 @@ impl Engine {
     }
 
     /// `Cancel`：只在 `Working` 时有效。待确认的请求回答 `cancelled`，发 `session/cancel`，`link` 为 `Stopping`。
+    /// 适配器 30 秒内没有回复 `session/prompt`（不理会 `session/cancel`）时，连接以 `Protocol` 失败并关闭。
     pub(super) fn cancel(&self, session: &SessionKey) {
         let mut fx = Effects::default();
         {
@@ -582,6 +618,15 @@ impl Engine {
             };
             conv.run.cancel_permissions(session, &mut fx);
             conv.run.link = Link::Stopping;
+            conv.run.stop_seq += 1;
+            fx.timers.push((
+                self.setup.clock.now() + CANCEL_WAIT,
+                Timer::Stop {
+                    key: session.clone(),
+                    conn: conn.id,
+                    seq: conv.run.stop_seq,
+                },
+            ));
             fx.send(
                 session,
                 &conn,
@@ -728,13 +773,15 @@ impl Engine {
             return;
         };
         conv.run.cancel_permissions(key, fx);
-        if let Some(conn) = conv.run.conn.take() {
-            fx.closes.push((conn, why));
-        }
+        let detached = conv.run.conn.take();
         conv.run.reset_connection();
         conv.run.link = Link::None;
         conv.run.live.clear();
         fx.reads.push(key.clone());
+        if let Some(conn) = detached {
+            fx.closes.push((conn.clone(), why));
+            state.closing.insert(conn.id, conn);
+        }
         Self::drop_if_unused(state, key);
     }
 
@@ -753,11 +800,15 @@ impl Engine {
         lectern_logging::warn!("acp link failed"; error = link_error_name(&error));
         conv.run.live.abort();
         conv.run.cancel_permissions(key, fx);
-        if let Some(conn) = conv.run.conn.take() {
-            fx.closes.push((conn, Closed::Failure));
-        }
+        let detached = conv.run.conn.take();
         conv.run.reset_connection();
         conv.run.link = Link::Failed(error);
+        // The turn may be in the log already: read the history again so it replaces the live items.
+        fx.reads.push(key.clone());
+        if let Some(conn) = detached {
+            fx.closes.push((conn.clone(), Closed::Failure));
+            state.closing.insert(conn.id, conn);
+        }
     }
 
     // ---- 启动 ----
@@ -945,6 +996,20 @@ impl Engine {
 
     /// 读线程收到一行。
     fn on_line(&self, conn: &Arc<Conn>, line: &[u8]) {
+        // Parsing, and the diff of a permission request's change preview, take their time and read no
+        // engine state: they run before the lock, which `snapshot` on the UI thread also takes.
+        let parsed = wire::parse(line);
+        let prepared = match &parsed {
+            Ok(Incoming::Request {
+                method: Method::RequestPermission,
+                params,
+                ..
+            }) => Some(wire::permission(*params).map(|ask| {
+                let edits = self.previews.edits(&ask.diffs);
+                (ask, edits)
+            })),
+            _ => None,
+        };
         let mut fx = Effects::default();
         {
             let mut state = self.state();
@@ -960,7 +1025,7 @@ impl Engine {
             }
             let _scope = lectern_logging::scope(diag::session_ctx(&key.id));
             let bytes = line.len() as u64;
-            match wire::parse(line) {
+            match parsed {
                 Err(_) => {
                     self.fail(&mut state, &key, LinkError::Protocol, &mut fx);
                     self.publish(&mut state, &key, true, &mut fx);
@@ -976,10 +1041,10 @@ impl Engine {
                         conv.run.live.skip();
                     }
                 }
-                Ok(Incoming::Request { id, method, params }) => {
+                Ok(Incoming::Request { id, method, .. }) => {
                     lectern_logging::debug!("acp message received"; method = method.name(), bytes = bytes);
-                    if method == Method::RequestPermission {
-                        self.on_permission(&mut state, &key, conn, &id, params, &mut fx);
+                    if let Some(prepared) = prepared {
+                        self.on_permission(&mut state, &key, conn, &id, prepared, &mut fx);
                     } else {
                         // 没有声明的能力（`fs/*`、`terminal/*`）和不认识的方法。
                         fx.send(&key, conn, Method::Other, None, wire::method_not_found(&id));
@@ -1060,6 +1125,8 @@ impl Engine {
                     skipped = conv.run.live.skipped(),
                     dropped = conv.run.live.dropped(),
                 );
+                // The turn is in the log by now: read it, so the live items give way to the history.
+                fx.reads.push(key.clone());
                 self.publish(state, key, true, fx);
             }
             (Request::Prompt, Err(error)) => {
@@ -1079,6 +1146,7 @@ impl Engine {
                 });
                 lectern_logging::warn!("acp link failed"; error = link_error_name(&conv.run.link_error()));
                 Self::arm_idle(key, &mut conv.run, now, fx);
+                fx.reads.push(key.clone());
                 self.publish(state, key, true, fx);
             }
             (Request::Initialize | Request::Restore(_), Err(error)) => {
@@ -1205,10 +1273,10 @@ impl Engine {
         key: &SessionKey,
         conn: &Arc<Conn>,
         id: &Id,
-        params: Option<&RawValue>,
+        prepared: Prepared,
         fx: &mut Effects,
     ) {
-        let Ok(ask) = wire::permission(params) else {
+        let Ok((ask, edits)) = prepared else {
             return self.protocol_error(state, key, fx);
         };
         let rid = PermissionId(state.next_permission);
@@ -1245,8 +1313,8 @@ impl Engine {
                 text: live::clip_bytes(command, COMMAND_MAX).0.into(),
                 workdir: tool.cwd.as_deref().map(|cwd| Arc::from(PathBuf::from(cwd))),
             },
-            // `Edits` 的改动预览是设计的第 8 步。
-            _ => PermissionDetail::None,
+            // The change preview was computed before the lock (`on_line`).
+            _ => edits.map_or(PermissionDetail::None, PermissionDetail::Edits),
         };
         let request = PermissionRequest {
             id: rid,
@@ -1302,6 +1370,7 @@ impl Engine {
         {
             let mut state = self.state();
             let key = state.by_conn.remove(&conn.id);
+            state.closing.remove(&conn.id);
             if let Some(key) = &key {
                 let _scope = lectern_logging::scope(diag::session_ctx(&key.id));
                 lectern_logging::info!(
@@ -1367,7 +1436,11 @@ impl Engine {
                     conns.push(conn);
                 }
             }
+            // Connections that were closed before: their close task may still be queued, and the
+            // executor drops queued tasks of a revoked plugin, so they are closed here as well.
+            conns.extend(state.closing.drain().map(|(_, conn)| conn));
             state.sessions.clear();
+            state.waiting = Arc::from([]);
             conns
         };
         for conn in &conns {

@@ -8,8 +8,8 @@ use lectern_services::conversation::{
     CallKind, CallState, Entry, EntryBody, EntryKey, HistoryError, Passage, PromptOrigin, ToolEntry,
 };
 use lectern_services::session::{
-    Content, ContentRef, SessionError, SessionKey, SessionSource, ToolCall, ToolKind, ToolStatus,
-    Turn, TurnItem,
+    Content, ContentRef, SessionError, SessionKey, SessionSource, Timestamp, ToolCall, ToolKind,
+    ToolStatus, Turn, TurnItem,
 };
 
 /// 单段正文的上限。
@@ -27,6 +27,17 @@ pub(crate) struct Window {
     pub(crate) entries: Arc<[Entry]>,
     /// 窗口之前还有多少轮。
     pub(crate) earlier: u32,
+    /// 窗口里每一轮的标记，从最早的一轮起：实时项据此认出自己这一轮已经出现在轮次索引里。
+    pub(crate) marks: Arc<[Mark]>,
+}
+
+/// 窗口里一轮的标记（轮次索引里的 `Turn` 的一部分）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Mark {
+    pub(crate) ordinal: u32,
+    pub(crate) started_at: Timestamp,
+    /// prompt 的第一行（`Turn::prompt_preview`）。
+    pub(crate) preview: Arc<str>,
 }
 
 /// 读最近 `wanted` 轮。阻塞（读会话文件），只在 executor 上调用。
@@ -47,6 +58,7 @@ pub(crate) fn read_window(
     let mut earlier = first;
     // 每一轮的项，从最新的一轮起。
     let mut kept: Vec<Vec<Entry>> = Vec::new();
+    let mut marks: Vec<Mark> = Vec::new();
     let mut bytes = 0usize;
     for (at, turn) in turns[first..].iter().enumerate().rev() {
         let (entries, size) = turn_entries(source, key, turn)?;
@@ -56,8 +68,14 @@ pub(crate) fn read_window(
         }
         bytes += size;
         kept.push(entries);
+        marks.push(Mark {
+            ordinal: turn.ordinal,
+            started_at: turn.started_at,
+            preview: turn.prompt_preview.clone(),
+        });
     }
     kept.reverse();
+    marks.reverse();
     let mut entries: Vec<Entry> = kept.into_iter().flatten().collect();
     if bytes > WINDOW_MAX {
         trim_front(&mut entries, bytes);
@@ -65,6 +83,7 @@ pub(crate) fn read_window(
     Ok(Window {
         entries: entries.into(),
         earlier: u32::try_from(earlier).unwrap_or(u32::MAX),
+        marks: marks.into(),
     })
 }
 
@@ -88,6 +107,12 @@ pub(crate) fn fit(entries: &[Entry], live_bytes: usize) -> (usize, u32) {
 /// 项键 `h:<轮次序号>:<项序号>` 里的轮次序号。
 fn turn_of(entry: &Entry) -> &str {
     entry.key.0.split(':').nth(1).unwrap_or_default()
+}
+
+/// 历史项所在的轮次序号；实时项没有。
+pub(crate) fn turn_number(entry: &Entry) -> Option<u32> {
+    entry.key.0.strip_prefix("h:")?;
+    turn_of(entry).parse().ok()
 }
 
 /// 去掉开头的项，直到正文合计不超过上限。

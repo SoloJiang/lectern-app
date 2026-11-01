@@ -148,13 +148,24 @@ impl FakeSource {
         self.state().turns_calls
     }
 
-    /// 一轮：prompt 和若干项。
+    /// 一轮：prompt 和若干项，开始于 1970 年之后 `ordinal` 秒。
     pub fn turn(&self, ordinal: u32, prompt: &str, items: Vec<TurnItem>) -> Turn {
+        self.turn_at(ordinal, i64::from(ordinal) * 1000, prompt, items)
+    }
+
+    /// 一轮，开始于 `started_at`（UTC 毫秒），500 毫秒后结束。
+    pub fn turn_at(
+        &self,
+        ordinal: u32,
+        started_at: i64,
+        prompt: &str,
+        items: Vec<TurnItem>,
+    ) -> Turn {
         Turn {
             id: TurnId(format!("turn-{ordinal}").into()),
             ordinal,
-            started_at: Timestamp(i64::from(ordinal) * 1000),
-            ended_at: Some(Timestamp(i64::from(ordinal) * 1000 + 500)),
+            started_at: Timestamp(started_at),
+            ended_at: Some(Timestamp(started_at + 500)),
             prompt: Some(self.text(prompt)),
             prompt_preview: prompt.chars().take(120).collect::<String>().into(),
             items: items.into(),

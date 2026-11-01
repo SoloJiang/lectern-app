@@ -29,4 +29,4 @@ the design). The unit test `acp::wire::tests::fixture_messages_parse` parses eve
 | `client_requests.jsonl` | requests for capabilities Lectern did not declare |
 | `hold.jsonl` | a turn that never finishes |
 | `stubborn.jsonl` | ignores SIGTERM and leaves a child process in its group |
-| `loud.jsonl` | puts canary strings in every place the logs must not show |
+| `loud.jsonl` | puts canary strings in every place the logs must not show: the first prompt of a connection gets a command request, the second an `edit` request with a diff (title, path, both sides of the change), the third a `session/prompt` error with a two-line message |

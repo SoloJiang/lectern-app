@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见「日志与诊断」）已实现，命令行与凭据转发端点的记录随 Analyze 实现。见「验收」与「实际验证」。ACP 客户端（[#23](https://github.com/SoloJiang/lectern-app/issues/23)，[conversation 设计](conversation.md#对其他-crate-的要求)的前置条件 C，[ADR 0060](../adr/0060.md)）分三步，见「ACP 客户端」与「验收」第 6–8 步：第 6 步（核对、设计、会话历史窗口与程序查找）已实现；第 7 步（进程与协议：`wire`、`conn`、`link`、`live`，`Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss`、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限，假 ACP agent 的测试）已实现，见「实际验证」与「与设计的差异」；第 8 步（实时项换成历史项、`PermissionDetail::Edits` 的改动预览、`waiting()` 与 `WaitingChanged`）尚未实现，所以第 7 步里 `waiting()` 恒为空，`Edits` 请求的 `detail` 是 `None`，一轮结束后日志里出现这一轮时实时项与历史项同时出现（见「与设计的差异」）。
+状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见「日志与诊断」）已实现，命令行与凭据转发端点的记录随 Analyze 实现。见「验收」与「实际验证」。ACP 客户端（[#23](https://github.com/SoloJiang/lectern-app/issues/23)，[conversation 设计](conversation.md#对其他-crate-的要求)的前置条件 C，[ADR 0060](../adr/0060.md)）分三步，见「ACP 客户端」与「验收」第 6–8 步：第 6 步（核对、设计、会话历史窗口与程序查找）已实现；第 7 步（进程与协议：`wire`、`conn`、`link`、`live`，`Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss`、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限，假 ACP agent 的测试）已实现，见「实际验证」与「与设计的差异」；第 8 步（实时项换成历史项、`PermissionDetail::Edits` 的改动预览、`waiting()` 与 `WaitingChanged`，另有第 7 步评审留下的四项修正：停用时关闭已脱钩的连接、实时工具行的字段上限、实时项换成历史项后上限回落、不理会 `session/cancel` 的适配器的超时）已实现，见「实际验证」与「与设计的差异」。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -852,7 +852,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 |---|---|---|
 | 第 6 步 | 本节的设计与核对；插件 "conversations"；`watch` / `snapshot` / `waiting` / `LoadEarlier`；历史窗口；`can_prompt` 的检查（不含连接状态）；程序查找 | 已实现 |
 | 第 7 步 | JSON-RPC 层（`acp/wire.rs`）；进程的启动与关闭；`Prompt`、`Cancel`、`Answer`、`Disconnect`、`Dismiss`；实时项、计划、上下文占用；权限请求；空闲退出与 3 个连接的上限；日志与假 ACP agent 的测试 | 已实现 |
-| 第 8 步 | 实时项在轮次索引出现后换成历史项；`PermissionDetail::Edits` 的改动预览（`git::line_diff`，LRU）；`waiting()` 与 `WaitingChanged` | 未实现 |
+| 第 8 步 | 实时项在轮次索引出现后换成历史项；`PermissionDetail::Edits` 的改动预览（`git::line_diff`，LRU）；`waiting()` 与 `WaitingChanged`；不理会 `session/cancel` 的适配器的超时 | 已实现 |
 
 第 6 步结束时 `can_prompt` 对每个能通过检查的会话都是 `Err(Unavailable::Unsupported)`（模块常量 `CONNECTIONS` 为 false），`command` 只处理 `LoadEarlier`。第 7 步删掉了这个常量：`can_prompt` 按「`can_prompt` 的检查」，五个命令都有实现。插件还没有放进 `app` 的 `PluginSet`（conversation 设计 J 在第 4 步），所以用户看不到这个状态。
 
@@ -887,7 +887,7 @@ pub struct ConversationsDeps {
 }
 ```
 
-模块在 `crates/agents/src/acp/`：`program`（程序查找）、`history`（历史窗口）、`engine`（`Conversations` 的实现与状态）、`plugin`；第 7 步加 `wire`（JSON-RPC 消息）、`conn`（一个连接的进程、管道、发送队列和读线程的主体）、`link`（连接的生命周期：命令、启动、消息的处理、计时器、关闭）、`live`（`session/update` 到实时项、计划、上下文占用）。
+模块在 `crates/agents/src/acp/`：`program`（程序查找）、`history`（历史窗口）、`engine`（`Conversations` 的实现与状态）、`plugin`；第 7 步加 `wire`（JSON-RPC 消息）、`conn`（一个连接的进程、管道、发送队列和读线程的主体）、`link`（连接的生命周期：命令、启动、消息的处理、计时器、关闭）、`live`（`session/update` 到实时项、计划、上下文占用）；第 8 步加 `preview`（权限请求的改动预览与它的 LRU）。
 
 ### 会话的状态与快照
 
@@ -939,13 +939,36 @@ pub struct ConversationsDeps {
 - 空闲（`Idle` 且没有待确认的请求）10 分钟（`Clock` 可由测试拨动）、`Disconnect`、项目关闭、插件停用时关闭 stdin、向进程组发 SIGTERM，2 秒后 SIGKILL；Lectern 退出时等待至多 500 ms。启动用 `CommandExt::process_group(0)`。至多 3 个连接。
   - 计时（握手 30 秒、空闲 10 分钟、2 秒后 SIGKILL、50 ms 合并）都用 kernel 的 `Clock::wake_at`（`ConversationsPlugin::with_clock`，测试用 `ManualClock`）；到点的闭包在时钟的线程上只改状态，不做 IO。空闲计时每个连接至多设一个，到点时按进入空闲的时刻重新核对。
   - 关闭：待确认的请求先回答 `cancelled`，队列里的行写完，关闭 stdin，SIGTERM（`rustix::process::kill_process_group`，进程组 ID 就是 pid），2 秒后 SIGKILL；进程被回收后再向组发一次 SIGKILL，清掉适配器留下的孙进程。stdout 关了而进程不退出时，2 秒后同样 SIGKILL。
-  - 插件停用（`Active::drop` → `Engine::stop`）：所有连接同样关闭，等它们退出至多 500 ms（合计，不是每个），还在的 SIGKILL，丢掉全部状态。
+  - 插件停用（`Active::drop` → `Engine::stop`）：所有连接同样关闭，等它们退出至多 500 ms（合计，不是每个），还在的 SIGKILL，丢掉全部状态。已经和会话脱钩的连接（`close_session`、`fail` 取走了它，关闭任务在 executor 的队列里排着）也在内：`State::closing` 记着它们直到进程被回收，`stop` 同样关闭、等待、SIGKILL，因为插件撤销时队列里没跑的关闭任务会被丢弃。
   - 第 4 个连接：先关闭最久没用的空闲连接（`link` 为 `Idle`，或连接仍在的 `Failed`），没有空闲的就拒绝（`TooMany`）。
+  - 取消超时（第 8 步）：`Cancel` 发出 `session/cancel` 之后，`link` 是 `Stopping`；30 秒（`CANCEL_WAIT`，`Clock::wake_at`）内适配器没有回复 `session/prompt`，连接以 `Failed(Protocol)` 失败并关闭（同握手超时的做法，不新增 `LinkError`）。计时器带这一次取消的序号与连接 ID，回复来得及时就是过期的，什么也不做。
 - 权限：请求不自动回答；`options` 按种类去重；`PermissionDetail::Command` 取 `rawInput.command` 与 `rawInput.cwd`（取不到为 `None`）；`Cancel` 和连接关闭时待确认的请求回答 `cancelled`。
   - 一轮结束时（`session/prompt` 回复了，有结果或出错）仍未答的请求回答 `cancelled`；一轮之外（`link` 不是 `Working`）的请求、别的会话的请求、没有 Lectern 认识的选项种类的请求、超过 16 个的请求，Lectern 自己回答 `cancelled`，不让用户为一张没有按钮的卡片等待。
   - `Answer` 的 `option` 必须是这个请求的选项之一，否则忽略；回答后卡片马上从快照里去掉。拒绝类的回答（`RejectOnce`、`RejectAlways`）之后，这个工具调用的失败显示为「已拒绝」（`CallState::Denied`）。
-  - 第 7 步里 `Edits` 请求的 `detail` 是 `None`（改动预览是第 8 步）。
+  - `detail`：种类是 `Execute` 且取得了命令文本为 `Command`；否则工具调用内容里有 diff 为 `Edits`（「改动预览」）；否则 `None`。
 - 协议版本：`initialize` 回复的版本不是 1 时关闭连接，`Failed(Unsupported)`。
+
+### 实时项换成历史项（第 8 步）
+
+- 每个 `Prompt` 是实时项里的一组（`l:<序号>:*`，prompt 是 0），记着发出的时刻（UTC 毫秒）和 prompt 的第一行（与轮次索引同一个函数 `index::preview`）。`session/prompt` 回复了（有结果或出错），或连接在这一轮中间结束（`fail`），这一组就「返回」了。
+- 历史窗口多记每一轮的 `Mark`（序号、开始时刻、`prompt_preview`）。`rebuild` 里按发出的先后逐组认：窗口里序号比前一个认出的轮次大、开始时刻加 2 秒不早于发出的时刻、`prompt_preview` 相同的第一轮就是这一组的轮次。时刻挡住 CLI 里先前说过同样的话的旧轮次，序号让两个相同的 prompt 各认各的。
+  - 认出了、已返回：整组实时项去掉。认出了、还没返回（适配器已经把这一轮写进日志，轮次还在进行）：窗口里这一轮的历史项（`h:<序号>:*`）暂时不显示，实时项更全。没认出：实时项留着（日志里还没有这一轮，或适配器改写了 prompt）。
+  - 去掉和隐藏都在 `rebuild` 里、与换出新窗口或新状态的是同一次换快照，所以任何一代快照里同一轮都只出现一次，实时变历史时 `generation` 加一。
+- 去掉实时项释放它们占的项数（4096）和正文字节数（合计 1 MiB），工具调用 ID 到位置的表随之重排，所以上限不跨轮累积，之后的回复不会因为前几轮占着而被截断。没认出的组一直占着，直到连接关闭（`clear`，那时重读历史）。
+- `session/prompt` 回复、出错和连接失败时额外提交一次历史重读（原来只有 `SessionsChanged` 和连接关闭会读）；日志已经有这一轮时，下一次换快照就换成历史项。
+
+### 改动预览（第 8 步）
+
+- 输入：权限请求的 `toolCall.content` 里 `type` 为 `diff` 的项（`path`、`oldText`、`newText`），至多 8 个文件，多的不显示也不计数；`oldText` 为 null 的 `new_file` 为 true。形状不对的项和字段当作没有。
+- 每个文件用 `lectern_git::line_diff`（Histogram）算增删行；输出同 unified diff 去掉头：每块增删行前后各 3 行上下文（取新的一侧），相隔不到 7 行的块合并，同一块里先删后增，块之间没有分隔行；至多 120 行（`rows`），其余行数计入 `omitted`；行尾的换行去掉，一行超过 1 KiB 的截到 1 KiB 以内最后一个完整的字符；路径超过 4 KiB 的同样截断。`added`、`removed` 是整个文件的增删行数。
+- 任何一侧超过 2 MiB 时不算 diff：`added`、`removed` 是两侧的行数，`rows` 为空，`omitted` 是两者之和。
+- LRU：键是两侧内容的 git blob OID（`Oid::for_blob(HashKind::Sha1, …)`，只用来区分内容，调用方全用 SHA-1），至多 64 项，命中移到最近；值是行与计数，路径和 `new_file` 每次按请求填。内容相同的改动不重算。
+- 线程：读线程在 `on_line` 里取引擎的锁之前解析消息、算预览，LRU 有自己的锁、只在查和放的瞬间持有，所以算 diff 的时候没有锁，UI 线程上的 `snapshot` 不会因此等待。预览是纯计算，不读文件、不读 git 仓库。
+
+### `waiting()` 与 `WaitingChanged`（第 8 步）
+
+- `waiting()` 是有待确认权限请求的会话，按每个会话最早的请求排序（`PermissionId` 随到达递增）。快照换出时重算（`rebuild_all`、`refresh`），在同一次持锁里更新 `State::waiting`，所以 `Changed` 的监听者读到的已是新值。
+- 集合变了（有会话进入或离开）发 `WaitingChanged`，放在同一批事件的最后（`Changed` 之后）；只是先后变了（先到的请求答完了，同一个会话的下一个请求排在了别人后面）只更新顺序，不发事件。`stop` 清空，不发事件。
 
 ### 日志与诊断（本节补充）
 
@@ -956,10 +979,17 @@ target 仍是 `agents`，与一个会话有关的记录在 `session` 作用域�
   - info：`acp process started`（`program`：`claude-agent-acp` 或 `codex-acp`，`argc`：0，`cwd`：路径，`pid`）、`acp process exited`（`pid`、`code`：没有退出码时 -1、`signaled`、`stderr_bytes`、`runtime_ms`）、`acp connection closing`（`reason`：`idle`、`disconnect`、`project`、`evicted`、`failure`，`pid`）。按 [logging 设计「隐私」](logging.md#隐私)的子进程规则，程序名不含目录。
   - warn：`acp link failed`（`error`：`spawn`、`unsupported`、`load_failed`、`protocol`、`exited`、`auth_required`、`prompt_failed`）、`acp process not started`（`error`：`Value::io`）。
   - debug：JSON-RPC 只记方法名（`wire::Method::name` 的固定表：`initialize`、`session/resume`、`session/load`、`session/prompt`、`session/cancel`、`session/update`、`session/request_permission`，表外是 `other`）、`req`（我们发的请求的序号，在 `req` 作用域里）、字节数、耗时：`acp message sent`、`acp message received`（通知与 agent 的请求）、`acp response received`（`method`、`bytes`、`ok`、`took_us`）；`acp turn finished`（`ended`、`skipped`：跳过的更新数、`dropped`：因上限丢弃的项数）；`conversation prompt accepted`（`bytes`、`connects`）；`conversation command ignored`（`command`，`reason`：`no_connection`、`not_watched`、`unavailable`、`too_large`、`not_working`、`unknown_request`、`unknown_option`、`busy`、`not_failed`）。
-- 不记录：提示词与回复、`Passage` 的文字、工具行的 `summary`、权限请求的 `title`、命令文本与工作目录、`OptionId`、计划的文字、`PromptFailed` 的错误文字、环境变量的名字与值、stderr 的内容、会话文件里的路径。错误只记种类。
-- 金丝雀测试 `logs_hold_no_conversation_contents`（`src/acp/tests/logs.rs`）：把金丝雀放进会话的 prompt、agent 说明、注入内容、工具的路径与命令、登录环境的变量名与值、会话的 `cwd`，走完第 6 步的流程，`assert_absent`；第 7 步在假 ACP agent 的消息、`OptionId`、标题、命令文本、stderr 里再放：进程相关的部分需要假 agent，只能在集成测试里找到它（`CARGO_BIN_EXE_` 只给集成测试），所以另有同名的 `tests/acp_logs.rs`（`logs_hold_no_conversation_contents`，`loud.jsonl`：回复、工具标题、命令文本与工作目录、权限请求的标题、`OptionId`、计划、stderr 的文字，加上提示词、形似真实的令牌、登录环境的变量名与值，跑完两个连接的整个生命周期，`assert_absent`，并检查进程与 JSON-RPC 记录的字段）；`src/acp/tests/logs.rs` 里的单元测试加了 `Cancel` 和一次启动失败的路径。
+- 第 8 步没有新的记录。取消超时记的是 `acp link failed`（`error`：`protocol`）和随后的 `acp connection closing`（`reason`：`failure`）；实时项换成历史项、改动预览、`WaitingChanged` 的发出都不记（第 6 步的 `conversation history read` 照旧）。
+- 不记录：提示词与回复、`Passage` 的文字、工具行的 `summary`、权限请求的 `title`、命令文本与工作目录、`OptionId`、计划的文字、`PromptFailed` 的错误文字、改动预览的路径与两侧内容、环境变量的名字与值、stderr 的内容、会话文件里的路径。错误只记种类。
+- 金丝雀测试 `logs_hold_no_conversation_contents`（`src/acp/tests/logs.rs`）：把金丝雀放进会话的 prompt、agent 说明、注入内容、工具的路径与命令、登录环境的变量名与值、会话的 `cwd`，走完第 6 步的流程，`assert_absent`；第 7 步在假 ACP agent 的消息、`OptionId`、标题、命令文本、stderr 里再放：进程相关的部分需要假 agent，只能在集成测试里找到它（`CARGO_BIN_EXE_` 只给集成测试），所以另有同名的 `tests/acp_logs.rs`（`logs_hold_no_conversation_contents`，`loud.jsonl`：回复、工具标题、命令文本与工作目录、权限请求的标题、`OptionId`、计划、stderr 的文字，加上提示词、形似真实的令牌、登录环境的变量名与值，跑完两个连接的整个生命周期，`assert_absent`，并检查进程与 JSON-RPC 记录的字段）；`src/acp/tests/logs.rs` 里的单元测试加了 `Cancel` 和一次启动失败的路径。第 8 步：`loud.jsonl` 多两条 `session/prompt` 规则（同一个连接上第二、第三个 prompt 用）：一个 `edit` 请求，标题、文件路径、`oldText`、`newText` 都是金丝雀；一个 `session/prompt` 的错误，错误文字的两行都是金丝雀（`PromptFailed` 保留第一行给界面，日志不记）；`tests/acp_logs.rs` 对这两条的 `assert_absent`，并检查 `acp link failed` 有 `prompt_failed` 且没有错误文字的字段；单元测试里一轮实时的 prompt 与回复在日志里出现之后换成历史项，同样 `assert_absent`。
 
 ### 测试（本节补充）
+
+- 第 8 步：
+  - `src/acp/tests/swap.rs`（`swap_*`，没有进程，直接改实时项代替连接）：实时项与日志里的同一轮不同时出现，未返回时历史项不显示，返回时在新的一代里换成历史项；prompt 先于日志返回时，日志出现的那次读取换掉实时项。
+  - `live` 的纯函数测试：工具行的标题、命令、路径的上限；`settle` 的认法（时刻、第一行、两个相同的 prompt 各认各的、中断的一轮算返回）；`retired_turns_give_the_caps_back`（300 轮、每轮 21 项、640 KiB，没有一项因上限被丢弃或截断）；位置重排后工具调用仍在原项上更新。
+  - `preview` 的纯函数测试：上下文与合并、新文件与删除、120 行上限与 `omitted`、行的截断、超大一侧、LRU（相同内容一项、64 项上限、命中移到最近）；`wire` 的 `diffs`。
+  - 集成测试：`acp_history.rs`（`acp_*`：返回的一轮换成历史项且下一轮从空位开始；日志里有而未返回的一轮只显示实时项、连接关闭后是历史项；日志里没有的不换）；`acp_permission.rs`（`Edits` 的路径、增删行、行；`waiting()` 的排序与 `WaitingChanged` 的次数、关闭连接和停用后清空）；`acp_lifecycle.rs`（停用时已脱钩的、不理会 SIGTERM 的连接被终止；不理会 `session/cancel` 的适配器 30 秒后 `Failed(Protocol)`、29 秒时还在 `Stopping`；及时回复的取消之后计时器什么也不做）。
 
 - 第 6 步：`src/acp/tests/`，`history_*`（窗口的顺序、键、截断、1 MiB 上限、`earlier`、工具行的归类与状态、`SessionError` 的映射）、`prompt_gate_*`（`can_prompt` 的每一项和顺序）、`lookup_*`（查找的缓存、重试、相对路径的 PATH 项、新快照的 `generation`）、`watch_*`（关注与释放、`LoadEarlier` 的上限、`SessionsChanged` 后重读、事件的 `generation`）、`conversations_plugin_*`（真实的 `Kernel`：提供服务、停用后不再发事件）、`logs_*`。用本模块自己的假 `SessionSource` 与假 `Projects`，不读真实的会话目录。
 - 第 7 步：假的 ACP agent `lectern-agents-fake-acp`（`test-support` feature 的 `[[bin]]`，`src/bin/fake_acp.rs`，与 `terminal` 的 `lectern-terminal-fake` 同一做法）放在 PATH 最前面，记录收到的参数、工作目录、环境变量的名字和每条消息，按 `tests/fixtures/acp/` 里的合成脚本回放（不用真实会话，脚本里不出现模型名；脚本的格式写在假 agent 的文档注释里，文件清单在 `SOURCE.md`）。覆盖 conversation 设计 C 的「测试」一条列出的情形，在集成测试 `tests/acp_connect.rs`、`acp_permission.rs`、`acp_lifecycle.rs`、`acp_logs.rs` 里，经真实的 `Kernel`（`TestKernel`）、真实的 `Executor` 和 `ManualClock`，共用 `tests/common/mod.rs`：
@@ -1140,6 +1170,7 @@ ACP 客户端（[#23](https://github.com/SoloJiang/lectern-app/issues/23)，conv
    - `just test -p lectern-agents` 的 `acp_*`（集成测试，假 agent）、`connect_*`、`logs_hold_no_conversation_contents`（两个）、`wire`、`live`、`conn` 的纯函数测试通过；`just check`、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过；`rg gpui crates/agents/Cargo.toml` 没有结果；`Cargo.lock` 只多了 `lectern-agents` 对 `libc`（可选，`test-support`）与 `rustix` 的依赖边，没有新的外部 crate。
    - `rg 'serde_json::Value' crates/agents/src` 的结果只在测试代码和 `test-support` 的假 agent（`src/bin/fake_acp.rs`）里。
 8. **实时项换历史项与改动预览**：实时项在轮次索引出现这一轮、`session/prompt` 也返回之后，在同一代里换成历史项；`PermissionDetail::Edits` 用 `git::line_diff` 算，两侧内容的 blob OID 为键、至多 64 项的 LRU；`waiting()` 与 `WaitingChanged`。
+   - `just test -p lectern-agents` 的 `swap_*`、`preview` 与 `live` 的纯函数测试、`acp_history`、`acp_permission`（`Edits`、`waiting`）、`acp_lifecycle`（已脱钩的连接、取消超时）、两个 `logs_hold_no_conversation_contents` 通过；`just check`、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过；`rg gpui crates/agents/Cargo.toml` 没有结果；`Cargo.lock` 只多了 `lectern-agents` 对 `lectern-git` 的依赖边。
 
 review 设计的前置条件 G（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，一个 PR，写 `Refs #15`，改 `services` 的 `session` 模块和本 crate）：`SessionSource::turns_unretained` 按上文「服务接口」；`just test -p lectern-agents` 的 `turns_unretained_*` 和 `just test -p lectern-services` 的 `session_*` 通过。
 
@@ -1247,7 +1278,15 @@ ACP 客户端第 7 步（进程与协议，[#23](https://github.com/SoloJiang/le
 - 集成测试 38 个（一个测试一个进程，各自起假 agent 的进程）：`acp_connect` 18 个、`acp_permission` 8 个、`acp_lifecycle` 11 个、`acp_logs` 1 个；八轮连续运行都通过，没有重试。覆盖 conversation 设计 C「测试」一条的每个情形：`initialize` 没有 `fs`、`terminal`（连 `clientCapabilities` 都是空对象）；权限请求在没有 `Answer` 时一直等待（时钟拨过 11 分钟，请求和进程都在）；`Cancel` 回答 `cancelled` 并发 `session/cancel`；空闲 10 分钟退出（9 分 59 秒时还在）；第 4 个连接（3 个都忙时 `TooMany` 且不起第 4 个进程；有空闲的就关闭最久没用的）；拒绝的情况（子 agent 会话、没有恢复命令、非 UUID、归位在项目之外）不起进程；超长行（假 agent 写 16 MiB + 10 字节不带换行，连接以 `Protocol` 关闭，进程被终止）；停用时进程组被终止（假 agent 忽略 SIGTERM 并留下一个孙进程，停用在 5 秒内返回，两个进程都消失）。
 - 单元测试新增：`wire`（消息的序列化与解析、每种 `Malformed`、`fixture_messages_parse`）、`live`（键、合并、上限、取消）、`conn`（按行读取与上限）、`history::fit`、`program`（子进程环境）、`connect_*` 4 个、`prompt_gate_puts_unsupported_busy_and_too_many_after_the_other_checks`。第 6 步的 `prompt_gate_passes_the_checks_then_stops_at_unsupported` 随 `CONNECTIONS` 的删除改成 `prompt_gate_passes_every_check_for_a_resumable_session`，`lookup_*`、`conversations_plugin_reads_the_history_on_the_executor`、`logs_hold_no_conversation_contents` 里对 `Unsupported` 的断言改成新的值。
 - 金丝雀：`tests/acp_logs.rs::logs_hold_no_conversation_contents` 在 trace 级别跑完两个连接的整个生命周期（回答权限请求、`Cancel`、空闲关闭、停用），提示词、形似真实的令牌、回复、工具标题、命令文本与工作目录、权限请求的标题、`OptionId`、计划、stderr 的文字、登录环境的变量名与值都不在任何记录里；同时检查了 `acp process started`（`program`、`argc` 为 0、`cwd`、`pid`、`session`）、`acp process exited`、`acp connection closing`、JSON-RPC 记录里的 `method` 都在固定表里。
-- 没有验证到的：(1) 真实的适配器：我没有运行 `claude-agent-acp`、`codex-acp`，这里没有它们；协议的形状、`session/resume` 与 `session/load` 的行为、`usage_update`、`rawInput.command` 的位置都只对照了第 6 步「核对」里读过的公开源码和合成的脚本，那张表里的「未运行验证」两项（轮次是否写进同一份本机日志）仍然没有验证。(2) 真实的登录 shell 环境：测试用 `with_login_env` 给固定的环境，`login_env()` 在这条路径上没有运行。(3) 真实的计时：10 分钟、30 秒、2 秒、50 ms 都是 `ManualClock` 拨动的；kernel 的 `SystemClock`（真实的计时线程）没有在测试里等过这些时长。(4) Lectern 退出时的路径：插件停用时 `Active::drop` 在 kernel 的生命周期线程（线程名 `kernel`，`kernel.rs` 的 `revoke`）上运行，所以至多 500 ms 的等待发生在那条线程上，不在调用方或 UI 线程上，但会推迟这段时间里其他插件的激活与撤销；我没有核对 `app` 在退出时是否一定先停用插件，也没有在应用里试过。(4a) `PromptFailed` 的错误文字（agent 写的，界面显示，不进日志）没有日志金丝雀：`loud.jsonl` 里没有出错的 prompt；`acp link failed` 只记错误种类这一点由代码保证（`link_error_name`），没有测试。(5) 应用里的 SIGPIPE：Rust 标准库默认忽略它，测试里是这样；`app` 的 `main` 若改了处理方式，写已经退出的进程会杀死 Lectern，没有核对。(6) 内存与冷启动：没有跑基准；首帧之前不做事这一点由 `conversations_plugin_starts_nothing_until_a_session_is_watched` 覆盖，激活和构造不提交任务。(7) Linux：只在 macOS 上运行；`process_group(0)` 与 `kill_process_group` 在 Linux 上也是同一组调用，但没有试。
+- 没有验证到的：(1) 真实的适配器：我没有运行 `claude-agent-acp`、`codex-acp`，这里没有它们；协议的形状、`session/resume` 与 `session/load` 的行为、`usage_update`、`rawInput.command` 的位置都只对照了第 6 步「核对」里读过的公开源码和合成的脚本，那张表里的「未运行验证」两项（轮次是否写进同一份本机日志）仍然没有验证。(2) 真实的登录 shell 环境：测试用 `with_login_env` 给固定的环境，`login_env()` 在这条路径上没有运行。(3) 真实的计时：10 分钟、30 秒、2 秒、50 ms 都是 `ManualClock` 拨动的；kernel 的 `SystemClock`（真实的计时线程）没有在测试里等过这些时长。(4) Lectern 退出时的路径：插件停用时 `Active::drop` 在 kernel 的生命周期线程（线程名 `kernel`，`kernel.rs` 的 `revoke`）上运行，所以至多 500 ms 的等待发生在那条线程上，不在调用方或 UI 线程上，但会推迟这段时间里其他插件的激活与撤销；我没有核对 `app` 在退出时是否一定先停用插件，也没有在应用里试过。(4a) `PromptFailed` 的错误文字（agent 写的，界面显示，不进日志）没有日志金丝雀：`loud.jsonl` 里没有出错的 prompt；`acp link failed` 只记错误种类这一点由代码保证（`link_error_name`），没有测试（第 8 步补上了，见第 8 步的验证）。(5) 应用里的 SIGPIPE：Rust 标准库默认忽略它，测试里是这样；`app` 的 `main` 若改了处理方式，写已经退出的进程会杀死 Lectern，没有核对。(6) 内存与冷启动：没有跑基准；首帧之前不做事这一点由 `conversations_plugin_starts_nothing_until_a_session_is_watched` 覆盖，激活和构造不提交任务。(7) Linux：只在 macOS 上运行；`process_group(0)` 与 `kill_process_group` 在 Linux 上也是同一组调用，但没有试。
+
+ACP 客户端第 8 步（实时项换成历史项、改动预览、`waiting()`、第 7 步评审的四项修正，[#23](https://github.com/SoloJiang/lectern-app/issues/23)，叠在第 7 步之上），在 macOS（arm64）上运行。没有运行应用，没有打开真实窗口，没有运行 `app` 的测试和基准，没有读 `~/.claude`、`~/.codex`；假 agent 是本仓库的程序，脚本和轮次索引都是合成的：
+
+- `just check`、`just test -p lectern-agents`（316 个测试通过、1 个跳过，是原有的被忽略的脱敏测试；第 7 步是 293 个）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过。`rg gpui crates/agents/Cargo.toml` 没有结果；`rg 'serde_json::Value' crates/agents/src` 只在 `redact.rs`（测试）、`src/bin/fake_acp.rs` 和 `wire.rs` 的一句文档注释里。`git diff -- Cargo.lock` 只有 `lectern-agents` 的依赖列表多了 `lectern-git`（本仓库的非插件库，架构规则 7 允许），没有新的外部 crate。
+- 集成测试 47 个（第 7 步 38 个）：`acp_connect` 18、`acp_permission` 11、`acp_lifecycle` 14、`acp_history` 3、`acp_logs` 1；三次连续运行都通过。新增的覆盖：已脱钩的、不理会 SIGTERM 的连接在插件停用时被终止（把 `stop` 里补关闭的那一行换成清空，这个测试等 30 秒后失败，换回去通过）；不理会 `session/cancel` 的适配器在时钟拨过 30 秒后 `Failed(Protocol)` 且进程被终止，29 秒时还在 `Stopping`，及时回复的取消之后拨过 60 秒仍是 `Idle`；`Edits` 的路径、增删行和行；`waiting()` 的排序和 `WaitingChanged` 的次数（两个会话、一个答完、一个被 `Cancel`、项目关闭、停用）；返回的一轮在日志里出现后换成历史项，下一轮的键从 `l:1:` 起，连接复用；日志里有而未返回的一轮不显示历史项，连接关闭后是历史项；日志里没有的（别的 prompt、先前说过同样的话的旧轮次）实时项留着。
+- 单元测试新增：`swap_*` 2 个、`live` 5 个、`preview` 6 个、`wire::tests::diffs_come_from_the_content_of_the_tool_call`。`retired_turns_give_the_caps_back` 跑 300 轮、每轮 21 项和 640 KiB，每一轮的最后一段回复都完整，没有一项因上限被丢弃（不换成历史项的话第 2 轮就会碰到 1 MiB）。
+- 金丝雀：`tests/acp_logs.rs` 把改动预览的标题、路径、两侧内容和 `PromptFailed` 的两行错误文字放进假 agent 的消息，跑完三个 prompt（回答、`Cancel`、出错）、空闲关闭、停用，都不在任何记录里；`acp link failed` 有 `prompt_failed` 且没有错误文字。`src/acp/tests/logs.rs` 在实时的 prompt 与回复换成历史项的路径上同样 `assert_absent`。
+- 没有验证到的：(1) 真实的适配器写进日志的 prompt 与 `Turn::prompt_preview` 是否逐字相同、`started_at` 是否不早于我们发出的时刻（认法依赖这两点，没有运行适配器，也没有读本机日志）；认不出时实时项留到连接关闭，窗口里日志的那一轮也在，这一轮会显示两次（内容不丢）。(2) `line_diff` 在 2 MiB 一侧上的耗时：只在单元测试里跑了小输入和 2 MiB 以上的退路，没有量；读线程上算，不在 UI 线程，但一个很大的 diff 会让这条连接的读线程忙一会儿。(3) 真实的 30 秒：由 `ManualClock` 拨动，没有等过。(4) 第 7 步列出的 (1)–(7) 里与本步无关的各项仍然没有验证。
 
 ## 与设计的差异
 
@@ -1364,9 +1403,9 @@ ACP 客户端第 7 步：
 - **写 stdin 是队列，读线程从不写。** 设计没写。队列由 `Background` 任务排空（一个不读的 agent 只占一个 `Background` 的 worker，`Interactive` 的 worker 留给历史读取）；`Cancel` 和关闭排在已有的行后面，保证顺序。
 - **`Cancel` 只在 `Working` 时有效。** 设计没有规定 `Connecting` 时的 `Cancel`：忽略（debug，`reason` 为 `not_working`）。
 - **`Busy` 先于 `TooMany`，`TooMany` 只对没有自己连接的会话。** 设计的「`can_prompt` 的检查」把 `TooMany` 写在 `Busy` 前面；按那个顺序，一个有自己的连接且正在工作的会话在 3 个连接时会显示 `TooMany`。让位的对象是 `Idle` 的连接和连接仍在的 `Failed`（`AuthRequired`、`PromptFailed`）。
-- **关闭连接时实时项清掉并重读历史；失败时实时项留着。** 空闲、`Disconnect`、项目关闭、让位之后，`entries` 只有历史窗口（重读，那一轮已写进本机日志），`plan` 与 `context` 为空。`Failed` 时实时项留着，界面在它们后面显示原因，下一次 `Prompt` 在后面接着编号（`l:<n>` 只增不减）。实时项换成历史项（设计「服务接口」的不变量）是第 8 步：在那之前，一轮结束后本机日志里出现这一轮时，历史窗口和实时项会同时有它，直到连接关闭。
-- **`waiting()` 与 `WaitingChanged` 留给第 8 步。** 「验收」把它们列在第 8 步；第 7 步里权限请求只在快照的 `permissions` 里，`waiting()` 恒为空，不发 `WaitingChanged`。`project_home` 的等待标记和 `conversation` 的「新请求切到这一页」要等第 8 步（`conversation` 的 `Messages` 页可以直接用快照里的 `permissions`）。
-- **`Edits` 请求的 `detail` 是 `None`。** 改动预览是第 8 步。
+- **关闭连接时实时项清掉并重读历史；失败时实时项留着。** 空闲、`Disconnect`、项目关闭、让位之后，`entries` 只有历史窗口（重读，那一轮已写进本机日志），`plan` 与 `context` 为空。`Failed` 时实时项留着，界面在它们后面显示原因，下一次 `Prompt` 在后面接着编号（`l:<n>` 只增不减）。实时项换成历史项（设计「服务接口」的不变量）是第 8 步：在那之前，一轮结束后本机日志里出现这一轮时，历史窗口和实时项会同时有它，直到连接关闭（第 8 步已做，见下）。
+- **`waiting()` 与 `WaitingChanged` 留给第 8 步。** 「验收」把它们列在第 8 步；第 7 步里权限请求只在快照的 `permissions` 里，`waiting()` 恒为空，不发 `WaitingChanged`。`project_home` 的等待标记和 `conversation` 的「新请求切到这一页」要等第 8 步（`conversation` 的 `Messages` 页可以直接用快照里的 `permissions`）。第 8 步已做。
+- **`Edits` 请求的 `detail` 是 `None`。** 改动预览是第 8 步（已做）。
 - **Lectern 自己回答 `cancelled` 的请求。** 设计只写 `Cancel` 和连接关闭时回答 `cancelled`。一轮之外的请求、别的会话的请求、没有 Lectern 认识的选项种类的请求、超过 16 个待确认的请求也回答 `cancelled`：这些请求在界面上没有可点的按钮。
 - **启动失败都是 `Failed(Spawn)`。** `cwd` 不存在、不是目录、不在会话归位的项目里，没有专门的 `LinkError`；启动期间被取消（项目关闭、插件停用）的尝试不改状态。没有 executor 的装配（只有单元测试）不启动进程，同样是 `Failed(Spawn)`。
 - **`session/update` 的合并是「第一个马上换，之后每 50 ms 一次」。** 设计写「合并后至多每 50 ms 换一次」；连接状态、权限请求、一轮的开始与结束不合并（马上换，并重算所有会话的 `can_prompt`）。
@@ -1375,3 +1414,16 @@ ACP 客户端第 7 步：
 - **进程相关的测试是集成测试，`test-support` 多了几个公开项。** `CARGO_BIN_EXE_<bin>` 只给集成测试，所以设计写在 `src/acp/tests/` 的金丝雀测试在那里只能覆盖没有进程的路径；有进程的部分是 `tests/acp_logs.rs` 里同名的测试。为此：假的 `SessionSource` 与 `Projects` 从 `src/acp/tests/support.rs` 移到 `testing::acp`（`FakeProjects` 多了 `set_location`，给启动时的 `cwd` 检查），`ConversationsPlugin::with_clock` 和 `probe()` / `Probe`（取 `dyn Conversations`）在 `test-support` 下公开。`src/bin/fake_acp.rs` 用 `serde_json::Value`（验收第 2 步的 `rg` 不包含这个测试程序）。
 - **空闲计时只设一个计时器。** 每个连接至多一个空闲计时器；活动时不取消它，到点时按进入空闲的时刻核对，没到就按剩下的时间重设。
 - **对端关了 stdout 而进程不退出，2 秒后 SIGKILL。** 设计没写；否则读线程在 `wait` 上永远等下去。进程被回收后也向组发一次 SIGKILL，清掉适配器留下的孙进程。
+
+ACP 客户端第 8 步：
+
+- **实时项和历史项靠「发出的时刻 + prompt 的第一行 + 序号」认。** 设计只写「轮次索引里出现了这一轮」，没有说怎么认。窗口多记每一轮的 `Mark`（序号、开始时刻、`prompt_preview`），认法见「实时项换成历史项」。只比第一行是因为轮次索引的列表只保留这一点；只比时刻会把紧挨着的另一个人的轮次当成我们的。
+- **未返回但已在日志里的一轮，隐藏的是历史项。** 设计的不变量是「同一轮不出现两次」，并说换成历史项发生在 `session/prompt` 返回之后；在那之前适配器已经把这一轮部分写进日志，窗口读到它时，显示哪一份设计没有写。实时项更全（流式的回复和待确认的请求），所以保留实时项、隐藏窗口里的这一轮。 已知限制：同时有别的进程（CLI）往同一个会话写后面的轮次时，窗口里这些轮次排在我们这一轮的位置之前，而实时项总是接在窗口的最后，所以这一轮会显示在它们之后；并发使用同一个会话不在主路径上。
+- **取消超时是第 7 步评审留下的项，设计允许。** 设计没有规定 `Stopping` 的出路。30 秒内没有回复就以 `Failed(Protocol)` 关闭连接，与握手超时一样，没有新增 `LinkError`。选 30 秒是因为一个正在跑的长命令被适配器取消可能要一会儿；错误地失败的代价是丢掉这个连接（历史不丢），所以取长的一边。
+- **`stop` 也关闭已脱钩的连接。** 第 7 步的 `stop` 只看还挂在会话上的连接；`close_session`、`fail` 取走连接后，关闭是 executor 的 `Background` 任务，插件撤销时没跑的会被丢弃，进程既不在会话上也没被关闭。`State::closing` 记着它们直到回收。
+- **实时工具行的字段有上限。** 标题、命令、每个路径至多 4 KiB，路径至多 16 个（`summary` 只用到前 3 个文件名和前 160 个字符）。设计没写；第 7 步的实现把它们原样存着。
+- **`rebuild` 会改实时项。** 第 7 步的 `rebuild` 只读状态；现在它先让实时项和窗口对一次（`Live::settle`，可能去掉整组），再生成快照，这样换出新窗口、`session/prompt` 返回都落在同一次换快照里。`settle` 幂等。
+- **改动预览的细节。** 设计只写「改动预览用 `git::line_diff` 算，以两侧内容的 git blob OID 为键放在至多 64 项的 LRU 里」「至多 120 行（上下文 3 行）」「至多 8 个文件」。补的：OID 取 SHA-1 的 blob OID（只用来区分内容）；LRU 的值是行与计数，路径和 `new_file` 每次填；块之间没有分隔行（`RowKind` 没有分隔）；一行截到 1 KiB；任何一侧超过 2 MiB 时不算 diff，计数按行数，`rows` 为空；多于 8 个文件时多的不显示。`Execute` 且有命令的请求仍是 `Command`，即使它也带了 diff。
+- **预览在读线程里、取引擎的锁之前算。** 设计没写在哪个线程。`on_line` 原来在锁里解析消息；现在解析和预览都先于锁，所以一个大的 diff 不会让 UI 线程上的 `snapshot` 等。
+- **`WaitingChanged` 只在集合变了时发。** 设计写「`waiting()` 的集合变了」；先后变了不发，顺序仍更新。
+- **`agents` 依赖 `lectern-git`。** 设计写「用 `git::line_diff`」，没写依赖边；`lectern-git` 是非插件库（架构规则 7），`Cargo.lock` 只多了这条边。
