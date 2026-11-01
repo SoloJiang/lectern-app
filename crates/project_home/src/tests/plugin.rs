@@ -2,6 +2,9 @@
 //! the services are fakes, events are emitted by the test, and the composing
 //! task runs when the test runs the manual executor.
 
+use std::sync::Arc;
+
+use lectern_services::conversation::ConversationEvent;
 use lectern_services::project::ProjectKey;
 use lectern_services::usage::{ProjectRef, UsageEvent, UsageQuery, UsageState, Window};
 
@@ -10,7 +13,7 @@ use crate::testing::{
     usage_limits,
 };
 use lectern_services::review::OutsideCount;
-use lectern_services::session::Agent;
+use lectern_services::session::{Agent, SessionKey};
 use lectern_services::workspace::{ContributionKind, SidebarSection};
 
 /// A project with two sessions in its main worktree, set in the fake `Projects`
@@ -440,4 +443,122 @@ fn deactivation_drops_the_interests() {
     rig.kernel.barrier();
     assert_eq!(rig.review.released(), 1);
     assert_eq!(rig.usage.released(), 1);
+}
+
+/// Keys of sessions with the given IDs (the fake source "fake").
+fn waiting_keys(ids: &[&str]) -> Vec<SessionKey> {
+    let fx = ProjectFx::git("app");
+    let key = fx.key();
+    let main = fx.wt("main");
+    ids.iter()
+        .map(|id| sess("fake", id, &key, Some(&main)).build().key)
+        .collect()
+}
+
+#[test]
+fn waiting_plugin_registers_and_reads_nothing_when_it_starts() {
+    let rig = Rig::new();
+    rig.activate_home();
+    let registered = rig.contributions.registered();
+    rig.conversations.set_waiting(waiting_keys(&["s1"]));
+    rig.activate_waiting();
+    assert_eq!(rig.run(), 0, "no task: the plugin only fills a cell");
+    assert_eq!(rig.contributions.registered(), registered);
+    assert_eq!(
+        rig.conversations.waiting_calls(),
+        0,
+        "`started` records the service; the views read it"
+    );
+    assert_eq!(&*rig.home().waiting(), &waiting_keys(&["s1"])[..]);
+}
+
+#[test]
+fn nobody_waits_without_the_conversations_plugin() {
+    let rig = Rig::new();
+    rig.activate_home();
+    rig.conversations.set_waiting(waiting_keys(&["s1"]));
+    assert!(
+        rig.home().waiting().is_empty(),
+        "`project-home-waiting` is not active: no `dyn Conversations` in the cell"
+    );
+    assert_eq!(rig.conversations.waiting_calls(), 0);
+    // The event of a provider nobody listens to changes nothing either.
+    rig.kernel.emitter().emit(ConversationEvent::WaitingChanged);
+    assert_eq!(rig.run(), 0);
+}
+
+#[test]
+fn a_change_of_who_waits_wakes_the_views_and_does_not_recompose() {
+    let rig = Rig::new();
+    rig.activate_home();
+    rig.activate_waiting();
+    let (_, key) = project(&rig, "app");
+    rig.opened(&key);
+    rig.run();
+    let snapshot = rig.snapshot().expect("a snapshot");
+    let before = rig.projects.snapshot_calls();
+    let mut views = rig.home().attach_view("screen");
+    while views.try_recv().is_ok() {}
+
+    let waiting = waiting_keys(&["s2"]);
+    rig.set_waiting(waiting.clone());
+    assert!(views.try_recv().is_ok(), "the views are woken");
+    assert!(views.try_recv().is_err(), "once");
+    assert_eq!(&*rig.home().waiting(), &waiting[..]);
+    assert_eq!(rig.run(), 0, "nothing is composed again");
+    assert_eq!(rig.projects.snapshot_calls(), before);
+    assert!(
+        Arc::ptr_eq(&snapshot, &rig.snapshot().unwrap()),
+        "the snapshot is the same"
+    );
+
+    // The items of one conversation are not what the marks show.
+    rig.kernel.emitter().emit(ConversationEvent::Changed {
+        session: waiting[0].clone(),
+        generation: 3,
+    });
+    assert!(views.try_recv().is_err(), "`Changed` wakes nobody");
+}
+
+#[test]
+fn sessions_that_wait_already_are_seen_when_the_plugin_starts_late() {
+    let rig = Rig::new();
+    rig.activate_home();
+    let mut views = rig.home().attach_view("sidebar");
+    while views.try_recv().is_ok() {}
+    let waiting = waiting_keys(&["s1", "s2"]);
+    rig.conversations.set_waiting(waiting.clone());
+    assert!(views.try_recv().is_err(), "no event: nobody was told");
+
+    rig.activate_waiting();
+    assert!(views.try_recv().is_ok(), "`started` wakes the views");
+    assert_eq!(&*rig.home().waiting(), &waiting[..]);
+}
+
+#[test]
+fn the_waiting_plugin_activating_before_the_home_still_marks() {
+    let rig = Rig::new();
+    rig.activate_waiting();
+    rig.activate_home();
+    let waiting = waiting_keys(&["s1"]);
+    rig.set_waiting(waiting.clone());
+    assert_eq!(&*rig.home().waiting(), &waiting[..]);
+}
+
+#[test]
+fn waiting_plugin_deactivation_clears_the_marks_and_wakes() {
+    let rig = Rig::new();
+    rig.activate_home();
+    rig.activate_waiting();
+    rig.set_waiting(waiting_keys(&["s1"]));
+    let mut views = rig.home().attach_view("screen");
+    while views.try_recv().is_ok() {}
+
+    rig.deactivate_waiting();
+    assert!(views.try_recv().is_ok(), "the views are woken");
+    assert!(rig.home().waiting().is_empty(), "the marks are gone");
+    // An event that arrives later has no listener.
+    rig.set_waiting(waiting_keys(&["s2"]));
+    assert!(views.try_recv().is_err());
+    assert!(rig.home().waiting().is_empty());
 }

@@ -2199,7 +2199,8 @@ pub static BUDGETS: &[Budget] = &[
     // frame budget is the 8.3 ms of the screens.
     share_macos(
         "conversation/stream_apply",
-        &[p95(Limit::TimeAtMost(ms(2)))],
+        // 2 ms until ADR 0055: 3.75 ms on CI with the code unchanged.
+        &[p95(Limit::TimeAtMost(us(4_800)))],
         CONVERSATION,
         ACTIVE,
         Time,

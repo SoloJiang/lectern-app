@@ -69,3 +69,22 @@ fn sidebar_tree_with_views_and_usage(cx: &mut TestAppContext) {
     let (_host, vcx) = window(cx, &rig);
     insta::assert_snapshot!("sidebar_tree_with_views_and_usage", tree(vcx, sidebar_part));
 }
+
+#[gpui::test]
+fn trees_with_waiting_sessions(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    rig.activate_waiting();
+    let (_host, vcx) = window(cx, &rig);
+    // The running session and the Codex one wait for the user.
+    rig.set_waiting(vec![world.running.clone(), world.codex.clone()]);
+    frame(vcx);
+    insta::assert_snapshot!(
+        "sidebar_tree_with_waiting_sessions",
+        tree(vcx, |id| sidebar_part(id) && id.contains(".sessions"))
+    );
+    insta::assert_snapshot!(
+        "home_tree_with_waiting_cards",
+        tree(vcx, |id| main_part(id) && id.contains("needs-review.item"))
+    );
+}

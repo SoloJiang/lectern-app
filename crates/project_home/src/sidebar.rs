@@ -58,7 +58,8 @@ const GAP: Pixels = px(8.0);
 /// The width the agent dot and the gap after it take: the "N more" row and
 /// the third-party agent's name start after it.
 const DOT_INDENT: Pixels = px(16.0);
-/// The green dot at the end of a running session's row.
+/// The dot at the end of a session's row: green while it runs, orange while
+/// a permission request of it waits for the user.
 const RUNNING_DOT: Pixels = px(6.0);
 const BLOCK_WIDTH: Pixels = px(96.0);
 const BLOCK_HEIGHT: Pixels = px(10.0);
@@ -148,6 +149,9 @@ pub struct HomeSidebar {
     /// only the newest `FOLDED`. The view's state, not the snapshot's.
     expanded: bool,
     rounds: HashMap<SessionKey, Round>,
+    /// The sessions that wait for the user, as of the last wake-up
+    /// (`Home::waiting`). Read there, not per row.
+    waiting: Arc<[SessionKey]>,
     /// How many rows the last frame built (the probe's `visible`, and tests).
     built: Rc<Cell<usize>>,
     _wake: Task<()>,
@@ -174,6 +178,7 @@ impl HomeSidebar {
             scroll: UniformListScrollHandle::new(),
             expanded: false,
             rounds: HashMap::new(),
+            waiting: home.waiting(),
             built: Rc::new(Cell::new(0)),
             home,
             _wake: task,
@@ -206,6 +211,11 @@ impl HomeSidebar {
         let on_home = self.home.on_home_screen();
         if on_home != self.on_home {
             self.on_home = on_home;
+            changed = true;
+        }
+        let waiting = self.home.waiting();
+        if *waiting != *self.waiting {
+            self.waiting = waiting;
             changed = true;
         }
         if changed {
@@ -355,8 +365,10 @@ impl HomeSidebar {
         }
     }
 
-    /// A session: the agent's dot, the title, and a green dot at the end
-    /// while it runs. Clicking opens its review.
+    /// A session: the agent's dot, the title, and a dot at the end: orange
+    /// while a permission request of it waits for the user (this wins over
+    /// running, a waiting session has an open turn), green while it runs.
+    /// Clicking opens its review.
     fn session_row(
         &self,
         row: &SessionRow,
@@ -366,10 +378,12 @@ impl HomeSidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = present::title(strings, row);
+        let waiting = self.waiting.contains(&row.key);
         let facts = Semantic::new(row.node.child("facts"), Role::Group)
             .label(&title)
             .attr("agent", agent_attr(&row.agent))
             .attr("running", flag(row.running))
+            .attr("waiting", flag(waiting))
             .attr("pending", flag(row.tail_pending));
         let mut content = div()
             .flex()
@@ -398,7 +412,17 @@ impl HomeSidebar {
             );
         }
         content = content.child(div().flex_1().min_w_0().truncate().child(title.shared()));
-        if row.running {
+        if waiting {
+            let name = Text::key(strings, keys::project_home::WAITING);
+            content = content.child(semantic(
+                Semantic::new(row.node.child("waiting"), Role::Badge).label(&name),
+                div()
+                    .flex_shrink_0()
+                    .size(RUNNING_DOT)
+                    .rounded_full()
+                    .bg(palette.system(SystemColor::Orange)),
+            ));
+        } else if row.running {
             let name = Text::key(strings, keys::project_home::RUNNING);
             content = content.child(semantic(
                 Semantic::new(row.node.child("running"), Role::Badge).label(&name),

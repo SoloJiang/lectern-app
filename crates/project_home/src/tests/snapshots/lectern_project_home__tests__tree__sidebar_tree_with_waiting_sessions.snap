@@ -1,0 +1,15 @@
+---
+source: crates/project_home/src/tests/tree.rs
+expression: "tree(vcx, | id | sidebar_part(id) && id.contains(\".sessions\"))"
+---
+project-home.sidebar.sessions Text label=[project-home-sessions]
+project-home.sidebar.sessions.item[s1] ListItem
+  project-home.sidebar.sessions.item[s1].facts Group label="Fix the login redirect" agent=claude-code running=true waiting=true pending=false
+    project-home.sidebar.sessions.item[s1].waiting Badge label=[project-home-waiting]
+project-home.sidebar.sessions.item[s2] ListItem
+  project-home.sidebar.sessions.item[s2].facts Group label="Add the search index" agent=codex running=false waiting=true pending=false
+    project-home.sidebar.sessions.item[s2].waiting Badge label=[project-home-waiting]
+project-home.sidebar.sessions.item[s3] ListItem
+  project-home.sidebar.sessions.item[s3].facts Group label="Try a new layout" agent=claude-code running=false waiting=false pending=false
+project-home.sidebar.sessions.more ListItem
+  project-home.sidebar.sessions.more.facts Button label=[project-home-sessions-more] hidden=3 expanded=false

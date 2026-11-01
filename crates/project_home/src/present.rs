@@ -70,7 +70,9 @@ pub(crate) struct Meta {
     pub status: Option<(Range<usize>, SessionStatus)>,
 }
 
-pub(crate) fn meta(strings: &Strings, card: &Card, now: Timestamp) -> Meta {
+/// `waiting`: a permission request of the session waits for the user. The
+/// word for it replaces the card's own status (the snapshot does not know).
+pub(crate) fn meta(strings: &Strings, card: &Card, now: Timestamp, waiting: bool) -> Meta {
     let mut text = agent_name(strings, &card.session.agent);
     if let Some(branch) = &card.branch {
         text.push_str(SEPARATOR);
@@ -78,7 +80,8 @@ pub(crate) fn meta(strings: &Strings, card: &Card, now: Timestamp) -> Meta {
     }
     text.push_str(SEPARATOR);
     text.push_str(&relative(strings, &card.session, now));
-    let status = card.status.map(|status| {
+    let status = waiting.then_some(SessionStatus::Waiting).or(card.status);
+    let status = status.map(|status| {
         text.push_str(SEPARATOR);
         let start = text.len();
         text.push_str(status_word(strings, status));

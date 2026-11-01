@@ -1032,3 +1032,136 @@ fn the_screen_takes_the_focus_back_from_the_root_only(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("down");
     assert_eq!(picked(vcx), ["project-home.needs-review.item[s1]"]);
 }
+
+/// The lines of `tree` that are the node `id` or one of its descendants by ID.
+fn node_lines<'a>(tree: &'a str, id: &str) -> Vec<&'a str> {
+    tree.lines()
+        .filter(|line| {
+            let name = line.split_whitespace().next().unwrap_or("");
+            name == id || name.starts_with(&format!("{id}."))
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_waiting_session_is_marked_on_its_row_and_its_card(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    rig.activate_waiting();
+    let (_host, vcx) = window(cx, &rig);
+    let row = "project-home.sidebar.sessions.item[s1]";
+    let card = "project-home.needs-review.item[s1]";
+
+    let sidebar = tree(vcx, sidebar_part);
+    assert!(
+        sidebar.contains(&format!("{row}.facts Group"))
+            && sidebar.contains("running=true waiting=false"),
+        "nobody waits: {sidebar}"
+    );
+    assert!(sidebar.contains(&format!("{row}.running Badge label=[project-home-running]")));
+    assert!(!sidebar.contains(".waiting Badge"), "{sidebar}");
+
+    // s1 runs and waits, s2 only waits; s3 is not touched.
+    rig.set_waiting(vec![world.running.clone(), world.codex.clone()]);
+    frame(vcx);
+    let sidebar = tree(vcx, sidebar_part);
+    assert!(
+        sidebar.contains(&format!("{row}.waiting Badge label=[project-home-waiting]")),
+        "{sidebar}"
+    );
+    assert!(
+        !sidebar.contains(&format!("{row}.running")),
+        "the waiting mark replaces the running dot: {sidebar}"
+    );
+    assert!(sidebar.contains("project-home.sidebar.sessions.item[s2].waiting Badge"));
+    assert!(!sidebar.contains("project-home.sidebar.sessions.item[s3].waiting"));
+    assert!(
+        node_lines(&sidebar, row)
+            .iter()
+            .any(|line| line.contains("running=true waiting=true")),
+        "the row's facts say both: {sidebar}"
+    );
+    let main = tree(vcx, main_part);
+    for id in [card, "project-home.needs-review.item[s2]"] {
+        assert!(
+            node_lines(&main, id)
+                .iter()
+                .any(|line| line.contains(".facts Group") && line.contains("waiting=true")),
+            "{id} waits: {main}"
+        );
+    }
+    assert_eq!(
+        main.matches("waiting=true").count(),
+        2,
+        "only the two: {main}"
+    );
+
+    // Answered: the marks go, and the snapshot was not composed again.
+    let before = rig.projects.snapshot_calls();
+    rig.set_waiting(vec![world.codex.clone()]);
+    frame(vcx);
+    let sidebar = tree(vcx, sidebar_part);
+    assert!(!sidebar.contains(&format!("{row}.waiting")), "{sidebar}");
+    assert!(
+        sidebar.contains(&format!("{row}.running Badge")),
+        "running again"
+    );
+    assert!(sidebar.contains("sessions.item[s2].waiting Badge"));
+    assert_eq!(rig.projects.snapshot_calls(), before);
+}
+
+#[gpui::test]
+fn sessions_that_wait_before_the_views_exist_are_marked_at_once(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    rig.activate_waiting();
+    rig.conversations.set_waiting(vec![world.codex.clone()]);
+    // No event: the views read the set when they are built.
+    let (_host, vcx) = window(cx, &rig);
+    let sidebar = tree(vcx, sidebar_part);
+    assert!(
+        sidebar.contains("sessions.item[s2].waiting Badge"),
+        "{sidebar}"
+    );
+    let main = tree(vcx, main_part);
+    assert!(main.contains("waiting=true"), "{main}");
+}
+
+#[gpui::test]
+fn the_marks_follow_the_conversations_plugin_coming_and_going(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    rig.conversations.set_waiting(vec![world.codex.clone()]);
+    let (_host, vcx) = window(cx, &rig);
+    assert!(
+        !tree(vcx, sidebar_part).contains(".waiting Badge"),
+        "without the plugin nobody is marked"
+    );
+
+    rig.activate_waiting();
+    frame(vcx);
+    assert!(tree(vcx, sidebar_part).contains("sessions.item[s2].waiting Badge"));
+    assert!(tree(vcx, main_part).contains("waiting=true"));
+
+    rig.deactivate_waiting();
+    frame(vcx);
+    assert!(!tree(vcx, sidebar_part).contains(".waiting Badge"));
+    assert!(!tree(vcx, main_part).contains("waiting=true"));
+}
+
+#[gpui::test]
+fn a_waiting_session_in_recently_done_says_so_in_its_facts_only(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    rig.activate_waiting();
+    let (_host, vcx) = window(cx, &rig);
+    rig.set_waiting(vec![world.done.clone()]);
+    frame(vcx);
+    let main = tree(vcx, main_part);
+    assert!(
+        node_lines(&main, "project-home.done.item[s4]")
+            .iter()
+            .any(|line| line.contains(".facts Group") && line.contains("waiting=true")),
+        "the row's facts say it: {main}"
+    );
+}

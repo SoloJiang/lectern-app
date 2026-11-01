@@ -28,6 +28,7 @@ fn canary_stays_out_of_home_logs(cx: &mut TestAppContext) {
     let rig = rig(cx);
     rig.activate_home();
     rig.activate_usage();
+    rig.activate_waiting();
 
     let fx = ProjectFx::git(&format!("app-{CANARY}"))
         .linked("feat", branch(&format!("feat/{CANARY}")))
@@ -87,6 +88,16 @@ fn canary_stays_out_of_home_logs(cx: &mut TestAppContext) {
     rig.overview_changed(&key);
     rig.run();
     frame(vcx);
+    // The session with the canary in its title waits for the user: the
+    // marks on its row and card, then they go away with the plugin.
+    rig.set_waiting(vec![known.key.clone(), other.key.clone()]);
+    frame(vcx);
+    rig.set_waiting(vec![]);
+    frame(vcx);
+    rig.set_waiting(vec![known.key.clone()]);
+    frame(vcx);
+    rig.deactivate_waiting();
+    frame(vcx);
     rig.deactivate_usage();
     rig.run();
     frame(vcx);
@@ -105,6 +116,12 @@ fn canary_stays_out_of_home_logs(cx: &mut TestAppContext) {
     assert!(
         built.iter().any(|line| line.contains("\"cards\":1")),
         "counts are written instead of names: {built:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("\"event\":\"waiting-changed\"")),
+        "the change of who waits is traced: {lines:#?}"
     );
     for message in [
         "home command",

@@ -94,13 +94,13 @@ fn the_first_line_of_a_card_joins_agent_branch_time_and_status() {
         Some("feat-print-queue"),
         Some(SessionStatus::Running),
     );
-    let line = meta(&en, &running, now);
+    let line = meta(&en, &running, now, false);
     assert_eq!(line.text, "Codex · feat-print-queue · 34 min ago · running");
     let (range, status) = line.status.expect("the status word is marked");
     assert_eq!(&line.text[range], "running");
     assert_eq!(status, SessionStatus::Running);
     assert_eq!(
-        meta(&zh, &running, now).text,
+        meta(&zh, &running, now, false).text,
         "Codex · feat-print-queue · 34 分钟前 · 运行中"
     );
 
@@ -110,7 +110,7 @@ fn the_first_line_of_a_card_joins_agent_branch_time_and_status() {
         None,
         None,
     );
-    let line = meta(&en, &plain, now);
+    let line = meta(&en, &plain, now, false);
     assert_eq!(line.text, "Claude Code · 2 hours ago");
     assert!(line.status.is_none());
 
@@ -124,8 +124,23 @@ fn the_first_line_of_a_card_joins_agent_branch_time_and_status() {
             Some("main"),
             Some(status),
         );
-        assert!(meta(&en, &card, now).text.ends_with(expected_en));
-        assert!(meta(&zh, &card, now).text.ends_with(expected_zh));
+        assert!(meta(&en, &card, now, false).text.ends_with(expected_en));
+        assert!(meta(&zh, &card, now, false).text.ends_with(expected_zh));
+    }
+
+    // A session that waits for the user says so, whatever the snapshot says:
+    // the snapshot does not know who waits.
+    for status in [None, Some(SessionStatus::Running)] {
+        let card = card(row(Agent::Codex, MINUTE, true, None), Some("main"), status);
+        let line = meta(&en, &card, now, true);
+        assert_eq!(line.text, "Codex · main · 1 min ago · waiting for you");
+        let (range, status) = line.status.expect("the status word is marked");
+        assert_eq!(&line.text[range], "waiting for you");
+        assert_eq!(status, SessionStatus::Waiting);
+        assert!(
+            meta(&zh, &card, now, true).text.ends_with("等你处理"),
+            "and in Chinese"
+        );
     }
 
     // An agent without a dot is named as written.
@@ -134,7 +149,10 @@ fn the_first_line_of_a_card_joins_agent_branch_time_and_status() {
         Some("main"),
         None,
     );
-    assert_eq!(meta(&en, &other, now).text, "aider · main · 5 min ago");
+    assert_eq!(
+        meta(&en, &other, now, false).text,
+        "aider · main · 5 min ago"
+    );
 }
 
 #[test]
