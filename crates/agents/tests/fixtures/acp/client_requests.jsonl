@@ -1,0 +1,3 @@
+{"on":"initialize","do":[{"reply":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{},"sessionCapabilities":{"resume":{}}},"agentInfo":{"name":"fake-adapter","version":"0.0.0"},"authMethods":[]}}]}
+{"on":"session/resume","do":[{"reply":{}}]}
+{"on":"session/prompt","do":[{"send":{"jsonrpc":"2.0","id":"fs-1","method":"fs/read_text_file","params":{"sessionId":"$SESSION","path":"/etc/hosts"}}},{"send":{"jsonrpc":"2.0","id":"term-1","method":"terminal/create","params":{"sessionId":"$SESSION","command":"ls"}}},{"send":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"$SESSION","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"no client capabilities used"}}}}},{"reply":{"stopReason":"end_turn"}}]}

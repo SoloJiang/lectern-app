@@ -96,7 +96,8 @@ fn conversations_plugin_reads_the_history_on_the_executor() {
     let interest = engine.watch(&session);
     let loading = engine.snapshot(&session).unwrap();
     assert_eq!(loading.load, Load::Loading);
-    assert_eq!(loading.can_prompt, Err(Unavailable::Unsupported));
+    // The lookup has not run yet: not being installed is not known, so it is not an error.
+    assert_eq!(loading.can_prompt, Ok(()));
     assert!(loading.entries.is_empty());
 
     assert!(f.executor.run_until_idle() > 0);

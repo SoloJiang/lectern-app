@@ -21,17 +21,54 @@ fn can_prompt(
 }
 
 #[test]
-fn prompt_gate_passes_the_checks_then_stops_at_unsupported() {
+fn prompt_gate_passes_every_check_for_a_resumable_session() {
     let (rig, _dir) = rig_with_programs();
     let session = rig.claude_session();
-    // Everything holds; the process half is not implemented yet.
-    assert_eq!(can_prompt(&rig, &session), Err(Unavailable::Unsupported));
+    assert_eq!(can_prompt(&rig, &session), Ok(()));
     let codex = key(&codex_source(), CODEX_SESSION);
     rig.codex.add(
         &codex,
         Spec::located(&codex, folder("/work/project"), &Agent::Codex),
     );
-    assert_eq!(can_prompt(&rig, &codex), Err(Unavailable::Unsupported));
+    assert_eq!(can_prompt(&rig, &codex), Ok(()));
+}
+
+#[test]
+fn prompt_gate_puts_unsupported_busy_and_too_many_after_the_other_checks() {
+    use lectern_services::conversation::Link;
+    let (rig, _dir) = rig_with_programs();
+    let session = rig.claude_session();
+    let _interest = rig.engine.watch(&session);
+    // The last negotiation named another protocol version.
+    rig.engine.mark_unsupported(AcpProgram::ClaudeCode, true);
+    assert_eq!(
+        rig.engine.snapshot(&session).unwrap().can_prompt,
+        Err(Unavailable::Unsupported)
+    );
+    rig.engine.mark_unsupported(AcpProgram::ClaudeCode, false);
+    assert_eq!(rig.engine.snapshot(&session).unwrap().can_prompt, Ok(()));
+    // A turn is running.
+    for busy in [Link::Connecting, Link::Working, Link::Stopping] {
+        rig.engine.set_link(&session, busy);
+        assert_eq!(
+            rig.engine.snapshot(&session).unwrap().can_prompt,
+            Err(Unavailable::Busy)
+        );
+    }
+    // An earlier failure does not block a new prompt.
+    rig.engine.set_link(
+        &session,
+        Link::Failed(lectern_services::conversation::LinkError::Protocol),
+    );
+    assert_eq!(rig.engine.snapshot(&session).unwrap().can_prompt, Ok(()));
+    // The checks before keep their order: a session outside the projects is not "busy".
+    rig.engine.set_link(&session, Link::Working);
+    rig.projects.set_open(vec![]);
+    rig.engine.on_projects_changed();
+    assert_eq!(
+        rig.engine.snapshot(&session).unwrap().can_prompt,
+        Err(Unavailable::OutsideProject)
+    );
 }
 
 #[test]
@@ -124,10 +161,7 @@ fn prompt_gate_refuses_a_session_outside_the_open_projects() {
     assert_eq!(can_prompt(&rig, &session), Err(Unavailable::OutsideProject));
     rig.projects.set_open(vec![folder("/work/project")]);
     rig.engine.on_projects_changed();
-    assert_eq!(
-        rig.engine.snapshot(&session).unwrap().can_prompt,
-        Err(Unavailable::Unsupported)
-    );
+    assert_eq!(rig.engine.snapshot(&session).unwrap().can_prompt, Ok(()));
     // The project closes while the session is watched.
     rig.projects.set_open(vec![]);
     rig.engine.on_projects_changed();

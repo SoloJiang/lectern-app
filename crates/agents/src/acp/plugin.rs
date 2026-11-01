@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use lectern_executor::Executor;
 use lectern_kernel::{
-    Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, service,
+    Activation, Active, Clock, Context, Manifest, Name, Plugin, PluginError, PluginHandle,
+    SystemClock, service,
 };
 use lectern_services::conversation::Conversations;
 use lectern_services::project::{ProjectEvent, Projects};
@@ -27,7 +28,8 @@ pub struct ConversationsDeps {
 pub struct ConversationsPlugin {
     deps: ConversationsDeps,
     env: Env,
-    #[cfg(test)]
+    clock: Arc<dyn Clock>,
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) engine: Arc<std::sync::Mutex<Option<Arc<Engine>>>>,
 }
 
@@ -38,7 +40,8 @@ pub fn conversations_plugin(deps: ConversationsDeps) -> (Name, ConversationsPlug
         ConversationsPlugin {
             deps,
             env: Env::Login,
-            #[cfg(test)]
+            clock: Arc::new(SystemClock),
+            #[cfg(any(test, feature = "test-support"))]
             engine: Arc::default(),
         },
     )
@@ -50,6 +53,38 @@ impl ConversationsPlugin {
     pub fn with_login_env(mut self, vars: Vec<(OsString, OsString)>) -> ConversationsPlugin {
         self.env = Env::Fixed(vars.into());
         self
+    }
+
+    /// 空闲、握手超时、SIGKILL 和快照合并用这个时钟计时（测试拨动它，不等真实的 10 分钟）。
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> ConversationsPlugin {
+        self.clock = clock;
+        self
+    }
+
+    /// 激活之后取 `dyn Conversations` 的句柄（插件交给 kernel 之前取；不经 kernel 的服务表，测试用）。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn probe(&self) -> Probe {
+        Probe(self.engine.clone())
+    }
+}
+
+/// [`ConversationsPlugin::probe`] 的句柄。
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub struct Probe(Arc<std::sync::Mutex<Option<Arc<Engine>>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Probe {
+    /// 插件激活之后的服务对象；还没激活或已停用时仍是最后一次激活的那个。
+    pub fn conversations(&self) -> Option<Arc<dyn Conversations>> {
+        let engine = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        Some(engine)
     }
 }
 
@@ -69,10 +104,11 @@ impl Plugin for ConversationsPlugin {
             sources: Sources::Service(ctx.service_set::<dyn SessionSource>()),
             projects: Open::Service(ctx.service::<dyn Projects>()),
             env: self.env.clone(),
+            clock: self.clock.clone(),
             #[cfg(test)]
             sink: None,
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             *self
                 .engine

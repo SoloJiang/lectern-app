@@ -1,5 +1,7 @@
 //! 测试与 bench 用：不经过插件，直接解析一个文件（docs/design/agents.md「本 crate 的公开项」）。
 
+pub mod acp;
+
 use std::path::Path;
 use std::sync::Arc;
 
