@@ -66,6 +66,9 @@ pub struct ProjectInfo {
     /// 项目在本次运行中打开着时为 Some。
     pub key: Option<ProjectKey>,
     pub status: ProjectStatus,
+    /// 用户确认「是新项目」（`UsageCommand::ConfirmNew`）之后为 Some，撤销后为 None：
+    /// 「是新项目」之后项目是 `Active`，撤销要的别名只能从这里拿到。
+    pub confirmed: Option<AliasId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -172,6 +175,11 @@ pub struct AllUsage {
     pub total: Tokens,
     /// 每个项目一行（并入别的项目的不单列），加上 `other`，相加等于 `total`。
     pub projects: Arc<[(ProjectInfo, Tokens)]>,
+    /// 经用户命令（`Merge`、`ConfirmSame`）并入别的项目、还没有撤销的项目，状态都是
+    /// `Merged { into, alias }`，按合并时间从新到旧。它们不在 `projects` 里、不带 token
+    /// （用量已计入 `into`），所以 `projects` 加 `other` 仍等于 `total`。自动的别名（移动、
+    /// 改写）不列出。
+    pub merged: Arc<[ProjectInfo]>,
     /// 「其他」：还没有打开过的项目和不在任何项目里的用量。
     pub other: Tokens,
     pub daily: Arc<[DayTotals]>,

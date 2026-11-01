@@ -156,6 +156,8 @@ pub(crate) struct Harness {
     pub(crate) zone: TableZone,
     pub(crate) now: i64,
     pub(crate) open: Vec<ProjectKey>,
+    /// Paths that no longer exist, for the snapshots' `PathMissing`.
+    pub(crate) missing: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl Harness {
@@ -170,6 +172,7 @@ impl Harness {
             zone: TableZone::fixed(0),
             now: OCT_20 + 2 * DAY + 12 * HOUR,
             open: Vec::new(),
+            missing: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -276,6 +279,7 @@ impl Harness {
             batch: &read.batch,
             places: &read.places,
             stamp: read.stamp,
+            now_ms: self.now,
         })
     }
 
@@ -326,6 +330,7 @@ impl Harness {
             now_ms: self.now,
             open: &self.open,
             state: UsageState::Ready,
+            exists: &|p| !self.missing.borrow().iter().any(|m| m == p),
         };
         compute(&cx, query).unwrap()
     }
@@ -339,6 +344,7 @@ impl Harness {
             now_ms: self.now,
             open: &self.open,
             state: UsageState::Ready,
+            exists: &|p| !self.missing.borrow().iter().any(|m| m == p),
         };
         match crate::engine::compute_full(&cx, query).unwrap() {
             Some(crate::engine::Computed::Watched(w)) => w,
@@ -515,18 +521,19 @@ pub(crate) fn assert_buckets(h: &Harness) {
     let conn = rusqlite::Connection::open(h.db_path()).unwrap();
     let rows = |sql: &str| -> Vec<Vec<i64>> {
         let mut stmt = conn.prepare(sql).unwrap();
-        stmt.query_map([], |r| (0..10).map(|i| r.get(i)).collect())
+        stmt.query_map([], |r| (0..11).map(|i| r.get(i)).collect())
             .unwrap()
             .map(Result::unwrap)
             .collect()
     };
     let facts = rows(
-        "SELECT bucket, location, agent, model, review, sum(input), sum(output),
-                sum(cache_read), sum(cache_write), count(*)
-         FROM fact GROUP BY bucket, location, agent, model, review
-         ORDER BY bucket, location, agent, model, review",
+        "SELECT bucket, location, coalesce(project, 0), agent, model, review, sum(input),
+                sum(output), sum(cache_read), sum(cache_write), count(*)
+         FROM fact GROUP BY bucket, location, coalesce(project, 0), agent, model, review
+         ORDER BY bucket, location, coalesce(project, 0), agent, model, review",
     );
-    let buckets = rows("SELECT * FROM fact_bucket ORDER BY bucket, location, agent, model, review");
+    let buckets =
+        rows("SELECT * FROM fact_bucket ORDER BY bucket, location, project, agent, model, review");
     assert_eq!(buckets, facts, "fact_bucket is not the sum of the facts");
 }
 

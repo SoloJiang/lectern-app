@@ -59,7 +59,9 @@ pub use path::{Mode, RefName, RepoPath};
 pub use reflog::{
     HeadReflog, RefReflog, ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line,
 };
-pub use refs::{BranchInfo, CommitInfo, GitTime, RemoteBranch, RemoteInfo, Signature, StashInfo};
+pub use refs::{
+    Advance, BranchInfo, CommitInfo, GitTime, RemoteBranch, RemoteInfo, Signature, StashInfo,
+};
 pub use repo::{Discovered, HeadState, Location, Repo, WorktreeId, WorktreeInfo};
 pub use rows::{INLINE_MAX_LINE_BYTES, InlineChanges, Row, inline_changes, rows};
 pub use tracked::{EntryLimits, TrackedEntry, TrackedPaths};

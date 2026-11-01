@@ -5,6 +5,7 @@
 
 pub(crate) mod cold;
 mod dedup;
+mod identity;
 mod ingest;
 pub(crate) mod limits;
 mod query;
@@ -23,6 +24,9 @@ use lectern_logging::{Value, error, info, warn};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 pub(crate) use dedup::FactDelta;
+#[cfg(test)]
+pub(crate) use identity::AliasKind;
+pub(crate) use identity::{Aliases, Commanded, Outcome, Recorded, temporary_of};
 pub(crate) use ingest::{FileStamp, Ingest, Ingested, Place, SessionInfo, agent_of, path_bytes};
 pub(crate) use query::{FolderRoot, ProjectRow, Totals, under};
 pub(crate) use recover::Recovery;

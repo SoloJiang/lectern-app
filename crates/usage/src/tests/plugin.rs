@@ -18,7 +18,7 @@ use lectern_services::usage::{
 };
 
 use super::support::*;
-use crate::engine::{Engine, PACE};
+use crate::engine::{Engine, FactsReader, PACE, git_facts};
 use crate::testing::{FakeProjects, FakeSessions, ManualTime, TableZone};
 use crate::time::WALL_CHECK;
 use crate::{UsageDeps, plugin};
@@ -36,11 +36,24 @@ pub(crate) struct Rig {
     pub(crate) sessions: Arc<FakeSessions>,
     pub(crate) projects: Arc<FakeProjects>,
     pub(crate) engine: Arc<Engine>,
+    facts: FactsReader,
+    /// Paths that do not exist for the plugin; none at first (the paths of
+    /// the fake projects are not on the disk).
+    pub(crate) vanished: Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 
 impl Rig {
     /// `setup` declares projects before the plugin starts.
     pub(crate) fn new(sessions: FakeSessions, setup: impl FnOnce(&FakeProjects)) -> Rig {
+        Rig::with_facts(sessions, setup, git_facts())
+    }
+
+    /// The same with another reader of what identifies a repository.
+    pub(crate) fn with_facts(
+        sessions: FakeSessions,
+        setup: impl FnOnce(&FakeProjects),
+        facts: FactsReader,
+    ) -> Rig {
         let projects = Arc::new(FakeProjects::new());
         setup(&projects);
         Rig::build(
@@ -48,6 +61,8 @@ impl Rig {
             projects,
             tempfile::tempdir().unwrap(),
             ManualTime::new(NOW),
+            facts,
+            Arc::default(),
         )
     }
 
@@ -62,9 +77,11 @@ impl Rig {
             sessions,
             projects,
             time,
+            facts,
+            vanished,
             ..
         } = self;
-        Rig::build(sessions, projects, dir, time)
+        Rig::build(sessions, projects, dir, time, facts, vanished)
     }
 
     fn build(
@@ -72,6 +89,8 @@ impl Rig {
         projects: Arc<FakeProjects>,
         dir: tempfile::TempDir,
         time: ManualTime,
+        facts: FactsReader,
+        vanished: Arc<std::sync::Mutex<Vec<PathBuf>>>,
     ) -> Rig {
         let executor = Executor::manual();
         let backend = FakeBackend::new();
@@ -82,7 +101,13 @@ impl Rig {
             data_dir: dir.path().join("usage"),
             zone: Arc::new(TableZone::fixed(0)),
         });
-        let usage = usage.with_time(&time);
+        let gone = vanished.clone();
+        let usage = usage
+            .with_time(&time)
+            .with_facts(facts.clone())
+            .with_exists(Arc::new(move |path| {
+                !gone.lock().unwrap().iter().any(|p| p == path)
+            }));
         let slot = usage.engine.clone();
         let kernel = TestKernel::new(usage)
             .mock::<dyn Projects>(projects.clone())
@@ -98,6 +123,8 @@ impl Rig {
             sessions,
             projects,
             engine,
+            facts,
+            vanished,
         }
     }
 

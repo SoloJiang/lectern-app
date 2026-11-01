@@ -16,7 +16,7 @@ use lectern_services::session::{SessionSource, SessionsChanged};
 use lectern_services::usage::Usage;
 
 use crate::LocalZone;
-use crate::engine::{Deps, Engine};
+use crate::engine::{Deps, Engine, Exists, FactsReader, git_facts, path_exists};
 use crate::time::Time;
 
 /// The plugin ID.
@@ -43,6 +43,8 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin) {
         UsagePlugin {
             deps: Arc::new(deps),
             time: Time::system(),
+            facts: git_facts(),
+            exists: Arc::new(path_exists),
             #[cfg(test)]
             engine: Arc::default(),
         },
@@ -52,9 +54,26 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin) {
 pub struct UsagePlugin {
     deps: Arc<UsageDeps>,
     time: Time,
+    facts: FactsReader,
+    exists: Exists,
     /// The engine of the latest activation, for this crate's tests.
     #[cfg(test)]
     pub(crate) engine: Arc<std::sync::Mutex<Option<Arc<Engine>>>>,
+}
+
+#[cfg(test)]
+impl UsagePlugin {
+    /// Replaces the reader of repository facts (tests).
+    pub(crate) fn with_facts(mut self, facts: FactsReader) -> UsagePlugin {
+        self.facts = facts;
+        self
+    }
+
+    /// Replaces the check whether a project's path exists (tests).
+    pub(crate) fn with_exists(mut self, exists: Exists) -> UsagePlugin {
+        self.exists = exists;
+        self
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -85,6 +104,8 @@ impl Plugin for UsagePlugin {
                 data_dir: self.deps.data_dir.clone(),
                 zone: self.deps.zone.clone(),
                 time: self.time.clone(),
+                facts: self.facts.clone(),
+                exists: self.exists.clone(),
             },
             ctx.service_set::<dyn SessionSource>(),
             ctx.service::<dyn Projects>(),

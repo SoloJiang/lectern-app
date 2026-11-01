@@ -240,7 +240,7 @@ fn limits_codex_log_keeps_the_newest_sample_of_each_window() {
         vec![codex_sample(
             OCT_20 + 3 * HOUR,
             "codex",
-            Some(window(30.0, 300, 1_792_700_000)),
+            Some(window(30.0, 300, 1_792_472_400)),
             Some(window(55.0, 10_080, 1_793_059_200)),
         )],
     );
@@ -249,7 +249,7 @@ fn limits_codex_log_keeps_the_newest_sample_of_each_window() {
         vec![codex_sample(
             OCT_20 + HOUR,
             "codex",
-            Some(window(10.0, 300, 1_792_600_000)),
+            Some(window(10.0, 300, 1_792_465_200)),
             None,
         )],
     );
@@ -264,8 +264,93 @@ fn limits_codex_log_keeps_the_newest_sample_of_each_window() {
         && s.source == LimitSource::SessionLog
         && s.limit_id.as_deref() == Some("codex")));
     assert_eq!(samples[0].window_minutes, Some(300));
-    assert_eq!(samples[0].resets_at, Some(Timestamp(1_792_700_000_000)));
+    assert_eq!(samples[0].resets_at, Some(Timestamp(1_792_472_400_000)));
     assert_eq!(samples[0].sampled_at, Timestamp(OCT_20 + 3 * HOUR));
+}
+
+#[test]
+fn limits_a_reset_beyond_two_window_lengths_is_dropped() {
+    let h = Harness::new();
+    let at = NOW - 3 * HOUR;
+    let five_hours = |reset_after: i64| Sample {
+        agent: Agent::ClaudeCode,
+        source: LimitSource::Statusline,
+        limit_id: None,
+        kind: LimitKind::FiveHour,
+        used_percent: 40.0,
+        window_minutes: Some(300),
+        resets_at: Some(Timestamp(at + reset_after)),
+        sampled_at: sampled(at),
+    };
+    // Two window lengths past the sample is as far as it is believed.
+    for believable in [2 * HOUR, 10 * HOUR] {
+        let sample = five_hours(believable);
+        assert_eq!(crate::store::limits::sanitized(&sample, NOW), sample);
+    }
+    let far = five_hours(10 * HOUR + 1);
+    assert_eq!(crate::store::limits::sanitized(&far, NOW).resets_at, None);
+    // Stored without it; the percentage and the time stay.
+    assert!(
+        h.store()
+            .put_samples(&[five_hours(11 * HOUR)], NOW)
+            .unwrap()
+    );
+    let kept = stored(&h);
+    assert_eq!(kept.len(), 1);
+    assert_eq!((kept[0].used_percent, kept[0].resets_at), (40.0, None));
+    assert_eq!(kept[0].sampled_at, sampled(at));
+    // A sample with no window length has nothing to measure by.
+    let mut open_ended = five_hours(500 * HOUR);
+    open_ended.window_minutes = None;
+    assert_eq!(
+        crate::store::limits::sanitized(&open_ended, NOW).resets_at,
+        open_ended.resets_at
+    );
+}
+
+#[test]
+fn limits_a_sample_dated_after_now_is_stored_as_taken_now() {
+    let h = Harness::new();
+    // A statusline file whose clock was ahead.
+    let future = Sample {
+        agent: Agent::ClaudeCode,
+        source: LimitSource::Statusline,
+        limit_id: None,
+        kind: LimitKind::FiveHour,
+        used_percent: 10.0,
+        window_minutes: Some(300),
+        resets_at: Some(Timestamp(NOW + HOUR)),
+        sampled_at: sampled(NOW + 6 * HOUR),
+    };
+    assert!(
+        h.store()
+            .put_samples(std::slice::from_ref(&future), NOW)
+            .unwrap()
+    );
+    assert_eq!(stored(&h)[0].sampled_at, sampled(NOW));
+    // The next real sample is newer than it, not blocked by it.
+    let next = Sample {
+        used_percent: 20.0,
+        sampled_at: sampled(NOW + 1000),
+        ..future
+    };
+    assert!(h.store().put_samples(&[next], NOW + 1000).unwrap());
+    assert_eq!(percents(&stored(&h)), [(LimitKind::FiveHour, 20.0)]);
+
+    // The same for a Codex record dated after the read.
+    let fake = codex(
+        "s",
+        vec![codex_sample(
+            NOW + 9 * HOUR,
+            "codex",
+            Some(window(30.0, 300, (NOW + 10 * HOUR) / 1000)),
+            None,
+        )],
+    );
+    let codex_h = Harness::new();
+    codex_h.read_all(&fake, "s");
+    let samples = stored(&codex_h);
+    assert_eq!(samples[0].sampled_at, sampled(NOW));
 }
 
 #[test]
@@ -375,19 +460,27 @@ fn limits_reading_reports_whether_a_sample_changed() {
 fn limits_statusline_sample_is_replaced_by_a_newer_one_only() {
     let h = Harness::new();
     let at = |ms| limits::parse_statusline(FIVE_HOUR_ONLY.as_bytes(), sampled(ms)).unwrap();
-    assert!(h.store().put_samples(&at(OCT_20 + 2 * HOUR)).unwrap());
+    assert!(
+        h.store()
+            .put_samples(&at(OCT_20 + 2 * HOUR), h.now)
+            .unwrap()
+    );
     // An older file (the file was replaced by an older copy): ignored.
-    assert!(!h.store().put_samples(&at(OCT_20 + HOUR)).unwrap());
+    assert!(!h.store().put_samples(&at(OCT_20 + HOUR), h.now).unwrap());
     assert_eq!(stored(&h)[0].sampled_at, sampled(OCT_20 + 2 * HOUR));
     // The same bytes at the same time: no change.
-    assert!(!h.store().put_samples(&at(OCT_20 + 2 * HOUR)).unwrap());
+    assert!(
+        !h.store()
+            .put_samples(&at(OCT_20 + 2 * HOUR), h.now)
+            .unwrap()
+    );
     // A newer sample with another percentage replaces it.
     let newer = limits::parse_statusline(
         br#"{"rate_limits": {"five_hour": {"used_percentage": 9, "resets_at": 1792680000}}}"#,
         sampled(OCT_20 + 3 * HOUR),
     )
     .unwrap();
-    assert!(h.store().put_samples(&newer).unwrap());
+    assert!(h.store().put_samples(&newer, h.now).unwrap());
     assert_eq!(percents(&stored(&h)), [(LimitKind::FiveHour, 9.0)]);
 }
 

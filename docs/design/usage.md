@@ -1,6 +1,6 @@
 # usage 设计
 
-状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#178](https://github.com/SoloJiang/lectern-app/pull/178)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现。第 1 步已实现：前一部分（数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计、时间窗口、取整、`Project` / `AllProjects` 查询、插件与读取节奏，[#183](https://github.com/SoloJiang/lectern-app/pull/183)），后一部分（冷热分层与 `History` 查询、窗口快照的增量更新、`testing::Scenario` 与 `heavy_days`、第 1 步的 bench 条目，[#187](https://github.com/SoloJiang/lectern-app/pull/187)）。前置条件 C 的 `app` 部分（构造 `UsageDeps`、放进 `PluginSet`，[#247](https://github.com/SoloJiang/lectern-app/pull/247)）已实现。第 2 步已实现：额度快照（Codex 日志里的 `RateLimits`、statusline JSON、`limits()`、`UsageEvent::Limits`、`limit_sample` 与表结构版本 3、`UsageDeps::watcher`，statusline 的字段名已按公开文档核对）。前置条件 C 的 statusline 脚本部分（`platform`，#32）与第 3–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#178](https://github.com/SoloJiang/lectern-app/pull/178)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现。第 1 步已实现：前一部分（数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计、时间窗口、取整、`Project` / `AllProjects` 查询、插件与读取节奏，[#183](https://github.com/SoloJiang/lectern-app/pull/183)），后一部分（冷热分层与 `History` 查询、窗口快照的增量更新、`testing::Scenario` 与 `heavy_days`、第 1 步的 bench 条目，[#187](https://github.com/SoloJiang/lectern-app/pull/187)）。前置条件 C 的 `app` 部分（构造 `UsageDeps`、放进 `PluginSet`，[#247](https://github.com/SoloJiang/lectern-app/pull/247)）已实现。第 2 步已实现：额度快照（Codex 日志里的 `RateLimits`、statusline JSON、`limits()`、`UsageEvent::Limits`、`limit_sample` 与表结构版本 3、`UsageDeps::watcher`，statusline 的字段名已按公开文档核对）。第 3 步已实现：项目标识（`identity::identify` 与判定表的每一行、从仓库读出的标识事实、位置与固定 ID、别名与 `Usage::command`、文件夹的认领、「其他」、表结构版本 4）。前置条件 C 的 statusline 脚本部分（`platform`，#32）与第 4–8 步尚未实现。
 
 对应 issue [#31](https://github.com/SoloJiang/lectern-app/issues/31)，[#32](https://github.com/SoloJiang/lectern-app/issues/32) 的 Usage 页与额度读本文定义的快照。`usage` 把 `agents` 交来的用量记录去重、规范化后落进自己的 SQLite，把每一轮的 token 归属到项目、分支的「一次使用」和 MR，按时间窗口聚合，并保存额度快照（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)、[ADR 0022](../adr/0022.md)、[交互规范「用量」](interaction.md#用量)）。改动权重的来源按 [ADR 0047](../adr/0047.md)，数据库按 [ADR 0027](../adr/0027.md)，位置按 [ADR 0044](../adr/0044.md) 的应用数据目录。
 
@@ -241,6 +241,9 @@ pub struct ProjectInfo {
     /// 项目在本次运行中打开着时为 Some。
     pub key: Option<ProjectKey>,
     pub status: ProjectStatus,
+    /// 用户确认「是新项目」（`UsageCommand::ConfirmNew`）之后为 Some，撤销后为 None：
+    /// 「是新项目」之后项目是 `Active`，撤销要的别名只能从这里拿到。
+    pub confirmed: Option<AliasId>,
 }
 pub enum ProjectStatus {
     Active,
@@ -313,6 +316,10 @@ pub struct AllUsage {
     pub total: Tokens,
     /// 每个项目一行（并入别的项目的不单列），加上 `other`，相加等于 `total`。
     pub projects: Arc<[(ProjectInfo, Tokens)]>,
+    /// 经用户命令（`Merge`、`ConfirmSame`）并入别的项目、还没有撤销的项目，状态都是
+    /// `Merged { into, alias }`，按合并时间从新到旧。它们不带 token（用量已计入 `into`），
+    /// 所以 `projects` 加 `other` 仍等于 `total`。自动的别名（移动、改写）不列出。
+    pub merged: Arc<[ProjectInfo]>,
     /// 「其他」：还没有打开过的项目和不在任何项目里的用量。
     pub other: Tokens,
     pub daily: Arc<[DayTotals]>,
@@ -614,7 +621,9 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 | `intern` | O | 驻留表：字符串与字节串（来源 ID、会话 ID、`TurnId`、模型名、agent 标签）→ ID | 第一次出现 |
 | `run` | O | fs_watch 的 `RunId` → 本 crate 分配的递增序号 | 第一次收到某个 `RunId` 的记录（fs_watch 设计「reflog」的先后规则） |
 | `location` | O | 种类（git 公共目录 / 目录）、规范路径（字节） | 第一次出现 |
-| `project`、`project_fact`、`alias` | O | 项目 ID、种类、状态；每次识别时的标识事实（根提交、主远端、远端集合、仓库 ID、位置）；别名记录（种类、从、到、被撤销的别名） | 识别、命令（「项目标识」） |
+| `project` | O | 项目 ID（`pid`）、种类、位置、是否打开过、显示名；`since`（从这个时刻起拥有位置的用量，第一个项目为 0）；临时项目的原因与候选 | 位置第一次出现（`since` 为 0）；识别出新项目、临时项目时（`since` 为识别的时刻） |
+| `project_fact` | O | 每次识别时的标识事实：项目、位置、时刻、根提交、远端地址集合、主远端的名字与地址、仓库 ID、是否还没有提交、根提交是从哪个提交找到的（`tip`，默认分支的顶端；只有顶端变了时改最新一行，不追加）（别的事实变了才追加） | 识别（「项目标识」） |
+| `alias` | O | 别名记录：种类（移动、改写、合并、确认同一个、确认是新项目、转正、撤销）、从、到、被撤销的记录、时刻；只追加 | 识别、命令（「项目标识」） |
 | `session` | O | 来源 ID、会话 ID、agent、父会话、派出它的调用、当前代与回放中的代、游标（`Cursor::to_bytes`）、`inheritance_unknown`、是否读到过末尾；最后一批读到末尾时、读之前日志文件的大小、修改时间与 inode（`end_stamp`，别的批次清空） | 每批读取的事务里 |
 | `session_gen` | O | 会话、代：读到这一批末尾时的 cwd 位置、模型、所在轮次（下一批从这里接着读） | 每批读取的事务里 |
 | `turn` | O | 会话、代、`TurnId`、序号、开始与结束时刻、cwd 的位置与 worktree、日志记录的分支、是否已定稿、跟踪中或导入 | 读到 `TurnStarted`；定稿时更新一次 |
@@ -637,14 +646,14 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 | `usage_value` | D | 每个键当前计数的那个来源 | 来源增删时 |
 | `share` | D | 轮次、目标（项目或位置、片段或「不属于任何 MR」的种类）、权重与权重和 | 轮次定稿、转移、受影响的轮次重算 |
 | `fact` | D | 时刻、15 分钟桶、项目或位置、片段或种类、编写 / 审阅、agent、模型、会话、轮次、四类 token（百万分之一） | 随 `share` |
-| `fact_bucket` | D | 15 分钟桶 × 位置 × agent × 模型 × 编写 / 审阅：热事实行的四类 token 之和与行数（`WITHOUT ROWID`）；时间窗口的查询读它，不读 `fact` | 与 `fact` 的每次增删同一事务；月份归档完时删掉这个月的行；重建时从 `fact` 重算 |
+| `fact_bucket` | D | 15 分钟桶 × 位置 × 项目 × agent × 模型 × 编写 / 审阅（项目为 0 是不属于任何项目的事实，如文件夹根目录之下的目录）：热事实行的四类 token 之和与行数（`WITHOUT ROWID`）；时间窗口的查询读它，不读 `fact` | 与 `fact` 的每次增删同一事务；月份归档完时删掉这个月的行；重建时从 `fact` 重算 |
 | `cold_part` | O | UTC 年月、表、段序号、行数、未压缩字节数、压缩后的块、写入时刻 | 冷归档（「冷热分层」） |
 | `cold_month` | O | 项目或位置、本地年月、agent、模型、编写 / 审阅、四类 token | 冷归档，与 `cold_part` 同一事务 |
 | `cold_total` | O | 片段或会话、编写 / 审阅、四类 token（已归档部分的累计） | 同上 |
 | `cold_anchor` | O | 会话、已归档的最后一个有改动轮次及其份额；派出仍有热数据的子会话的父轮次及其份额 | 同上（有改动的轮次随第 4 步出现，第 1 步不写） |
 | `cold_seen` | O | 会话、UTC 月：这个会话在这个月有已归档的来源 | 来源的段归档时，与 `cold_part` 同一事务 |
 
-表结构版本 2 在版本 1 之上加冷数据的五张表、`fact_bucket`（迁移时从 `fact` 算出）和下面两个按时刻的索引（迁移前照常写副本）。冷数据的三张汇总表和 `cold_seen` 在抢救时与观察一起复制（都是 rowid 表）。表结构版本 3 在版本 2 之上加 `limit_sample`（迁移前照常写副本），抢救时与观察一起复制；它是小的实体表，一直是热的，不归档。
+表结构版本 2 在版本 1 之上加冷数据的五张表、`fact_bucket`（迁移时从 `fact` 算出）和下面两个按时刻的索引（迁移前照常写副本）。冷数据的三张汇总表和 `cold_seen` 在抢救时与观察一起复制（都是 rowid 表）。表结构版本 3 在版本 2 之上加 `limit_sample`（迁移前照常写副本），抢救时与观察一起复制；它是小的实体表，一直是热的，不归档。表结构版本 4 在版本 3 之上重建 `project`（`location` 不再唯一，加 `since`、`reason`、`candidate`，行连同 ID 照搬）、加 `project_fact` 和 `alias`，并重建 `fact_bucket`（主键加 `project`，从 `fact` 算出；迁移前照常写副本）。抢救时 `project_fact`、`alias` 与观察一起复制；`project` 等表按两边都有的列复制，所以版本 3 的文件抢救进版本 4 的表时新列取默认值。
 
 索引：`fact` 按（时刻）、（片段）、（会话）；`usage_source` 按（键）、（会话、代）、（时刻）；`turn` 按（开始时刻）；`reflog` 按（仓库、文件、`seq`）；`call` 按（会话、代、轮次）。按时刻的索引让归档按月找到行。
 
@@ -686,6 +695,8 @@ statusline JSON 的字段名已在第 2 步按公开文档核对（2026-11-01 �
 | 仓库还没有提交 | 临时项目（`Unborn`）；第一个提交出现后（HEAD 的 reflog 记录）按本表用完整标识重新判定，并入候选或转为新项目 |
 
 临时项目本身就是一个新项目：用户不确认时它一直是单独的项目（`crates/usage/AGENTS.md`「对不上时为它分配新项目」），确认「是同一个项目」时追加别名并入候选，「是新项目」时转为 `Active`。`PrimaryRemoteChanged` 这一行按 `crates/usage_view/AGENTS.md` 的两种临时项目给出确认操作：远端改名和 fork 占用路径在没有仓库 ID 时分不清，不自动合并。
+
+同一个位置可以先后有几个项目：路径被无关仓库占用、改写历史、等用户确认的临时项目，都是位置上的一个新项目，`since` 是识别的时刻。事实行写入时按记录的时间戳取位置上 `since` 不晚于它的最后一个项目，写进 `fact.project`；时间窗口的求和按（位置、项目）分开，所以位置换了主人之后，以前的用量留在以前的项目里（识别之前、占用已经发生之后的那一小段用量仍归旧项目，识别的时刻就是分界）。
 
 别名只追加：合并、确认、移动、改写、撤销各是一条记录，撤销指向被撤销的那一条。汇总时按记录的顺序重放出「项目 → 最终项目」的映射，所以撤销之后的用量回到原项目，不需要改写任何观察。
 
@@ -1134,6 +1145,22 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - `just check`（整个工作区的 clippy，含 `app` 与 `lectern-bench` 的目标）、`just deny`（advisories、bans、licenses、sources 都通过）、`cargo metadata --format-version 1 --locked --all-features` 通过；`Cargo.lock` 只多了 `lectern-usage` 对 `lectern-fs-watch` 的依赖；`tools/automation/Cargo.lock` 用 `cargo metadata --offline` 刷新，`lectern-usage` 多了 `lectern-fs-watch`、`serde`、`serde_json`（`--locked` 通过）。
 - 没有运行：`app` 的会开窗口的测试、`startup`、探针和 `bench_probe` 测试、`--profile windows`、`just bench`（`usage/resident_bytes` 的基准已改为带一个手动 watcher，只编译过，没有运行，数字没有重测，预算没有改）；整个工作区的 `just test`；真实的 FSEvents 后端（只用 `FakeBackend`）；statusline 脚本的端到端（脚本在前置条件 C 的 `platform` 部分，尚未实现）。
 
+### 第 3 步
+
+在 macOS（aarch64）上运行，不开任何窗口：
+
+- `just test -p lectern-usage`：162 个测试通过（另有 1 个手动运行的测量），比第 2 步多 61 个：
+  - `identity_*` 45 个、`other_*` 2 个（`src/tests/identity.rs`）。判定表每一行都有用例，直接调 `identity::identify`：行 1 移动（同一个仓库 ID；没有 ID 时根提交和远端集合都相同；候选不唯一、没有远端、ID 不同、旧路径还在时都不认），行 2 新项目与 fork（`upstream` 让集合相交也不合并），行 3 同一个项目的三个条件，行 4 取不到 ID，行 5 的两种情况（有 ID：新项目；没有 ID：`PrimaryRemoteChanged`），行 6 改写（有 ID、没有 ID），行 7 `LocalRewrite`，行 8 新项目的三种其余情况，行 9 `Unborn`（含仍没有提交、第一个提交后按首次看到的仓库判定、有提交的位置上重新 `git init`）。行 4 的用例叫 `identity_reopen_without_a_forge_id_is_pending`：`identity_forge_pending_*` 留给第 7 步（取到 ID 后自动并入要 `MrSource`）。
+  - 其余 `identity_*`：远端地址统一为主机加路径（密码和令牌不留）；主远端的选定、沿用、新增远端不影响、被删后重选；用 `TestRepo` 从仓库读标识事实（根提交、统一后的远端、主远端、没有提交、没有远端，`Debug` 输出里没有用户名和令牌）；同一仓库的两个 worktree 是一个项目；位置是公共目录、每条事实行带项目 ID；重新打开只在事实变了时记一行；路径被无关仓库占用后旧用量留在旧项目（旧项目 `PathMissing`、新项目 0，之后的用量归新项目，`fact_bucket` 与事实行一致）；移动后的别名（沿用旧项目 ID、按新目录命名、重开不再追加、自动的别名不能撤销）；改写历史是同一个项目；`LocalRewrite` 与 `PrimaryRemoteChanged` 的临时项目；确认「是同一个项目」、「是新项目」和它们的撤销（`confirmed`、`merged` 的变化，确认之后不再是临时项目）；没有提交的仓库在第一个提交后转正或认作移动；手动合并与撤销、被拒绝的命令（环、未知项目、不是临时项目、未知或不能撤销的别名、已并入）、合并链指向最后一个项目；文件夹的最深根认领、文件夹项目的合并；抢救复制 `project_fact`、`alias`，版本 3 的 `project` 表抢救进版本 4；插件级 5 个（打开时识别并执行命令、重启后同一个项目、没有提交的仓库在 worktree 变化时重新识别、读不出事实时仍按位置记录、被拒绝的命令不改变快照、迁移前的副本写不出来时快照说明原因）。
+  - `other_*` 2 个：从没打开过的仓库和位置上的用量在「其他」里，识别之后进项目；移动后的新路径上的用量在被识别之前在「其他」里。
+  - `limits_*` 新增 2 个（见「与设计的差异」第 2 步评审的两条）：超过两个窗口长度的 `resets_at` 被丢掉、两个窗口长度整保留；晚于现在的采样时刻按现在存（statusline 与 Codex 各一条路径），之后更新的样本不被它挡住。
+  - `store_*`：新增 `store_migration_from_version_3_keeps_every_project_and_sum`（版本 3 的文件与 `CREATE_V3` 的表结构相同，迁移后项目行连同 ID 不变、合计不变、`fact_bucket` 与事实行一致、副本是版本 3）；两个旧版本的迁移测试先退回版本 3 的表（`BACK_TO_V3`）；三个假的更新版本改为 5 到 7；`store_page_cache_is_bounded` 的快照 `user_version` 改为 4（用 `INSTA_UPDATE=always` 重写后看过两行的差异，之后都用 `INSTA_UPDATE=no` 运行）；`store_salvage_keeps_every_readable_row` 的样本改为 `resets_at` 在两个窗口长度之内。
+  - `log_canary_never_reaches_a_record` 加了仓库的标识事实（根提交、远端地址、主远端的名字、仓库 ID）、一个读不出事实的仓库（错误文字带金丝雀）、一次合并、一次被拒绝的合并和一次撤销，并检查这些记录确实写过；金丝雀不在任何记录里。
+  - 根提交的走法（评审后加，两轮）：顶端没变不走（读取时把取消标志设上，读得出就是没走）、变了才检查、没有记录时走（`identity_facts_walk_the_history_for_the_roots_once_per_tip`、`identity_facts_walk_again_when_the_tip_moved`、`identity_facts_reuse_what_the_store_recorded`）；向前动了的顶端不走整个历史（记下的根提交是编出来的标记，读出来的还是它，说明没有走到根）、改写的历史走整个历史并得到真正的根、合并带进新的根、根的总数不超过 4 个、旧顶端已不在时走整个历史（`identity_facts_for_*`）；顶端移动不加行（`identity_a_tip_that_moved_adds_no_fact_row`）；取消不记任何东西（`identity_plugin_cancelled_read_records_nothing`、`identity_plugin_cancel_during_the_ancestor_check_records_nothing`）。`lectern-git` 的 `refs_advance_since_*` 两个测试：只访问新提交、上限、不是祖先、旧对象不在、取消、合并带来的根。`cargo test --release -p lectern-usage --lib identity_facts_walk_cost -- --ignored --nocapture`：整个历史 1000 个提交 53 ms，5000 个 247 ms，20000 个 0.94 s（另一次 1.80 s）；顶端没变约 1 ms；顶端向前 10 个提交 1.7–2.5 ms（20000 个提交的历史 1.7 ms）。
+- `cargo bench --locked -p lectern-bench --all-features --bench time -- usage/`（进程内的 `testing::Scenario`，不开窗口）全部在预算内，预算没有改：`ingest_append_4k` 334 µs、`backfill_batch` 80.9 ms、`backfill_large_session` 最大 105 ms 中位 55.6 ms、`project_30d` 991 µs、`all_projects_30d` 5.71 ms、`snapshot_increment` 3.33 µs、`archive_month` 57.3 ms、`cold_read_month` 17.2 ms、`disk_day_heavy` 5.51 MB（记录）；`--bench memory -- usage/`：`resident_bytes` 89 KB。
+- `just check`（整个工作区的 clippy，含 `app` 与 `lectern-bench` 的目标）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过；`Cargo.lock` 只多了 `lectern-usage` 对 `lectern-git` 的依赖，`tools/automation/Cargo.lock` 同样（`cargo metadata --offline` 刷新，`--locked` 通过）。`python3 scripts/check_architecture.py` 通过（`just check` 里）。
+- 没有运行：`app` 的会开窗口的测试、`startup`、探针和 `bench_probe` 测试、`--profile windows`、`just bench`（整个入口会构建并运行 `empty_window` 与 `lectern`，只运行了上面两条进程内的 `usage/` 基准）、`app/*` 与 `plugin/*` 基准；整个工作区的 `just test`；真实的 FSEvents 后端；真实仓库上的 `Repo::discover` 路径（`facts::read` 只在 `app` 里用，没有单独的测试：测试用 `facts::from_repo` 和 `TestRepo`，插件级用例换掉了读取函数）；`app` 里打开项目时识别的端到端。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -1207,3 +1234,22 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - **Codex 的样本归会话的 agent。** `RateLimits` 记录出自哪个会话，agent 就是那个会话的 agent，来源 `SessionLog`；`primary`、`secondary` 各一行。
 - **已知限制：数据库只读时样本存不下。** 数据库是更新的版本、迁移前的副本写不出来或写不进时，`put_samples` 返回错误，记 warn，`Limits` 保持原样（statusline 的新样本也不显示）。额度是小数据、重启后下一次 statusline 更新就会再来，没有为只读状态另加内存缓存。
 - **statusline 脚本不在这一步。** 验收把它放在「第 2 步的端到端之前」，属于前置条件 C 的 `platform` 部分（#32）：本 PR 没有改 `platform`，也没有读写本机的 Claude Code 设置；第 2 步只用 fixtures 验收（验收原文）。脚本写 `<app_data>/usage/statusline/claude-code.json`（先写临时文件再 `rename`）的约定本 crate 已按此实现。
+
+### 第 3 步
+
+- **一个位置可以先后有几个项目（表结构版本 4）。** 设计的判定表有「已知位置，……新项目」「改写」「临时项目」几行，它们都要在同一个位置上有第二个项目，而第 1 步的 `project.location` 是唯一的，窗口求和也只按位置。现在：`project` 重建，`location` 不再唯一，加 `since`（从这个时刻起拥有位置的用量；位置第一次出现时的项目为 0，识别出的新项目、改写、临时项目为识别的时刻）、`reason`、`candidate`（迁移时行连同 ID 照搬）；事实行写入时取位置上 `since` 不晚于记录时间戳的最后一个项目写进 `fact.project`；`fact_bucket` 的主键加 `project`（0 是不属于任何项目的事实），窗口的求和和增量都带项目，`snapshot::Owners` 按项目归属，只有项目为 0 的事实才按目录认领。放弃的做法：把代数放在 `location` 上（`ingest` 的每个位置查找要带时间，会话的读取状态里存的位置 ID 会过时）。识别的时刻就是分界，所以实际占用之后、识别之前的那一小段用量仍归旧项目（已知限制）。
+- **冷数据的按月汇总和 `History` 仍按位置。** `cold_month`、`inherited_in` 和 `History` 的热数据都按位置求和：两个项目共用过一个位置时，它们的 `History` 会含对方在这个位置上的用量。共用位置的不只是路径被占用、改写历史的情况：`PrimaryRemoteChanged` 和 `LocalRewrite` 的临时项目与原项目也在同一个位置上，在用户确认之前是两个项目，它们的 `History` 也混在一起。必须在 `usage_view` 显示 History 之前改掉（usage_view 设计前置条件 A2）。窗口快照（`Project`、`AllProjects`）读 `fact_bucket`，不受影响；`cold_total` 按片段和会话，也不受影响。`History` 的按项目拆分留到有界面用它的时候。
+- **`identify` 的输入。** `KnownProject { id, here, path_missing, facts }`：`here` 是位置上最后一个识别过的项目，`path_missing` 是别处路径已不在或被别的项目占着、而且没有并入别的项目的项目（一个项目组里有任何成员的路径还在并且是那个位置上最后的项目，组就还在）。结果 `Identification`：`Same`、`Moved { from }`、`Rewritten { project }`、`New`、`Temporary { reason, candidate }`。表没有覆盖、按下面的规则决定的情况：根提交「相同」是两边的集合相交（合并过别的历史的仓库只会多出根提交）；记下的项目有仓库 ID、这次也有但不同时，不管根提交都是新项目；记下的项目没有 ID 而这次有（平台接入之后第一次）按没有 ID 比较；根提交相同、一边有远端另一边没有（新加或删掉了远端）是同一个项目；上次没有提交的占位项目在这次有提交时按「位置没有记录」判定，结果是转正（别名 `Promote`）或认作移动；在有提交的位置上又变成没有提交的仓库是候选为原项目的 `Unborn` 临时项目。
+- **别名的方向与种类。** `Move`：新位置上的项目（位置第一次出现时分配的，或打开时新建的）→ 旧项目，所以最终项目是旧项目，「沿用旧项目 ID」成立，显示名取最近打开的成员的（新目录名）。`Rewrite`：改写之后的新项目 → 旧项目。`Merge`、`ConfirmSame`、`ConfirmNew`（没有目标，让临时项目不再是临时项目）、`Promote`（自动的转正，同样没有目标）和 `Undo`（指向被撤销的记录）。同一个项目的后一条连接盖过前一条，撤销后前一条重新生效。`Undo` 只能撤销用户的三种；`Merge` 不检查 `PathMissing`（视图只在那里提供）；环、未知项目、已并入、不是临时项目、未知别名都拒绝，记 warn，不改任何东西。
+- **`ProjectStatus` 和列表。** 状态按最终项目的组算：临时（原因、候选取候选的最终项目）> `PathMissing`（组里没有任何成员的路径还在并且是位置上最后的项目）> `Active`。所以等用户确认的临时项目占着旧项目的位置时，旧项目显示 `PathMissing`，确认「是同一个项目」之后合并为一行。列表只含有成员打开过的组；`AllUsage::merged` 是用户并入的项目，`ProjectInfo::key` 取组里正打开着的成员的键。`Project` 查询按成员的 ID 取事实，被并入的项目的 ID 也给出它并入的项目的快照。状态只在整体计算时更新（增量不改 `ProjectInfo`）；识别和命令都触发整体重算。
+- **`ProjectInfo::confirmed`、`AllUsage::merged` 在这一步加了。** [usage_view 设计](usage_view.md)的前置条件 A 的第 1、2 条写「随 usage 第 3 步实现」，所以改了 `crates/services`（两个字段，JSON 往返的测试已加）和 `crates/project_home/src/testing.rs`（构造 `ProjectInfo` 的测试夹具）；usage_view 本身没有动。
+- **没有提交的仓库的重新识别。** 设计写第一个提交出现后（HEAD 的 reflog 记录）重新判定；reflog 的监听在第 5 步。现在引擎记下没有提交的仓库，在项目的 `ProjectEvent::Changed`（`worktrees` 变了）时重新识别，测试 `identity_plugin_identifies_a_repository_again_once_it_has_a_commit`。第 5 步接上 reflog 之后可以换成那个触发。
+- **识别在打开项目的后台任务里，读不出事实时不阻止记录。** 启动时（数据库打开的那个任务）和每个 `ProjectEvent::Opened` 为 git 项目读标识事实，写 `project_fact`；读不出来（仓库坏了、reftable）时记 warn（只有路径），仍按位置记下项目，与第 1 步相同。仓库 ID 的来源 `MrSource` 要等第 7 步，现在 `forge` 总是 None，所以生产里不会出现 `ForgeIdPending`，取到 ID 后的自动并入也在第 7 步（判定本身已有，由 `identity_reopen_without_a_forge_id_is_pending` 覆盖）。`facts::read` 用 `Repo::discover`，会读用户的 git 配置，`insteadOf` 改写的地址是统一前的输入；测试不走它。
+- **识别的结果记在项目自己的事实里。** 临时项目、新项目、改写之后的项目各记自己的事实，下次打开比较的是位置上最后一个识别过的项目，所以一个等用户确认的临时项目下次是 `Same`（仍是临时的），不会每次打开都再产生一个。
+- **迁移前的副本写不出来时。** 文件停在旧版本、只读：新表和列不在，快照的查询失败。引擎现在在这种状态（不是可写）下给出没有用量、`Degraded(Unwritable)` 的快照，而不是没有快照（测试 `identity_plugin_answers_from_an_old_file_kept_after_a_failed_backup`）。
+- **抢救按列复制。** `copy_table` 原来 `SELECT *`，旧版本的文件列数不同就整张表算丢失；现在取两边都有的列，新列取默认值（版本 3 的 `project` 抢救进版本 4，测试 `identity_salvage_copies_the_project_table_of_version_3`）。`repair_references` 删掉指向已丢失的项目或位置的 `project_fact`、`alias`，清掉指向丢失项目的 `candidate`，否则新行拿到丢失的 ID 时它们会指错。
+- **根提交只在需要时才走整个历史。** `Repo::root_commits` 从顶端走遍所有可达的提交，直到找到 4 个根提交或走完；只有一个根的仓库就是整个历史，每次打开项目都走一遍会在 `BusyGuard` 下读完 50 万个提交，而 AI 的提交让顶端一直在动。现在 `project_fact` 记下 `tip`（找到根提交时默认分支的顶端；表结构版本 4，未发布，直接改），`facts::from_repo(repo, &Previous, forge, cancel)` 分三种情况：顶端与上次相同（且上次有根提交）：用记下的根提交，不走；顶端向前动了：`Repo::advance_since(旧顶端, 新顶端, 10000, cancel)` 只访问新提交（`rev_walk` 隐藏旧顶端），确认旧顶端是新顶端的祖先（新提交里有一个以它为父）后，根提交是记下的根提交加上新提交里没有父提交的那些（合并带进来的历史可以有自己的根；总数不超过 4 个）；其余情况走整个历史：旧顶端不是祖先（改写历史、换了默认分支）、新提交超过 10000 个、旧顶端的对象已不在、上次没有记下根提交。只有这最后一类才是整个历史的代价。顶端的移动本身不加 `project_fact` 的行：其余事实不变时只改最新那一行的 `tip`（`identity_a_tip_that_moved_adds_no_fact_row`），根提交变了或别的事实变了才追加。取消：引擎的停止标志作为 `cancel` 传给两种走法，返回 `GitError::Cancelled` 时不记事实、不改身份，也不按位置回退记录（`identity_plugin_cancelled_read_records_nothing`、`identity_plugin_cancel_during_the_ancestor_check_records_nothing`）。实测（`identity_facts_walk_cost`，发布构建，合成的单根线性历史，松散对象，`#[ignore]`，手动运行，两次运行的整个历史走法相差一倍）：整个历史 1000 个提交 53–56 ms，5000 个 234–247 ms，20000 个 0.94–1.80 s；顶端没变约 1 ms（解析引用、读远端）；顶端向前 10 个提交：1000 个提交的历史 2.5 ms，5000 个 1.6 ms，20000 个 1.7 ms，与历史长度无关。没有加预算条目：整个历史的走法只在顶端不再是后代时发生，不在首帧之前。
+- **日志。** 识别结果（`same` 以外）、用户命令的结果记 info，`same` 记 debug，被拒绝的命令和读不出事实记 warn。字段是项目 ID（`Value::uuid`）、判别名和路径；远端地址、根提交、主远端的名字、仓库 ID 和读不出时的错误文字都不记。
+- **第 2 步评审的两条额度修正。** `limit_sample` 写入前经 `store::limits::sanitized`：`resets_at` 比采样时刻晚过两个窗口长度的去掉（样本留下，没有窗口长度的样本不检查）；采样时刻晚于现在的按现在存，否则一个时钟走快的文件会挡住以后所有较新的样本。为此 `put_samples(samples, now_ms)`、`Ingest::now_ms`（Codex 的路径）带上现在的时刻。
+- **快照计算多做一次 `stat`。** 判断 `PathMissing` 要对每个项目行查一次路径（`Context::exists`，执行器上，每次整体计算）。「数据流与线程」写的是 SQL 加内存里的映射，这是一处小的偏离；项目只有几十个。`testing::Scenario` 认为路径都在，所以 `usage/all_projects_30d` 不含这项开销。
+- **测试台。** `Context::exists` 让快照能判断路径是否还在（测试用 `Harness::vanish`，`Scenario` 认为都在）；引擎的 `Deps` 有读标识事实的函数和判断路径的函数，插件级的测试换掉它们（`Rig::with_facts`、`Rig::vanished`）。第 1 步起的测试没有改：它们读不出事实，按位置记项目。

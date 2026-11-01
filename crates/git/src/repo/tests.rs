@@ -604,6 +604,65 @@ fn refs_root_commits() {
 }
 
 #[test]
+fn refs_advance_since_walks_the_new_commits_only() {
+    let t = TestRepo::new();
+    let tree = t.tree(&[("a", b"a")]);
+    let base = t.commit(tree, &[], "base");
+    let a = t.commit(tree, &[base], "a");
+    let b = t.commit(tree, &[a], "b");
+    let repo = t.repo();
+    let c = no_cancel();
+    assert_eq!(
+        repo.advance_since(a, b, 10, &c).unwrap(),
+        Some(Advance {
+            commits: 1,
+            roots: vec![]
+        })
+    );
+    assert_eq!(
+        repo.advance_since(base, b, 10, &c)
+            .unwrap()
+            .unwrap()
+            .commits,
+        2
+    );
+    assert_eq!(
+        repo.advance_since(b, b, 10, &c).unwrap(),
+        Some(Advance::default())
+    );
+    // The bound: more new commits than that is no answer.
+    assert_eq!(repo.advance_since(base, b, 1, &c).unwrap(), None);
+    // The ancestor is the new tip's descendant, or on another branch.
+    assert_eq!(repo.advance_since(b, a, 10, &c).unwrap(), None);
+    let side = t.commit(tree, &[base], "side");
+    assert_eq!(repo.advance_since(side, b, 10, &c).unwrap(), None);
+    // An old tip that is not in the repository.
+    let gone = Oid::from_hex(HashKind::Sha1, &"ab".repeat(20)).unwrap();
+    assert_eq!(repo.advance_since(gone, b, 10, &c).unwrap(), None);
+    assert!(matches!(
+        repo.advance_since(a, b, 10, &AtomicBool::new(true)),
+        Err(GitError::Cancelled)
+    ));
+}
+
+#[test]
+fn refs_advance_since_finds_the_roots_a_merge_brings() {
+    let t = TestRepo::new();
+    let tree = t.tree(&[("a", b"a")]);
+    let base = t.commit(tree, &[], "base");
+    let other_root = t.commit(tree, &[], "other root");
+    let other = t.commit(tree, &[other_root], "other");
+    let merge = t.commit(tree, &[base, other], "merge");
+    let repo = t.repo();
+    let advance = repo
+        .advance_since(base, merge, 10, &no_cancel())
+        .unwrap()
+        .unwrap();
+    assert_eq!(advance.commits, 3);
+    assert_eq!(advance.roots, vec![other_root]);
+}
+
+#[test]
 fn refs_stash_parts() {
     let t = TestRepo::new();
     let tree = t.tree(&[("a", b"a")]);

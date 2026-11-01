@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use lectern_services::project::ProjectKey;
 use lectern_services::session::{Cursor, SessionKey};
-use lectern_services::usage::UsageProjectId;
+use lectern_services::usage::{TemporaryReason, UsageProjectId};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::ingest::{FileStamp, Place, location, path_bytes};
@@ -28,6 +28,38 @@ pub(crate) struct ProjectRow {
     pub(crate) name: Option<String>,
     pub(crate) location: i64,
     pub(crate) path: PathBuf,
+    /// When the project starts to own its location's usage (Unix
+    /// milliseconds; 0 for the project made when the location appeared).
+    pub(crate) since: i64,
+    /// Set for a temporary project.
+    pub(crate) temp: Option<Temp>,
+}
+
+/// What makes a project temporary (docs/design/usage.md「项目标识」).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Temp {
+    pub(crate) reason: TemporaryReason,
+    /// The `project.id` it may be the same as.
+    pub(crate) candidate: Option<i64>,
+}
+
+pub(crate) fn reason_code(reason: TemporaryReason) -> i64 {
+    match reason {
+        TemporaryReason::LocalRewrite => 0,
+        TemporaryReason::PrimaryRemoteChanged => 1,
+        TemporaryReason::ForgeIdPending => 2,
+        TemporaryReason::Unborn => 3,
+    }
+}
+
+fn reason_of(code: i64) -> Option<TemporaryReason> {
+    Some(match code {
+        0 => TemporaryReason::LocalRewrite,
+        1 => TemporaryReason::PrimaryRemoteChanged,
+        2 => TemporaryReason::ForgeIdPending,
+        3 => TemporaryReason::Unborn,
+        _ => return None,
+    })
 }
 
 impl ProjectRow {
@@ -57,6 +89,8 @@ pub(crate) struct FolderRoot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Sum {
     pub(crate) location: i64,
+    /// The project the facts belong to; 0 for none.
+    pub(crate) project: i64,
     pub(crate) bucket: i64,
     pub(crate) agent: i64,
     pub(crate) model: i64,
@@ -108,11 +142,33 @@ fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
         name: r.get(4)?,
         location: r.get(5)?,
         path: os_path(r.get(6)?),
+        since: r.get(7)?,
+        temp: r
+            .get::<_, Option<i64>>(8)?
+            .and_then(reason_of)
+            .map(|reason| Temp {
+                reason,
+                candidate: r.get(9).ok().flatten(),
+            }),
     })
 }
 
-const PROJECT_SELECT: &str = "SELECT p.id, p.pid, p.kind, p.opened, p.name, p.location, l.path
+pub(crate) const PROJECT_SELECT: &str = "SELECT p.id, p.pid, p.kind, p.opened, p.name,
+            p.location, l.path, p.since, p.reason, p.candidate
      FROM project p JOIN location l ON l.id = p.location";
+
+/// Every project, by ID.
+pub(crate) fn projects_on(conn: &Connection) -> rusqlite::Result<Vec<ProjectRow>> {
+    conn.prepare_cached(&format!("{PROJECT_SELECT} ORDER BY p.id"))?
+        .query_map([], project_row)?
+        .collect()
+}
+
+pub(crate) fn project_by_id_on(conn: &Connection, id: i64) -> rusqlite::Result<Option<ProjectRow>> {
+    conn.prepare_cached(&format!("{PROJECT_SELECT} WHERE p.id = ?1"))?
+        .query_row(params![id], project_row)
+        .optional()
+}
 
 /// Is `path` the same as `root` or inside it (by whole components)?
 pub(crate) fn under(path: &[u8], root: &[u8]) -> bool {
@@ -125,11 +181,7 @@ pub(crate) fn under(path: &[u8], root: &[u8]) -> bool {
 
 impl Store {
     pub(crate) fn projects(&self) -> Result<Vec<ProjectRow>, StoreError> {
-        self.read(|conn| {
-            conn.prepare_cached(&format!("{PROJECT_SELECT} ORDER BY p.id"))?
-                .query_map([], project_row)?
-                .collect()
-        })
+        self.read(projects_on)
     }
 
     /// The saved positions of these sessions (those the database knows).
@@ -198,7 +250,8 @@ impl Store {
         let (kind, path) = key_parts(key);
         self.read(|conn| {
             conn.prepare_cached(&format!(
-                "{PROJECT_SELECT} WHERE l.kind = ?1 AND l.path = ?2"
+                "{PROJECT_SELECT} WHERE l.kind = ?1 AND l.path = ?2
+                 ORDER BY p.since DESC, p.id DESC LIMIT 1"
             ))?
             .query_row(params![kind, path_bytes(path)], project_row)
             .optional()
@@ -233,8 +286,9 @@ impl Store {
                 ProjectKey::Folder { root } => {
                     let loc = location(tx, &Place::Dir(root.to_path_buf()))?;
                     tx.prepare_cached(
-                        "INSERT OR IGNORE INTO project (pid, kind, location)
-                         VALUES (randomblob(16), ?1, ?2)",
+                        "INSERT INTO project (pid, kind, location)
+                         SELECT randomblob(16), ?1, ?2
+                         WHERE NOT EXISTS (SELECT 1 FROM project WHERE location = ?2)",
                     )?
                     .execute(params![PROJECT_FOLDER, loc])?;
                     project_of(tx, loc)?
@@ -257,21 +311,22 @@ impl Store {
             snapshot_read(conn, |conn| {
                 let mut totals = Totals::default();
                 let mut stmt = conn.prepare_cached(
-                    "SELECT bucket, agent, model, sum(input), sum(output), sum(cache_read),
-                            sum(cache_write), sum(rows)
+                    "SELECT bucket, agent, model, project, sum(input), sum(output),
+                            sum(cache_read), sum(cache_write), sum(rows)
                      FROM fact_bucket WHERE bucket >= ?2 AND bucket < ?3 AND location = ?1
-                     GROUP BY bucket, agent, model",
+                     GROUP BY bucket, agent, model, project",
                 )?;
                 let (from, to) = buckets(&range);
                 for &location in locations {
                     let rows = stmt.query_map(params![location, from, to], |r| {
                         Ok(Sum {
                             location,
+                            project: r.get(3)?,
                             bucket: r.get(0)?,
                             agent: r.get(1)?,
                             model: r.get(2)?,
-                            micro: micro(r, 3)?,
-                            rows: r.get::<_, i64>(7)?.max(0) as u64,
+                            micro: micro(r, 4)?,
+                            rows: r.get::<_, i64>(8)?.max(0) as u64,
                         })
                     })?;
                     for row in rows {
@@ -316,19 +371,20 @@ impl Store {
                 let (from, to) = buckets(&range);
                 let rows: Vec<Sum> = conn
                     .prepare_cached(
-                        "SELECT location, bucket, agent, sum(input), sum(output), sum(cache_read),
-                                sum(cache_write), sum(rows)
+                        "SELECT location, bucket, agent, project, sum(input), sum(output),
+                                sum(cache_read), sum(cache_write), sum(rows)
                          FROM fact_bucket WHERE bucket >= ?1 AND bucket < ?2
-                         GROUP BY bucket, location, agent",
+                         GROUP BY bucket, location, agent, project",
                     )?
                     .query_map(params![from, to], |r| {
                         Ok(Sum {
                             location: r.get(0)?,
+                            project: r.get(3)?,
                             bucket: r.get(1)?,
                             agent: r.get(2)?,
                             model: 0,
-                            micro: micro(r, 3)?,
-                            rows: r.get::<_, i64>(7)?.max(0) as u64,
+                            micro: micro(r, 4)?,
+                            rows: r.get::<_, i64>(8)?.max(0) as u64,
                         })
                     })?
                     .collect::<rusqlite::Result<_>>()?;
@@ -383,9 +439,12 @@ fn key_parts(key: &ProjectKey) -> (i64, &Path) {
     }
 }
 
+/// The project that owns a location now: the latest one.
 fn project_of(conn: &Connection, location: i64) -> rusqlite::Result<i64> {
-    conn.prepare_cached("SELECT id FROM project WHERE location = ?1")?
-        .query_row(params![location], |r| r.get(0))
+    conn.prepare_cached(
+        "SELECT id FROM project WHERE location = ?1 ORDER BY since DESC, id DESC LIMIT 1",
+    )?
+    .query_row(params![location], |r| r.get(0))
 }
 
 fn micro(r: &rusqlite::Row<'_>, from: usize) -> rusqlite::Result<[u64; 4]> {

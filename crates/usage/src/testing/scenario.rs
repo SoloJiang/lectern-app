@@ -217,6 +217,7 @@ impl Scenario {
                 batch: &batch,
                 places: &places,
                 stamp,
+                now_ms: self.now_ms,
             })
             .map_err(|e| io_error("ingest", e))?;
         Ok(Stored { out })
@@ -295,6 +296,7 @@ impl Scenario {
             now_ms: self.now_ms,
             open: &self.open,
             state: UsageState::Ready,
+            exists: &|_| true,
         }
     }
 

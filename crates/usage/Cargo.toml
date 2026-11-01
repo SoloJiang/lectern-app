@@ -22,6 +22,9 @@ test-support = [
 [dependencies]
 # The statusline directory's watch (`watch_dir`).
 lectern-fs-watch = { path = "../fs_watch" }
+# The facts that identify a repository (root commits, remotes, default
+# branch), read when a project opens (docs/design/usage.md「项目标识」).
+lectern-git = { path = "../git" }
 # Background tasks (reading, snapshots, the database). Timers are not tasks:
 # they are waker callbacks on the kernel's `Clock` (see src/time.rs).
 lectern-executor = { path = "../executor" }
@@ -47,6 +50,8 @@ lectern-kernel = { path = "../kernel", features = ["test-support"] }
 lectern-logging = { path = "../logging", features = ["test-support"] }
 # FakeBackend and the manually driven watcher.
 lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
+# TestRepo: repositories with remotes, root commits and unborn heads.
+lectern-git = { path = "../git", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

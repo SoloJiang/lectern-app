@@ -4813,6 +4813,7 @@ version = "0.0.0"
 dependencies = [
  "lectern-executor",
  "lectern-fs-watch",
+ "lectern-git",
  "lectern-kernel",
  "lectern-logging",
  "lectern-services",

@@ -203,7 +203,9 @@ fn insert_facts(conn: &Connection, source: i64, deltas: &mut Deltas) -> rusqlite
                 s.input * ?3, s.output * ?3, s.cache_read * ?3, s.cache_write * ?3
          FROM usage_source s
          JOIN session se ON se.id = s.session
-         LEFT JOIN project p ON p.location = s.location
+         LEFT JOIN project p ON p.id = (
+             SELECT q.id FROM project q WHERE q.location = s.location AND q.since <= s.at
+             ORDER BY q.since DESC, q.id DESC LIMIT 1)
          WHERE s.id = ?1";
     let values = params![source, BUCKET_MS, MICRO as i64];
     if !deltas.on {
@@ -249,12 +251,12 @@ pub(crate) fn delete_facts(
 /// `fact_bucket`; a bucket row left without facts goes.
 fn add_buckets(conn: &Connection, source: i64, sign: i64) -> rusqlite::Result<()> {
     conn.prepare_cached(
-        "INSERT INTO fact_bucket (bucket, location, agent, model, review,
+        "INSERT INTO fact_bucket (bucket, location, project, agent, model, review,
                                   input, output, cache_read, cache_write, rows)
-         SELECT bucket, location, agent, model, review,
+         SELECT bucket, location, coalesce(project, 0), agent, model, review,
                 ?2 * input, ?2 * output, ?2 * cache_read, ?2 * cache_write, ?2
          FROM fact WHERE source = ?1
-         ON CONFLICT (bucket, location, agent, model, review) DO UPDATE SET
+         ON CONFLICT (bucket, location, project, agent, model, review) DO UPDATE SET
            input = input + excluded.input, output = output + excluded.output,
            cache_read = cache_read + excluded.cache_read,
            cache_write = cache_write + excluded.cache_write, rows = rows + excluded.rows",
@@ -263,8 +265,9 @@ fn add_buckets(conn: &Connection, source: i64, sign: i64) -> rusqlite::Result<()
     if sign < 0 {
         conn.prepare_cached(
             "DELETE FROM fact_bucket WHERE rows <= 0
-               AND (bucket, location, agent, model, review) IN (
-                 SELECT bucket, location, agent, model, review FROM fact WHERE source = ?1)",
+               AND (bucket, location, project, agent, model, review) IN (
+                 SELECT bucket, location, coalesce(project, 0), agent, model, review
+                 FROM fact WHERE source = ?1)",
         )?
         .execute(params![source])?;
     }
@@ -277,25 +280,26 @@ pub(crate) fn rebuild_buckets(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "DELETE FROM fact_bucket;
          INSERT INTO fact_bucket
-           SELECT bucket, location, agent, model, review, sum(input), sum(output),
-                  sum(cache_read), sum(cache_write), count(*)
-           FROM fact GROUP BY bucket, location, agent, model, review;",
+           SELECT bucket, location, coalesce(project, 0), agent, model, review, sum(input),
+                  sum(output), sum(cache_read), sum(cache_write), count(*)
+           FROM fact GROUP BY bucket, location, coalesce(project, 0), agent, model, review;",
     )
 }
 
 const DELTA_COLUMNS: &str =
-    "location, bucket, agent, model, input, output, cache_read, cache_write";
+    "location, coalesce(project, 0), bucket, agent, model, input, output, cache_read, cache_write";
 
 fn delta(r: &rusqlite::Row<'_>, sign: i64) -> rusqlite::Result<FactDelta> {
     let mut micro = [0i64; 4];
     for (i, slot) in micro.iter_mut().enumerate() {
-        *slot = r.get::<_, i64>(4 + i)?.saturating_mul(sign);
+        *slot = r.get::<_, i64>(5 + i)?.saturating_mul(sign);
     }
     Ok(FactDelta {
         location: r.get(0)?,
-        bucket: r.get(1)?,
-        agent: r.get(2)?,
-        model: r.get(3)?,
+        project: r.get(1)?,
+        bucket: r.get(2)?,
+        agent: r.get(3)?,
+        model: r.get(4)?,
         micro,
         rows: sign,
     })
@@ -307,6 +311,8 @@ fn delta(r: &rusqlite::Row<'_>, sign: i64) -> rusqlite::Result<FactDelta> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FactDelta {
     pub(crate) location: i64,
+    /// The project the fact belongs to; 0 for none.
+    pub(crate) project: i64,
     pub(crate) bucket: i64,
     pub(crate) agent: i64,
     pub(crate) model: i64,
