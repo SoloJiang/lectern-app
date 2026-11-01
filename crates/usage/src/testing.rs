@@ -4,7 +4,7 @@
 //! fixture is synthetic; nothing here reads an agent's real session
 //! directories.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -872,8 +872,11 @@ struct FakeGitInner {
     defaults: HashMap<PathBuf, String>,
     logs: HashMap<(PathBuf, String), crate::gitread::BranchLog>,
     commits: HashMap<Vec<u8>, Vec<String>>,
+    branches: HashMap<PathBuf, HashSet<String>>,
     log_reads: usize,
     commit_reads: usize,
+    head_reads: usize,
+    branch_reads: usize,
 }
 
 impl FakeGit {
@@ -895,6 +898,25 @@ impl FakeGit {
                 })
                 .collect(),
         );
+    }
+
+    /// The local branches of a repository (full names). A repository with
+    /// none set cannot be asked which branches exist.
+    pub fn set_branches(&self, common_dir: &Path, branches: &[&str]) {
+        lock(&self.inner).branches.insert(
+            common_dir.to_owned(),
+            branches.iter().map(|b| (*b).to_owned()).collect(),
+        );
+    }
+
+    /// Reads of the worktrees' HEADs so far.
+    pub fn head_reads(&self) -> usize {
+        lock(&self.inner).head_reads
+    }
+
+    /// Reads of which branches exist so far.
+    pub fn branch_reads(&self) -> usize {
+        lock(&self.inner).branch_reads
     }
 
     /// The repository cannot be read any more (`heads` gives nothing).
@@ -951,7 +973,16 @@ impl FakeGit {
 
 impl crate::gitread::GitRead for FakeGit {
     fn heads(&self, common_dir: &Path) -> Option<Vec<crate::gitread::WorktreeHead>> {
-        lock(&self.inner).heads.get(common_dir).cloned()
+        let mut inner = lock(&self.inner);
+        inner.head_reads += 1;
+        inner.heads.get(common_dir).cloned()
+    }
+
+    fn branches_exist(&self, common_dir: &Path, names: &[String]) -> Option<HashSet<String>> {
+        let mut inner = lock(&self.inner);
+        inner.branch_reads += 1;
+        let all = inner.branches.get(common_dir)?;
+        Some(names.iter().filter(|n| all.contains(*n)).cloned().collect())
     }
 
     fn default_branch(&self, common_dir: &Path) -> Option<String> {

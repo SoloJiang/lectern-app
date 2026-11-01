@@ -4,7 +4,7 @@
 //! first time, the default branch, and the paths a commit changed. Blocking;
 //! executor only. Tests replace it with a table.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -47,6 +47,10 @@ pub trait GitRead: Send + Sync {
     /// The worktrees with their HEADs; None when the repository cannot be
     /// read.
     fn heads(&self, common_dir: &Path) -> Option<Vec<WorktreeHead>>;
+    /// Which of these full reference names (`refs/heads/...`) exist; None
+    /// when the repository cannot be read. HEAD going to a name that is not
+    /// one is HEAD going to a commit (a tag, `origin/x`, `main~1`).
+    fn branches_exist(&self, common_dir: &Path, names: &[String]) -> Option<HashSet<String>>;
     /// The full reference name of the default branch.
     fn default_branch(&self, common_dir: &Path) -> Option<String>;
     /// The reflog of a branch (`refs/heads/...`); None when it cannot be read.
@@ -110,6 +114,20 @@ impl GitRead for DiskGit {
                 })
                 .collect(),
         )
+    }
+
+    fn branches_exist(&self, common_dir: &Path, names: &[String]) -> Option<HashSet<String>> {
+        let repo = self.repo(common_dir)?;
+        let mut found = HashSet::new();
+        for name in names {
+            let Some(reference) = RefName::new(name) else {
+                continue;
+            };
+            if repo.resolve(&reference).ok()?.is_some() {
+                found.insert(name.clone());
+            }
+        }
+        Some(found)
     }
 
     fn default_branch(&self, common_dir: &Path) -> Option<String> {

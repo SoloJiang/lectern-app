@@ -392,7 +392,7 @@ fn repo_a_head_read_after_a_rewritten_log_lets_later_calls_be_attributed_again()
 
 /// A repository directory that exists, opened as a project, with the watch
 /// armed on `feature`.
-fn rig_with_repo() -> (Rig, tempfile::TempDir, Repo, Arc<crate::testing::FakeGit>) {
+pub(super) fn rig_with_repo() -> (Rig, tempfile::TempDir, Repo, Arc<crate::testing::FakeGit>) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("app");
     std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -416,7 +416,7 @@ fn rig_with_repo() -> (Rig, tempfile::TempDir, Repo, Arc<crate::testing::FakeGit
     (rig, dir, repo, reads)
 }
 
-fn baselines(rig: &Rig) -> i64 {
+pub(super) fn baselines(rig: &Rig) -> i64 {
     rusqlite::Connection::open(rig.db())
         .unwrap()
         .query_row("SELECT count(*) FROM head_baseline", [], |r| r.get(0))

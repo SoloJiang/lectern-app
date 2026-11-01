@@ -240,6 +240,11 @@ struct State {
     /// Per repository, the worktrees whose HEAD reflog had a gap and whose
     /// HEAD has not been read again since (docs/design/usage.md「分支观察」).
     rebaseline: HashMap<PathBuf, HashSet<PathBuf>>,
+    /// Per repository, what the written batches say about HEAD that the
+    /// next read of it checks: where the records left each worktree, the
+    /// worktrees that have records and no baseline, a changed list of
+    /// worktrees.
+    reconcile: HashMap<PathBuf, repo::Reconcile>,
 }
 
 pub(crate) struct Engine {
@@ -1466,6 +1471,7 @@ impl Engine {
     /// A repository is not watched any more (its project closed).
     fn unwatch_repo(&self, common_dir: &Path) {
         self.state().rebaseline.remove(common_dir);
+        self.state().reconcile.remove(common_dir);
         let watch = self.state().repos.remove(common_dir);
         if watch.is_none() {
             return;
@@ -1510,8 +1516,26 @@ impl Engine {
             let Some((common_dir, batch, _busy)) = next else {
                 break;
             };
-            let lost = match store.repo_batch(&common_dir, &batch) {
-                Ok(_) => false,
+            // Which of the names HEAD went to are branches: read here, not in
+            // the writer's transaction. A batch without a checkout asks
+            // nothing.
+            let targets = repo::checkout_targets(&batch);
+            let facts = repo::Facts {
+                branches: if targets.is_empty() {
+                    None
+                } else {
+                    self.deps.reads.branches_exist(&common_dir, &targets)
+                },
+            };
+            let lost = match store.repo_batch_with(&common_dir, &batch, &facts) {
+                Ok((_, reconcile)) => {
+                    let mut state = self.state();
+                    let waiting = state.reconcile.entry(common_dir.clone()).or_default();
+                    waiting.moved.extend(reconcile.moved);
+                    waiting.fresh.extend(reconcile.fresh);
+                    waiting.scan |= reconcile.scan;
+                    false
+                }
                 Err(e) => {
                     // The records are lost: the calls around them are unsure.
                     warn!(
@@ -1541,25 +1565,50 @@ impl Engine {
                 let at = self.deps.time.now_ms().saturating_mul(1_000_000);
                 let _ = store.disarm(&common_dir, at);
                 self.state().rebaseline.remove(&common_dir);
+                self.state().reconcile.remove(&common_dir);
             }
         }
         self.rebaseline_heads(&store);
     }
 
-    /// After a gap in a HEAD reflog (a rewrite, a read that failed, a batch
-    /// that could not be written) the HEAD of the worktree is read again,
-    /// here and not in the writer's transaction, and becomes a new baseline:
-    /// calls from then on replay from it; calls before it, across the gap,
-    /// stay unsure. One read per repository however many resets a batch held;
-    /// a read that fails keeps the worktrees waiting for the next drain.
+    /// HEAD of the worktrees is read, here and not in the writer's
+    /// transaction, once for a repository however many batches or resets
+    /// there were, when it has to be (docs/design/usage.md「分支观察」):
+    /// - after a gap in a HEAD reflog (a rewrite, a read that failed, a batch
+    ///   that could not be written) the HEAD becomes a new baseline: calls
+    ///   from then on replay from it; calls before it, across the gap, stay
+    ///   unsure;
+    /// - after records that moved HEAD it is compared with where they left
+    ///   it: a line cannot tell `checkout --detach main` from `checkout
+    ///   main`, so a HEAD that is somewhere else becomes the baseline and the
+    ///   calls up to it are unsure;
+    /// - a worktree with records and no baseline (made while the watch ran),
+    ///   or the list of worktrees changed, gets a baseline.
+    ///
+    /// A read that fails keeps the worktrees waiting for the next drain.
     fn rebaseline_heads(&self, store: &Store) {
-        let pending: Vec<(PathBuf, HashSet<PathBuf>)> = self
-            .state()
-            .rebaseline
-            .iter()
-            .map(|(c, k)| (c.clone(), k.clone()))
-            .collect();
-        for (common_dir, keys) in pending {
+        let pending: Vec<(PathBuf, HashSet<PathBuf>, repo::Reconcile)> = {
+            let state = self.state();
+            let mut repos: Vec<&PathBuf> = state
+                .rebaseline
+                .keys()
+                .chain(state.reconcile.keys())
+                .collect();
+            repos.sort();
+            repos.dedup();
+            repos
+                .into_iter()
+                .map(|c| {
+                    (
+                        c.clone(),
+                        state.rebaseline.get(c).cloned().unwrap_or_default(),
+                        state.reconcile.get(c).cloned().unwrap_or_default(),
+                    )
+                })
+                .filter(|(_, gaps, what)| !gaps.is_empty() || !what.is_empty())
+                .collect()
+        };
+        for (common_dir, keys, mut what) in pending {
             if self.stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1569,15 +1618,25 @@ impl Engine {
                 debug!("heads not read; the gap stays"; path = Value::path(&common_dir));
                 continue;
             };
-            if store.rebaseline(&common_dir, at_ns, &heads, &keys).is_ok() {
-                let mut state = self.state();
-                if let Some(waiting) = state.rebaseline.get_mut(&common_dir) {
-                    // Worktrees that are not there any more are done too.
-                    waiting.retain(|k| !keys.contains(k));
-                    if waiting.is_empty() {
-                        state.rebaseline.remove(&common_dir);
+            if !keys.is_empty() {
+                if store.rebaseline(&common_dir, at_ns, &heads, &keys).is_ok() {
+                    let mut state = self.state();
+                    if let Some(waiting) = state.rebaseline.get_mut(&common_dir) {
+                        // Worktrees that are not there any more are done too.
+                        waiting.retain(|k| !keys.contains(k));
+                        if waiting.is_empty() {
+                            state.rebaseline.remove(&common_dir);
+                        }
                     }
+                } else {
+                    continue;
                 }
+            }
+            // A worktree that was just read as a gap is read.
+            what.moved.retain(|k, _| !keys.contains(k));
+            what.fresh.retain(|k| !keys.contains(k));
+            if what.is_empty() || store.reconcile(&common_dir, at_ns, &heads, &what).is_ok() {
+                self.state().reconcile.remove(&common_dir);
             }
         }
     }

@@ -110,6 +110,27 @@ impl Repo {
         }
     }
 
+    /// A record of a line as it was written (a literal), found by a read
+    /// that ended at `observed` (milliseconds).
+    pub(super) fn literal(
+        &self,
+        file: ReflogFile,
+        line: &str,
+        observed: i64,
+        origin: Origin,
+    ) -> ReflogRecord {
+        let seq = self.next();
+        ReflogRecord {
+            file,
+            offset: seq * 100,
+            line: Arc::from(line.as_bytes()),
+            seq,
+            observed: stamp(observed),
+            after: None,
+            origin,
+        }
+    }
+
     /// `checkout: moving from <from> to <to>` in the HEAD of a worktree.
     pub(super) fn switch(
         &self,
