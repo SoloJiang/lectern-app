@@ -444,17 +444,16 @@ fn ingest(
                         .map(|t| t.0),
                     None => state.turn,
                 };
-                let cid = ids.text(tx, call.call.0.as_bytes())?;
-                calls::start(
-                    tx,
-                    row.id,
-                    target,
-                    cid,
-                    turn_id,
-                    call.at.0,
-                    calls::kind_code(&call.kind),
-                )?;
+                let cid = calls::hash(&call.call.0);
+                if let Some(kind) = calls::stored(&call.kind)
+                    && calls::start(tx, row.id, target, cid, turn_id, call.at.0, kind)?
+                {
+                    warn!("two calls of a session have one key");
+                }
                 if let ToolKind::Edit { paths } = &call.kind {
+                    if let Some(t) = turn_id {
+                        touch.edits.insert(t);
+                    }
                     for path in paths.iter() {
                         let Some(found) = input.paths.get(path) else {
                             continue;
@@ -465,7 +464,6 @@ fn ingest(
                                 Some(w) => Some(ids.text(tx, path_bytes(w))?),
                                 None => None,
                             },
-                            Some(ids.text(tx, path_bytes(&found.rel))?),
                         );
                         let path = ids.text(tx, path_bytes(path))?;
                         calls::fact(tx, row.id, cid, path, place, call.at.0)?;
@@ -480,7 +478,7 @@ fn ingest(
                 {
                     continue;
                 }
-                let cid = ids.text(tx, done.call.0.as_bytes())?;
+                let cid = calls::hash(&done.call.0);
                 let turn_id = calls::finish(
                     tx,
                     row.id,
@@ -489,7 +487,8 @@ fn ingest(
                     done.at.0,
                     calls::status_code(done.status),
                 )?;
-                if let Some(t) = turn_id.flatten() {
+                // A call without a row ended in the turn that is running.
+                if let Some(t) = turn_id.unwrap_or(state.turn) {
                     touch.at(t, done.at.0);
                 }
             }
@@ -690,10 +689,7 @@ fn session_row(
         )),
         None => None,
     };
-    let parent_call = match info.parent_call {
-        Some(c) => Some(ids.text(tx, c.0.as_bytes())?),
-        None => None,
-    };
+    let parent_call = info.parent_call.map(|c| calls::hash(&c.0));
     let found: Option<FoundSession> = tx
         .prepare_cached(
             "SELECT id, gen, replay, cursor, agent FROM session WHERE source = ?1 AND sid = ?2",
@@ -799,6 +795,8 @@ fn gen_state(
 struct Touch {
     last: HashMap<i64, i64>,
     closed: HashSet<i64>,
+    /// Turns that have an `Edit` call.
+    edits: HashSet<i64>,
 }
 
 impl Touch {
@@ -816,6 +814,10 @@ impl Touch {
         }
         for &turn in &self.closed {
             tx.prepare_cached("UPDATE turn SET closed = 1 WHERE id = ?1")?
+                .execute(params![turn])?;
+        }
+        for &turn in &self.edits {
+            tx.prepare_cached("UPDATE turn SET edits = 1 WHERE id = ?1")?
                 .execute(params![turn])?;
         }
         Ok(())

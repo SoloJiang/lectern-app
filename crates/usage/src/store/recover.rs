@@ -582,26 +582,20 @@ fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
     // is gone is dropped rather than left to point at whatever takes the ID
     // next. Every session is read again, and the calls and places with it;
     // the turns are settled again from the items that are left.
-    run("DELETE FROM call
-         WHERE cid NOT IN (SELECT id FROM intern)
-            OR session NOT IN (SELECT id FROM session)")?;
+    run("DELETE FROM call WHERE session NOT IN (SELECT id FROM session)")?;
     run("UPDATE call SET turn = NULL
          WHERE turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)")?;
     run("DELETE FROM call_fact
-         WHERE cid NOT IN (SELECT id FROM intern) OR path NOT IN (SELECT id FROM intern)
+         WHERE path NOT IN (SELECT id FROM intern)
             OR location NOT IN (SELECT id FROM location)
             OR session NOT IN (SELECT id FROM session)")?;
     run("UPDATE call_fact SET worktree = NULL
          WHERE worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern)")?;
-    run("UPDATE call_fact SET rel = NULL
-         WHERE rel IS NOT NULL AND rel NOT IN (SELECT id FROM intern)")?;
     run("DELETE FROM item
-         WHERE cid NOT IN (SELECT id FROM intern) OR path NOT IN (SELECT id FROM intern)
+         WHERE path NOT IN (SELECT id FROM intern)
             OR location NOT IN (SELECT id FROM location)
             OR turn NOT IN (SELECT id FROM turn)
             OR session NOT IN (SELECT id FROM session)")?;
-    run("UPDATE session SET parent_call = NULL
-         WHERE parent_call IS NOT NULL AND parent_call NOT IN (SELECT id FROM intern)")?;
 
     let strings = missing(
         conn,

@@ -482,12 +482,18 @@ fn archive_month(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     s.set_now(HEAVY_NOW + 400 * DAY);
     let mut samples = Vec::new();
     let (mut rows, mut raw, mut packed) = (0, 0, 0);
+    // Per table: segments, encoded and compressed bytes.
+    let mut tables: std::collections::BTreeMap<&str, (usize, usize, usize)> = Default::default();
     for month in s.archive_plan()? {
         loop {
             let started = Instant::now();
             let step = s.archive_step(month)?;
             let took = started.elapsed();
-            if step.table.is_some() {
+            if let Some(table) = step.table {
+                let t = tables.entry(table).or_default();
+                t.0 += 1;
+                t.1 += step.raw_bytes;
+                t.2 += step.packed_bytes;
                 samples.push(took);
                 rows += step.rows;
                 raw += step.raw_bytes;
@@ -502,12 +508,17 @@ fn archive_month(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         return Err(BenchError::new("nothing archived"));
     }
     let ratio = raw as f64 / packed.max(1) as f64;
+    let by_table: Vec<String> = tables
+        .iter()
+        .map(|(name, (n, raw, packed))| format!("{name} {n} segments {raw} B -> {packed} B"))
+        .collect();
     Ok(vec![
         Measured::new("usage/archive_month", Value::Time(Samples(samples.clone()))).with_note(
             Some(format!(
                 "{} segments, {rows} rows, {raw} bytes encoded, {packed} compressed \
-                 (ratio {ratio:.1}:1), hot database {hot} bytes",
-                samples.len()
+                 (ratio {ratio:.1}:1), hot database {hot} bytes; {}",
+                samples.len(),
+                by_table.join("; ")
             )),
         ),
     ])
@@ -576,10 +587,22 @@ fn disk_day_heavy(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let after = s.db_bytes();
     let wal = s.wal_bytes();
     let day = after.saturating_sub(before);
+    // The same day once the connections are closed and the log is in the
+    // file, and a day of the 30-day fixture (closed the same way): what
+    // 396 days of hot data come to.
+    s.close();
+    let closed = std::fs::metadata(dir.join("usage.db")).map_or(0, |m| m.len());
+    let fixture = heavy(ctx)?;
+    let fixture_bytes =
+        std::fs::metadata(fixture.dir.path().join("usage.db")).map_or(0, |m| m.len());
+    let per_day = fixture_bytes / u64::from(fixture.days.max(1));
     Ok(vec![
         Measured::new("usage/disk_day_heavy", Value::Bytes(vec![day])).with_note(Some(format!(
-            "one heavy day, {wal} bytes of it in -wal; times 396: {} MiB",
-            (day * 396) >> 20
+            "one heavy day, {wal} bytes of it in -wal; closed: {closed} bytes; \
+             {} days of the fixture: {fixture_bytes} bytes, {per_day} per day; \
+             times 396: {} MiB",
+            fixture.days,
+            (per_day * 396) >> 20
         ))),
     ])
 }

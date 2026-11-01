@@ -5,13 +5,14 @@
 //! or an executor: session records go in through [`FakeSessions`], each
 //! batch is read from the saved cursor and stored, the watched window
 //! snapshots take the batch's fact deltas, and the queries, the archive and
-//! the history are called directly. Step 1 has session records only;
-//! reflog records, worktree states and MR timelines join in later steps.
+//! the history are called directly. Session records and settling turns are
+//! there; reflog records, worktree states and MR timelines join in later
+//! steps.
 //!
 //! The heavy day (「磁盘」): 50 sessions in 20 repositories, 2000 turns,
-//! 6000 usage records; every turn takes 14 lines of 1.5 KiB in its log, of
-//! which the turn start and its three usage records are materialized (the
-//! tool calls, 20 000 a day, carry nothing step 1 stores).
+//! 6000 usage records and 20 000 tool calls, 4 000 of them `Edit`; every turn takes
+//! 14 lines of 1.5 KiB in its log. The turns are settled when the day is
+//! written.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,8 +20,8 @@ use std::sync::Arc;
 
 use lectern_services::project::ProjectKey;
 use lectern_services::session::{
-    Agent, Positioned, RawTokens, Record, SessionSource, Timestamp, TurnId, UsageKey, UsageOrigin,
-    UsageRecord,
+    Agent, EditOp, FileEdit, Positioned, RawTokens, Record, SessionSource, Timestamp, ToolCallId,
+    ToolFinished, ToolKind, ToolStarted, ToolStatus, TurnId, UsageKey, UsageOrigin, UsageRecord,
 };
 use lectern_services::usage::{
     HistoryUsage, LocalDate, ProjectRef, UsageQuery, UsageSnapshot, UsageState,
@@ -204,8 +205,7 @@ impl Scenario {
     }
 
     fn path_place(&self, path: &Path) -> PathPlace {
-        let (dir, name) = crate::paths::split(path);
-        crate::paths::dir_place(Some(&self.projects), dir).file(name)
+        crate::paths::dir_place(Some(&self.projects), crate::paths::dir_of(path))
     }
 
     fn place(&self, cwd: &Path) -> Place {
@@ -676,7 +676,7 @@ fn at_of(r: &Record) -> i64 {
 pub const LINE_BYTES: u64 = 1536;
 
 /// The lines of one synthetic turn: its start, three usage records and ten
-/// tool lines that are not materialized.
+/// tool lines (one call each; [`HEAVY_CALLS`]).
 pub const TURN_LINES: u64 = 14;
 
 /// The bytes of one synthetic turn.
@@ -712,7 +712,7 @@ pub fn synthetic_turns(
     turns: std::ops::Range<usize>,
     model: &str,
 ) -> Vec<Positioned<Record>> {
-    let mut out = Vec::with_capacity(turns.len() * 4 + 1);
+    let mut out = Vec::with_capacity(turns.len() * (4 + 2 * HEAVY_CALLS) + 1);
     if turns.start == 0 {
         out.push(Positioned {
             pos: 0,
@@ -727,6 +727,7 @@ pub fn synthetic_turns(
         });
     }
     for t in turns {
+        let first = out.len();
         // Line 0 of the log is the context; a turn's lines follow it.
         let pos = t as u64 * TURN_BYTES + LINE_BYTES;
         let at = start_ms + t as i64 * 6 * 60_000;
@@ -787,8 +788,100 @@ pub fn synthetic_turns(
                 }),
             });
         }
+        // The turn's tool calls, in the lines between the usage records.
+        for (i, tool_line) in TOOL_LINES.iter().enumerate() {
+            let line = pos + LINE_BYTES * tool_line;
+            let call = ToolCallId(heavy_call(prefix, t, i).into());
+            let started = at + 65_000 + 3_000 * i as i64;
+            let kind = match i % 5 {
+                0 => ToolKind::Edit {
+                    paths: vec![heavy_edit_path(cwd, t, i)].into(),
+                },
+                1 => ToolKind::Execute {
+                    command: "cargo check".into(),
+                    workdir: Arc::from(cwd),
+                    exec_session: None,
+                    workdir_exact: true,
+                },
+                2 => ToolKind::Read {
+                    paths: vec![heavy_edit_path(cwd, t, i)].into(),
+                },
+                3 => ToolKind::Search {
+                    paths: vec![cwd.to_path_buf()].into(),
+                },
+                _ => ToolKind::Other,
+            };
+            out.push(Positioned {
+                pos: line,
+                seq: 0,
+                inherited: false,
+                value: Record::ToolStarted(ToolStarted {
+                    call: call.clone(),
+                    turn: Some(TurnId(tid.clone().into())),
+                    at: Timestamp(started),
+                    name: "tool".into(),
+                    kind,
+                }),
+            });
+            out.push(Positioned {
+                pos: line,
+                seq: 1,
+                inherited: false,
+                value: Record::ToolFinished(ToolFinished {
+                    call,
+                    at: Timestamp(started + 400),
+                    status: ToolStatus::Completed,
+                    exec_session: None,
+                }),
+            });
+        }
+        // The lines in order: a read takes whole lines in the order given.
+        out[first..].sort_by_key(|r| (r.pos, r.seq));
     }
     out
+}
+
+/// Tool calls in a synthetic turn: every fifth one is an `Edit` (two of ten),
+/// so a heavy day has 20 000 calls, 4 000 of them edits.
+pub const HEAVY_CALLS: usize = 10;
+
+/// The lines of a turn the tool calls are in (the others hold the start
+/// and the usage records).
+const TOOL_LINES: [u64; HEAVY_CALLS] = [2, 3, 4, 6, 7, 8, 10, 11, 12, 13];
+
+/// The ID of tool call `i` of turn `t`.
+fn heavy_call(prefix: &str, t: usize, i: usize) -> String {
+    format!("{prefix}-t{t}-c{i}")
+}
+
+/// The file an `Edit` (or `Read`) call of a synthetic turn names: one of
+/// eight files in the session's directory.
+fn heavy_edit_path(cwd: &Path, t: usize, i: usize) -> PathBuf {
+    cwd.join(format!("f{}.rs", (t + i) % 8))
+}
+
+/// Gives the source of a synthetic session the content of its `Edit` calls
+/// (six lines each), as the session's turn index and `load` would.
+pub fn heavy_edits(fake: &FakeSessions, prefix: &str, cwd: &Path, turns: std::ops::Range<usize>) {
+    let content: String = (0..6).map(|i| format!("line {i}\n")).collect();
+    for t in turns {
+        for i in (0..HEAVY_CALLS).step_by(5) {
+            let path = heavy_edit_path(cwd, t, i);
+            fake.edit_call(
+                prefix,
+                &format!("{prefix}-t{t}"),
+                &heavy_call(prefix, t, i),
+                std::slice::from_ref(&path),
+                vec![FileEdit {
+                    path: path.clone(),
+                    op: EditOp::Write {
+                        content: content.as_str().into(),
+                        created: true,
+                    },
+                }],
+            );
+        }
+    }
 }
 
 /// One heavy session: its agent, ID, cwd, model and first turn's time.
@@ -847,7 +940,11 @@ pub fn heavy_fill(s: &mut Scenario, days: u32) -> io::Result<()> {
             let records =
                 synthetic_turns(&h.agent, &h.id, &h.cwd, h.start_ms, 0..HEAVY_TURNS, h.model);
             s.session(&h.agent, &h.id, &h.cwd, records);
+            heavy_edits(s.sessions(&h.agent), &h.id, &h.cwd, 0..HEAVY_TURNS);
             s.read_all(&h.agent, &h.id)?;
+            // Every turn of the day has ended: they are settled, their
+            // changed files read.
+            while s.settle(&h.agent, &h.id)?.more() {}
             s.sessions(&h.agent).remove(&h.id);
         }
     }

@@ -276,8 +276,7 @@ impl Harness {
     }
 
     pub(crate) fn path_place(&self, path: &Path) -> crate::store::PathPlace {
-        let (dir, name) = crate::paths::split(path);
-        crate::paths::dir_place(Some(&self.projects), dir).file(name)
+        crate::paths::dir_place(Some(&self.projects), crate::paths::dir_of(path))
     }
 
     /// One batch of a session's ready turns, as the engine settles them.

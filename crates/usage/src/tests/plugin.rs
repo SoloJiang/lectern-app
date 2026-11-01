@@ -902,3 +902,94 @@ fn plugin_settles_an_older_sessions_last_turn_after_a_restart() {
         (1, 4)
     );
 }
+
+#[test]
+fn plugin_stops_reading_an_index_that_keeps_failing() {
+    use crate::engine::RETRY_MAX;
+    use lectern_services::session::{
+        EditOp, FileEdit, ToolCallId, ToolFinished, ToolKind, ToolStarted, ToolStatus, TurnId,
+    };
+    let fake = sources();
+    let at = NOW - 60_000;
+    fake.add("live", Path::new("/work/app"), at - 1000, None);
+    let path = PathBuf::from("/work/lib/a.rs");
+    fake.edit_call(
+        "live",
+        "t1",
+        "c1",
+        std::slice::from_ref(&path),
+        vec![FileEdit {
+            path: path.clone(),
+            op: EditOp::Write {
+                content: "a\n".into(),
+                created: true,
+            },
+        }],
+    );
+    fake.push(
+        "live",
+        vec![
+            context(0, at - 1000, "/work/app"),
+            turn(100, "t1", at - 1000),
+            claude(200, at - 900, Some("t1"), "m1", [6, 0, 0, 0]),
+            rec(
+                300,
+                Record::ToolStarted(ToolStarted {
+                    call: ToolCallId("c1".into()),
+                    turn: Some(TurnId("t1".into())),
+                    at: Timestamp(at - 600),
+                    name: "Edit".into(),
+                    kind: ToolKind::Edit {
+                        paths: vec![path].into(),
+                    },
+                }),
+            ),
+            rec(
+                400,
+                Record::ToolFinished(ToolFinished {
+                    call: ToolCallId("c1".into()),
+                    at: Timestamp(at),
+                    status: ToolStatus::Completed,
+                    exec_session: None,
+                }),
+            ),
+        ],
+    );
+    // The index cannot be read, and stays so.
+    fake.fail_index(true);
+    let rig = Rig::new(fake, |p| {
+        open_app(p);
+        let lib = p.repo(Path::new("/work/lib"), Path::new("/work/lib/.git"));
+        p.set_open(&lib, true);
+    });
+    rig.settle();
+    // An hour of retries with doubling waits: a few, then none.
+    for _ in 0..60 {
+        rig.advance(Duration::from_secs(60));
+    }
+    let tried = rig.sessions.index_reads("live");
+    assert_eq!(
+        tried,
+        1 + RETRY_MAX as usize,
+        "the first try and the retries"
+    );
+    for _ in 0..60 {
+        rig.advance(Duration::from_secs(60));
+    }
+    assert_eq!(rig.sessions.index_reads("live"), tried, "no more tries");
+    let all = rig.all();
+    assert_eq!(project_input(&all, "lib"), 0);
+    // The log changes and the index works again: the session is settled.
+    rig.sessions.fail_index(false);
+    rig.sessions.push(
+        "live",
+        vec![claude(500, NOW, Some("t1"), "m2", [1, 0, 0, 0])],
+    );
+    rig.emit_changed(&["live"]);
+    // The session is no longer active: one batch per quiet stretch.
+    for _ in 0..3 {
+        rig.advance(PACE);
+    }
+    let all = rig.all();
+    assert_eq!(project_input(&all, "lib"), 7);
+}

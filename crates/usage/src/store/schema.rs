@@ -499,21 +499,28 @@ CREATE INDEX alias_src ON alias (src);
 ///   `closed` (its end marker was read), `done` (settled: its `item` and
 ///   `share` rows are written) and `changed` (its share comes from changes,
 ///   its own or its sub-agents', not from following another turn).
-/// - `session.parent_call` is the tool call that spawned the session (an
-///   `intern` ID of the call ID).
-/// - `call`: one row per tool call of a generation (`cid` is the `intern` ID
-///   of the call ID; `kind` and `status` are the codes of `store::calls`).
+/// - A call is named by `cid`, a 64-bit hash of its call ID
+///   (`store::calls::hash`), not by an `intern` row: the strings of `intern`
+///   are never removed, and a heavy day has 20 000 calls. `session.parent_call`
+///   is the `cid` of the call that spawned the session.
+/// - `turn.edits` says the turn has `Edit` calls: its changed files are read
+///   from the session's turn index when it is settled.
+/// - `call`: a row per call that spawns a sub-agent, of a generation
+///   (`kind` and `status` are the codes of `store::calls`); the other calls
+///   have no row until a step needs one (the `Edit` calls are in `turn.edits`
+///   and `call_fact`).
 /// - `call_fact`: what the world looked like when an `Edit` call was read:
-///   the place, worktree and relative path of each file it names. Written
-///   once, not per generation, so that a replay keeps them after the
-///   worktree is gone.
+///   the place and worktree of each file it names (the path below the
+///   worktree is the path less the worktree's). Written once, not per
+///   generation, so that a replay keeps them after the worktree is gone.
 /// - `item`: a changed file of a turn, with its changed lines. `at` is the
 ///   turn's start (the archive finds the rows by it).
 /// - `share` (derived): the settled turn's targets, `weight` out of `total`.
 ///   `at` is the turn's start.
 ///
 /// The migration reads every session again (cursors back to the start):
-/// version 4 stored no calls.
+/// version 4 stored no calls. A replay in progress goes on from the start
+/// of the log into the generation it was filling.
 macro_rules! calls_sql {
     () => {
         "
@@ -521,6 +528,7 @@ ALTER TABLE turn ADD COLUMN last_at INTEGER;
 ALTER TABLE turn ADD COLUMN closed INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE turn ADD COLUMN done INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE turn ADD COLUMN changed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE turn ADD COLUMN edits INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX turn_pending ON turn (session, gen, seq) WHERE done = 0;
 CREATE INDEX turn_changed ON turn (session, gen, seq) WHERE done = 1 AND changed = 1;
 CREATE INDEX turn_seq ON turn (session, gen, seq);
@@ -540,7 +548,6 @@ CREATE TABLE call (
   status      INTEGER,
   UNIQUE (session, gen, cid)
 );
-CREATE INDEX call_turn ON call (turn);
 CREATE INDEX call_started ON call (started_at);
 
 CREATE TABLE call_fact (
@@ -550,7 +557,6 @@ CREATE TABLE call_fact (
   path     INTEGER NOT NULL,
   location INTEGER NOT NULL,
   worktree INTEGER,
-  rel      INTEGER,
   at       INTEGER NOT NULL,
   UNIQUE (session, cid, path)
 );
@@ -561,14 +567,12 @@ CREATE TABLE item (
   session  INTEGER NOT NULL,
   gen      INTEGER NOT NULL,
   turn     INTEGER NOT NULL,
-  cid      INTEGER NOT NULL,
   path     INTEGER NOT NULL,
   location INTEGER NOT NULL,
   lines    INTEGER NOT NULL,
   at       INTEGER NOT NULL
 );
 CREATE INDEX item_turn ON item (turn);
-CREATE INDEX item_session ON item (session, gen);
 CREATE INDEX item_at ON item (at);
 
 CREATE TABLE share (
@@ -583,7 +587,7 @@ CREATE TABLE share (
 );
 CREATE INDEX share_at ON share (at);
 
-UPDATE session SET cursor = X'01', reached_end = 0, end_stamp = NULL WHERE replay IS NULL;
+UPDATE session SET cursor = X'01', reached_end = 0, end_stamp = NULL;
 "
     };
 }

@@ -187,6 +187,8 @@ struct Inner {
     loads: HashMap<Arc<str>, usize>,
     /// The next `pos` of a content reference.
     next_ref: u64,
+    /// `turns_unretained` fails with an IO error (`FakeSessions::fail_index`).
+    index_fails: bool,
 }
 
 /// A `SessionSource` replaying record scripts; counts its reads.
@@ -215,6 +217,7 @@ impl FakeSessions {
                 index_reads: HashMap::new(),
                 loads: HashMap::new(),
                 next_ref: 0,
+                index_fails: false,
             }),
         }
     }
@@ -393,6 +396,19 @@ impl FakeSessions {
         paths: &[PathBuf],
         edits: Vec<FileEdit>,
     ) {
+        self.edit_call_with(session, turn, call, paths, edits, ToolStatus::Completed);
+    }
+
+    /// The same with the status the index gives the call.
+    pub fn edit_call_with(
+        &self,
+        session: &str,
+        turn: &str,
+        call: &str,
+        paths: &[PathBuf],
+        edits: Vec<FileEdit>,
+        status: ToolStatus,
+    ) {
         let mut inner = lock(&self.inner);
         let id: Arc<str> = session.into();
         let at = ContentRef::new(inner.next_ref, 0, 0);
@@ -425,12 +441,17 @@ impl FakeSessions {
                 paths: paths.to_vec().into(),
             },
             started_at: Timestamp(0),
-            finished: Some((Timestamp(0), ToolStatus::Completed)),
+            finished: Some((Timestamp(0), status)),
             input: at,
             result: None,
         }));
         t.items = items.into();
         inner.generation += 1;
+    }
+
+    /// Makes `turns_unretained` fail with an IO error (or work again).
+    pub fn fail_index(&self, fails: bool) {
+        lock(&self.inner).index_fails = fails;
     }
 
     /// `turns_unretained` calls for a session so far.
@@ -524,6 +545,9 @@ impl SessionSource for FakeSessions {
     fn turns_unretained(&self, key: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
         let mut inner = lock(&self.inner);
         *inner.index_reads.entry(key.id.clone()).or_default() += 1;
+        if inner.index_fails {
+            return Err(SessionError::Io("the index cannot be read".into()));
+        }
         match inner.index.get(&key.id) {
             Some(turns) => Ok(Arc::new(TurnIndex {
                 session: key.clone(),

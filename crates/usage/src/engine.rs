@@ -39,7 +39,7 @@ use crate::facts;
 use crate::finalize::{self, BATCH_TIME, BATCH_TURNS, Settling};
 use crate::identity::{Previous, RepoFacts};
 use crate::limits::{self, Rejected};
-use crate::paths::{self, DirPlace};
+use crate::paths;
 use crate::snapshot::{self, Applied, Owners, Scope, Watched};
 use crate::store::cold::{self, Month, Stepped};
 use crate::store::{
@@ -57,6 +57,14 @@ pub(crate) const ACTIVE_MS: i64 = 10 * 60 * 1000;
 
 /// Quiescence the kernel must keep before the next backfill batch.
 pub(crate) const PACE: Duration = Duration::from_secs(10);
+
+/// Most times in a row a session's turn index is read again after an error
+/// (with doubling waits from [`PACE`], at most [`RETRY_CAP`] each); then the
+/// session waits for its log to change.
+pub(crate) const RETRY_MAX: u32 = 5;
+
+/// The longest wait between two such attempts.
+pub(crate) const RETRY_CAP: Duration = Duration::from_secs(10 * 60);
 
 /// Most cwd paths whose place is remembered.
 const PLACE_CACHE: usize = 4096;
@@ -192,11 +200,14 @@ struct State {
     maintenance: Maintenance,
     places: HashMap<PathBuf, Place>,
     /// Where the files of a directory lie (`Projects::resolve`, remembered).
-    dirs: HashMap<PathBuf, DirPlace>,
+    dirs: HashMap<PathBuf, PathPlace>,
     /// Sessions with turns to settle (docs/design/usage.md「轮次的观察与改动项」).
     settle: HashSet<SessionKey>,
     /// The moment a timer waits for before a session settles again.
     waits: HashMap<SessionKey, i64>,
+    /// Failed attempts in a row to read a session's turn index (a lasting
+    /// error is not retried for ever; the next change of the log clears it).
+    retries: HashMap<SessionKey, u32>,
     interests: HashMap<UsageQuery, Interest>,
     computing: bool,
     generation: u64,
@@ -1292,9 +1303,9 @@ impl Engine {
 
     /// The place of a file: `Projects::resolve` of its directory, remembered.
     fn path_place(&self, path: &Path) -> PathPlace {
-        let (dir, name) = paths::split(path);
+        let dir = paths::dir_of(path);
         let cached = self.state().dirs.get(dir).cloned();
-        let found = match cached {
+        match cached {
             Some(found) => found,
             None => {
                 let projects = self.projects.get();
@@ -1306,8 +1317,7 @@ impl Engine {
                 state.dirs.insert(dir.to_path_buf(), found.clone());
                 found
             }
-        };
-        found.file(name)
+        }
     }
 
     // ---- settling turns ----
@@ -1392,6 +1402,7 @@ impl Engine {
         if again {
             self.state().settle.insert(key.clone());
         }
+        let wrote = written.is_some();
         if let Some(out) = written {
             self.apply_facts(&out);
         }
@@ -1400,8 +1411,22 @@ impl Engine {
             self.arm_settle(&key, at);
         }
         if retry {
-            let at = self.deps.time.now_ms() + PACE.as_millis() as i64;
-            self.arm_settle(&key, at);
+            let n = {
+                let mut state = self.state();
+                let n = state.retries.entry(key.clone()).or_default();
+                *n += 1;
+                *n
+            };
+            if n <= RETRY_MAX {
+                // 10 s, 20 s, 40 s ... at most 10 minutes.
+                let delay = (PACE * 2u32.pow(n - 1)).min(RETRY_CAP);
+                let at = self.deps.time.now_ms() + delay.as_millis() as i64;
+                self.arm_settle(&key, at);
+            } else if n == RETRY_MAX + 1 {
+                warn!("turn index unreadable; the session waits for its log to change");
+            }
+        } else if wrote || !again {
+            self.state().retries.remove(&key);
         }
         self.compute();
         self.pump();
@@ -1556,6 +1581,9 @@ impl Engine {
             let mut state = self.state();
             state.blocked = false;
             state.unverified.extend(event.changed.iter().cloned());
+            for key in event.changed.iter() {
+                state.retries.remove(key);
+            }
             for key in event.removed.iter() {
                 state.dirty.remove(key);
                 state.unverified.remove(key);

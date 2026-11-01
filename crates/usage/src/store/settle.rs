@@ -28,8 +28,9 @@ pub(crate) struct ReadyTurn {
     pub(crate) id: i64,
     /// The `TurnId` text.
     pub(crate) turn: String,
-    /// The IDs of its `Edit` calls that completed, in the order they began.
-    pub(crate) edits: Vec<String>,
+    /// It has `Edit` calls (`turn.edits`): its changed files are in the
+    /// session's turn index.
+    pub(crate) edits: bool,
 }
 
 /// The turns of a session waiting to be settled.
@@ -46,8 +47,8 @@ pub(crate) struct Pending {
 /// A changed file of a turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ItemWork {
-    /// The call that changed it (its call ID).
-    pub(crate) call: String,
+    /// The key of the call that changed it (`calls::hash`).
+    pub(crate) call: i64,
     pub(crate) path: PathBuf,
     pub(crate) lines: u64,
     /// Where it lies, used when the call's own record does not say.
@@ -127,7 +128,7 @@ impl Store {
             }
             let frozen = cold::frozen(conn)?;
             let sql = format!(
-                "SELECT t.id, i.text, coalesce(t.last_at, t.started_at) FROM turn t
+                "SELECT t.id, i.text, coalesce(t.last_at, t.started_at), t.edits FROM turn t
                  JOIN intern i ON i.id = t.tid
                  WHERE t.session = ?1 AND t.gen = ?2 AND t.done = 0 AND t.closed = 1
                    AND NOT {}
@@ -135,13 +136,13 @@ impl Store {
                 frozen.sql("t.started_at")
             );
             let mut pending = Pending::default();
-            let rows: Vec<(i64, Vec<u8>, i64)> = conn
+            let rows: Vec<(i64, Vec<u8>, i64, bool)> = conn
                 .prepare_cached(&sql)?
                 .query_map(params![session, generation], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
-            for (id, turn, last) in rows {
+            for (id, turn, last, edits) in rows {
                 let ready_at = last.saturating_add(SETTLE_WAIT_MS);
                 if ready_at > now_ms {
                     pending.wait_until =
@@ -152,24 +153,10 @@ impl Store {
                     pending.more = true;
                     break;
                 }
-                let edits: Vec<Vec<u8>> = conn
-                    .prepare_cached(
-                        "SELECT i.text FROM call c JOIN intern i ON i.id = c.cid
-                         WHERE c.turn = ?1 AND c.kind = ?2 AND c.status = ?3
-                         ORDER BY c.started_at, c.id",
-                    )?
-                    .query_map(
-                        params![id, calls::KIND_EDIT, calls::STATUS_COMPLETED],
-                        |r| r.get(0),
-                    )?
-                    .collect::<rusqlite::Result<_>>()?;
                 pending.ready.push(ReadyTurn {
                     id,
                     turn: String::from_utf8_lossy(&turn).into_owned(),
-                    edits: edits
-                        .iter()
-                        .map(|c| String::from_utf8_lossy(c).into_owned())
-                        .collect(),
+                    edits,
                 });
             }
             Ok(Some(pending))
@@ -210,7 +197,7 @@ impl Store {
                 tx.prepare_cached("DELETE FROM item WHERE turn = ?1")?
                     .execute(params![turn.id])?;
                 for item in &turn.items {
-                    let cid = intern(tx, item.call.as_bytes())?;
+                    let cid = item.call;
                     let path = intern(tx, path_bytes(&item.path))?;
                     let known: Option<i64> = tx
                         .prepare_cached(
@@ -227,20 +214,18 @@ impl Store {
                                 Some(w) => Some(intern(tx, path_bytes(w))?),
                                 None => None,
                             };
-                            let rel = intern(tx, path_bytes(&item.place.rel))?;
-                            calls::fact(tx, session, cid, path, (place, worktree, Some(rel)), at)?;
+                            calls::fact(tx, session, cid, path, (place, worktree), at)?;
                             place
                         }
                     };
                     tx.prepare_cached(
-                        "INSERT INTO item (session, gen, turn, cid, path, location, lines, at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        "INSERT INTO item (session, gen, turn, path, location, lines, at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     )?
                     .execute(params![
                         session,
                         generation,
                         turn.id,
-                        cid,
                         path,
                         place,
                         i64::try_from(item.lines).unwrap_or(i64::MAX),

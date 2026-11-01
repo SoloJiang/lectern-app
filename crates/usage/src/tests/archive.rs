@@ -867,6 +867,7 @@ fn changing_session(h: &mut Harness) -> (std::sync::Arc<FakeSessions>, ProjectKe
     let mut log = Log::new(&fake, "s", "/work/app", old);
     log.turn("a", old).usage("a", "ma", old + 10, 40);
     log.edit("a", "ca", &["/work/lib/a.rs"], old + 20, 2);
+    log.spawn("a", "sp", old + 25);
     let recent = utc(2026, 10, 21, 9);
     log.turn("b", recent).usage("b", "mb", recent + 10, 5);
     log.write();

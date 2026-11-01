@@ -173,9 +173,10 @@ fn weights(conn: &Connection, turn: i64, sessions: &[i64]) -> rusqlite::Result<V
         "SELECT location, sum(lines), count(DISTINCT path) FROM (
            SELECT location, lines, path FROM item WHERE turn = ?1
            UNION ALL
-           SELECT i.location, i.lines, i.path FROM item i
-             JOIN session s ON s.id = i.session AND s.gen = i.gen
-             WHERE i.session IN ({list}) )
+           SELECT i.location, i.lines, i.path FROM turn t
+             JOIN session s ON s.id = t.session AND s.gen = t.gen
+             JOIN item i ON i.turn = t.id
+             WHERE t.session IN ({list}) )
          GROUP BY location ORDER BY location"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
@@ -207,7 +208,10 @@ fn parent_turn(conn: &Connection, child: i64) -> rusqlite::Result<Option<i64>> {
     };
     if let Some(cid) = call {
         let turn: Option<Option<i64>> = conn
-            .prepare_cached("SELECT turn FROM call WHERE session = ?1 AND gen = ?2 AND cid = ?3")?
+            .prepare_cached(
+                "SELECT turn FROM call
+                 WHERE session = ?1 AND gen = ?2 AND cid = ?3 AND coalesce(status, 0) != 9",
+            )?
             .query_row(params![parent, generation, cid], |r| r.get(0))
             .optional()?;
         if let Some(Some(turn)) = turn {

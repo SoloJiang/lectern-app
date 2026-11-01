@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 
 use lectern_logging::{debug, warn};
 use lectern_services::session::{
-    Content, EditOp, SessionError, SessionKey, SessionSource, ToolKind, TurnItem,
+    Content, EditOp, SessionError, SessionKey, SessionSource, ToolKind, ToolStatus, TurnItem,
 };
 
+use crate::store::calls;
 use crate::store::{Ingested, ItemWork, PathPlace, Store, StoreError, TurnWork};
 
 /// The most bytes of each side the line diff of a `Replace` reads
@@ -69,7 +70,7 @@ pub(crate) fn settle(s: &Settling<'_>) -> Result<Settled, StoreError> {
         return Ok(out);
     }
     let started = Instant::now();
-    let index = if pending.ready.iter().any(|t| !t.edits.is_empty()) {
+    let index = if pending.ready.iter().any(|t| t.edits) {
         match s.source.turns_unretained(s.key) {
             Ok(index) => Some(index),
             Err(SessionError::NotFound | SessionError::Unrecognized) => None,
@@ -92,17 +93,18 @@ pub(crate) fn settle(s: &Settling<'_>) -> Result<Settled, StoreError> {
         if let Some(index) = &index
             && let Some(found) = index.turns.iter().find(|t| t.id.0.as_ref() == turn.turn)
         {
-            for cid in &turn.edits {
-                let Some(call) = found.items.iter().find_map(|item| match item {
-                    TurnItem::Tool(c)
-                        if c.id.0.as_ref() == cid && matches!(c.kind, ToolKind::Edit { .. }) =>
-                    {
-                        Some(c)
-                    }
-                    _ => None,
-                }) else {
-                    continue;
-                };
+            // The completed `Edit` calls of the turn, as the index has them.
+            let edits = found.items.iter().filter_map(|item| match item {
+                TurnItem::Tool(c)
+                    if matches!(c.kind, ToolKind::Edit { .. })
+                        && matches!(c.finished, Some((_, ToolStatus::Completed))) =>
+                {
+                    Some(c)
+                }
+                _ => None,
+            });
+            for call in edits {
+                let cid = calls::hash(&call.id.0);
                 let at = call.result.as_ref().unwrap_or(&call.input);
                 match s.source.load(s.key, at) {
                     Ok(Content::Edits(edits)) => {
@@ -112,7 +114,7 @@ pub(crate) fn settle(s: &Settling<'_>) -> Result<Settled, StoreError> {
                                 continue;
                             }
                             items.push(ItemWork {
-                                call: cid.clone(),
+                                call: cid,
                                 path: edit.path.clone(),
                                 lines,
                                 place: (s.resolve)(&edit.path),

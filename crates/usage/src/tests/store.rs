@@ -142,6 +142,7 @@ DROP TABLE share;
 DROP INDEX turn_pending;
 DROP INDEX turn_changed;
 DROP INDEX turn_seq;
+ALTER TABLE turn DROP COLUMN edits;
 DROP INDEX session_parent;
 DROP INDEX usage_source_turn;
 ALTER TABLE turn DROP COLUMN last_at;
@@ -739,16 +740,14 @@ fn dangling(path: &Path) -> i64 {
            OR (turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)))
       + (SELECT count(*) FROM project WHERE location NOT IN (SELECT id FROM location))
       + (SELECT count(*) FROM call WHERE session NOT IN (SELECT id FROM session)
-           OR cid NOT IN (SELECT id FROM intern)
            OR (turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)))
       + (SELECT count(*) FROM call_fact WHERE session NOT IN (SELECT id FROM session)
-           OR cid NOT IN (SELECT id FROM intern) OR path NOT IN (SELECT id FROM intern)
+           OR path NOT IN (SELECT id FROM intern)
            OR location NOT IN (SELECT id FROM location)
-           OR (worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern))
-           OR (rel IS NOT NULL AND rel NOT IN (SELECT id FROM intern)))
+           OR (worktree IS NOT NULL AND worktree NOT IN (SELECT id FROM intern)))
       + (SELECT count(*) FROM item WHERE session NOT IN (SELECT id FROM session)
            OR turn NOT IN (SELECT id FROM turn) OR location NOT IN (SELECT id FROM location)
-           OR cid NOT IN (SELECT id FROM intern) OR path NOT IN (SELECT id FROM intern))";
+           OR path NOT IN (SELECT id FROM intern))";
     raw(path).query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
@@ -947,4 +946,128 @@ fn store_full_disk_fails_the_write_and_keeps_the_cursor() {
     h.read_all(&fake, "s");
     assert_eq!(h.store().mode(), Mode::Writable);
     assert_eq!(h.total().input, 400);
+}
+
+#[test]
+fn store_migration_from_version_4_goes_on_with_a_replay_in_progress() {
+    use super::attribution::{Log, source};
+    let mut h = Harness::new();
+    let lib = h.open_repo("/work/lib");
+    let fake = source();
+    let at = OCT_20 + 9 * HOUR;
+    // The edit is in the first lines; more usage follows.
+    let mut log = Log::new(&fake, "s", "/work/app", at);
+    log.turn("t1", at)
+        .edit("t1", "c1", &["/work/lib/a.rs"], at + 20, 2);
+    for i in 0..4 {
+        log.usage("t1", &format!("m{i}"), at + 100 + i, 5);
+    }
+    log.write();
+    h.read_all(&fake, "s");
+    // The adapter is upgraded: the log is replayed, and a read ends before
+    // the replay does.
+    let records: Vec<_> = {
+        let mut again = Log::new(&fake, "again", "/work/app", at);
+        again
+            .turn("t1", at)
+            .edit("t1", "c1", &["/work/lib/a.rs"], at + 20, 2);
+        for i in 0..4 {
+            again.usage("t1", &format!("m{i}"), at + 100 + i, 5);
+        }
+        std::mem::take(&mut again.records)
+    };
+    fake.replace("s", records);
+    let part = h.read_once(&fake, "s", 450);
+    assert!(part.replay_started && !part.at_end);
+    h.close(true);
+    // A version-4 file: no calls, and the replay still in progress.
+    let conn = raw(&h.db_path());
+    conn.execute_batch(BACK_TO_V4).unwrap();
+    conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+    let replaying: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM session WHERE replay IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(replaying, 1);
+    drop(conn);
+    let reopened = h.open_with(&CURRENT);
+    assert_eq!(reopened.migrated_from, Some(4));
+    // The session is read from its start into the generation being filled,
+    // calls included, and the replay ends.
+    h.read_all(&fake, "s");
+    let main = raw(&h.db_path());
+    let replaying: i64 = main
+        .query_row(
+            "SELECT count(*) FROM session WHERE replay IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(replaying, 0);
+    assert_eq!(count(&main, "call_fact"), 1);
+    drop(main);
+    assert_eq!(h.total().input, 20, "nothing counted twice");
+    h.settle_all(&fake, "s", OCT_20 + 2 * DAY);
+    assert_eq!(
+        h.project(&lib, Window::D7).total.input,
+        20,
+        "the edit counts"
+    );
+    assert_buckets(&h);
+}
+
+/// Manual measurement (`cargo test --release -p lectern-usage --lib
+/// heavy_disk_by_table -- --ignored --nocapture`): where the bytes of three
+/// heavy days are, per table and index, by `dbstat` when SQLite has it and
+/// by row counts otherwise.
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn heavy_disk_by_table() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::testing::heavy_days(dir.path(), 3).unwrap();
+    let file = dir.path().join("usage.db");
+    let conn = Connection::open(&file).unwrap();
+    let total = std::fs::metadata(&file).unwrap().len();
+    eprintln!(
+        "usage.db after 3 heavy days: {total} bytes, {} per day",
+        total / 3
+    );
+    let sql =
+        "SELECT name, sum(pgsize), count(*) FROM dbstat GROUP BY name ORDER BY 2 DESC LIMIT 24";
+    match conn.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap();
+            for row in rows {
+                let (name, bytes, pages) = row.unwrap();
+                eprintln!("{name:32} {:>10} bytes {pages:>6} pages", bytes);
+            }
+        }
+        Err(e) => eprintln!("no dbstat: {e}"),
+    }
+    for table in [
+        "intern",
+        "usage_source",
+        "usage_value",
+        "fact",
+        "fact_bucket",
+        "turn",
+        "call",
+        "call_fact",
+        "item",
+        "share",
+        "location",
+    ] {
+        eprintln!("rows {table:14} {}", count(&conn, table));
+    }
 }

@@ -116,7 +116,8 @@ impl Log {
         at: i64,
         status: ToolStatus,
     ) -> &mut Log {
-        self.fake.edit_call(&self.id, turn, call, named, edits);
+        self.fake
+            .edit_call_with(&self.id, turn, call, named, edits, status);
         let pos = self.pos;
         self.push(rec(
             pos,
@@ -350,18 +351,19 @@ fn items_path_prefix_is_kept_in_the_call_fact() {
     let conn = conn(&h);
     // The place, worktree and the path below it, written when the call
     // was read (before any turn settles).
-    let (place, worktree, rel): (Vec<u8>, Vec<u8>, Vec<u8>) = conn
+    // The path below the worktree is the path less the worktree's.
+    let (place, worktree, path): (Vec<u8>, Vec<u8>, Vec<u8>) = conn
         .query_row(
-            "SELECT l.path, w.text, r.text FROM call_fact f
+            "SELECT l.path, w.text, p.text FROM call_fact f
              JOIN location l ON l.id = f.location
-             JOIN intern w ON w.id = f.worktree JOIN intern r ON r.id = f.rel",
+             JOIN intern w ON w.id = f.worktree JOIN intern p ON p.id = f.path",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
     assert_eq!(place, b"/work/lib/.git");
     assert_eq!(worktree, b"/work/lib");
-    assert_eq!(rel, b"src/a.rs");
+    assert_eq!(path, b"/work/lib/src/a.rs");
 }
 
 // ---- project_by_change ----
@@ -1138,4 +1140,122 @@ fn session_of_an_unknown_session_has_no_snapshot() {
         session: fake.key("nobody"),
     });
     assert!(none.is_none());
+}
+
+// ---- call keys ----
+
+#[test]
+fn items_call_ids_are_not_stored_as_strings() {
+    use crate::store::calls::hash;
+    // FNV-1a over the bytes, 64 bits: the same in every version.
+    assert_eq!(hash("") as u64, 0xcbf2_9ce4_8422_2325);
+    assert_eq!(hash("a") as u64, 0xaf63_dc4c_8601_ec8c);
+    assert_ne!(hash("call-1"), hash("call-2"));
+    let mut h = Harness::new();
+    h.open_repo("/work/lib");
+    let fake = source();
+    let mut log = Log::new(&fake, "s", "/work/app", AT);
+    log.turn("t1", AT).usage("t1", "m1", AT + 10, 5);
+    log.edit("t1", "secret-call-id-0001", &["/work/lib/a.rs"], AT + 20, 1);
+    log.spawn("t1", "secret-call-id-0002", AT + 30);
+    log.write();
+    h.read_every(&fake);
+    settled(&h, &fake, "s");
+    let conn = conn(&h);
+    let strings: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM intern WHERE instr(text, 'secret-call-id') > 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(strings, 0, "a call ID is not interned");
+    // Only the calls a rule needs have a row: the spawn. The edit is a flag
+    // on its turn and a row per file.
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM call", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    let (edits, files): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT sum(edits) FROM turn), (SELECT count(*) FROM call_fact)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((edits, files), (1, 1));
+}
+
+#[test]
+fn items_calls_with_one_key_are_marked_and_their_children_still_count() {
+    use crate::store::calls::COLLIDE;
+    COLLIDE.with(|c| c.set(true));
+    let mut h = Harness::new();
+    let app = h.open_repo("/work/app");
+    let lib = h.open_repo("/work/lib");
+    let tools = h.open_repo("/work/tools");
+    let fake = source();
+    let mut parent = Log::new(&fake, "p", "/work/app", AT);
+    parent.turn("pt", AT).usage("pt", "pm", AT + 10, 60);
+    // Two different call IDs with one key.
+    parent.spawn("pt", "collide-a", AT + 20);
+    parent.spawn("pt", "collide-b", AT + 30);
+    parent.write();
+    let mut a = child(&fake, "ka", "p", "collide-a", "/work/app", AT + 40);
+    a.turn("kat", AT + 40);
+    a.edit("kat", "kac", &["/work/lib/a.rs"], AT + 50, 2);
+    a.write();
+    let mut b = child(&fake, "kb", "p", "collide-b", "/work/app", AT + 60);
+    b.turn("kbt", AT + 60);
+    b.edit("kbt", "kbc", &["/work/tools/b.rs"], AT + 70, 2);
+    b.write();
+    h.read_every(&fake);
+    settled(&h, &fake, "ka");
+    settled(&h, &fake, "kb");
+    settled(&h, &fake, "p");
+    COLLIDE.with(|c| c.set(false));
+    let conn = conn(&h);
+    // The first call keeps the row, marked; the second has none.
+    let (rows, status): (i64, i64) = conn
+        .query_row("SELECT count(*), max(status) FROM call", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((rows, status), (1, 9));
+    // The children are found by the time they began: both count for the
+    // turn that spawned them.
+    assert_eq!(
+        (input_of(&h, &app), input_of(&h, &lib), input_of(&h, &tools)),
+        (0, 30, 30)
+    );
+}
+
+#[test]
+fn items_a_call_read_again_is_not_a_collision() {
+    let mut h = Harness::new();
+    h.open_repo("/work/lib");
+    let fake = source();
+    let mut log = Log::new(&fake, "s", "/work/app", AT);
+    log.turn("t1", AT).usage("t1", "m1", AT + 10, 5);
+    log.spawn("t1", "sp1", AT + 20);
+    log.write();
+    h.read_every(&fake);
+    // The log is read again from its start (as after a migration).
+    let key = fake.key("s");
+    h.close(true);
+    let conn = rusqlite::Connection::open(h.db_path()).unwrap();
+    conn.execute("UPDATE session SET cursor = X'01'", [])
+        .unwrap();
+    drop(conn);
+    h.reopen(true);
+    assert!(h.store().cursor(&key).unwrap().is_start());
+    h.read_every(&fake);
+    let (rows, ambiguous): (i64, i64) = self::conn(&h)
+        .query_row(
+            "SELECT count(*), count(CASE WHEN status = 9 THEN 1 END) FROM call",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((rows, ambiguous), (1, 0), "the same call, not a second one");
 }

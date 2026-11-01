@@ -4,7 +4,7 @@
 //! executor tasks; the writer is behind a lock.
 
 mod attrib;
-mod calls;
+pub(crate) mod calls;
 pub(crate) mod cold;
 mod dedup;
 mod identity;
