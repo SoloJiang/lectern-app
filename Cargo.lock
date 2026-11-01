@@ -4728,6 +4728,7 @@ dependencies = [
  "lectern-kernel",
  "lectern-logging",
  "lectern-services",
+ "lectern-terminal-view",
  "lectern-ui",
 ]
 

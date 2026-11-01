@@ -46,6 +46,29 @@ pub(crate) fn send_block(
     can_prompt.clone().err().map(Block::Unavailable)
 }
 
+/// What the Terminal page's resume button does, by the state of the ACP link
+/// (docs/design/conversation.md「一处驱动」): a session is driven from one
+/// place, so resuming it in a terminal needs the link to be gone first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Resume {
+    /// There is no link (or no `dyn Conversations`): open the terminal.
+    Open,
+    /// The link is idle or failed (it may still hold the connection):
+    /// disconnect it, then open the terminal.
+    DisconnectFirst,
+    /// A connection is starting or a turn is running: the button is off.
+    Blocked,
+}
+
+/// The button's mode for a link; `None` is no `dyn Conversations`.
+pub(crate) fn resume_mode(link: Option<&Link>) -> Resume {
+    match link {
+        None | Some(Link::None) => Resume::Open,
+        Some(Link::Idle) | Some(Link::Failed(_)) => Resume::DisconnectFirst,
+        Some(Link::Connecting) | Some(Link::Working) | Some(Link::Stopping) => Resume::Blocked,
+    }
+}
+
 /// Whether the session may still run somewhere else: its log has an open
 /// turn, was written to within [`ELSEWHERE_WINDOW_MS`], and nothing in
 /// Lectern drives the session. A hint only; it does not stop a send.

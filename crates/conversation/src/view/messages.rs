@@ -211,8 +211,9 @@ impl MessagesModel {
         lectern_logging::scope(diag::session_ctx(&self.session.id))
     }
 
-    /// `conversation shown`: the page was built for a session.
-    pub(crate) fn log_shown(&self) {
+    /// `conversation shown`: the page was built for a session; `page` is the
+    /// one it opened on.
+    pub(crate) fn log_shown(&self, page: &'static str) {
         let _scope = self.scope();
         let (link, entries, pending) = match &self.snapshot {
             Some(snapshot) => (
@@ -224,7 +225,7 @@ impl MessagesModel {
         };
         info!(
             "conversation shown";
-            page = "messages",
+            page = page,
             link = link,
             entries = diag::count(entries),
             pending = diag::count(pending)

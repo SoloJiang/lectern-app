@@ -28,8 +28,8 @@ use lectern_services::session::{
     SessionList, SessionSource, SessionSummary, SourceId, Timestamp, TurnIndex,
 };
 use lectern_services::terminal::{
-    FrameInterest, Input, LaunchError, LaunchKind, OpenSpec, RunState, TerminalEvent, TerminalId,
-    TerminalInfo, TerminalList, Terminals,
+    Frame, FrameInterest, GridSize, Input, Launch, LaunchError, LaunchKind, OpenSpec, RunState,
+    TerminalEvent, TerminalId, TerminalInfo, TerminalList, Terminals, Theme,
 };
 use lectern_services::workspace::{
     CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone, Payload,
@@ -37,7 +37,8 @@ use lectern_services::workspace::{
 };
 
 use crate::plugin::{
-    ConversationPlugin, LIVE_ID, LivePlugin, PLUGIN_ID, TERMINAL_ID, TerminalPagePlugin, plugins,
+    ConversationPlugin, LIVE_ID, LivePlugin, PLUGIN_ID, Shared, TERMINAL_ID, TerminalPagePlugin,
+    plugins,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -283,31 +284,75 @@ impl Conversations for FakeConversations {
     }
 }
 
-/// The provider of `dyn Terminals`: the terminals a test sets, by session.
-/// Only what the reply box reads is there (`for_session`, `info`, `list`).
+/// What a test sees of one `Terminals::open` call.
+#[derive(Clone, Debug)]
+pub(crate) struct OpenCall {
+    pub launch: Launch,
+    pub size: Option<GridSize>,
+    pub theme: Theme,
+}
+
+#[derive(Default)]
+struct TerminalsState {
+    terminals: Vec<TerminalInfo>,
+    next: u64,
+    opens: Vec<OpenCall>,
+    refuse: Option<LaunchError>,
+    frames: HashMap<TerminalId, Arc<Frame>>,
+    frame_reads: HashMap<TerminalId, usize>,
+    inputs: Vec<(TerminalId, Input)>,
+    closed: Vec<TerminalId>,
+    watches: usize,
+    /// The activation numbers of the tokens `copy_selection` was given.
+    copy_tokens: Vec<u64>,
+}
+
+/// The provider of `dyn Terminals`: the terminals a test sets, by session,
+/// and the ones `open` makes (registered at once, `Starting`, as the real
+/// service does). It records `open`, `watch`, `frame`, `input` and `close`.
+/// A terminal's state changes only when a test says so (no event: the test
+/// sends `Listed`).
 #[derive(Default)]
 pub(crate) struct FakeTerminals {
-    terminals: Mutex<Vec<TerminalInfo>>,
-    next: AtomicUsize,
+    state: Mutex<TerminalsState>,
+    /// The interests alive.
+    alive: Arc<AtomicUsize>,
 }
 
 impl FakeTerminals {
-    /// Gives the session a terminal in `state`, or changes the state of the
-    /// one it has (no event: the test sends `Listed`).
+    /// Gives the session a terminal in `state` (in the project of `CWD`), or
+    /// changes the state of the one it has.
     pub fn set(&self, session: &SessionKey, state: RunState) {
-        let mut terminals = lock(&self.terminals);
+        self.set_in(session, folder(CWD), state);
+    }
+
+    /// The same, in a given project.
+    pub fn set_in(&self, session: &SessionKey, project: ProjectKey, state: RunState) {
+        let mut inner = lock(&self.state);
         let launch = LaunchKind::Resume(session.clone());
-        if let Some(info) = terminals.iter_mut().find(|info| info.launch == launch) {
+        if let Some(info) = inner
+            .terminals
+            .iter_mut()
+            .find(|info| info.launch == launch)
+        {
             info.state = state;
             return;
         }
-        let id = TerminalId(self.next.fetch_add(1, Ordering::SeqCst) as u64 + 1);
-        terminals.push(TerminalInfo {
+        Self::push(&mut inner, launch, project, state);
+    }
+
+    fn push(
+        inner: &mut TerminalsState,
+        launch: LaunchKind,
+        project: ProjectKey,
+        state: RunState,
+    ) -> TerminalId {
+        inner.next += 1;
+        let id = TerminalId(inner.next);
+        inner.terminals.push(TerminalInfo {
             id,
             launch,
-            project: ProjectKey::Folder {
-                root: Arc::from(Path::new(CWD)),
-            },
+            project,
             cwd: Arc::from(Path::new(CWD)),
             state,
             title: None,
@@ -315,51 +360,167 @@ impl FakeTerminals {
             bells: 0,
             dropped_inputs: 0,
         });
+        id
+    }
+
+    /// Gives a terminal that is not the resume of a session (a shell).
+    pub fn set_shell(&self, project: ProjectKey, state: RunState) -> TerminalId {
+        Self::push(&mut lock(&self.state), LaunchKind::Shell, project, state)
+    }
+
+    /// The title the program set (it is the program's output: a canary
+    /// carrier).
+    pub fn set_title(&self, id: TerminalId, title: &str) {
+        if let Some(info) = lock(&self.state)
+            .terminals
+            .iter_mut()
+            .find(|info| info.id == id)
+        {
+            info.title = Some(Arc::from(title));
+        }
+    }
+
+    /// The next `open` answers with this error.
+    pub fn refuse_next(&self, error: LaunchError) {
+        lock(&self.state).refuse = Some(error);
+    }
+
+    pub fn set_frame(&self, id: TerminalId, frame: Arc<Frame>) {
+        lock(&self.state).frames.insert(id, frame);
+    }
+
+    /// Every `open`, in order.
+    pub fn opens(&self) -> Vec<OpenCall> {
+        lock(&self.state).opens.clone()
+    }
+
+    /// The terminals closed, in order.
+    pub fn closed(&self) -> Vec<TerminalId> {
+        lock(&self.state).closed.clone()
+    }
+
+    /// How many times `frame(id)` was read.
+    pub fn frame_reads(&self, id: TerminalId) -> usize {
+        lock(&self.state).frame_reads.get(&id).copied().unwrap_or(0)
+    }
+
+    /// The activation numbers of the tokens that `copy_selection` got.
+    pub fn copy_tokens(&self) -> Vec<u64> {
+        lock(&self.state).copy_tokens.clone()
+    }
+
+    /// How many times `watch` was called.
+    pub fn watches(&self) -> usize {
+        lock(&self.state).watches
+    }
+
+    /// The interests that are alive.
+    pub fn alive(&self) -> usize {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    /// The ID of the terminal of a session, if it has one.
+    pub fn id_of(&self, session: &SessionKey) -> Option<TerminalId> {
+        self.for_session(session)
+    }
+}
+
+/// A folder project at `root`.
+pub(crate) fn folder(root: &str) -> ProjectKey {
+    ProjectKey::Folder {
+        root: Arc::from(Path::new(root)),
     }
 }
 
 impl Terminals for FakeTerminals {
-    fn open(&self, _: OpenSpec) -> Result<TerminalId, LaunchError> {
-        unreachable!("the reply box never opens a terminal")
+    fn open(&self, spec: OpenSpec) -> Result<TerminalId, LaunchError> {
+        let mut inner = lock(&self.state);
+        inner.opens.push(OpenCall {
+            launch: spec.launch.clone(),
+            size: spec.size,
+            theme: spec.theme,
+        });
+        if let Some(error) = inner.refuse.take() {
+            return Err(error);
+        }
+        let Launch::Resume(session) = spec.launch else {
+            unreachable!("the Terminal page only resumes sessions");
+        };
+        let launch = LaunchKind::Resume(session);
+        if let Some(at) = inner
+            .terminals
+            .iter()
+            .position(|info| info.launch == launch)
+        {
+            let info = &inner.terminals[at];
+            if matches!(info.state, RunState::Starting | RunState::Running { .. }) {
+                return Err(LaunchError::AlreadyRunning(info.id));
+            }
+            // An ended terminal is replaced.
+            let old = inner.terminals.remove(at);
+            inner.closed.push(old.id);
+        }
+        Ok(Self::push(
+            &mut inner,
+            launch,
+            folder(CWD),
+            RunState::Starting,
+        ))
     }
     fn list(&self) -> Arc<TerminalList> {
         Arc::new(TerminalList {
             generation: 1,
-            terminals: Arc::from(lock(&self.terminals).clone()),
+            terminals: Arc::from(lock(&self.state).terminals.clone()),
         })
     }
     fn info(&self, id: TerminalId) -> Option<TerminalInfo> {
-        lock(&self.terminals)
+        lock(&self.state)
+            .terminals
             .iter()
             .find(|info| info.id == id)
             .cloned()
     }
     fn for_session(&self, session: &SessionKey) -> Option<TerminalId> {
         let launch = LaunchKind::Resume(session.clone());
-        lock(&self.terminals)
+        lock(&self.state)
+            .terminals
             .iter()
             .find(|info| info.launch == launch)
             .map(|info| info.id)
     }
-    fn frame(&self, _: TerminalId) -> Option<Arc<lectern_services::terminal::Frame>> {
-        unreachable!("the reply box never reads a frame")
+    fn frame(&self, id: TerminalId) -> Option<Arc<Frame>> {
+        let mut inner = lock(&self.state);
+        *inner.frame_reads.entry(id).or_insert(0) += 1;
+        inner.frames.get(&id).cloned()
     }
-    fn watch(&self, _: TerminalId) -> Option<FrameInterest> {
-        unreachable!("the reply box never watches a terminal")
+    fn watch(&self, id: TerminalId) -> Option<FrameInterest> {
+        let mut inner = lock(&self.state);
+        if !inner.terminals.iter().any(|info| info.id == id) {
+            return None;
+        }
+        inner.watches += 1;
+        self.alive.fetch_add(1, Ordering::SeqCst);
+        let alive = self.alive.clone();
+        Some(FrameInterest::new(move || {
+            alive.fetch_sub(1, Ordering::SeqCst);
+        }))
     }
-    fn input(&self, _: TerminalId, _: Input) {
-        unreachable!("the reply box never sends terminal input")
+    fn input(&self, id: TerminalId, input: Input) {
+        lock(&self.state).inputs.push((id, input));
     }
     fn copy_selection(
         &self,
         _: TerminalId,
-        _: lectern_kernel::ActivationToken,
-        _: Box<dyn FnOnce(Option<String>) + Send>,
+        token: lectern_kernel::ActivationToken,
+        reply: Box<dyn FnOnce(Option<String>) + Send>,
     ) {
-        unreachable!("the reply box never copies from a terminal")
+        lock(&self.state).copy_tokens.push(token.id());
+        reply(None);
     }
-    fn close(&self, _: TerminalId) {
-        unreachable!("the reply box never closes a terminal")
+    fn close(&self, id: TerminalId) {
+        let mut inner = lock(&self.state);
+        inner.terminals.retain(|info| info.id != id);
+        inner.closed.push(id);
     }
 }
 
@@ -373,6 +534,8 @@ pub(crate) struct FakeContributions {
     tokens_given: Mutex<Vec<bool>>,
     route: Mutex<Option<Route>>,
     dispatched: Mutex<Vec<WorkspaceCommand>>,
+    guards: Mutex<Vec<Arc<dyn LeaveGuard>>>,
+    guards_released: Arc<AtomicUsize>,
 }
 
 impl FakeContributions {
@@ -392,6 +555,16 @@ impl FakeContributions {
             .iter()
             .map(|(kind, id, _, _)| (*kind, id.clone()))
             .collect()
+    }
+
+    /// The leave guards registered, in order.
+    pub fn guards(&self) -> Vec<Arc<dyn LeaveGuard>> {
+        lock(&self.guards).clone()
+    }
+
+    /// How many leave guards were unregistered.
+    pub fn guards_released(&self) -> usize {
+        self.guards_released.load(Ordering::SeqCst)
     }
 
     /// How many registrations were dropped.
@@ -420,6 +593,32 @@ impl FakeContributions {
             .find_map(|(_, _, _, payload)| {
                 let any: &(dyn std::any::Any + Send) = &*payload.0;
                 any.downcast_ref::<T>().cloned()
+            })
+    }
+
+    /// The keystrokes, action names and contexts of the `KeyBindings`
+    /// contribution registered under `id`.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple is what a test compares; a named type would be used once"
+    )]
+    pub fn binding_names(
+        &self,
+        id: &str,
+    ) -> Option<Vec<(&'static str, &'static str, Option<&'static str>)>> {
+        lock(&self.contributions)
+            .iter()
+            .filter(|(_, registered, _, _)| registered == id)
+            .find_map(|(_, _, _, payload)| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                any.downcast_ref::<lectern_ui::contrib::KeyBindings>()
+                    .map(|bindings| {
+                        bindings
+                            .0
+                            .iter()
+                            .map(|(keys, action, context)| (*keys, action.name(), *context))
+                            .collect()
+                    })
             })
     }
 
@@ -485,10 +684,18 @@ impl Contributions for FakeContributions {
     }
     fn register_leave_guard(
         &self,
-        _: Arc<dyn LeaveGuard>,
-        _: Option<ActivationToken>,
+        guard: Arc<dyn LeaveGuard>,
+        token: Option<ActivationToken>,
     ) -> Registration {
-        unreachable!("conversation registers no leave guard before the Terminal page")
+        lock(&self.tokens_given).push(token.is_some());
+        lock(&self.guards).push(guard);
+        let released = self.guards_released.clone();
+        Registration::new(
+            |_| {},
+            move || {
+                released.fetch_add(1, Ordering::SeqCst);
+            },
+        )
     }
     fn dispatch(&self, command: WorkspaceCommand) {
         lock(&self.dispatched).push(command);
@@ -552,6 +759,8 @@ pub(crate) struct Rig {
     pub conversations: Arc<FakeConversations>,
     pub contributions: Arc<FakeContributions>,
     pub terminals: Arc<FakeTerminals>,
+    /// The state the plugins share.
+    pub shared: Arc<Shared>,
 }
 
 impl Rig {
@@ -568,6 +777,7 @@ impl Rig {
         let terminals = Arc::new(FakeTerminals::default());
         let (main, live, terminal): (ConversationPlugin, LivePlugin, TerminalPagePlugin) =
             plugins();
+        let shared = main.shared();
         let set = PluginSet::new()
             .with(
                 "mock-sessions",
@@ -595,6 +805,7 @@ impl Rig {
             conversations,
             contributions,
             terminals,
+            shared,
         }
     }
 
@@ -672,6 +883,14 @@ impl Rig {
         self.kernel
             .emitter()
             .emit(TerminalEvent::Listed { generation: 1 });
+        self.kernel.barrier();
+    }
+
+    /// `Frame` for a terminal, as the terminal service emits it.
+    pub fn terminal_frame(&self, id: TerminalId, generation: u64) {
+        self.kernel
+            .emitter()
+            .emit(TerminalEvent::Frame { id, generation });
         self.kernel.barrier();
     }
 

@@ -9,8 +9,8 @@
 use std::fmt::Write as _;
 
 use gpui::{
-    AnyView, Context, Entity, InteractiveElement, IntoElement, Modifiers, ParentElement, Render,
-    Styled, TestAppContext, VisualTestContext, Window, div, px,
+    AnyView, AppContext, Context, Entity, InteractiveElement, IntoElement, Modifiers,
+    ParentElement, Render, Styled, TestAppContext, VisualTestContext, Window, div, px,
 };
 use lectern_i18n::{Locale, Strings};
 use lectern_services::session::SessionKey;
@@ -20,7 +20,7 @@ use lectern_ui::{Appearance, init_fixed};
 
 use crate::plugin::TAB_ID;
 use crate::testing::Rig;
-use crate::view::{ConversationTab, MessagesModel};
+use crate::view::{ConversationTab, MessagesModel, TerminalPage};
 
 /// The inspector's region, as `workspace` lays it out.
 pub(crate) struct Host {
@@ -210,4 +210,51 @@ pub(crate) fn messages_of(
 ) -> Option<Entity<MessagesModel>> {
     let tab = tab_of(host, vcx);
     vcx.update(|_, cx| tab.read(cx).messages().cloned())
+}
+
+/// What the inspector shows while the page is hidden.
+struct Blank;
+
+impl Render for Blank {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// Hides the inspector's page: the page is dropped, as `workspace` drops it
+/// when the inspector hides or shows another page.
+pub(crate) fn hide_inspector(host: &Entity<Host>, vcx: &mut VisualTestContext) {
+    let blank: AnyView = vcx.update(|_, cx| cx.new(|_| Blank).into());
+    vcx.update(|_, cx| {
+        host.update(cx, |host, cx| {
+            host.inspector = blank;
+            cx.notify();
+        });
+    });
+    frame(vcx);
+}
+
+/// Shows the page again, built by the factory the plugin registered.
+pub(crate) fn show_inspector(host: &Entity<Host>, rig: &Rig, vcx: &mut VisualTestContext) {
+    let tab: InspectorTab = rig
+        .contributions
+        .payload(TAB_ID)
+        .expect("the page is registered");
+    vcx.update(|window, cx| {
+        let built = (tab.build)(&(), window, cx);
+        host.update(cx, |host, cx| {
+            host.inspector = built;
+            cx.notify();
+        });
+    });
+    frame(vcx);
+}
+
+/// The Terminal page of the session on the screen, if the page was built.
+pub(crate) fn terminal_of(
+    host: &Entity<Host>,
+    vcx: &mut VisualTestContext,
+) -> Option<Entity<TerminalPage>> {
+    let tab = tab_of(host, vcx);
+    vcx.update(|_, cx| tab.read(cx).terminal().cloned())
 }

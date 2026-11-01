@@ -15,9 +15,12 @@ use lectern_services::conversation::{
 use lectern_services::project::{ProjectKey, WorktreeKey};
 use lectern_services::review::ReviewTarget;
 use lectern_services::session::Timestamp;
+use lectern_services::terminal::RunState;
 use lectern_services::workspace::{Route, Target, screens};
 
-use crate::testing::{agent_text, entry_key, passage, prompt, session, tool, with_entries};
+use crate::testing::{
+    agent_text, entry_key, passage, prompt, session, snapshot, tool, with_entries,
+};
 
 use super::stage::*;
 
@@ -180,4 +183,36 @@ fn conversation_tree_not_session(cx: &mut TestAppContext) {
     });
     let (_host, vcx) = window(cx, &rig);
     insta::assert_snapshot!(tree(vcx, all));
+}
+
+/// The Terminal page with a terminal that exited: the state, Close, the
+/// resume button again, and the grid (its own nodes, declared by
+/// `terminal_view`) under `conversation.terminal`.
+#[gpui::test]
+fn conversation_tree_terminal(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let key = session(1);
+    rig.conversations.set(snapshot(&key, 1));
+    rig.terminals.set(
+        &key,
+        RunState::Exited {
+            code: 2,
+            signaled: false,
+        },
+    );
+    let id = rig.terminals.id_of(&key).expect("a terminal");
+    rig.terminals.set_frame(
+        id,
+        lectern_terminal_view::testing::frame(&["$ claude --resume", "synthetic output"])
+            .size(40, 10)
+            .state(RunState::Exited {
+                code: 2,
+                signaled: false,
+            })
+            .build(),
+    );
+    let (_host, vcx) = open(cx, &rig, &key);
+    click(vcx, "conversation.pages.item[terminal]");
+    frame(vcx);
+    insta::assert_snapshot!(tree(vcx, |id| all(id) || id.starts_with("terminal.")));
 }
