@@ -54,6 +54,15 @@ pub(crate) fn session_ctx(id: &str) -> Ctx {
     }
 }
 
+/// 一个 JSON-RPC 请求的作用域：会话和请求序号（`req`）。
+pub(crate) fn rpc_ctx(id: &str, req: u64) -> Ctx {
+    Ctx {
+        session: Some(session_tag(id)),
+        req: Some(req),
+        ..Ctx::default()
+    }
+}
+
 /// 一行被跳过的原因（`error` 字段）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Skip {

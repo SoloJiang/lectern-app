@@ -2,6 +2,7 @@
 //! （docs/design/agents.md「ACP 客户端」的「测试」）。假的 `SessionSource` 与 `Projects`，
 //! 不读真实的会话目录，不运行登录 shell，不启动进程。
 
+mod connect;
 mod gate;
 mod history;
 mod logs;
