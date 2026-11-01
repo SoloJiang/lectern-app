@@ -1193,6 +1193,87 @@ fn branch_by_change_the_worktree_query_gives_the_cumulative_of_its_branch() {
     assert!(w.branch.is_none() && w.cumulative.is_none());
 }
 
+#[test]
+fn branch_by_change_a_session_row_names_the_worktree_that_has_the_branch() {
+    // What `review_view` reads (docs/design/review_view.md「简报」): the full
+    // reference name, the key of the worktree on the branch (the one the
+    // project gives the session's location), the session's part, and the
+    // turns by the `TurnId` of the log.
+    let mut h = Harness::new();
+    let key = h.open_repo("/work/app");
+    let repo = Repo::new("/work/app/.git");
+    h.projects.set_head(
+        Path::new("/work/app"),
+        Head::Branch("refs/heads/feature".into()),
+    );
+    h.git.set_default(&repo.common, "refs/heads/main");
+    h.arm(
+        &repo,
+        AT - 60 * SEC,
+        &[("/work/app/.git", Some("refs/heads/feature"))],
+    );
+    let fake = source();
+    let mut log = Log::new(&fake, "s", "/work/app", AT);
+    log.turn("t1", AT).usage("t1", "m1", AT + 10, 100);
+    log.edit("t1", "c1", &["/work/app/src/a.rs"], AT + 20, 3);
+    log.turn("t2", AT + 100).usage("t2", "m2", AT + 110, 7);
+    log.write();
+    h.read_every(&fake);
+    settled(&h, &fake, "s");
+    let s = session_usage(&h, &fake, "s");
+    let worktree = lectern_services::project::Projects::snapshot(&h.projects, &key)
+        .unwrap()
+        .worktrees[0]
+        .key
+        .clone();
+    assert_eq!(s.rows.len(), 1, "{:?}", s.rows);
+    let row = &s.rows[0];
+    let RowKey::Branch { branch, .. } = &row.key else {
+        panic!("not a branch row: {row:?}");
+    };
+    assert_eq!(&*branch.name, "refs/heads/feature");
+    assert_eq!(branch.worktree.as_ref(), Some(&worktree));
+    assert_eq!(row.worktree.as_ref(), Some(&worktree));
+    assert_eq!(row.session_part.input, 107);
+    assert_eq!(row.cumulative.input, 107);
+    assert!(!row.shared);
+    let turns: Vec<_> = s.turns.iter().map(|(t, n)| (&*t.0, n.input)).collect();
+    assert_eq!(turns, [("t1", 100), ("t2", 7)]);
+
+    // A branch that is checked out nowhere has a row without a worktree.
+    h.projects.set_head(
+        Path::new("/work/app"),
+        Head::Branch("refs/heads/other".into()),
+    );
+    let s = session_usage(&h, &fake, "s");
+    assert_eq!(s.rows[0].worktree, None, "{:?}", s.rows);
+}
+
+#[test]
+fn branch_by_change_the_worktree_query_of_a_branch_without_usage_counts_nothing() {
+    // A watched branch that no session has used yet is counted (zero), not
+    // "not counted": the worktrees detail tells the two apart.
+    let mut h = Harness::new();
+    let key = h.open_repo("/work/app");
+    let repo = Repo::new("/work/app/.git");
+    h.projects.set_head(
+        Path::new("/work/app"),
+        Head::Branch("refs/heads/feature".into()),
+    );
+    h.git.set_default(&repo.common, "refs/heads/main");
+    h.arm(
+        &repo,
+        AT - 60 * SEC,
+        &[("/work/app/.git", Some("refs/heads/feature"))],
+    );
+    let w = worktree_usage(&h, &key);
+    assert_eq!(
+        w.branch.as_ref().map(|b| &*b.name),
+        Some("refs/heads/feature")
+    );
+    assert_eq!(w.cumulative.map(|t| t.total()), Some(0), "{w:?}");
+}
+
 // ---- rebuild ----
 
 #[test]

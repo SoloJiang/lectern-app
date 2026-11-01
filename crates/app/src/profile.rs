@@ -23,7 +23,7 @@ use lectern_project_home::{
     WAITING_PLUGIN_ID as PROJECT_HOME_WAITING_ID, WaitingSlot,
 };
 use lectern_review::ReviewDeps;
-use lectern_review_view::PLUGIN_ID as REVIEW_VIEW_ID;
+use lectern_review_view::{PLUGIN_ID as REVIEW_VIEW_ID, USAGE_ID as REVIEW_VIEW_USAGE_ID};
 use lectern_terminal::{PLUGIN_ID as TERMINAL_ID, TerminalDeps, TerminalPlugin};
 use lectern_usage::{LocalZone, UsageDeps};
 use lectern_welcome::WelcomeDeps;
@@ -96,8 +96,8 @@ impl Profile {
     /// Desktop: `project`, the two session sources, `review`, `usage`,
     /// `workspace`, `welcome`, `welcome-discovery`, `welcome-review`,
     /// `project-home`, `project-home-usage`, `project-home-waiting`,
-    /// `review-view`, `worktrees`, `worktrees-usage`, `terminal`,
-    /// `conversations`, `conversation`, `conversation-live` and
+    /// `review-view`, `review-view-usage`, `worktrees`, `worktrees-usage`,
+    /// `terminal`, `conversations`, `conversation`, `conversation-live` and
     /// `conversation-terminal`
     /// (docs/design/app.md「插件与资源」).
     /// Test: none. With the number of plugins, for the log (`PluginSet` does
@@ -189,9 +189,15 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
     // The review screen. Its second plugin, "review-view-handoff", requires
     // `dyn Reader` and `dyn CodeIntel`, which no assembled plugin provides
     // yet, so it is dropped: the screen works without it and its handoff
-    // buttons stay disabled (docs/design/app.md「review_view 的装配」).
-    let (review_view, _handoff) = lectern_review_view::plugins(r.executor.clone());
-    let set = set.with(REVIEW_VIEW_ID, review_view);
+    // buttons stay disabled. The third, "review-view-usage", requires only
+    // `dyn Usage`, which `usage` provides: the brief's usage rows and the
+    // turns' tokens do not wait for the handoff
+    // (docs/design/app.md「review_view 的装配」).
+    let (review_view, _handoff, review_view_usage) =
+        lectern_review_view::plugins(r.executor.clone());
+    let set = set
+        .with(REVIEW_VIEW_ID, review_view)
+        .with(REVIEW_VIEW_USAGE_ID, review_view_usage);
     // The parallel overview. `dyn Usage` may be absent, so the interest in
     // the worktrees' usage is reconciled in one cell, as for `project-home`
     // (docs/design/app.md「worktrees 的装配」).
@@ -231,7 +237,7 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
         .with(CONVERSATION_ID, page)
         .with(CONVERSATION_LIVE_ID, live)
         .with(CONVERSATION_TERMINAL_ID, terminal_page);
-    (set, count + 14)
+    (set, count + 15)
 }
 
 /// `usage`'s local time zone: `platform::time::utc_offset`

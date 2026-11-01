@@ -142,9 +142,9 @@ fn startup_writes_a_header_and_an_end_record() {
     // project, two session sources, review, usage, workspace, welcome,
     // welcome-discovery, welcome-review, project-home, project-home-usage,
     // project-home-waiting,
-    // review-view, worktrees, worktrees-usage, terminal, conversations,
-    // conversation, conversation-live, conversation-terminal.
-    assert_eq!(records[assembled]["plugins"], 20);
+    // review-view, review-view-usage, worktrees, worktrees-usage, terminal,
+    // conversations, conversation, conversation-live, conversation-terminal.
+    assert_eq!(records[assembled]["plugins"], 21);
     // Nothing of the review screen runs before the first frame
     // (docs/design/review_view.md「验收」第 3 步), nor of the worktrees
     // overview (docs/design/worktrees.md「性能」), nor of the terminals

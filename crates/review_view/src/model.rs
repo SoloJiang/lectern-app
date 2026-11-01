@@ -477,6 +477,7 @@ impl ReviewModel {
         let mut layer = None;
         let mut usage = false;
         let mut handoff = false;
+        let mut usage_service = false;
         for job in jobs {
             match job {
                 Job::Review(lectern_services::review::ReviewEvent::Changed {
@@ -489,6 +490,7 @@ impl ReviewModel {
                 Job::Layer { open } => layer = Some(open),
                 Job::Usage { query } => usage |= self.usage_query.as_ref() == Some(&query),
                 Job::Handoff => handoff = true,
+                Job::UsageService => usage_service = true,
                 Job::Spans {
                     key,
                     spans,
@@ -507,7 +509,11 @@ impl ReviewModel {
         if handoff {
             self.handoff_changed(cx);
         }
-        if usage {
+        // A service that came or went makes the watch again, and that reads
+        // the snapshot: an event in the same batch has nothing more to say.
+        if usage_service {
+            self.usage_changed(cx);
+        } else if usage {
             self.read_usage(cx);
         }
         if let Some(open) = layer {

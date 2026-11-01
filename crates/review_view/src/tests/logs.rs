@@ -29,6 +29,7 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
     lectern_logging::testing::set_callsite_limit(1_000_000);
     let rig = Rig::new(cx);
     rig.enable_handoff(cx);
+    rig.enable_usage(cx);
     locate(&rig);
     // The session title is the canary too.
     let mut titled = crate::tests::support::summary(session_key(), &format!("Fix the {CANARY}"));
@@ -141,7 +142,7 @@ fn logs_hold_no_contents(cx: &mut TestAppContext) {
         },
         session_usage(),
     );
-    rig.handoff
+    rig.usage_kernel
         .inner()
         .expect("the kernel runs")
         .emitter()

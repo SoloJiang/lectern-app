@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：「验收」第 1 到第 4 步已实现（第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。
+状态：「验收」第 1 到第 4 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -8,7 +8,7 @@
 
 - 做：
   - 审阅屏幕（`Screen("review")`）：简报、叙事、diff、浮条；检查器的 Files 页（`InspectorTab("files")`）是 Progress 列表；两者共用一个 `ReviewModel`。
-  - 简报：`Brief::items` 按快照顺序（critical 在前），`omitted`、`pending_providers`、`analysis` 的状态；点一条跳到对应的文件或行；本会话改到的分支的用量行与每轮的 token（[ADR 0020](../adr/0020.md)「界面位置」）；Analyze 的触发与取消（[ADR 0019](../adr/0019.md)），结果的显示随 [#66](https://github.com/SoloJiang/lectern-app/issues/66)。
+  - 简报：`Brief::items` 按快照顺序（critical 在前），`omitted`、`pending_providers`、`analysis` 的状态；点一条跳到对应的文件或行；本会话改到的分支的用量行与每轮的 token（[ADR 0020](../adr/0020.md)「界面位置」；读 `dyn Usage`，由 `review-view-usage` 提供）；Analyze 的触发与取消（[ADR 0019](../adr/0019.md)），结果的显示随 [#66](https://github.com/SoloJiang/lectern-app/issues/66)。
   - 叙事：每轮 prompt → agent 说明 → 改动步、命令、子 agent、其他工具调用；正文经 `Prepare(Need::Text)` 与 `text()` 按可见范围取。
   - diff：展示行经 `Prepare(Need::Rows)` 与 `rows()` 取；统一视图与双栏视图；hunk 的归因标签与 Drifted 标记；折叠的未改动行可展开；噪声文件默认折叠；归因 `Pending` 时的显示。
   - Progress：`files`、`seen`、`progress`；勾选发 `MarkSeen` / `MarkUnseen`，V 标记并跳到下一个未看文件，Looks good 发 `LooksGood`；`ChangedSinceSeen` 的提示。
@@ -44,38 +44,47 @@
 | `futures`（`channel` feature） | 事件到主线程的 `mpsc::unbounded` | 已在工作区依赖（`workspace` 同样用它） |
 | `lectern-kernel`（`test-support`，dev）、`insta`（dev） | `TestKernel`、语义树快照 | 工作区统一依赖 |
 
-本 crate 是插件 crate（`[package.metadata.lectern] plugin = true`），含两个插件（见「接口」）。它不依赖 `lectern-review`、`lectern-file-reader`、`lectern-code-intel`、`lectern-usage`、`lectern-workspace`（都是插件，dev-dependency 也不行，架构规则 7），所以测试不用 `review::testing`，用本 crate 自己的假 `dyn Review`（「测试」）。不新增 Cargo.lock 里没有的外部 crate。所在层与依赖方向见 [crates/review_view/AGENTS.md](../../crates/review_view/AGENTS.md)。
+本 crate 是插件 crate（`[package.metadata.lectern] plugin = true`），含三个插件（见「接口」）。它不依赖 `lectern-review`、`lectern-file-reader`、`lectern-code-intel`、`lectern-usage`、`lectern-workspace`（都是插件，dev-dependency 也不行，架构规则 7），所以测试不用 `review::testing`，用本 crate 自己的假 `dyn Review`（「测试」）。不新增 Cargo.lock 里没有的外部 crate。所在层与依赖方向见 [crates/review_view/AGENTS.md](../../crates/review_view/AGENTS.md)。
 
 ## 接口
 
 ### 插件
 
-kernel 没有可选依赖：`requires` 里的每个服务都要有活着的提供者，插件才能激活；查找不在 `requires` 里的服务让插件失败（[kernel 设计「激活时的上下文」](kernel.md#激活时的上下文)）。审阅闭环不该因为 `code-intel`、`usage` 或 `file-reader` 失败而消失，所以分成两个插件：
+kernel 没有可选依赖：`requires` 里的每个服务都要有活着的提供者，插件才能激活；查找不在 `requires` 里的服务让插件失败（[kernel 设计「激活时的上下文」](kernel.md#激活时的上下文)）。审阅闭环不该因为 `code-intel`、`usage` 或 `file-reader` 失败而消失，`usage` 的提供者又在 desktop 里而 `dyn Reader`、`dyn CodeIntel` 还没有，所以分成三个插件（用量与交接互不依赖）：
 
 | 插件 ID | provides | requires | 激活 | 内容 |
 |---|---|---|---|---|
 | `review-view` | — | `dyn Contributions`、`dyn Review`、`dyn SessionSource` | `AfterFirstFrame` | 屏幕、检查器页、快捷键的登记；`ReviewEvent` 的监听；审阅屏幕本身 |
-| `review-view-handoff` | — | `dyn Reader`、`dyn CodeIntel`、`dyn Usage` | `AfterFirstFrame` | 把三个服务的引用放进共享状态；在时交接生效，不在时屏幕照常、只少交接 |
+| `review-view-handoff` | — | `dyn Reader`、`dyn CodeIntel` | `AfterFirstFrame` | 把两个服务的引用放进共享状态；在时交接（⇧⌘O、焦点、`share_object`、Space）生效，不在时屏幕照常、只少交接 |
+| `review-view-usage` | — | `dyn Usage` | `AfterFirstFrame` | 把 `dyn Usage` 的引用放进共享状态并订阅 `UsageEvent`；在时简报有用量行、轮次标题有 token，不在时屏幕照常、只少这两处。与 `review-view-handoff` 互不依赖（与 `project-home-usage`、`worktrees-usage` 同一种拆法） |
 
 ```rust
-/// `app` 装配时调用一次，两个插件都放进 `PluginSet`（id 见上表）。`executor` 是进程的执行器，高亮任务经它提交
+/// `app` 装配时调用一次，三个插件都放进 `PluginSet`（id 见上表；`HANDOFF_ID` 要等 `dyn Reader`、`dyn CodeIntel` 有提供者）。
+/// `executor` 是进程的执行器，高亮任务经它提交
 /// （`PluginHandle::own_with` 只给 `SubmitGate`，`spawn_gated` 要执行器本身，与 `review` 插件的构造相同）。不做 IO。
-pub fn plugins(executor: lectern_executor::Executor) -> (ReviewViewPlugin, HandoffPlugin);
+pub fn plugins(executor: lectern_executor::Executor) -> (ReviewViewPlugin, HandoffPlugin, ReviewViewUsagePlugin);
 
 pub struct ReviewViewPlugin { /* Arc<Shared> */ }
 pub struct HandoffPlugin { /* Arc<Shared> */ }
+pub struct ReviewViewUsagePlugin { /* Arc<Shared> */ }
+
+pub const PLUGIN_ID: &str = "review-view";
+pub const HANDOFF_ID: &str = "review-view-handoff";
+pub const USAGE_ID: &str = "review-view-usage";
 ```
 
 - `ReviewViewPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service::<dyn Review>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`；`Contributions::register(…, None)` 三项贡献（「界面」的「向 `workspace` 登记的贡献」；`activate` 里没有 token），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<ReviewEvent>` 与 `ctx.on::<WorkspaceEvent>`（只用 `LayerChanged`）订阅。不提交任务。`started`：保存 `PluginHandle`（高亮任务用 `own_with`）。停用：`Active` drop 时清空 `Shared` 里的引用，正在显示的屏幕由 `workspace` 按 `Pop` 处理。
-- `HandoffPlugin::activate`：取三个 `ServiceRef`，`started` 时放进 `Shared::handoff`；`Active` drop 时取出。屏幕每次要交接时从 `Shared::handoff` 取一份（取锁复制），`ServiceRef::get()` 为 None（提供者已停用）时按没有处理。
-- 两个插件共用一个 `Arc<Shared>`（`plugins()` 建），与 `workspace` 的 `WorkspaceHost` 由 `app` 和插件共用是同一种做法。
+- `HandoffPlugin::activate`：取两个 `ServiceRef`，`started` 时放进 `Shared::handoff`；`Active` drop 时取出。屏幕每次要交接时从 `Shared::handoff` 取一份（取锁复制），`ServiceRef::get()` 为 None（提供者已停用）时按没有处理。
+- `ReviewViewUsagePlugin::activate`：取 `ServiceRef<dyn Usage>`，`ctx.on::<UsageEvent>` 订阅（只转发，见「数据流与线程」）；`started` 时放进 `Shared::usage`；`Active` drop 时取出。放进和取出都向每个屏幕发 `Job::UsageService`：屏幕在主线程上放掉旧的 `UsageInterest`，服务在时重新 `watch`，不在时丢掉 `UsageSnapshot`。不提交任务。
+- 三个插件共用一个 `Arc<Shared>`（`plugins()` 建），与 `workspace` 的 `WorkspaceHost` 由 `app` 和插件共用是同一种做法。
 
 ```rust
 pub(crate) struct Shared {
     contributions: Mutex<Option<ServiceRef<dyn Contributions>>>,
     review: Mutex<Option<ServiceRef<dyn Review>>>,
     sessions: Mutex<Option<ServiceSet<dyn SessionSource>>>,
-    handoff: Mutex<Option<Handoff>>,
+    handoff: Mutex<Option<Handoff>>,                // review-view-handoff 填
+    usage: Mutex<Option<ServiceRef<dyn Usage>>>,    // review-view-usage 填
     handle: Mutex<Option<PluginHandle>>,            // review-view 这次激活的句柄
     /// 活着的审阅屏幕的主线程通道（「数据流与线程」）：`ReviewEvent` 的监听按 `ReviewId` 投递。
     screens: Mutex<Vec<(ReviewId, futures::channel::mpsc::UnboundedSender<Job>)>>,
@@ -83,7 +92,6 @@ pub(crate) struct Shared {
 pub(crate) struct Handoff {
     reader: ServiceRef<dyn Reader>,
     code_intel: ServiceRef<dyn CodeIntel>,
-    usage: ServiceRef<dyn Usage>,
 }
 ```
 
@@ -192,7 +200,7 @@ pub mod testing {
     impl Review for FakeReview { /* `open` 返回递增的 ID；`rows` / `text` 只对最近一次 `Prepare` 里的键返回 Some */ }
     /// 合成的快照：`files` 个文件、`turns` 轮、每个文件 `rows_per_file` 行的 `FileRows`（纯文本 Rust 源码）。
     pub fn snapshot_fixture(files: u32, turns: u32, rows_per_file: u32) -> (ReviewSnapshot, Vec<(RowsKey, FileRows)>);
-    /// `TestKernel` 上装好 `FakeReview`、假的 `Contributions`（只记登记）、假的 `SessionSource` 和两个插件。
+    /// `TestKernel` 上装好 `FakeReview`、假的 `Contributions`（只记登记）、假的 `SessionSource` 和三个插件。
     pub fn harness(cx: &mut TestAppContext) -> Harness;
 }
 ```
@@ -345,10 +353,10 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 - 主线程上只有：读快照与行（复制 `Arc`）、`items::build`、显示行的配对、锚点与可见范围的计算、发命令、渲染。没有 IO、解析和 git 操作（架构规则 4）。
 - 执行器上只有高亮任务：`highlight::window` 是阻塞调用，只在 `own_with` 提交的任务里运行；任务持有 `BusyGuard`，结果投递后释放，kernel 的静止不会漏掉它。
-- 事件的监听在发出事件的线程（executor）上运行，只做转发：取 `Shared::screens` 的锁、按 `ReviewId` 找通道、`unbounded_send`，不做别的。`UsageEvent` 由 `review-view-handoff` 订阅（它才 requires `dyn Usage`），同样只转发 `Job::Usage`。
+- 事件的监听在发出事件的线程（executor）上运行，只做转发：取 `Shared::screens` 的锁、按 `ReviewId` 找通道、`unbounded_send`，不做别的。`UsageEvent` 由 `review-view-usage` 订阅（它才 requires `dyn Usage`），同样只转发 `Job::Usage`；这个插件放进或取出服务时转发 `Job::UsageService`（`review-view-handoff` 到达或离开转发 `Job::Handoff`，两件事互不牵连）。
 - 事件的合并：前台任务每次醒来把通道里的项全部取出：`Review(Changed)` 只应用最高的 `generation`（低的丢弃）；`Prepared` 合并成一次；`Spans` 逐条应用。应用之后 `cx.notify()` 一次。
 - 派生数据：高亮区间以（OID、查询版本、窗口）为键（架构规则 5）；其余都从快照和行直接算，不缓存。
-- 首帧之前什么都不做：两个插件 `AfterFirstFrame` 激活，`activate` 只登记（[ADR 0017](../adr/0017.md)）。没有审阅屏幕时本 crate 没有任务、没有通道，`Shared` 只有几个空的 `Mutex`。
+- 首帧之前什么都不做：三个插件 `AfterFirstFrame` 激活，`activate` 只登记（[ADR 0017](../adr/0017.md)）。没有审阅屏幕时本 crate 没有任务、没有通道，`Shared` 只有几个空的 `Mutex`。
 
 ## 性能
 
@@ -363,7 +371,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 | 刷新 | `Changed` 到新画面：`items::build` < 2 ms（5000 行时 < 4 ms），锚点找回 O(1)；不等 `Prepared` |
 | 空闲内存（采样状态，没有打开审阅） | 本 crate 没有屏幕时 < 16 KiB（`Shared` 与注册的工厂）。屏幕在 `Pop` 时 drop，不保留 |
 | 审阅打开时的内存 | 展示行由 review 保留（≤ 8 MiB，只为 `Prepare` 的范围）；本 crate 另有：`items`（5000 行约 5000 × 40 B = 200 KiB）、显示行的配对（双栏时同量级）、高亮区间 ≤ 2 MiB（LRU）、`texts` 的引用（内容由 review 持有）。合计 ≤ 3 MiB 之外不持有两侧文本的副本（`ArcSource` 只借 review 给的 `Arc<[u8]>`） |
-| 冷启动 20 ms | 首帧之前没有代码运行；`plugin/review-view/activate`、`plugin/review-view-handoff/activate` 各 < 1 ms（只登记） |
+| 冷启动 20 ms | 首帧之前没有代码运行；`plugin/review-view/activate`、`plugin/review-view-handoff/activate`、`plugin/review-view-usage/activate` 各 < 1 ms（只登记） |
 
 基准（`bench`，macOS 判定）：
 
@@ -372,7 +380,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 | `app/open_diff` | 中位数 < 50 ms（目标；产品能力完成之前 CI 按 < 260 ms 判定，[ADR 0059](../adr/0059.md)；bench 设计已列出，归本 crate）：`Driver::open(OpenTarget::Session)` 到 `DiffShown`；夹具与 `review/open_session_50` 相同的仓库与会话，缓存全空（实际的夹具较小，见「与设计的差异」第 3 步） |
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 全部行已准备；进程内，不依赖窗口） |
 | `review_view/scroll_5000` | 每帧工作时间 ≤ 8.3 ms（p95）：`WorkspaceHost::record_frames` 在滚过 5000 行的场景上记录（bench 的 `frames` 应答，随 `workspace` 第 3 步接入） |
-| `plugin/review-view/activate`、`plugin/review-view-handoff/activate`、`plugin/*/resident` | 随 bench 的插件基准自动覆盖 |
+| `plugin/review-view/activate`、`plugin/review-view-handoff/activate`、`plugin/review-view-usage/activate`、`plugin/*/resident` | 随 bench 的插件基准自动覆盖 |
 
 ## 界面
 
@@ -656,7 +664,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
   | 快照内部不一致（下标越界） | warn | `snapshot inconsistent` | `id`、`generation`、`kind`（`turn_ref` / `step` / `file_index`） |
   | 工厂收到的 `Target` 不是 `Review` | warn | `screen built without a review target` | `target`（判别名） |
   | 高亮任务 `Unavailable` | warn | `highlight unavailable` | `id`、`bytes`（本次运行每种语言只记一次） |
-  | `Handoff` 不在而用户触发交接 | info | `handoff unavailable` | `id`、`what`（`open_file` / `focus` / `share` / `usage`） |
+  | `Handoff` 或 `Usage` 不在而用户触发交接、或屏幕要读用量 | info | `handoff unavailable` | `id`、`what`（`open_file` / `focus` / `share` / `usage`） |
 
   `review screen closed` 另带 `notes_added`（本次打开发出的 `AddNote` 数，#22）。发送和再次复制的结果由 `review` 记（`review notes sent`、`review notes not sent`、`review notes copied again`、`review notes not copied again`，[review 设计「日志与诊断」](review.md#日志与诊断)），本 crate 不重复。
 - 详细级别（debug）：`snapshot applied`（`id`、`generation`、`state`、`items`、`files`、`turns`、`anchor_found`（bool）、`took_us`）；`prepare sent`（`id`、`rows`、`texts`、`visible`（范围长度））；`prepared applied`（`id`、`rows`、`texts`、`spliced`（换掉的项数））；`highlight`（`id`、`bytes`、`outcome`（`done` / `timed_out` / `cancelled`）、`took_us`）；`focus set`（`id`、`kind`、`paths`）；`usage applied`（`id`、`rows`、`turns`）；`command`（`id`、`kind`：`ReviewCommand` 的判别名）；#22 的 `note editor`（`id`、`target`（`new` / `existing`）、`how`（`opened` / `saved` / `cancelled` / `drafted` / `closed_by_change`））和 `notes discard`（`id`、`confirmed`（bool）、`notes`）。trace 不另记；渲染路径（每帧的 `render`、滚动事件）上不加记录。
@@ -697,7 +705,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
   - `drop_closes_the_review_and_cancels_analysis`：`Running` 时 drop 发 `CancelAnalyze` 再 `close`。
   - `stale_generation_is_dropped`。
   - `milestone_is_reported_once`：第一次画出行后 `report_milestone(DiffShown)` 一次，之后的 `Prepared` 不再报。
-  - `plugins_register_and_deactivate_cleanly`（第 1 步）：`TestKernel` 激活后假 `Contributions` 收到 `Screen`、`InspectorTab`、`KeyBindings` 三项；`review-view` 停用后登记 drop。`handoff_plugin_deactivates_on_its_own`（第 2 步）：`review-view-handoff` 单独停用后屏幕照常、交接按钮置灰。
+  - `plugins_register_and_deactivate_cleanly`（第 1 步）：`TestKernel` 激活后假 `Contributions` 收到 `Screen`、`InspectorTab`、`KeyBindings` 三项；`review-view` 停用后登记 drop。`handoff_plugin_deactivates_on_its_own`（第 2 步）：`review-view-handoff` 单独停用后屏幕照常、交接按钮置灰，用量行和 `UsageInterest` 不受影响。`usage_plugin_deactivates_on_its_own`：`review-view-usage` 单独停用后屏幕照常、用量行和轮次 token 消失、`UsageInterest` 放掉，交接按钮不受影响，重新激活后恢复。
   - `escape_goes_to_the_panel_first`：面板开着（假 `Contributions` 发 `LayerChanged { open: true }`）且有选中项时 Esc 不清空选中、冒泡到 `workspace`；面板关了之后 Esc 清空选中。
 - 审阅意见（#22，`src/tests/notes.rs`；`FakeReview` 按命令换出 `notes`、`notes_state`）：
   - 纯函数 `items_notes_*`：意见项跟在锚点行之后（`Rows([Step])` 在会话审阅、`Rows([Final])` 在规则分组视图）、同一行几条按时刻、锚点行在折叠段里时跟在 `Fold` 之后、`Drifted` 跟在文件标题之后、`Elsewhere` 进 `NotesElsewhere`、编辑框的位置。
@@ -734,7 +742,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
   本 crate 切到双栏时 `dispatch(SetReadingColumn(false))`，切回统一时 `dispatch(SetReadingColumn(true))`。`workspace` 设计「数据结构」的 `Nav` 加一个 `reading_column: Option<bool>`，`Pop` 时清掉。已实现：[#253](https://github.com/SoloJiang/lectern-app/pull/253)（覆盖按栈深度记，见 [workspace 设计「与设计的差异」](workspace.md#与设计的差异)）。
 - **B. `i18n`**（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）：`locales/{en,zh-CN}/review.ftl` 加上「界面」表里的键（已有的 5 个不改）。
-- **C. `app`**：`plugins()` 的两个插件放进 `PluginSet`（`Profile::Desktop` 的表加两行；test profile 不装）；bench 的 `Driver::open(OpenTarget::Session { … })` 经 `Contributions::dispatch(Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) }))`；`Milestone::DiffShown` 经 `workspace` 转给探针。
+- **C. `app`**：`plugins()` 的三个插件放进 `PluginSet`（`Profile::Desktop` 的表加三行；test profile 不装）；bench 的 `Driver::open(OpenTarget::Session { … })` 经 `Contributions::dispatch(Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) }))`；`Milestone::DiffShown` 经 `workspace` 转给探针。
 - **D. `bench`**：预算表加 `review_view/items_5000`、`review_view/scroll_5000`；`app/open_diff` 的夹具与场景按「性能」。
 - **E. `code_intel`**（随 review 设计的前置条件 F，不阻塞）：两条 `BriefRules` 规则的 `rule` 名与 `args` 的参数名定下后，本 crate 的静态表加两行、`review.ftl` 加两个键。
 - **F. `ui`**（#214 的设计加两个字段，随它的第 1 步或之后一个小 PR）：`Palette` 加 `diff_added_inline_background`、`diff_removed_inline_background`：词级差异的底色，`system(Green)` / `system(Red)` 按浅色 28%、深色 36% 的透明度叠在 `control_background` 上（比 `diff_*_background` 深一档），内置表与系统色两条路径都给出，`palette_builtin_*` 里一并检查对比度。本 crate 第 2 步之前合并。已实现：[#238](https://github.com/SoloJiang/lectern-app/pull/238)。
@@ -766,7 +774,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 高亮窗口 8 ms 内解析不完时这一侧保持纯文本，本次打开不重试。
 - `Changed` 与 `Prepared` 之间（< 3 ms）旧行与新快照并存，hunk 标签可能与新的 `FileAttribution` 短暂不一致。
 - ⌘E 只能打开文件，进入编辑要再按一次 ⌘E（`Reader::open` 没有直接编辑的参数）。
-- `review-view-handoff` 三个依赖里任一个失败，三项交接一起不可用。
+- `review-view-handoff` 两个依赖（`dyn Reader`、`dyn CodeIntel`）里任一个失败，交接一起不可用；用量由 `review-view-usage` 单独提供，不受影响。
 - 别的 worktree 里的子 agent 不在这个审阅里，它的派出在叙事里只是一行 `Tool`（review 设计「未决问题」1 的 (a)），不能从这里进入它的审阅；同一 worktree 里的子 agent 的 `Subagent` 行点开只滚到它的第一轮。
 - `Provided` 规则的文案只覆盖静态表里的（provider, rule）；新的提供者要改表。
 - 审阅意见的草稿（Esc 关掉的新意见的文字）只在屏幕存在期间保留，离开审阅页后丢失；不写盘。
@@ -801,7 +809,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 **第 3 步：`app` 装配、`app/open_diff`、帧基准（`Closes #15`；前置 C、D）。**
 
-- `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加一（`review-view`；`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再加一，见「与设计的差异」第 3 步）；启动测试里首帧之前没有 `review_view` 的记录。
+- `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加二（`review-view`、`review-view-usage`；`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再加一，见「与设计的差异」第 3 步和「用量插件」）；启动测试里首帧之前没有 `review_view` 的记录。
 - `just bench app/open_diff`：中位数 < 50 ms（CI 按 < 260 ms，ADR 0059）；日志里 `diff shown` 的 `took_us` 与基准一致。
 - `just bench review_view/scroll_5000`：每帧 ≤ 8.3 ms（p95）。
 - 手动在 macOS 上运行发布构建：打开一个有 Claude Code 会话的仓库，项目主页 ↵ 进入审阅：简报、轮次、diff 行显示；V 勾选并滚到下一个文件；⌥⌘I 打开 Progress；⇧⌘O 打开完整文件；⌘[ 返回；切换双栏时内容区变宽。
@@ -840,7 +848,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 「验收」的检查：第 1 步的五条 `rg` 都没有结果（测试里的 Rust 示例源码不含 `println!`）；`rg 'highlight::window' crates/review_view/src` 只出现在 `src/highlight.rs`（`highlight::window` 的调用和两处说明），`crates/review_view/src/view` 不存在；`rg 'SetReadingColumn' crates/review_view/src` 有结果（`src/diffs.rs`）。
 - `just test -p lectern-review-view`：117 个测试通过（第 1 步的 77 个，新增 40 个；一个测试一个进程）。
   - 纯函数（`src/tests/highlight.rs`、`brief.rs`、`step2.rs`）：`highlight_window_*`（窗口取行的 `*_byte` 的范围到最后一行的行尾、超过 256 KiB 在行上拆开、没有文本或 OID 的一侧没有窗口、JSON 整份一个窗口或没有）、`highlight_cache_*`（按最久未用淘汰、键含 OID、查询版本和窗口）、`highlight_side_spans_*`、`lines_*`（行文本按字节或行号取、tab 展开后 token 与词级差异的区间平移、长行截断、不是 UTF-8 的行没有着色）、`items_display_rows_*`（统一一行一个 `DiffRow`；双栏的配对、没有配对的行单侧）、`brief_usage_*`（当前 worktree 的行排第一、累计与占比的整数百分比、MR 按标题、`shared` 的数量、zh-CN）、`brief_turn_tokens_*`。
-  - `#[gpui::test]`（真实的 kernel、假的 `Review`、`Reader`、`CodeIntel`、`Usage`，`Executor::manual()`）：`highlight_runs_on_the_executor_and_colours_after_the_fact`（任务运行前 `highlighted=old=plain,new=plain`，`run_tasks` 之后两侧都有 `Token`，`let` 是 `Keyword`）、`highlight_cache_is_shared_by_oid`（步骤与最终改动的同一个 blob 只提交 2 个任务）、`highlight_leaves_a_file_without_a_language_plain`、`highlight_results_of_rows_that_left_are_dropped`、`open_file_hands_off_to_the_reader`（删除行取旧侧 `Object`、新增行取新侧、`Anchor::Byte`、`expect`）、`open_file_in_a_final_diff_reads_the_working_tree`、`open_file_without_the_handoff_is_disabled_and_logged`、`share_object_follows_the_rows`（两侧各登记一次，行离开范围或屏幕 drop 时 `ObjectShare` drop）、`focus_is_set_from_the_snapshot`（`Review`、`Touched` 各一次，列表变了再发，选中行时 `Current`，清空选中不发，屏幕 drop 发一次 `Current(None)`）、`space_opens_the_context_panel_on_the_selected_row`、`usage_rows_and_turn_tokens`（用量行、轮次 token、`UsageEvent` 之后更新、`UsageInterest` 随屏幕 drop）、`without_the_handoff_there_is_no_usage`、`handoff_plugin_deactivates_on_its_own`（单独停用后屏幕照常、按钮置灰、用量行消失，重新激活后恢复）、`side_by_side_pairs_removed_and_added`（模式切换后一对行是一项，选中项与滚动位置按删除行的行号找回，`SetReadingColumn` 随模式发出，切回后选中项回到删除行）、`side_by_side_keeps_the_rows_and_asks_for_nothing_new`（不重发 `Prepare`，不再调 `rows()`）、`side_by_side_is_remembered_by_the_next_screen`、`side_by_side_sideways_scroll_is_shared_by_the_diff`、`fold_expands_by_preparing_more_context`（`Prepare` 里这个文件的 `context` 变大，折叠消失）、`fold_expands_from_a_hunk_above_it`（↵）、`fold_expands_and_keeps_the_place`（纯函数：展开后锚点落在同一份 diff 的占位上，不越过它）、`highlight_answer_of_a_cancelled_task_does_not_end_its_replacement`（被取消的任务晚到的答复不结束它的替代任务）、`analyze_commands_follow_the_state`（`Idle` 的按钮发 `Analyze`，`Running` 有取消按钮并发 `CancelAnalyze`，`Done`、`Failed` 有「再分析」，`Unavailable` 不发命令）。
+  - `#[gpui::test]`（真实的 kernel、假的 `Review`、`Reader`、`CodeIntel`、`Usage`，`Executor::manual()`）：`highlight_runs_on_the_executor_and_colours_after_the_fact`（任务运行前 `highlighted=old=plain,new=plain`，`run_tasks` 之后两侧都有 `Token`，`let` 是 `Keyword`）、`highlight_cache_is_shared_by_oid`（步骤与最终改动的同一个 blob 只提交 2 个任务）、`highlight_leaves_a_file_without_a_language_plain`、`highlight_results_of_rows_that_left_are_dropped`、`open_file_hands_off_to_the_reader`（删除行取旧侧 `Object`、新增行取新侧、`Anchor::Byte`、`expect`）、`open_file_in_a_final_diff_reads_the_working_tree`、`open_file_without_the_handoff_is_disabled_and_logged`、`share_object_follows_the_rows`（两侧各登记一次，行离开范围或屏幕 drop 时 `ObjectShare` drop）、`focus_is_set_from_the_snapshot`（`Review`、`Touched` 各一次，列表变了再发，选中行时 `Current`，清空选中不发，屏幕 drop 发一次 `Current(None)`）、`space_opens_the_context_panel_on_the_selected_row`、`usage_rows_and_turn_tokens`（只有 `review-view-usage`、没有交接：用量行、轮次 token、`UsageEvent` 之后更新、`UsageInterest` 随屏幕 drop；夹具是 `usage` 的 `snapshot::session` 给出的形状：全名分支、`Unassigned` 行、`shared` 为 false）、`without_the_usage_plugin_there_is_no_usage`（交接在、用量插件不在）、`usage_plugin_deactivates_on_its_own`、`usage_that_arrives_after_the_screen_is_read_when_it_does`（屏幕先开、用量插件后到）、`handoff_plugin_deactivates_on_its_own`（单独停用后屏幕照常、按钮置灰，用量行不动，重新激活后恢复）、`side_by_side_pairs_removed_and_added`（模式切换后一对行是一项，选中项与滚动位置按删除行的行号找回，`SetReadingColumn` 随模式发出，切回后选中项回到删除行）、`side_by_side_keeps_the_rows_and_asks_for_nothing_new`（不重发 `Prepare`，不再调 `rows()`）、`side_by_side_is_remembered_by_the_next_screen`、`side_by_side_sideways_scroll_is_shared_by_the_diff`、`fold_expands_by_preparing_more_context`（`Prepare` 里这个文件的 `context` 变大，折叠消失）、`fold_expands_from_a_hunk_above_it`（↵）、`fold_expands_and_keeps_the_place`（纯函数：展开后锚点落在同一份 diff 的占位上，不越过它）、`highlight_answer_of_a_cancelled_task_does_not_end_its_replacement`（被取消的任务晚到的答复不结束它的替代任务）、`analyze_commands_follow_the_state`（`Idle` 的按钮发 `Analyze`，`Running` 有取消按钮并发 `CancelAnalyze`，`Done`、`Failed` 有「再分析」，`Unavailable` 不发命令）。
   - 语义树：`review_tree_session`、`review_tree_groups` 的 insta 快照加了每个步骤、文件的 `open` 按钮和 `review.diff.item[…]`（`Role::Diff`）节点；`review_tree_progress`、`review_tree_failed` 不变。
   - `logs_hold_no_contents`：第 2 步的流程加进来（句柄、用量的分支名、会话标题、高亮、⇧⌘O、Space、模式切换、↵、Analyze、`UsageEvent`），trace 级别没有记录含金丝雀；`highlight`、`focus set`、`usage applied` 三条 debug 记录出现。
 - `just bench review_view/`：`review_view/items_5000` 中位数 27 µs（两次运行 27 µs，第 1 步 18 µs；多了每份行的 `display_rows`，预算 < 4 ms）。`just test -p lectern-bench` 78 个通过。本步没有新的基准条目：设计的 `review_view/scroll_5000` 与 `app/open_diff` 在第 3 步。
@@ -869,7 +877,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 手动检查，用自动化构建（`just automation`，[ADR 0056](../adr/0056.md)），不是发布构建：它是 debug 构建，加了 gpui-mcp 的桥接。临时 `HOME` 是 `target/automation/home`；仓库和会话是合成的，由 `cargo run -p lectern-bench --example review_fixture` 生成（与 `app/open_diff` 的夹具相同：200 个文件，一个 Claude Code 会话在 17 轮里用 `Write` 改了 50 个文件）。用一个 stdio 的 MCP 客户端调用 `just automation-server` 的 `get_ui_tree`、`click_element`、`keyboard`、`scroll`、`screenshot`、`get_logs`、`get_frame_report`；View 菜单经 System Events 点击。结果：
   - 项目主页 ↵ 进入审阅：标题区（17 轮、50 个文件、+500 −500）、简报（「Nothing stands out」，没有 reflog 的提示）、轮次、文件卡片和 diff 行都显示。
   - V 勾选当前文件，Files 页显示「1 of 50 reviewed」，列表滚到下一个文件；⌥⌘I 打开检查器的 Files 页；滚动 5000 px 后显示后面的文件。
-  - ⇧⌘O 和 Open File 置灰，没有反应：`review-view-handoff` 没有装配（「与设计的差异」第 3 步）。
+  - ⇧⌘O 和 Open File 置灰，没有反应：`review-view-handoff` 没有装配（「与设计的差异」第 3 步）。简报的用量行和轮次 token 不在这里：它们由 `review-view-usage` 提供，已装配。
   - View 菜单有「Unified / Side by Side」和「Refresh」；点「Unified / Side by Side」后 diff 变成双栏，内容区变宽。
   - ⌘[ 回到项目主页，卡片的进度从 0/50 变成 1/50。
   - 日志：`diff shown` 的 `took_us` 是 33 754 和 49 115（两次启动，debug 构建）；日志里没有 WARN 或 ERROR，也没有夹具的路径、标题和文件名。
@@ -889,7 +897,29 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 真实窗口（`just automation`，临时 HOME，调试构建，合成的仓库与会话，2026-10-30）：在增加的行和删除的行上各按 C、输入、⌘↩，两条意见画在各自的行下，行号栏有圆点，浮条显示条数和 Discard；删除的行上 Esc 后再按 C，文字带回；Copy as Prompt 写进系统剪贴板，`pbpaste` 读出的文字与 `review` 的模板一致（`src/lib.rs:6` 和「line 6 of the version before your changes」两种位置），这同时走过了 `platform::clipboard` 排到主线程的写入；用别的文字覆盖剪贴板后按 Copy Again，读出相同的 `[lectern-notes …]` 标记和 23 行文字。行尾的 + 没有被裁。
 - 没有验证：粘贴进真实的 agent 会话、agent 回应后那一轮标题有 `review-turn-answers`（`notes_link_*` 只用合成的轮次）；放弃的系统确认框；真实输入法组字时 Esc 与 ⌘↩；深色外观；编辑框开着时点另一行的 + 换锚点。
 
+### 用量插件（`review-view-usage`，`Refs #31`）
+
+把会话用量从 `review-view-handoff` 拆出来，单独成 `review-view-usage`（只 requires `dyn Usage`），`app` 装配它。叠在 `main`（`usage` 第 3 到第 5 步已合并）上，在 macOS（arm64）上运行，没有打开真实窗口：下面全部是无窗口的 `#[gpui::test]` 和 `just` 入口。
+
+- `just test -p lectern-review-view`：157 个测试通过。用量的测试都改成只激活 `review-view-usage`、不激活交接（`usage_rows_and_turn_tokens`、`logs_hold_no_contents` 同时激活两个），新增 `without_the_usage_plugin_there_is_no_usage`（原 `without_the_handoff_there_is_no_usage`）、`usage_plugin_deactivates_on_its_own`、`usage_that_arrives_after_the_screen_is_read_when_it_does`；`handoff_plugin_deactivates_on_its_own` 改为交接离开时用量行和 `UsageInterest`（`released() == 0`）不受影响。`usage_rows_and_turn_tokens` 的夹具改成 `usage` 今天给出的形状（见下）。
+- `usage` 一侧：`just test -p lectern-usage` 新增 `branch_by_change_a_session_row_names_the_worktree_that_has_the_branch`（`Session` 的行是全名分支 `refs/heads/feature`，`worktree` 是项目快照里检出它的 worktree 的键，与 `Place::Located` 的 `WorktreeKey` 同源；分支没有被检出时为 None；`turns` 的 `TurnId` 是日志里的）、`branch_by_change_the_worktree_query_of_a_branch_without_usage_counts_nothing`（被监视而没有用量的分支是 0，不是「不计」）。
+- `just test -p lectern-app -E 'test(every_profile_graph_validates)'`：desktop 与 probe 的插件数为 21，图校验通过，临时目录之后仍是空的。`tests/startup.rs`（`plugins` 为 21）、`tests/bench_probe.rs`（21 个应答）没有在本机运行（开真实窗口），已改好，结果以 macOS CI 为准。
+- 对照 `usage` 真实输出（不是假服务的形状）：见「与设计的差异」「用量插件」。
+- 没有验证：真实窗口里的简报用量行与轮次标题（发布 / 自动化构建里打开一个有用量的会话的 Diff）；`usage` 插件和 `review-view-usage` 一起启动、会话还没读进 `usage` 时的先后（用 `UsageEvent::Changed` 补上，测试里用假服务的事件覆盖，没有用真实引擎）。
+
 ## 与设计的差异
+
+### 用量插件（`review-view-usage`，`Refs #31`）
+
+- **设计的两个插件变成三个。** 会话用量从 `review-view-handoff` 移到 `review-view-usage`，因为 `app` 因 `dyn Reader`、`dyn CodeIntel` 没有提供者而丢掉 `review-view-handoff`，用量也跟着不显示，而 `dyn Usage` 早已有提供者。`plugins(executor)` 返回三个；导出 `USAGE_ID`、`ReviewViewUsagePlugin`。`Shared::usage` 与 `Shared::handoff` 各自独立，`Handoff` 只有 `reader`、`code_intel`。
+- **`Job::UsageService`。** 用量插件放进或取出服务时，每个屏幕在主线程上放掉旧的 `UsageInterest`，服务在时重新 `watch`，不在时丢掉 `usage_query` 和 `UsageSnapshot`；`Job::Handoff` 只管 `Review`/`Touched`/`Current`、`share_object`，不碰用量。屏幕先于用量插件打开时，插件到达那一刻补上 `watch` 并读快照。`Missing::Usage` 的 `handoff unavailable` 仍是每个屏幕记一次（`what = usage`）。
+- **`app` 装配 `review-view-usage`**（`profile::desktop`，在 `review-view` 之后）；desktop 与 probe profile 共 21 个插件。`review-view-handoff` 仍被丢掉。
+- **对照 `usage` 的真实输出（`snapshot::session` / `snapshot::worktree`，不是假服务）：**
+  - `Session` 的 `rows`：`RowKey::Branch`（`BranchLabel.name` 是全名 `refs/heads/…`，视图去掉前缀；`worktree` 是 `checked_out` 找到的、HEAD 现在在这个分支上的 worktree，没有检出时 None）、最后一行 `RowKey::Unassigned`（`worktree` None，`cumulative == session_part`，视图显示「Not on any branch」和 100%）。`RowKey::Mrs` 与 `shared == true` 今天不会出现（MR 区间在 `usage` 第 7 步），视图的代码和 `brief_usage_rows_*` 的单元测试照常覆盖。`brief::usage_lines` 按 `worktree == focus_worktree()` 把审阅中的分支放第一，`SessionRow.worktree` 与 `Place::Located` 的 `Location.worktree` 都是项目快照里 `Worktree.key`，类型和来源相同，所以相等。
+  - `turns`：`(TurnId, Tokens)`，只有本会话自己、有用量的轮次，按 `turn.seq` 排序；`TurnId` 是 `agents` 的日志 ID，`review` 的 `TurnEntry.id` 用的是同一个，`handoff::turn_tokens` 按 `==` 匹配；子 agent 的轮次（`TurnEntry.at.session != 0`）不取，与「不含子 agent 会话」一致；没有用量的轮次没有条目，标题不显示 token。
+  - `Worktree` 的 `WorktreeUsage`：`worktrees` 只用它的 `branch`、`cumulative`、`review`、`since`、`mrs`、`header`。默认分支与 detached 的 `cumulative` 为 None，对应 `RowUsage::NotCounted`；`usage` 在没有 MR 时 `mrs` 为空，对应 `RowUsage::Branch`，`detail.rs` 的 `branch_usage` 用 `cumulative` 的四项和 `review.total()`、`since`；被监视而没有用量的分支是 `Some(0)`，不是「不计」。
+  - **发现，没有改：** 一个分支在 `usage` 还没有它的片段时（项目刚打开、`watch_repo` 还没写完，或没有被监视的仓库），`worktree()` 的 `totals` 是 None，`cumulative` 也是 None，`worktrees` 显示「默认分支与 detached 不计」。那是一小段时间内的错误标签；修法在 `usage`（给「未知」一个状态）或 `services`（`WorktreeUsage` 加一个字段），要改共享类型，不在本 PR 范围。
+  - **发现，没有改：** 同名分支被删除重建后，两个 `RowKey::Branch` 行（`use_id` 不同）有相同的分支名，视图用分支名做探针节点 ID，会重复；用量行都画出来，只是探针里 ID 不唯一。
 
 ### 第 4 步（审阅意见，#22）
 
@@ -953,7 +983,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - **`app/open_diff` 的夹具比「性能」写的小。** 不是 `review/open_session_50` 的仓库（2000 个提交、300 条 reflog），而是 200 个文件的合成仓库和一个 Claude Code 会话（17 轮，每轮用 `Write` 改 3 个约 300 行的文件，最后一轮 2 个，共 50 个）。会话日志写在临时 `HOME` 的 `.claude/projects/` 下，`app` 像对待真实会话一样发现、归位和归因，所以测量包含 `agents` 的读取。夹具在 `crates/bench/benches/fixtures/review_session.rs`。
 - **`Driver::open(Diff)` 的会话键是 `<来源>:<id>`**（如 `session-claude-code:<uuid>`），`app` 把它变成 `Push(Route { screen: REVIEW, target: Review(Session(key)) })`，与项目主页的会话行相同。
 - **手动检查用自动化构建，不用发布构建。** 自动化构建（ADR 0056）是 debug 构建加 gpui-mcp 的桥接，能按元素点击和截图；发布构建没有这个入口。功能与发布构建相同，数字（`took_us`）比发布构建大。
-- **`app` 只装 `review-view`。** 前置条件 C 要求两个插件都装；没有插件提供 `dyn Reader`、`dyn CodeIntel`（`file_reader` 还没有插件，`code_intel` 没有装配），`review-view-handoff` 装进去图校验报 `MissingProvider`，所以 `app` 丢掉它。屏幕照常，交接按钮置灰、没有用量行，与它单独停用时相同（`handoff_plugin_deactivates_on_its_own`）。
+- **`app` 只装 `review-view`。** 前置条件 C 要求两个插件都装；没有插件提供 `dyn Reader`、`dyn CodeIntel`（`file_reader` 还没有插件，`code_intel` 没有装配），`review-view-handoff` 装进去图校验报 `MissingProvider`，所以 `app` 丢掉它。屏幕照常，交接按钮置灰，与它单独停用时相同（`handoff_plugin_deactivates_on_its_own`）。用量行不在这里受影响：它们拆到了 `review-view-usage`，`app` 装配了它（「用量插件」）。
 
 ### 第 2 步
 
@@ -968,7 +998,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - **横向偏移**：每份 diff 一个 `hscroll`，`on_scroll_wheel` 的横向增量移动（两种模式都有），范围是画出过的最宽一行减 8 格，所以只滚到已经画过的最长一行；真实的触控板手感未验证。
 - **Space** 不检查「选中行有符号」（符号如何交给面板由 #20 的设计定）：选中行的 `Current(TextRef)` 发给 `code_intel`，再 `OpenPanel("context")`；没有交接时什么都不做（记 `handoff unavailable`）。选中 hunk 等于它的第一行。
 - **Analyze**：只发命令：按钮按 `brief.analysis` 显示，`Idle` 的「分析」发 `Analyze`；`Running` 显示 `review-analyze-running` 和「取消」发 `CancelAnalyze`；`Done`、`Failed` 的「Retry」用 `review-analyze-again`（设计的「Retry」没有单独的键）；`Unavailable` 是置灰的按钮（原因不显示，第 1 步的差异）。`Analyze` / `CancelAnalyze` 两个 Action 按状态忽略不适用的命令。本 crate 不接触被分析的内容、提示词，也不发任何网络请求。
-- **交接插件到达或离开时屏幕重做相关的事**（设计没写）：`Job::Handoff` 让每个屏幕重发 `Review`/`Touched`/`Current`、重新登记 `share_object`、重新 `watch` 用量；离开时放掉 `UsageInterest` 和登记。`Current(None)` 只在这个屏幕发出过 `Current(Some)` 时才在 drop 时发。`UsageEvent::Changed` 由 handoff 插件转给所有屏幕，屏幕按自己的 `UsageQuery` 过滤。日志 `handoff unavailable` 每个屏幕每种 `what` 只记一次。
+- **交接插件到达或离开时屏幕重做相关的事**（设计没写）：`Job::Handoff` 让每个屏幕重发 `Review`/`Touched`/`Current`、重新登记 `share_object`；离开时放掉登记（用量的 `watch` 与放掉随 `review-view-usage`，见「用量插件」）。`Current(None)` 只在这个屏幕发出过 `Current(Some)` 时才在 drop 时发。`UsageEvent::Changed` 由用量插件转给所有屏幕，屏幕按自己的 `UsageQuery` 过滤。日志 `handoff unavailable` 每个屏幕每种 `what` 只记一次。
 - **测试台**：`Rig` 有两个 `TestKernel`（`TestKernel` 只放一个插件），共用一个 `Shared`；`FakeReader`、`FakeCodeIntel`、`FakeUsage` 在 `src/tests/fakes.rs`，不在 `testing`（基准用不到）。`bench` 的 `review_view/items_5000` 只在 `BuildOptions` 加了 `mode: Unified`，预算表没有改。
 - **默认的产品问题**（「未决问题」）：1 本次运行记住所选模式（上面）；2、3、4 同第 1 步。
 

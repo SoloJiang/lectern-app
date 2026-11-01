@@ -4,12 +4,14 @@
 //! snapshots, rows and texts of `dyn Review` and sends `ReviewCommand`s; it
 //! reads no git, no session log and no file.
 //!
-//! Two plugins ([`plugins`]): "review-view" with the screen
+//! Three plugins ([`plugins`]): "review-view" with the screen
 //! ([`ReviewScreen`]), the shared state ([`ReviewModel`]), the pure item list
 //! ([`items`]), the brief ([`brief`]), the Progress page ([`ProgressTab`]),
-//! the actions and key bindings ([`actions`]) and the probe's nodes; and
+//! the actions and key bindings ([`actions`]) and the probe's nodes;
 //! "review-view-handoff" ([`HandoffPlugin`]), which gives the screens the
-//! reader, the code navigation and the usage. The diff is highlighted on the
+//! reader and the code navigation; and "review-view-usage"
+//! ([`ReviewViewUsagePlugin`]), which gives them the session's usage. Each of
+//! the last two works without the other. The diff is highlighted on the
 //! executor (`highlight`), laid out unified or side by side, and its folds
 //! expand.
 
@@ -42,7 +44,8 @@ mod tests;
 pub use items::DiffMode;
 pub use model::ReviewModel;
 pub use plugin::{
-    FILES_TAB, HANDOFF_ID, HandoffPlugin, LAYOUT, PLUGIN_ID, ReviewViewPlugin, plugins,
+    FILES_TAB, HANDOFF_ID, HandoffPlugin, LAYOUT, PLUGIN_ID, ReviewViewPlugin,
+    ReviewViewUsagePlugin, USAGE_ID, plugins,
 };
 pub use progress_tab::ProgressTab;
 pub use screen::ReviewScreen;
