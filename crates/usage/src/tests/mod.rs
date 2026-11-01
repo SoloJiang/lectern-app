@@ -6,6 +6,7 @@ mod branch_checks;
 mod branch_fixes;
 mod branches;
 mod dedup;
+mod git_lines;
 mod identity;
 mod limits;
 mod log;

@@ -687,6 +687,7 @@ impl Scenario {
         let heads = vec![WorktreeHead {
             key: common.clone(),
             branch: Some(branch.to_owned()),
+            rebasing: false,
         }];
         self.store
             .arm(&Arm {

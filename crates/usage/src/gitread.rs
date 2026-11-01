@@ -4,7 +4,7 @@
 //! first time, the default branch, and the paths a commit changed. Blocking;
 //! executor only. Tests replace it with a table.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -28,6 +28,12 @@ pub struct WorktreeHead {
     pub(crate) key: PathBuf,
     /// The full reference name of the branch; None when detached.
     pub(crate) branch: Option<String>,
+    /// A rebase is in progress in the worktree (`rebase-merge` or
+    /// `rebase-apply` is in its administrative directory): git has detached
+    /// HEAD for the stretch and puts it back on the branch when the rebase
+    /// ends, so this HEAD is not where the worktree is, to the branch
+    /// observations.
+    pub(crate) rebasing: bool,
 }
 
 /// What a branch's reflog says about its segments.
@@ -47,6 +53,10 @@ pub trait GitRead: Send + Sync {
     /// The worktrees with their HEADs; None when the repository cannot be
     /// read.
     fn heads(&self, common_dir: &Path) -> Option<Vec<WorktreeHead>>;
+    /// Which of these full reference names (`refs/heads/...`) exist; None
+    /// when the repository cannot be read. HEAD going to a name that is not
+    /// one is HEAD going to a commit (a tag, `origin/x`, `main~1`).
+    fn branches_exist(&self, common_dir: &Path, names: &[String]) -> Option<HashSet<String>>;
     /// The full reference name of the default branch.
     fn default_branch(&self, common_dir: &Path) -> Option<String>;
     /// The reflog of a branch (`refs/heads/...`); None when it cannot be read.
@@ -102,6 +112,8 @@ impl GitRead for DiskGit {
             worktrees
                 .into_iter()
                 .map(|w| WorktreeHead {
+                    rebasing: w.git_dir.join("rebase-merge").exists()
+                        || w.git_dir.join("rebase-apply").exists(),
                     key: w.git_dir,
                     branch: match w.head {
                         HeadState::Branch { name, .. } => Some(name.as_str().to_owned()),
@@ -110,6 +122,20 @@ impl GitRead for DiskGit {
                 })
                 .collect(),
         )
+    }
+
+    fn branches_exist(&self, common_dir: &Path, names: &[String]) -> Option<HashSet<String>> {
+        let repo = self.repo(common_dir)?;
+        let mut found = HashSet::new();
+        for name in names {
+            let Some(reference) = RefName::new(name) else {
+                continue;
+            };
+            if repo.resolve(&reference).ok()?.is_some() {
+                found.insert(name.clone());
+            }
+        }
+        Some(found)
     }
 
     fn default_branch(&self, common_dir: &Path) -> Option<String> {

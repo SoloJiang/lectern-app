@@ -63,6 +63,11 @@ pub(crate) const ACTIVE_MS: i64 = 10 * 60 * 1000;
 /// Quiescence the kernel must keep before the next backfill batch.
 pub(crate) const PACE: Duration = Duration::from_secs(10);
 
+/// How long a read of HEAD waits to be tried again while a rebase is in
+/// progress in a worktree (the batches of the rebase's own lines usually
+/// come first).
+pub(crate) const REBASE_RETRY: Duration = Duration::from_secs(5);
+
 /// Most times in a row a session's turn index is read again after an error
 /// (with doubling waits from [`PACE`], at most [`RETRY_CAP`] each); then the
 /// session waits for its log to change.
@@ -240,6 +245,13 @@ struct State {
     /// Per repository, the worktrees whose HEAD reflog had a gap and whose
     /// HEAD has not been read again since (docs/design/usage.md「分支观察」).
     rebaseline: HashMap<PathBuf, HashSet<PathBuf>>,
+    /// Per repository, what the written batches say about HEAD that the
+    /// next read of it checks: where the records left each worktree, the
+    /// worktrees that have records and no baseline, a changed list of
+    /// worktrees.
+    reconcile: HashMap<PathBuf, repo::Reconcile>,
+    /// A timer waits to read HEAD again, because a rebase was in progress.
+    rebase_retry: bool,
 }
 
 pub(crate) struct Engine {
@@ -1438,6 +1450,17 @@ impl Engine {
             self.unwatch_repo(common_dir);
             return;
         };
+        // A rebase in progress has detached HEAD for a stretch: a baseline
+        // read now would be wrong after the rebase ends. Those worktrees get
+        // theirs when the rebase is over.
+        let (heads, rebasing): (Vec<_>, Vec<_>) = heads.into_iter().partition(|h| !h.rebasing);
+        if !rebasing.is_empty() {
+            let mut state = self.state();
+            let waiting = state.reconcile.entry(common_dir.to_path_buf()).or_default();
+            waiting.fresh.extend(rebasing.into_iter().map(|h| h.key));
+            drop(state);
+            self.arm_rebase_retry();
+        }
         let mut logs: Vec<(String, BranchLog)> = Vec::new();
         for branch in heads.iter().filter_map(|h| h.branch.as_ref()) {
             if logs.iter().any(|(b, _)| b == branch) {
@@ -1466,6 +1489,7 @@ impl Engine {
     /// A repository is not watched any more (its project closed).
     fn unwatch_repo(&self, common_dir: &Path) {
         self.state().rebaseline.remove(common_dir);
+        self.state().reconcile.remove(common_dir);
         let watch = self.state().repos.remove(common_dir);
         if watch.is_none() {
             return;
@@ -1510,8 +1534,26 @@ impl Engine {
             let Some((common_dir, batch, _busy)) = next else {
                 break;
             };
-            let lost = match store.repo_batch(&common_dir, &batch) {
-                Ok(_) => false,
+            // Which of the names HEAD went to are branches: read here, not in
+            // the writer's transaction. A batch without a checkout asks
+            // nothing.
+            let targets = repo::checkout_targets(&batch);
+            let facts = repo::Facts {
+                branches: if targets.is_empty() {
+                    None
+                } else {
+                    self.deps.reads.branches_exist(&common_dir, &targets)
+                },
+            };
+            let lost = match store.repo_batch_with(&common_dir, &batch, &facts) {
+                Ok((_, reconcile)) => {
+                    let mut state = self.state();
+                    let waiting = state.reconcile.entry(common_dir.clone()).or_default();
+                    waiting.moved.extend(reconcile.moved);
+                    waiting.fresh.extend(reconcile.fresh);
+                    waiting.scan |= reconcile.scan;
+                    false
+                }
                 Err(e) => {
                     // The records are lost: the calls around them are unsure.
                     warn!(
@@ -1541,25 +1583,50 @@ impl Engine {
                 let at = self.deps.time.now_ms().saturating_mul(1_000_000);
                 let _ = store.disarm(&common_dir, at);
                 self.state().rebaseline.remove(&common_dir);
+                self.state().reconcile.remove(&common_dir);
             }
         }
         self.rebaseline_heads(&store);
     }
 
-    /// After a gap in a HEAD reflog (a rewrite, a read that failed, a batch
-    /// that could not be written) the HEAD of the worktree is read again,
-    /// here and not in the writer's transaction, and becomes a new baseline:
-    /// calls from then on replay from it; calls before it, across the gap,
-    /// stay unsure. One read per repository however many resets a batch held;
-    /// a read that fails keeps the worktrees waiting for the next drain.
+    /// HEAD of the worktrees is read, here and not in the writer's
+    /// transaction, once for a repository however many batches or resets
+    /// there were, when it has to be (docs/design/usage.md「分支观察」):
+    /// - after a gap in a HEAD reflog (a rewrite, a read that failed, a batch
+    ///   that could not be written) the HEAD becomes a new baseline: calls
+    ///   from then on replay from it; calls before it, across the gap, stay
+    ///   unsure;
+    /// - after records that moved HEAD it is compared with where they left
+    ///   it: a line cannot tell `checkout --detach main` from `checkout
+    ///   main`, so a HEAD that is somewhere else becomes the baseline and the
+    ///   calls up to it are unsure;
+    /// - a worktree with records and no baseline (made while the watch ran),
+    ///   or the list of worktrees changed, gets a baseline.
+    ///
+    /// A read that fails keeps the worktrees waiting for the next drain.
     fn rebaseline_heads(&self, store: &Store) {
-        let pending: Vec<(PathBuf, HashSet<PathBuf>)> = self
-            .state()
-            .rebaseline
-            .iter()
-            .map(|(c, k)| (c.clone(), k.clone()))
-            .collect();
-        for (common_dir, keys) in pending {
+        let pending: Vec<(PathBuf, HashSet<PathBuf>, repo::Reconcile)> = {
+            let state = self.state();
+            let mut repos: Vec<&PathBuf> = state
+                .rebaseline
+                .keys()
+                .chain(state.reconcile.keys())
+                .collect();
+            repos.sort();
+            repos.dedup();
+            repos
+                .into_iter()
+                .map(|c| {
+                    (
+                        c.clone(),
+                        state.rebaseline.get(c).cloned().unwrap_or_default(),
+                        state.reconcile.get(c).cloned().unwrap_or_default(),
+                    )
+                })
+                .filter(|(_, gaps, what)| !gaps.is_empty() || !what.is_empty())
+                .collect()
+        };
+        for (common_dir, keys, mut what) in pending {
             if self.stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1569,17 +1636,74 @@ impl Engine {
                 debug!("heads not read; the gap stays"; path = Value::path(&common_dir));
                 continue;
             };
-            if store.rebaseline(&common_dir, at_ns, &heads, &keys).is_ok() {
-                let mut state = self.state();
-                if let Some(waiting) = state.rebaseline.get_mut(&common_dir) {
-                    // Worktrees that are not there any more are done too.
-                    waiting.retain(|k| !keys.contains(k));
-                    if waiting.is_empty() {
-                        state.rebaseline.remove(&common_dir);
+            // A worktree in a rebase is not where its HEAD says (the rebase
+            // detaches it and puts it back): nothing is written for it, what
+            // waits for it stays, and the read is tried again.
+            let rebasing: HashSet<PathBuf> = heads
+                .iter()
+                .filter(|h| h.rebasing)
+                .map(|h| h.key.clone())
+                .collect();
+            let heads: Vec<_> = heads.into_iter().filter(|h| !h.rebasing).collect();
+            let ready: HashSet<PathBuf> = keys.difference(&rebasing).cloned().collect();
+            if !ready.is_empty() {
+                if store.rebaseline(&common_dir, at_ns, &heads, &ready).is_ok() {
+                    let mut state = self.state();
+                    if let Some(waiting) = state.rebaseline.get_mut(&common_dir) {
+                        // Worktrees that are not there any more are done too.
+                        waiting.retain(|k| !ready.contains(k));
+                        if waiting.is_empty() {
+                            state.rebaseline.remove(&common_dir);
+                        }
                     }
+                } else {
+                    continue;
                 }
             }
+            // A worktree that was just read as a gap is read.
+            what.moved.retain(|k, _| !ready.contains(k));
+            what.fresh.retain(|k| !ready.contains(k));
+            let mut waits = !rebasing.is_empty() && keys.iter().any(|k| rebasing.contains(k));
+            if !what.is_empty() {
+                if store.reconcile(&common_dir, at_ns, &heads, &what).is_err() {
+                    continue;
+                }
+                let mut state = self.state();
+                if let Some(waiting) = state.reconcile.get_mut(&common_dir) {
+                    waiting.moved.retain(|k, _| rebasing.contains(k));
+                    waiting.fresh.retain(|k| rebasing.contains(k));
+                    // The worktrees in a rebase may have no baseline yet.
+                    waiting.scan = waiting.scan && !rebasing.is_empty();
+                    waits |= !waiting.is_empty();
+                    if waiting.is_empty() {
+                        state.reconcile.remove(&common_dir);
+                    }
+                }
+            } else {
+                self.state().reconcile.remove(&common_dir);
+            }
+            if waits {
+                self.arm_rebase_retry();
+            }
         }
+    }
+
+    /// Reads HEAD again a little later: the lines of a rebase that is ending
+    /// come in batches, and the directory git keeps while it runs goes after
+    /// the last of them.
+    fn arm_rebase_retry(&self) {
+        {
+            let mut state = self.state();
+            if state.rebase_retry || state.stopped {
+                return;
+            }
+            state.rebase_retry = true;
+        }
+        let fire = self.timer(|engine| {
+            engine.state().rebase_retry = false;
+            engine.spawn(false, |engine| engine.drain_repos());
+        });
+        self.deps.time.after(REBASE_RETRY, fire);
     }
 
     // ---- settling turns ----

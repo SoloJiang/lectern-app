@@ -46,6 +46,9 @@ pub(crate) const ACT_RESET: i64 = 6;
 const RESET_REWRITTEN: i64 = 1;
 const RESET_REMOVED: i64 = 2;
 const RESET_UNREADABLE: i64 = 3;
+/// HEAD read after the records said something else: the calls around the
+/// read are unsure.
+const RESET_CORRECTED: i64 = 4;
 
 /// What a watch starts from.
 pub(crate) struct Arm<'a> {
@@ -63,6 +66,63 @@ pub(crate) struct Stored {
     pub(crate) records: usize,
     pub(crate) resets: usize,
     pub(crate) skipped: usize,
+}
+
+/// What the repository says at the time a batch is written (read off the
+/// writer): which of the branches HEAD went to exist. None: not read.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Facts {
+    pub(crate) branches: Option<HashSet<String>>,
+}
+
+/// Where a record left the HEAD of a worktree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Moved {
+    /// HEAD is on this branch (None: detached) after it.
+    To(Option<String>),
+    /// HEAD moved but where is not known from the record alone.
+    Unknown,
+}
+
+/// What the engine checks against HEAD after batches were written, per
+/// repository: where the last records of a worktree left it, the worktrees
+/// that have records and no baseline, and whether the list of worktrees
+/// changed.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Reconcile {
+    pub(crate) moved: HashMap<PathBuf, Moved>,
+    pub(crate) fresh: HashSet<PathBuf>,
+    pub(crate) scan: bool,
+}
+
+impl Reconcile {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.moved.is_empty() && self.fresh.is_empty() && !self.scan
+    }
+}
+
+/// The full reference names HEAD went to in a batch (the targets of
+/// `checkout: moving from A to B`): the branches whose existence the writer
+/// needs to tell a switch from a detach.
+pub(crate) fn checkout_targets(batch: &RepoBatch) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for rec in &batch.reflog {
+        if !matches!(rec.file, ReflogFile::Head(_)) {
+            continue;
+        }
+        let Some(hash) = hash_of(&rec.line) else {
+            continue;
+        };
+        if let Ok(entry) = parse_reflog_line(hash, &rec.line)
+            && let ReflogAction::Checkout { to, .. } = entry.action
+        {
+            let name = format!("refs/heads/{}", String::from_utf8_lossy(&to));
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn ns(t: SystemTime) -> i64 {
@@ -214,6 +274,88 @@ impl Store {
         })
     }
 
+    /// HEAD of the worktrees was read, off the writer, after batches were
+    /// written (`at_ns` is the time before the read). A worktree where the
+    /// records left HEAD somewhere else than it is: the records could not
+    /// say (`checkout --detach main` is written as a switch to `main`), so
+    /// HEAD is the new baseline and the calls up to it are unsure. A worktree
+    /// that has records and no baseline, or that is new in the list of
+    /// worktrees and has none (it was made while the watch ran, and git writes
+    /// no switch for it), gets one.
+    pub(crate) fn reconcile(
+        &self,
+        common_dir: &Path,
+        at_ns: i64,
+        heads: &[WorktreeHead],
+        what: &Reconcile,
+    ) -> Result<(), StoreError> {
+        self.transaction(|tx| {
+            let repo = location(tx, &Place::Git(common_dir.to_path_buf()))?;
+            let open: Option<i64> = tx
+                .prepare_cached(
+                    "SELECT max(begin_ns) FROM watch_span WHERE repo = ?1 AND end_ns IS NULL",
+                )?
+                .query_row(params![repo], |r| r.get(0))?;
+            if open.is_none() {
+                return Ok(());
+            }
+            let at = at_ns / 1_000_000;
+            for head in heads {
+                let wt = intern(tx, path_bytes(&head.key))?;
+                let corrected = matches!(
+                    what.moved.get(&head.key),
+                    Some(Moved::To(predicted)) if *predicted != head.branch
+                );
+                let missing =
+                    (what.scan || what.fresh.contains(&head.key)) && !has_baseline(tx, repo, wt)?;
+                if !corrected && !missing {
+                    continue;
+                }
+                match &head.branch {
+                    Some(name) => {
+                        segments::ensure_open(tx, repo, name)?;
+                        segments::reattached(tx, repo, wt, at)?;
+                    }
+                    None => {
+                        segments::detached_now(tx, repo, wt)?;
+                    }
+                }
+                tx.prepare_cached(
+                    "INSERT INTO head_baseline (repo, wt, at_ns, branch, at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?
+                .execute(params![repo, wt, at_ns, head.branch, at])?;
+                if corrected {
+                    let last: Option<i64> = tx
+                        .prepare_cached(
+                            "SELECT run FROM reflog WHERE repo = ?1 AND file = ?2 AND wt = ?3
+                             ORDER BY id DESC LIMIT 1",
+                        )?
+                        .query_row(params![repo, FILE_HEAD, wt], |r| r.get(0))
+                        .optional()?;
+                    let run = match last {
+                        Some(run) => run,
+                        None => run_id(tx, lectern_fs_watch::RunId(0))?,
+                    };
+                    tx.prepare_cached(
+                        "INSERT INTO reflog_reset (repo, file, wt, run, seq, reason, obs_ns, at)
+                         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)",
+                    )?
+                    .execute(params![
+                        repo,
+                        FILE_HEAD,
+                        wt,
+                        run,
+                        RESET_CORRECTED,
+                        at_ns,
+                        at
+                    ])?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// The watch of a repository ended.
     pub(crate) fn disarm(&self, common_dir: &Path, at_ns: i64) -> Result<(), StoreError> {
         self.transaction(|tx| {
@@ -237,15 +379,44 @@ impl Store {
     }
 
     /// Writes the records of a batch and the segments they make, in the
-    /// order they were read.
+    /// order they were read, with nothing known about the repository beyond
+    /// the records.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn repo_batch(
         &self,
         common_dir: &Path,
         batch: &RepoBatch,
     ) -> Result<Stored, StoreError> {
+        self.repo_batch_with(common_dir, batch, &Facts::default())
+            .map(|(stored, _)| stored)
+    }
+
+    /// Writes a batch with what the repository says (`facts`, read off the
+    /// writer): a checkout of a name that is not a branch is a detach. Also
+    /// says where the batch left each worktree's HEAD, for the engine to
+    /// check against the real HEAD, and which worktrees have records and no
+    /// baseline.
+    pub(crate) fn repo_batch_with(
+        &self,
+        common_dir: &Path,
+        batch: &RepoBatch,
+        facts: &Facts,
+    ) -> Result<(Stored, Reconcile), StoreError> {
         self.transaction(|tx| {
             let repo = location(tx, &Place::Git(common_dir.to_path_buf()))?;
             let mut stored = Stored::default();
+            let mut reconcile = Reconcile::default();
+            // The branches whose logs went away in the batch: a switch to one
+            // of them was a switch to a branch that is gone by now.
+            let removed: HashSet<String> = batch
+                .reflog_resets
+                .iter()
+                .filter(|r| matches!(r.reason, ResetReason::Removed))
+                .filter_map(|r| match &r.file {
+                    ReflogFile::Branch(name) => Some(String::from_utf8_lossy(name).into_owned()),
+                    _ => None,
+                })
+                .collect();
             // A rename leaves the old name's file behind (removed) and starts
             // the new one with the old lines: neither is the branch going.
             let mut renamed_from: HashSet<String> = HashSet::new();
@@ -275,12 +446,22 @@ impl Store {
             // read of its records: the next baseline.
             let mut heads: HashMap<i64, Moved> = HashMap::new();
             let mut last_read: HashMap<i64, i64> = HashMap::new();
+            let mut keys: HashMap<i64, PathBuf> = HashMap::new();
             for (_, item) in items {
                 match item {
                     Item::Record(rec) => {
-                        if let Some((wt, moved)) =
-                            record(tx, repo, common_dir, rec, &renamed_to, &mut stored)?
-                        {
+                        if let Some((wt, moved)) = record(
+                            tx,
+                            repo,
+                            common_dir,
+                            rec,
+                            &Known {
+                                renamed_to: &renamed_to,
+                                removed: &removed,
+                                facts,
+                            },
+                            &mut stored,
+                        )? {
                             // A rename after a switch to the branch is known.
                             let known = match (&moved, heads.get(&wt)) {
                                 (Moved::Unknown, Some(Moved::To(Some(now)))) => {
@@ -291,7 +472,9 @@ impl Store {
                             heads.insert(wt, known);
                         }
                         if let ReflogFile::Head(w) = &rec.file {
-                            let wt = intern(tx, path_bytes(&worktree_key(common_dir, w)))?;
+                            let key = worktree_key(common_dir, w);
+                            let wt = intern(tx, path_bytes(&key))?;
+                            keys.insert(wt, key);
                             let at = last_read.entry(wt).or_insert(0);
                             *at = (*at).max(ns(rec.observed.at));
                         }
@@ -302,10 +485,17 @@ impl Store {
                         if let ReflogFile::Head(w) = &reset.file
                             && !matches!(reset.reason, ResetReason::Removed)
                         {
-                            let wt = intern(tx, path_bytes(&worktree_key(common_dir, w)))?;
+                            let key = worktree_key(common_dir, w);
+                            let wt = intern(tx, path_bytes(&key))?;
+                            keys.insert(wt, key);
                             heads.insert(wt, Moved::Unknown);
                         }
                     }
+                }
+            }
+            for (wt, moved) in &heads {
+                if let Some(key) = keys.get(wt) {
+                    reconcile.moved.insert(key.clone(), moved.clone());
                 }
             }
             // HEAD read again: the replay of a later call starts from here,
@@ -326,6 +516,14 @@ impl Store {
                     ])?;
                 }
             }
+            // A worktree with records and no baseline in this watch (made
+            // while it ran: no switch is written for it) has to be read.
+            for (wt, key) in &keys {
+                if !has_baseline(tx, repo, *wt)? {
+                    reconcile.fresh.insert(key.clone());
+                }
+            }
+            reconcile.scan = batch.worktree_list;
             if let Some(last) = batch
                 .reflog
                 .iter()
@@ -345,7 +543,7 @@ impl Store {
                 resets = stored.resets,
                 skipped = stored.skipped
             );
-            Ok(stored)
+            Ok((stored, reconcile))
         })
     }
 
@@ -448,12 +646,22 @@ impl Store {
     }
 }
 
-/// What a record did to the HEAD of a worktree.
-enum Moved {
-    /// HEAD is on this branch (None: detached) after it.
-    To(Option<String>),
-    /// HEAD moved but where is not known from the record alone.
-    Unknown,
+/// Whether the worktree has a baseline in the watch that is open.
+fn has_baseline(tx: &Connection, repo: i64, wt: i64) -> rusqlite::Result<bool> {
+    tx.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM head_baseline
+                        WHERE repo = ?1 AND wt = ?2
+                          AND at_ns >= (SELECT coalesce(max(begin_ns), 0) FROM watch_span
+                                        WHERE repo = ?1 AND end_ns IS NULL))",
+    )?
+    .query_row(params![repo, wt], |r| r.get(0))
+}
+
+/// What `record` knows besides the record.
+struct Known<'a> {
+    renamed_to: &'a HashSet<String>,
+    removed: &'a HashSet<String>,
+    facts: &'a Facts,
 }
 
 /// The state after a rename record of the branch HEAD was left on: the new
@@ -479,9 +687,10 @@ fn record(
     repo: i64,
     common_dir: &Path,
     rec: &ReflogRecord,
-    renamed_to: &HashSet<String>,
+    known_by: &Known<'_>,
     stored: &mut Stored,
 ) -> rusqlite::Result<Option<(i64, Moved)>> {
+    let renamed_to = known_by.renamed_to;
     let Some(hash) = hash_of(&rec.line) else {
         stored.skipped += 1;
         return Ok(None);
@@ -510,13 +719,24 @@ fn record(
                 let from = String::from_utf8_lossy(from).into_owned();
                 let to_ref = format!("refs/heads/{to}");
                 let known = segments::open_named(tx, repo, &to_ref)?.is_some();
+                // HEAD went to a branch when the name is one. The line does
+                // not say: the argument is written as typed, a tag, a
+                // remote-tracking name or `main~1` as well. Without a read
+                // of the repository, a name that is not the new commit is
+                // taken for a branch.
+                let branch = match &known_by.facts.branches {
+                    Some(exist) => {
+                        known || exist.contains(&to_ref) || known_by.removed.contains(&to_ref)
+                    }
+                    None => known || !is_commit(&to, entry.new.as_ref()),
+                };
                 let from_ref = (!is_commit(&from, entry.old.as_ref())
                     || segments::open_named(tx, repo, &format!("refs/heads/{from}"))?.is_some())
                 .then(|| format!("refs/heads/{from}"));
                 if let Some(from_ref) = &from_ref {
                     segments::ensure_open(tx, repo, from_ref)?;
                 }
-                if !known && is_commit(&to, entry.new.as_ref()) {
+                if !branch {
                     act = ACT_DETACH;
                     segments::detached(tx, repo, wt, at)?;
                     moved = Some(Moved::To(None));
