@@ -1,5 +1,5 @@
-//! The plugins "conversation" and "conversation-live" and the state they
-//! share with the page (docs/design/conversation.md「接口」「插件」).
+//! The plugins "conversation", "conversation-live" and "conversation-terminal"
+//! and the state they share with the page (docs/design/conversation.md「接口」「插件」).
 //! `activate` only takes the services, registers the contributions and
 //! subscribes; nothing is read, submitted or drawn before the inspector shows
 //! the page (ADR 0017). The kernel has no optional dependencies, so what the
@@ -9,22 +9,25 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::channel::mpsc;
-use gpui::{App, AppContext};
+use gpui::{App, AppContext, Window};
 use lectern_kernel::{
     Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, ServiceRef,
     ServiceSet, service,
 };
-use lectern_logging::{debug, warn};
+use lectern_logging::{debug, info, warn};
 use lectern_services::conversation::{ConversationEvent, Conversations};
 use lectern_services::review::ReviewTarget;
 use lectern_services::session::{SessionKey, SessionSource, SessionSummary};
+use lectern_services::terminal::{RunState, TerminalEvent, Terminals};
 use lectern_services::workspace::{
     Contribution, ContributionKind, Contributions, Registration, Route, Target, WindowId,
-    WorkspaceEvent, screens,
+    WorkspaceCommand, WorkspaceEvent, screens,
 };
 use lectern_ui::contrib::{InspectorTab, KeyBindings};
 
 use crate::actions;
+use crate::diag;
+use crate::memory::Memory;
 use crate::view::ConversationTab;
 
 /// The ID of "conversation" in the `PluginSet`.
@@ -32,6 +35,9 @@ pub const PLUGIN_ID: &str = "conversation";
 
 /// The ID of "conversation-live" in the `PluginSet`.
 pub const LIVE_ID: &str = "conversation-live";
+
+/// The ID of "conversation-terminal" in the `PluginSet`.
+pub const TERMINAL_ID: &str = "conversation-terminal";
 
 /// The ID of the inspector's page.
 pub const TAB_ID: &str = "conversation";
@@ -81,8 +87,11 @@ pub(crate) enum Job {
         session: SessionKey,
         generation: u64,
     },
-    /// "conversation-live" started or stopped.
+    /// "conversation-live" or "conversation-terminal" started or stopped.
     Services,
+    /// A terminal event the page cares about (`Listed`): the state of the
+    /// terminal that may drive the session is read again.
+    Terminal,
 }
 
 pub(crate) type JobSender = mpsc::UnboundedSender<Job>;
@@ -94,8 +103,14 @@ pub(crate) struct Shared {
     contributions: Mutex<Option<ServiceRef<dyn Contributions>>>,
     sessions: Mutex<Option<ServiceSet<dyn SessionSource>>>,
     conversations: Mutex<Option<ServiceRef<dyn Conversations>>>,
+    terminals: Mutex<Option<ServiceRef<dyn Terminals>>>,
     /// The review on the screen on top.
     current: Mutex<Current>,
+    /// `Conversations::waiting()` as of the last `WaitingChanged`: the sessions
+    /// that newly wait are found by comparing with it.
+    waiting: Mutex<Arc<[SessionKey]>>,
+    /// The drafts and the pages the sessions were last on.
+    memory: Mutex<Memory>,
     /// The living pages' channels. The inspector has one page, so there is
     /// usually one element.
     tabs: Mutex<Vec<JobSender>>,
@@ -111,7 +126,10 @@ impl Shared {
             contributions: Mutex::new(None),
             sessions: Mutex::new(None),
             conversations: Mutex::new(None),
+            terminals: Mutex::new(None),
             current: Mutex::new(Current::None),
+            waiting: Mutex::new(Arc::from([])),
+            memory: Mutex::new(Memory::new()),
             tabs: Mutex::new(Vec::new()),
         }
     }
@@ -131,6 +149,26 @@ impl Shared {
         lock(&self.conversations)
             .as_ref()
             .is_some_and(|conversations| conversations.get().is_some())
+    }
+
+    /// The state of the terminal that holds the session, if there is one
+    /// (any state: the caller decides which ones drive the session). None
+    /// without `dyn Terminals` or without a terminal for the session.
+    pub(crate) fn terminal_state(&self, session: &SessionKey) -> Option<RunState> {
+        let terminals = lock(&self.terminals).clone()?;
+        let admitted = terminals.get()?;
+        let id = admitted.for_session(session)?;
+        admitted.info(id).map(|info| info.state)
+    }
+
+    /// Whether a terminal drives the session now: it starts or runs.
+    pub(crate) fn terminal_drives(&self, session: &SessionKey) -> bool {
+        crate::drive::drives(self.terminal_state(session).as_ref())
+    }
+
+    /// Runs `f` on the drafts.
+    pub(crate) fn with_memory<R>(&self, f: impl FnOnce(&mut Memory) -> R) -> R {
+        f(&mut lock(&self.memory))
     }
 
     /// The summary of a session in the sessions list, None if no source
@@ -191,17 +229,62 @@ impl Shared {
         }
     }
 
-    /// Runs on the thread that emitted the event: only forwards.
+    /// Runs on the thread that emitted the event: forwards, and on
+    /// `WaitingChanged` looks for the session on the screen.
     fn on_conversation(&self, event: &ConversationEvent) {
-        if let ConversationEvent::Changed {
-            session,
-            generation,
-        } = event
-        {
-            self.broadcast(Job::Conversation {
-                session: session.clone(),
-                generation: *generation,
-            });
+        match event {
+            ConversationEvent::Changed {
+                session,
+                generation,
+            } => {
+                self.broadcast(Job::Conversation {
+                    session: session.clone(),
+                    generation: *generation,
+                });
+            }
+            ConversationEvent::WaitingChanged => self.on_waiting(),
+        }
+    }
+
+    /// The set of sessions that wait for the user changed. A session that
+    /// newly waits and is the one under review brings the Conversation page
+    /// up (a command to `workspace`; the focus does not move). The page
+    /// need not be alive for this: the inspector may be hidden, and the
+    /// command shows it. Runs on the provider's thread: reads two small
+    /// values and sends one command.
+    fn on_waiting(&self) {
+        let Some(now) = self.with_conversations(|conversations| conversations.waiting()) else {
+            return;
+        };
+        let before = std::mem::replace(&mut *lock(&self.waiting), now.clone());
+        let new: Vec<&SessionKey> = now.iter().filter(|key| !before.contains(key)).collect();
+        debug!(
+            "waiting changed";
+            sessions = diag::count(now.len()),
+            new = diag::count(new.len())
+        );
+        let Current::Session(shown) = self.current() else {
+            return;
+        };
+        if !new.contains(&&shown) {
+            return;
+        }
+        let pending = self
+            .with_conversations(|conversations| conversations.snapshot(&shown))
+            .flatten()
+            .map_or(0, |snapshot| snapshot.permissions.len());
+        let _scope = lectern_logging::scope(diag::session_ctx(&shown.id));
+        info!("conversation tab selected for a request"; pending = diag::count(pending));
+        self.with_contributions(|contributions| {
+            contributions.dispatch(WorkspaceCommand::SelectInspectorTab(Name::Borrowed(TAB_ID)));
+        });
+    }
+
+    /// Runs on the terminal's thread: only forwards what changes the state
+    /// of a terminal.
+    fn on_terminal(&self, event: &TerminalEvent) {
+        if matches!(event, TerminalEvent::Listed { .. }) {
+            self.broadcast(Job::Terminal);
         }
     }
 
@@ -224,16 +307,26 @@ pub struct LivePlugin {
     shared: Arc<Shared>,
 }
 
-/// The plugins, to be put in the `PluginSet` by `app`: "conversation" and
-/// "conversation-live" (the third, "conversation-terminal", comes with the
-/// Terminal page). They share one [`Shared`]. Does no IO.
-pub fn plugins() -> (ConversationPlugin, LivePlugin) {
+/// The plugin "conversation-terminal": requires `dyn Terminals`. Until the
+/// Terminal page exists (step 3) it only brings the service into [`Shared`],
+/// so that the reply box knows when a terminal drives the session.
+pub struct TerminalPagePlugin {
+    shared: Arc<Shared>,
+}
+
+/// The plugins, to be put in the `PluginSet` by `app`: "conversation",
+/// "conversation-live" and "conversation-terminal". They share one
+/// [`Shared`]. Does no IO.
+pub fn plugins() -> (ConversationPlugin, LivePlugin, TerminalPagePlugin) {
     let shared = Arc::new(Shared::new());
     (
         ConversationPlugin {
             shared: shared.clone(),
         },
-        LivePlugin { shared },
+        LivePlugin {
+            shared: shared.clone(),
+        },
+        TerminalPagePlugin { shared },
     )
 }
 
@@ -278,9 +371,9 @@ fn register(contributions: &dyn Contributions, shared: &Arc<Shared>) -> Vec<Regi
     let build_shared = shared.clone();
     let tab = InspectorTab {
         label: lectern_i18n::keys::conversation::TAB,
-        build: Arc::new(move |_, _, cx: &mut App| {
+        build: Arc::new(move |_, window: &mut Window, cx: &mut App| {
             let shared = build_shared.clone();
-            cx.new(|cx| ConversationTab::new(shared, cx)).into()
+            cx.new(|cx| ConversationTab::new(shared, window, cx)).into()
         }),
         // Not `Some(review)`: a page scoped to a screen would hide the pages
         // of `None`, the Files page among them (docs/design/workspace.md「检查器页的范围」).
@@ -337,7 +430,10 @@ impl Drop for ConversationActive {
 }
 
 impl Shared {
-    fn with_contributions<R>(&self, f: impl FnOnce(&dyn Contributions) -> R) -> Option<R> {
+    pub(crate) fn with_contributions<R>(
+        &self,
+        f: impl FnOnce(&dyn Contributions) -> R,
+    ) -> Option<R> {
         let contributions = lock(&self.contributions).clone()?;
         let admitted = contributions.get()?;
         Some(f(&*admitted))
@@ -374,6 +470,11 @@ impl Active for LiveActive {
     /// The living page watches the session it shows.
     fn started(&mut self, _: PluginHandle) {
         if let Some(conversations) = self.conversations.take() {
+            // The sessions that wait already are not "new" when the first
+            // change comes.
+            if let Some(admitted) = conversations.get() {
+                *lock(&self.shared.waiting) = admitted.waiting();
+            }
             *lock(&self.shared.conversations) = Some(conversations);
             self.shared.broadcast(Job::Services);
         }
@@ -383,6 +484,51 @@ impl Active for LiveActive {
 impl Drop for LiveActive {
     fn drop(&mut self) {
         let had = lock(&self.shared.conversations).take().is_some();
+        *lock(&self.shared.waiting) = Arc::from([]);
+        if had {
+            self.shared.broadcast(Job::Services);
+        }
+    }
+}
+
+impl Plugin for TerminalPagePlugin {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            provides: Vec::new(),
+            requires: vec![service::<dyn Terminals>()],
+            activation: vec![Activation::AfterFirstFrame],
+        }
+    }
+
+    fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        let terminals = ctx.service::<dyn Terminals>();
+        let shared = self.shared.clone();
+        ctx.on::<TerminalEvent>(move |event, _| shared.on_terminal(event));
+        Ok(Box::new(TerminalActive {
+            shared: self.shared.clone(),
+            terminals: Some(terminals),
+        }))
+    }
+}
+
+struct TerminalActive {
+    shared: Arc<Shared>,
+    terminals: Option<ServiceRef<dyn Terminals>>,
+}
+
+impl Active for TerminalActive {
+    /// The service is written in `started`: `activate` has no side effects.
+    fn started(&mut self, _: PluginHandle) {
+        if let Some(terminals) = self.terminals.take() {
+            *lock(&self.shared.terminals) = Some(terminals);
+            self.shared.broadcast(Job::Services);
+        }
+    }
+}
+
+impl Drop for TerminalActive {
+    fn drop(&mut self) {
+        let had = lock(&self.shared.terminals).take().is_some();
         if had {
             self.shared.broadcast(Job::Services);
         }
