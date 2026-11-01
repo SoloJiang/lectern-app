@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use lectern_executor::{Executor, Priority};
 use lectern_fs_watch::{Coalesce, DirBatch, DirSpec, DirWatch, Sink, Watcher};
+use lectern_git::GitError;
 use lectern_kernel::{ActivationToken, BusyGuard, PluginHandle, ServiceRef, ServiceSet};
 use lectern_logging::{Ctx, Value, debug, error, info, warn};
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
@@ -33,12 +34,14 @@ use lectern_services::usage::{
 };
 
 use crate::LocalZone;
+use crate::facts;
+use crate::identity::RepoFacts;
 use crate::limits::{self, Rejected};
-use crate::snapshot::{self, Applied, Owners, Watched};
+use crate::snapshot::{self, Applied, Owners, Scope, Watched};
 use crate::store::cold::{self, Month, Stepped};
 use crate::store::{
-    Checked, FileStamp, Ingest, Ingested, Mode, Place, ProjectRow, SessionInfo, Store, StoreError,
-    Totals,
+    Aliases, Checked, Commanded, FileStamp, Ingest, Ingested, Mode, Outcome, Place, ProjectRow,
+    Recorded, SessionInfo, Store, StoreError, Totals,
 };
 use crate::time::Time;
 use crate::window;
@@ -55,12 +58,32 @@ pub(crate) const PACE: Duration = Duration::from_secs(10);
 /// Most cwd paths whose place is remembered.
 const PLACE_CACHE: usize = 4096;
 
+/// Reads what identifies the repository at a common directory, given the
+/// primary remote chosen before. Tests replace it.
+pub(crate) type FactsReader =
+    Arc<dyn Fn(&Path, Option<&str>) -> Result<RepoFacts, GitError> + Send + Sync>;
+
+/// The reader of the real repositories.
+pub(crate) fn git_facts() -> FactsReader {
+    Arc::new(|common_dir, recorded| facts::read(common_dir, recorded, None))
+}
+
+/// Whether a project's path still holds anything. Tests replace it.
+pub(crate) type Exists = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
 pub(crate) struct Deps {
     pub(crate) executor: Executor,
     pub(crate) watcher: Watcher,
     pub(crate) data_dir: PathBuf,
     pub(crate) zone: Arc<dyn LocalZone>,
     pub(crate) time: Time,
+    pub(crate) facts: FactsReader,
+    pub(crate) exists: Exists,
+}
+
+/// Whether a project's path still holds anything.
+pub(crate) fn path_exists(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok()
 }
 
 enum Db {
@@ -161,6 +184,9 @@ struct State {
     computing: bool,
     generation: u64,
     open: Vec<ProjectKey>,
+    /// The common directories of the open repositories that have no commit
+    /// yet: identified again when their worktrees change.
+    unborn: HashSet<PathBuf>,
     /// The next local midnight a timer is armed for.
     midnight: Option<i64>,
     needs_check: bool,
@@ -404,7 +430,7 @@ impl Engine {
         let path = self.statusline_dir().join(limits::STATUSLINE_FILE);
         let now = Timestamp(self.deps.time.now_ms());
         match limits::read_statusline(&path, now) {
-            Ok(samples) => match store.put_samples(&samples) {
+            Ok(samples) => match store.put_samples(&samples, now.0) {
                 Ok(true) => {
                     debug!("statusline samples stored"; windows = samples.len());
                     self.refresh_limits();
@@ -482,10 +508,101 @@ impl Engine {
         };
         let keys = projects.open_projects();
         for key in &keys {
-            let name = projects.snapshot(key).map(|s| s.name.to_string());
-            let _ = store.project_opened(key, name.as_deref().unwrap_or(""));
+            self.record_open(store, key);
         }
         self.state().open = keys;
+    }
+
+    /// Records an opened project: a repository is identified (docs/design/
+    /// usage.md「项目标识」), a folder is only recorded. A repository that
+    /// cannot be read is recorded as the project at its location.
+    fn record_open(&self, store: &Store, key: &ProjectKey) -> Option<ProjectRow> {
+        let name = self
+            .projects
+            .get()
+            .and_then(|p| p.snapshot(key))
+            .map(|s| s.name.to_string())
+            .unwrap_or_default();
+        if let ProjectKey::Git { common_dir } = key
+            && let Some(recorded) = self.identify(store, common_dir, &name)
+        {
+            return Some(recorded.project);
+        }
+        match store.project_opened(key, &name) {
+            Ok(row) => {
+                info!("project opened"; project = Value::uuid(row.pid.0), folder = row.folder);
+                Some(row)
+            }
+            Err(e) => {
+                warn!("project could not be recorded"; sqlite = e.code());
+                None
+            }
+        }
+    }
+
+    /// Reads the repository's facts and records who it is. None when the
+    /// facts cannot be read or the record cannot be written.
+    fn identify(&self, store: &Store, common_dir: &Path, name: &str) -> Option<Recorded> {
+        let recorded = store.recorded_primary(common_dir).ok().flatten();
+        let facts = match (self.deps.facts)(common_dir, recorded.as_deref()) {
+            Ok(facts) => facts,
+            Err(_) => {
+                warn!("repository facts could not be read"; path = Value::path(common_dir));
+                return None;
+            }
+        };
+        let gone: HashSet<i64> = store
+            .projects()
+            .ok()?
+            .iter()
+            .filter(|p| !(self.deps.exists)(&p.path))
+            .map(|p| p.location)
+            .collect();
+        {
+            let mut state = self.state();
+            if facts.unborn {
+                state.unborn.insert(common_dir.to_path_buf());
+            } else {
+                state.unborn.remove(common_dir);
+            }
+        }
+        match store.identify_open(common_dir, name, &facts, self.deps.time.now_ms(), &gone) {
+            Ok(recorded) => {
+                let project = Value::uuid(recorded.project.pid.0);
+                if recorded.outcome == Outcome::Same {
+                    debug!("project identified"; project = project, outcome = recorded.outcome.name());
+                } else {
+                    info!("project identified"; project = project, outcome = recorded.outcome.name());
+                }
+                Some(recorded)
+            }
+            Err(e) => {
+                warn!("project could not be identified"; sqlite = e.code());
+                None
+            }
+        }
+    }
+
+    /// A repository that had no commit has one now, perhaps: identified
+    /// again.
+    fn reidentify_unborn(&self, common_dir: PathBuf) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        if !self.state().unborn.contains(&common_dir) {
+            return;
+        }
+        let key = ProjectKey::Git {
+            common_dir: common_dir.as_path().into(),
+        };
+        let before = store.is_unborn(&common_dir).unwrap_or(false);
+        if before {
+            self.record_open(&store, &key);
+            self.mark_all_dirty();
+            self.compute();
+        } else {
+            self.state().unborn.remove(&common_dir);
+        }
     }
 
     /// Starts the task that checks the unverified sessions, unless it runs.
@@ -1000,6 +1117,7 @@ impl Engine {
             batch: &batch,
             places: &places,
             stamp,
+            now_ms: self.deps.time.now_ms(),
         };
         let adapter_changed = batch.reset
             && cursor
@@ -1229,24 +1347,21 @@ impl Engine {
                 self.mark_all_dirty();
                 self.compute();
             }
+            ProjectEvent::Changed {
+                project: ProjectKey::Git { common_dir },
+                parts,
+                ..
+            } if parts.worktrees && self.state().unborn.contains(&**common_dir) => {
+                let common_dir = common_dir.to_path_buf();
+                self.spawn(true, move |engine| engine.reidentify_unborn(common_dir));
+            }
             _ => {}
         }
     }
 
     fn project_opened(&self, key: ProjectKey) {
         if let Some(store) = self.store() {
-            let name = self
-                .projects
-                .get()
-                .and_then(|p| p.snapshot(&key))
-                .map(|s| s.name.to_string())
-                .unwrap_or_default();
-            match store.project_opened(&key, &name) {
-                Ok(row) => {
-                    info!("project opened"; project = Value::uuid(row.pid.0), folder = row.folder)
-                }
-                Err(e) => warn!("project could not be recorded"; sqlite = e.code()),
-            }
+            self.record_open(&store, &key);
         }
         {
             let mut state = self.state();
@@ -1256,6 +1371,26 @@ impl Engine {
         }
         self.mark_all_dirty();
         self.compute();
+    }
+
+    /// Applies a merge, a confirmation or an undo of the Usage page; the
+    /// snapshots are computed again when it took effect.
+    fn run_command(&self, command: &UsageCommand) {
+        let Some(store) = self.store() else {
+            debug!("usage command dropped: the database is not open");
+            return;
+        };
+        match store.command(command, self.deps.time.now_ms()) {
+            Ok(Commanded::Applied(kind)) => {
+                info!("project command applied"; kind = kind.name());
+                self.mark_all_dirty();
+                self.compute();
+            }
+            Ok(Commanded::Rejected(reason)) => {
+                warn!("project command rejected"; reason = reason);
+            }
+            Err(e) => warn!("project command failed"; sqlite = e.code()),
+        }
     }
 
     // ---- snapshots ----
@@ -1404,12 +1539,26 @@ impl Engine {
             now_ms: now,
             open: &open,
             state: self.usage_state(),
+            exists: &*self.deps.exists,
         };
         match compute_full(&context, query) {
             Ok(s) => s,
             Err(e) => {
                 self.query_failed(&e);
-                None
+                // A file kept at an older version (its backup could not be
+                // written) cannot answer; the header says why.
+                if store.mode() == Mode::Writable {
+                    return None;
+                }
+                unavailable(
+                    query,
+                    self.usage_state(),
+                    now,
+                    self.deps.zone.as_ref(),
+                    &open,
+                    projects.as_deref(),
+                )
+                .map(Computed::Snapshot)
             }
         }
     }
@@ -1513,9 +1662,21 @@ pub(crate) struct Context<'a> {
     /// Projects open in this run.
     pub(crate) open: &'a [ProjectKey],
     pub(crate) state: UsageState,
+    /// Whether a project's path still holds anything.
+    pub(crate) exists: &'a dyn Fn(&Path) -> bool,
 }
 
 impl Context<'_> {
+    /// The projects as the Usage page lists them.
+    fn owners(&self) -> Result<Owners, StoreError> {
+        Ok(Owners::new(
+            &self.store.projects()?,
+            &self.store.dir_locations()?,
+            &self.store.aliases()?,
+            self.exists,
+        ))
+    }
+
     fn header(&self, may_include_inherited: bool) -> SnapshotHeader {
         SnapshotHeader {
             generation: 0,
@@ -1555,27 +1716,22 @@ pub(crate) fn compute_full(
             let Some(row) = project_row(cx, project)? else {
                 return Ok(None);
             };
-            // A project never opened has its one location; an opened one
-            // claims directories, and a newer location may be one of them.
-            let (locations, max_location) = if row.opened {
-                let owners = Owners::new(&cx.store.projects()?, &cx.store.dir_locations()?);
-                (owners.locations_of(row.id), owners.max_location)
-            } else {
-                (vec![row.location], i64::MAX)
+            // A listed project counts the facts of the projects joined to it
+            // and of the directories its folder claims; a newer location or
+            // project may be one of them. One never opened has its own.
+            let owners = cx.owners()?;
+            let (info, scope) = match owners.listing_of(row.id) {
+                Some(i) => (owners.info(i, cx.open), owners.scope(i)),
+                None => (snapshot::info(&row, cx.open), Scope::single(&row)),
             };
-            let totals = cx.store.sums_at(&locations, range_of(&days))?;
+            let totals = cx.store.sums_at(&scope.locations, range_of(&days))?;
             Ok(Some(Computed::Watched(Watched::project(
-                snapshot::info(&row, cx.open),
-                *window,
-                &days,
-                locations,
-                max_location,
-                &totals,
+                info, *window, &days, scope, &totals,
             ))))
         }
         UsageQuery::AllProjects { window } => {
             let days = window::days(*window, cx.now_ms, cx.zone);
-            let owners = Owners::new(&cx.store.projects()?, &cx.store.dir_locations()?);
+            let owners = cx.owners()?;
             let totals = cx.store.sums_all(range_of(&days))?;
             Ok(Some(Computed::Watched(Watched::all(
                 *window, &days, owners, cx.open, &totals,
@@ -1590,22 +1746,17 @@ pub(crate) fn compute_full(
             let Some(row) = project_row(cx, project)? else {
                 return Ok(None);
             };
-            let locations = if row.opened {
-                Owners::new(&cx.store.projects()?, &cx.store.dir_locations()?).locations_of(row.id)
-            } else {
-                vec![row.location]
+            let owners = cx.owners()?;
+            let (info, locations) = match owners.listing_of(row.id) {
+                Some(i) => (owners.info(i, cx.open), owners.scope(i).locations),
+                None => (snapshot::info(&row, cx.open), vec![row.location]),
             };
             let totals = cx.store.history(&locations, *from, *to, *days, cx.zone)?;
             let range = window::start(*from, cx.zone)
                 ..window::start(window::date_of(window::day_number(*to) + 1), cx.zone);
             let inherited = cx.store.inherited_in(&locations, range)?;
             Ok(Some(Computed::Snapshot(UsageSnapshot::History(
-                snapshot::history(
-                    cx.header(inherited),
-                    snapshot::info(&row, cx.open),
-                    *from,
-                    &totals,
-                ),
+                snapshot::history(cx.header(inherited), info, *from, &totals),
             ))))
         }
         // Later steps of docs/design/usage.md「验收」.
@@ -1646,6 +1797,7 @@ fn unavailable(
                     folder: matches!(key, ProjectKey::Folder { .. }),
                     key: open.contains(key).then(|| key.clone()),
                     status: ProjectStatus::Active,
+                    confirmed: None,
                 },
                 ProjectRef::Id(pid) => ProjectInfo {
                     id: *pid,
@@ -1653,6 +1805,7 @@ fn unavailable(
                     folder: false,
                     key: None,
                     status: ProjectStatus::Active,
+                    confirmed: None,
                 },
             };
             let p = snapshot::project(header, info, *window, &days, &totals);
@@ -1660,7 +1813,7 @@ fn unavailable(
         }
         UsageQuery::AllProjects { window } => {
             let days = window::days(*window, now_ms, zone);
-            let owners = Owners::new(&[], &[]);
+            let owners = Owners::new(&[], &[], &Aliases::default(), &path_exists);
             let a = snapshot::all(header, *window, &days, &totals, &owners, open);
             Some(UsageSnapshot::All(a))
         }
@@ -1775,9 +1928,9 @@ impl Usage for Engine {
     }
 
     fn command(&self, command: UsageCommand) {
-        // Merging and confirming projects come with step 3 of the design.
-        let _ = command;
-        debug!("usage command ignored until project identity is implemented");
+        if !self.spawn(true, move |engine| engine.run_command(&command)) {
+            debug!("usage command dropped: the plugin is stopping");
+        }
     }
 
     fn begin_analysis(&self, start: AnalysisStart) -> Result<AnalysisId, UsageError> {

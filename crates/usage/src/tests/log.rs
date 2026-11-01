@@ -12,12 +12,13 @@ use lectern_services::session::{
     Agent, RateLimitSample, RateWindow, Record, Timestamp, ToolCallId, ToolFinished, ToolKind,
     ToolStarted, ToolStatus, TurnId, UsageKey,
 };
-use lectern_services::usage::{ProjectRef, UsageQuery, Window};
+use lectern_services::usage::{ForgeRepo, ProjectRef, UsageCommand, UsageQuery, Window};
 
 use super::limits::write_statusline;
 use super::plugin::Rig;
 use super::support::*;
-use crate::engine::PACE;
+use crate::engine::{FactsReader, PACE};
+use crate::identity::RepoFacts;
 use crate::testing::FakeSessions;
 
 const CANARY: &str = "c4n4ry-9f1e";
@@ -96,10 +97,36 @@ fn log_canary_never_reaches_a_record() {
             ],
         );
     }
-    let rig = Rig::new(fake, |p| {
-        let key = p.repo(Path::new("/work/app"), Path::new("/work/app/.git"));
-        p.set_open(&key, true);
+    // What identifies the repositories carries the canary too: roots,
+    // remote addresses, the primary remote's name and the platform's ID.
+    // One repository cannot be read at all, with the canary in the error.
+    let facts: FactsReader = Arc::new(|dir, _| {
+        if dir.ends_with("lib/.git") {
+            return Err(lectern_git::GitError::Corrupt(format!("broken {CANARY}")));
+        }
+        Ok(RepoFacts {
+            roots: [format!("root-{CANARY}")].into(),
+            remotes: [format!("github.com/{CANARY}/app")].into(),
+            primary: Some(format!("github.com/{CANARY}/app")),
+            primary_name: Some(CANARY.to_owned()),
+            forge: Some(ForgeRepo {
+                host: format!("host-{CANARY}").into(),
+                id: CANARY.into(),
+            }),
+            unborn: false,
+        })
     });
+    let rig = Rig::with_facts(
+        fake,
+        |p| {
+            for root in ["app", "lib", "other"] {
+                let root = Path::new("/work").join(root);
+                let key = p.repo(&root, &root.join(".git"));
+                p.set_open(&key, true);
+            }
+        },
+        facts,
+    );
     let query = UsageQuery::Project {
         project: ProjectRef::Open(lectern_services::project::ProjectKey::Git {
             common_dir: Path::new("/work/app/.git").into(),
@@ -133,7 +160,40 @@ fn log_canary_never_reaches_a_record() {
         2,
         "both samples came in"
     );
+    // The Usage page's commands: a merge, a refused one and an undo.
+    let all = rig.all();
+    let ids: Vec<_> = all.projects.iter().map(|(p, _)| p.id).collect();
+    assert!(ids.len() >= 3, "the three repositories are listed");
+    rig.usage().command(UsageCommand::Merge {
+        from: ids[0],
+        into: ids[1],
+    });
+    rig.settle();
+    rig.usage().command(UsageCommand::Merge {
+        from: ids[1],
+        into: ids[0],
+    });
+    rig.settle();
+    let merged = rig.all();
+    if let Some(info) = merged.merged.first()
+        && let lectern_services::usage::ProjectStatus::Merged { alias, .. } = info.status
+    {
+        rig.usage().command(UsageCommand::Undo { alias });
+        rig.settle();
+    }
     assert!(!capture.lines().is_empty(), "the run logged something");
+    let logged = capture.lines();
+    for expected in [
+        "project identified",
+        "repository facts could not be read",
+        "project command applied",
+        "project command rejected",
+    ] {
+        assert!(
+            logged.iter().any(|l| l.contains(expected)),
+            "no record says {expected:?}"
+        );
+    }
     assert!(
         capture
             .lines()

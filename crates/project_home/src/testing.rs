@@ -437,6 +437,7 @@ pub(crate) fn project_usage(state: UsageState, total: u64) -> Arc<UsageSnapshot>
             folder: false,
             key: None,
             status: ProjectStatus::Active,
+            confirmed: None,
         },
         window: Window::D7,
         days: Arc::from(Vec::new()),

@@ -60,9 +60,37 @@ fn kind_of(code: i64) -> Option<LimitKind> {
     })
 }
 
-/// Writes `sample` unless the stored one for its key is newer or equal in
-/// every column. Returns whether the table changed.
-pub(crate) fn put(conn: &Connection, sample: &Sample) -> rusqlite::Result<bool> {
+/// A window reset further away than this many window lengths after the
+/// sample is not believable (a damaged file, a clock far off): the sample
+/// is kept without its `resets_at`.
+const MAX_RESET_WINDOWS: i64 = 2;
+
+/// `sample` as it is stored: `sampled_at` is not later than `now_ms` (a
+/// clock set ahead would otherwise make the sample newer than every later
+/// one and block them), and a `resets_at` more than twice the window
+/// length past `sampled_at` is dropped. A sample without a window length
+/// keeps its `resets_at`.
+pub(crate) fn sanitized(sample: &Sample, now_ms: i64) -> Sample {
+    let mut out = sample.clone();
+    out.sampled_at = Timestamp(sample.sampled_at.0.min(now_ms));
+    if let (Some(minutes), Some(resets_at)) = (out.window_minutes, out.resets_at) {
+        let window_ms = i64::from(minutes).saturating_mul(60_000);
+        let limit = out
+            .sampled_at
+            .0
+            .saturating_add(window_ms.saturating_mul(MAX_RESET_WINDOWS));
+        if resets_at.0 > limit {
+            out.resets_at = None;
+        }
+    }
+    out
+}
+
+/// Writes `sample` (as [`sanitized`] at `now_ms`) unless the stored one for
+/// its key is newer or equal in every column. Returns whether the table
+/// changed.
+pub(crate) fn put(conn: &Connection, sample: &Sample, now_ms: i64) -> rusqlite::Result<bool> {
+    let sample = &sanitized(sample, now_ms);
     let changed = conn
         .prepare_cached(
             "INSERT INTO limit_sample
@@ -93,12 +121,13 @@ pub(crate) fn put(conn: &Connection, sample: &Sample) -> rusqlite::Result<bool> 
 }
 
 impl Store {
-    /// Writes samples in one transaction. Returns whether any changed.
-    pub(crate) fn put_samples(&self, samples: &[Sample]) -> Result<bool, StoreError> {
+    /// Writes samples in one transaction (as [`sanitized`] at `now_ms`).
+    /// Returns whether any changed.
+    pub(crate) fn put_samples(&self, samples: &[Sample], now_ms: i64) -> Result<bool, StoreError> {
         self.transaction(|tx| {
             let mut changed = false;
             for sample in samples {
-                changed |= put(tx, sample)?;
+                changed |= put(tx, sample, now_ms)?;
             }
             Ok(changed)
         })

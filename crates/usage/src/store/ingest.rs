@@ -58,6 +58,9 @@ pub(crate) struct Ingest<'a> {
     /// The log file as it was just before the read; kept when the batch
     /// reaches the end, so the next run skips an unchanged file.
     pub(crate) stamp: Option<FileStamp>,
+    /// The current time (Unix milliseconds): a limit sample dated later is
+    /// stored as if taken now.
+    pub(crate) now_ms: i64,
 }
 
 /// A log file's size, modification time and inode: equal stamps mean the
@@ -218,7 +221,8 @@ pub(crate) fn location(conn: &Connection, place: &Place) -> rusqlite::Result<i64
         .query_row(params![kind, path], |r| r.get(0))?;
     if kind == LOCATION_GIT {
         conn.prepare_cached(
-            "INSERT OR IGNORE INTO project (pid, kind, location) VALUES (randomblob(16), ?1, ?2)",
+            "INSERT INTO project (pid, kind, location) SELECT randomblob(16), ?1, ?2
+             WHERE NOT EXISTS (SELECT 1 FROM project WHERE location = ?2)",
         )?
         .execute(params![PROJECT_GIT, id])?;
     }
@@ -488,6 +492,7 @@ fn ingest(
                             resets_at: window.resets_at,
                             sampled_at: sample.at,
                         },
+                        input.now_ms,
                     )?;
                 }
             }

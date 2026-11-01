@@ -5012,6 +5012,7 @@ dependencies = [
  "insta",
  "lectern-executor",
  "lectern-fs-watch",
+ "lectern-git",
  "lectern-kernel",
  "lectern-logging",
  "lectern-services",

@@ -223,6 +223,7 @@ fn info(status: ProjectStatus) -> ProjectInfo {
         folder: false,
         key: Some(project()),
         status,
+        confirmed: None,
     }
 }
 
@@ -322,6 +323,7 @@ fn snapshots() -> Vec<UsageSnapshot> {
                         reason: TemporaryReason::LocalRewrite,
                         candidate: Some(id(1)),
                     },
+                    confirmed: None,
                 },
                 tokens(20),
             ),
@@ -335,10 +337,22 @@ fn snapshots() -> Vec<UsageSnapshot> {
                         into: id(1),
                         alias: AliasId(9),
                     },
+                    confirmed: Some(AliasId(4)),
                 },
                 tokens(0),
             ),
         ]),
+        merged: Arc::from(vec![ProjectInfo {
+            id: id(4),
+            name: text("older"),
+            folder: false,
+            key: None,
+            status: ProjectStatus::Merged {
+                into: id(1),
+                alias: AliasId(10),
+            },
+            confirmed: None,
+        }]),
         other: tokens(7),
         daily,
     };

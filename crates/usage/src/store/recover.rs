@@ -428,10 +428,19 @@ fn copy_table(conn: &Connection, table: &'static str, filter: &str) -> (u64, u64
             hi.ok().flatten().unwrap_or(ROWID_CEILING),
         ),
     };
+    // Only the columns both tables have: a file of an older table version
+    // (the `project` table of version 3 has fewer columns) is copied into
+    // the current tables, the new columns taking their defaults.
+    let columns = match shared_columns(conn, table) {
+        Ok(columns) if !columns.is_empty() => columns.join(", "),
+        // The old table's columns cannot even be read: nothing of it is
+        // copied.
+        _ => return (0, 1),
+    };
     let sql = format!(
-        "INSERT INTO main.{table} SELECT * FROM old.{table} WHERE rowid BETWEEN ?1 AND ?2 AND {filter}"
+        "INSERT INTO main.{table} ({columns}) SELECT {columns} FROM old.{table}
+         WHERE rowid BETWEEN ?1 AND ?2 AND {filter}"
     );
-    // The old table's columns cannot even be read: nothing of it is copied.
     let Ok(mut insert) = conn.prepare(&sql) else {
         return (0, 1);
     };
@@ -459,6 +468,24 @@ fn copy_table(conn: &Connection, table: &'static str, filter: &str) -> (u64, u64
         }
     }
     (copied, lost)
+}
+
+/// The quoted names of the columns `main.<table>` and `old.<table>` both
+/// have, in the order of the current table.
+fn shared_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let names = |schema: &str| -> rusqlite::Result<Vec<String>> {
+        conn.prepare(&format!(
+            "SELECT name FROM pragma_table_info('{table}', '{schema}') ORDER BY cid"
+        ))?
+        .query_map([], |r| r.get(0))?
+        .collect()
+    };
+    let old = names("old")?;
+    Ok(names("main")?
+        .into_iter()
+        .filter(|name| old.contains(name))
+        .map(|name| format!("\"{name}\""))
+        .collect())
 }
 
 /// `meta` is a small table without rowid: the readable rows, minus the
@@ -530,6 +557,16 @@ fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
          WHERE model IS NOT NULL AND model NOT IN (SELECT id FROM intern)")?;
     run("UPDATE session SET agent = -1 WHERE agent NOT IN (SELECT id FROM intern)")?;
     run("DELETE FROM project WHERE location NOT IN (SELECT id FROM location)")?;
+    // Identity rows that point at a project or location that is gone would
+    // point at whatever row takes the ID next.
+    run("DELETE FROM project_fact
+         WHERE project NOT IN (SELECT id FROM project)
+            OR location NOT IN (SELECT id FROM location)")?;
+    run("DELETE FROM alias
+         WHERE src NOT IN (SELECT id FROM project)
+            OR (dst IS NOT NULL AND dst NOT IN (SELECT id FROM project))")?;
+    run("UPDATE project SET candidate = NULL
+         WHERE candidate IS NOT NULL AND candidate NOT IN (SELECT id FROM project)")?;
     run("UPDATE turn SET location = NULL
          WHERE location IS NOT NULL AND location NOT IN (SELECT id FROM location)")?;
     run("UPDATE session_gen SET cwd = NULL

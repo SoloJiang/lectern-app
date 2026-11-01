@@ -10,21 +10,22 @@
 //! go through the same accumulators, so an incremental snapshot is the one a
 //! full compute would give.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
+use std::path::Path;
 use std::sync::Arc;
 
 use lectern_services::project::ProjectKey;
 use lectern_services::session::Agent;
 use lectern_services::usage::{
-    AllUsage, DayTotals, HistoryUsage, LocalDate, ProjectInfo, ProjectStatus, ProjectUsage,
-    SnapshotHeader, Tokens, UsageSnapshot, UsageState, Window,
+    AliasId, AllUsage, DayTotals, HistoryUsage, LocalDate, ProjectInfo, ProjectStatus,
+    ProjectUsage, SnapshotHeader, Tokens, UsageSnapshot, UsageState, Window,
 };
 
 use crate::round::largest_remainder;
 use crate::store::cold::{self, HistoryTotals};
 use crate::store::under;
-use crate::store::{FactDelta, FolderRoot, ProjectRow, Totals};
+use crate::store::{Aliases, FactDelta, FolderRoot, ProjectRow, Totals, temporary_of};
 use crate::window::BUCKET_MS;
 
 /// Agents in a fixed order: Claude Code, Codex, then the others by name.
@@ -116,21 +117,68 @@ fn daily(per_day: &[HashMap<AgentKey, u64>], agents: &[(&AgentKey, &Agent)]) -> 
         .into()
 }
 
-/// `ProjectInfo` of a project row.
-pub(crate) fn info(row: &ProjectRow, open: &[ProjectKey]) -> ProjectInfo {
-    let key = row.key();
-    let name = row.name.clone().unwrap_or_else(|| {
-        row.path
+/// The name a project row shows: the stored one, else the directory name.
+fn display_name(row: &ProjectRow) -> String {
+    match row.name.as_deref() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => row
+            .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
+            .unwrap_or_default(),
+    }
+}
+
+/// `ProjectInfo` of a project row that is not listed (never opened, or
+/// asked for by ID): nothing joins it to another project.
+pub(crate) fn info(row: &ProjectRow, open: &[ProjectKey]) -> ProjectInfo {
+    let key = row.key();
     ProjectInfo {
         id: row.pid,
-        name: name.into(),
+        name: display_name(row).into(),
         folder: row.folder,
         key: open.contains(&key).then_some(key),
         status: ProjectStatus::Active,
+        confirmed: None,
+    }
+}
+
+/// Whose facts a project window counts: the facts of the listed project's
+/// member projects, and of the directories under a folder project's root.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Scope {
+    /// The `project.id`s that are this project.
+    members: HashSet<i64>,
+    /// The directory locations a folder project claims.
+    claimed: HashSet<i64>,
+    /// Every location a member has or claimed: where its facts are.
+    pub(crate) locations: Vec<i64>,
+    /// A delta at a location or project above these is new to the
+    /// computation (a directory that may be claimed, a project made since):
+    /// the snapshot is computed again.
+    pub(crate) max_location: i64,
+    pub(crate) max_project: i64,
+}
+
+impl Scope {
+    /// A project that no other joins and no folder claims around: only its
+    /// own facts, and nothing new can change that.
+    pub(crate) fn single(row: &ProjectRow) -> Scope {
+        Scope {
+            members: HashSet::from([row.id]),
+            claimed: HashSet::new(),
+            locations: vec![row.location],
+            max_location: i64::MAX,
+            max_project: i64::MAX,
+        }
+    }
+
+    fn accepts(&self, location: i64, project: i64) -> bool {
+        if project != 0 {
+            self.members.contains(&project)
+        } else {
+            self.claimed.contains(&location)
+        }
     }
 }
 
@@ -184,8 +232,8 @@ pub(crate) struct ProjectAcc {
     project: ProjectInfo,
     window: Window,
     days: Vec<(LocalDate, Range<i64>)>,
-    /// The locations whose facts count here.
-    locations: Vec<i64>,
+    /// Whose facts count here.
+    scope: Scope,
     agents: BTreeMap<AgentKey, AgentAcc>,
     models: BTreeMap<(AgentKey, String), ModelAcc>,
     per_day: Vec<HashMap<AgentKey, u64>>,
@@ -196,13 +244,13 @@ impl ProjectAcc {
         project: ProjectInfo,
         window: Window,
         days: &[(LocalDate, Range<i64>)],
-        locations: Vec<i64>,
+        scope: Scope,
     ) -> ProjectAcc {
         ProjectAcc {
             project,
             window,
             days: days.to_vec(),
-            locations,
+            scope,
             agents: BTreeMap::new(),
             models: BTreeMap::new(),
             per_day: vec![HashMap::new(); days.len()],
@@ -269,13 +317,16 @@ pub(crate) fn project(
     days: &[(LocalDate, Range<i64>)],
     totals: &Totals,
 ) -> ProjectUsage {
-    let mut acc = ProjectAcc::new(project, window, days, Vec::new());
+    let mut acc = ProjectAcc::new(project, window, days, Scope::default());
     fill_project(&mut acc, totals);
     acc.snapshot(header)
 }
 
 fn fill_project(acc: &mut ProjectAcc, totals: &Totals) {
     for s in &totals.sums {
+        if !acc.scope.accepts(s.location, s.project) {
+            continue;
+        }
         let agent = agent_text(&totals.texts, s.agent);
         let model = model_text(&totals.texts, s.model);
         acc.add(s.bucket, &agent, &model, &signed(&s.micro), s.rows as i64);
@@ -329,78 +380,221 @@ pub(crate) enum Owner {
     Other,
 }
 
-/// The owner of each location: a repository's own project when it was
-/// opened; for a directory, the deepest opened folder project whose root
-/// contains it (docs/design/usage.md「项目标识」).
+/// A project as the Usage page lists it: the final project of a group of
+/// projects (those the alias records join to it). The group is listed when
+/// any of its projects was opened.
+#[derive(Clone, Debug)]
+pub(crate) struct Listed {
+    pub(crate) row: ProjectRow,
+    name: String,
+    /// The keys of the group's projects: the project is open when one is.
+    keys: Vec<ProjectKey>,
+    status: ProjectStatus,
+    confirmed: Option<AliasId>,
+}
+
+/// Whose usage each fact is (docs/design/usage.md「项目标识」): a fact that
+/// belongs to a project is the listed project that project finally is (an
+/// unopened repository's, 「其他」); a fact in a directory under a folder
+/// project's root is the deepest opened folder project's.
 #[derive(Clone, Debug)]
 pub(crate) struct Owners {
-    pub(crate) listed: Vec<ProjectRow>,
-    by_location: HashMap<i64, Owner>,
-    /// The largest location ID these owners know.
+    pub(crate) listed: Vec<Listed>,
+    /// `project.id` to the listed project it finally is.
+    by_project: HashMap<i64, usize>,
+    /// Directory location to the folder project that claims it.
+    by_dir: HashMap<i64, usize>,
+    /// The location each project has.
+    place_of: HashMap<i64, i64>,
+    /// The projects the user joined to another and has not undone, newest
+    /// first (`AllUsage::merged`).
+    pub(crate) merged: Vec<ProjectInfo>,
+    /// The largest location and project IDs these owners know.
     pub(crate) max_location: i64,
+    pub(crate) max_project: i64,
 }
 
 impl Owners {
-    pub(crate) fn new(projects: &[ProjectRow], dirs: &[(i64, Vec<u8>)]) -> Owners {
-        let listed: Vec<ProjectRow> = projects.iter().filter(|p| p.opened).cloned().collect();
-        let mut by_location = HashMap::new();
-        let roots: Vec<FolderRoot> = listed
+    /// `exists` says whether a project's path still holds anything.
+    pub(crate) fn new(
+        projects: &[ProjectRow],
+        dirs: &[(i64, Vec<u8>)],
+        aliases: &Aliases,
+        exists: &dyn Fn(&Path) -> bool,
+    ) -> Owners {
+        let final_of: HashMap<i64, i64> = projects
             .iter()
-            .filter(|p| p.folder)
+            .map(|p| (p.id, aliases.final_of(p.id)))
+            .collect();
+        let row_of: HashMap<i64, &ProjectRow> = projects.iter().map(|p| (p.id, p)).collect();
+        let mut groups: BTreeMap<i64, Vec<&ProjectRow>> = BTreeMap::new();
+        for p in projects {
+            groups.entry(final_of[&p.id]).or_default().push(p);
+        }
+        // The project that has each location now: the latest.
+        let mut latest_at: HashMap<i64, i64> = HashMap::new();
+        let mut by_age: Vec<&ProjectRow> = projects.iter().collect();
+        by_age.sort_by_key(|p| (p.since, p.id));
+        for p in by_age {
+            latest_at.insert(p.location, p.id);
+        }
+
+        let mut listed = Vec::new();
+        let mut by_project = HashMap::new();
+        for (final_id, members) in &groups {
+            if !members.iter().any(|m| m.opened) {
+                continue;
+            }
+            let Some(&row) = row_of.get(final_id) else {
+                continue;
+            };
+            let index = listed.len();
+            for m in members {
+                by_project.insert(m.id, index);
+            }
+            // The newest opened member names the project: a repository that
+            // moved shows the new directory's name.
+            let newest = members
+                .iter()
+                .filter(|m| m.opened)
+                .max_by_key(|m| (m.since, m.id))
+                .copied()
+                .unwrap_or(row);
+            let present = members
+                .iter()
+                .any(|m| exists(&m.path) && latest_at.get(&m.location) == Some(&m.id));
+            let status = match temporary_of(row, aliases) {
+                Some(temp) => ProjectStatus::Temporary {
+                    reason: temp.reason,
+                    candidate: temp
+                        .candidate
+                        .map(|c| final_of.get(&c).copied().unwrap_or(c))
+                        .and_then(|c| row_of.get(&c))
+                        .map(|c| c.pid),
+                },
+                None if !present => ProjectStatus::PathMissing,
+                None => ProjectStatus::Active,
+            };
+            listed.push(Listed {
+                row: row.clone(),
+                name: display_name(newest),
+                keys: members.iter().map(|m| m.key()).collect(),
+                status,
+                confirmed: aliases.confirmed(row.id).map(|id| AliasId(id as u64)),
+            });
+        }
+
+        let roots: Vec<FolderRoot> = projects
+            .iter()
+            .filter(|p| p.folder && p.opened)
             .map(|p| FolderRoot {
                 project: p.id,
                 path: crate::store::path_bytes(&p.path).to_vec(),
             })
             .collect();
-        for (i, p) in listed.iter().enumerate() {
-            if !p.folder {
-                by_location.insert(p.location, Owner::Project(i));
-            }
-        }
+        let mut by_dir = HashMap::new();
         for (id, path) in dirs {
             let claim = roots
                 .iter()
                 .filter(|r| under(path, &r.path))
                 .max_by_key(|r| r.path.len());
             if let Some(root) = claim
-                && let Some(i) = listed.iter().position(|p| p.id == root.project)
+                && let Some(&index) = by_project.get(&root.project)
             {
-                by_location.insert(*id, Owner::Project(i));
+                by_dir.insert(*id, index);
             }
         }
+
+        let merged = aliases
+            .user_joins()
+            .into_iter()
+            .filter_map(|record| {
+                let src = row_of.get(&record.src)?;
+                let into = row_of.get(&final_of.get(&record.dst?).copied()?)?;
+                Some(ProjectInfo {
+                    id: src.pid,
+                    name: display_name(src).into(),
+                    folder: src.folder,
+                    key: None,
+                    status: ProjectStatus::Merged {
+                        into: into.pid,
+                        alias: AliasId(record.id as u64),
+                    },
+                    confirmed: None,
+                })
+            })
+            .collect();
+
         let max_location = projects
             .iter()
             .map(|p| p.location)
             .chain(dirs.iter().map(|(id, _)| *id))
             .max()
             .unwrap_or(0);
+        let max_project = projects.iter().map(|p| p.id).max().unwrap_or(0);
         Owners {
             listed,
-            by_location,
+            by_project,
+            by_dir,
+            place_of: projects.iter().map(|p| (p.id, p.location)).collect(),
+            merged,
             max_location,
+            max_project,
         }
     }
 
-    pub(crate) fn owner(&self, location: i64) -> Owner {
-        self.by_location
-            .get(&location)
-            .copied()
-            .unwrap_or(Owner::Other)
+    /// Whose a fact is: its project's, else its directory's.
+    pub(crate) fn owner(&self, location: i64, project: i64) -> Owner {
+        let found = if project != 0 {
+            self.by_project.get(&project)
+        } else {
+            self.by_dir.get(&location)
+        };
+        found.map_or(Owner::Other, |&i| Owner::Project(i))
     }
 
-    /// The locations a listed project owns.
-    pub(crate) fn locations_of(&self, project: i64) -> Vec<i64> {
-        let Some(i) = self.listed.iter().position(|p| p.id == project) else {
-            return Vec::new();
+    /// The listed project a project row is, if its group is listed.
+    pub(crate) fn listing_of(&self, project: i64) -> Option<usize> {
+        self.by_project.get(&project).copied()
+    }
+
+    /// The `ProjectInfo` of listed project `index`; `open` are the projects
+    /// open in this run.
+    pub(crate) fn info(&self, index: usize, open: &[ProjectKey]) -> ProjectInfo {
+        let l = &self.listed[index];
+        ProjectInfo {
+            id: l.row.pid,
+            name: l.name.clone().into(),
+            folder: l.row.folder,
+            key: l.keys.iter().find(|k| open.contains(k)).cloned(),
+            status: l.status,
+            confirmed: l.confirmed,
+        }
+    }
+
+    /// What listed project `index` counts.
+    pub(crate) fn scope(&self, index: usize) -> Scope {
+        let mut scope = Scope {
+            max_location: self.max_location,
+            max_project: self.max_project,
+            ..Scope::default()
         };
-        let mut out: Vec<i64> = self
-            .by_location
-            .iter()
-            .filter(|(_, o)| **o == Owner::Project(i))
-            .map(|(l, _)| *l)
-            .collect();
-        out.sort_unstable();
-        out
+        let mut locations = HashSet::new();
+        for (project, &i) in &self.by_project {
+            if i == index {
+                scope.members.insert(*project);
+                locations.extend(self.place_of.get(project));
+            }
+        }
+        for (dir, &i) in &self.by_dir {
+            if i == index {
+                scope.claimed.insert(*dir);
+                locations.insert(*dir);
+            }
+        }
+        scope.locations = locations.into_iter().collect();
+        scope.locations.sort_unstable();
+        scope
     }
 }
 
@@ -437,12 +631,19 @@ impl AllAcc {
         }
     }
 
-    fn add(&mut self, location: i64, bucket: i64, agent: &Agent, micro: &[i64; 4], rows: i64) {
+    fn add(
+        &mut self,
+        (location, project): (i64, i64),
+        bucket: i64,
+        agent: &Agent,
+        micro: &[i64; 4],
+        rows: i64,
+    ) {
         let Some(d) = day_of(&self.days, bucket) else {
             return;
         };
         let n = self.owners.listed.len();
-        let row = match self.owners.owner(location) {
+        let row = match self.owners.owner(location, project) {
             Owner::Project(i) => i,
             Owner::Other => n,
         };
@@ -457,12 +658,9 @@ impl AllAcc {
         let n = self.owners.listed.len();
         let rounded = round_rows(&self.rows);
         let total = total_of(&rounded);
-        let mut projects: Vec<(ProjectInfo, Tokens)> = self
-            .owners
-            .listed
-            .iter()
+        let mut projects: Vec<(ProjectInfo, Tokens)> = (0..n)
             .zip(&rounded)
-            .map(|(p, t)| (info(p, &self.open), *t))
+            .map(|(i, t)| (self.owners.info(i, &self.open), *t))
             .collect();
         projects.sort_by(|a, b| {
             b.1.total()
@@ -476,6 +674,7 @@ impl AllAcc {
             days: self.days.iter().map(|(d, _)| *d).collect::<Vec<_>>().into(),
             total,
             projects: projects.into(),
+            merged: self.owners.merged.clone().into(),
             other: rounded[n],
             daily: daily(&self.per_day, &agents),
         }
@@ -500,7 +699,7 @@ fn fill_all(acc: &mut AllAcc, totals: &Totals) {
     for s in &totals.sums {
         let agent = agent_text(&totals.texts, s.agent);
         acc.add(
-            s.location,
+            (s.location, s.project),
             s.bucket,
             &agent,
             &signed(&s.micro),
@@ -523,9 +722,11 @@ pub(crate) struct Watched {
     texts: HashMap<i64, Vec<u8>>,
     /// The ingest commits the accumulators include.
     commits: i64,
-    /// A delta at a location above this needs a full compute (it may be
-    /// a new directory under an open folder project).
+    /// A delta at a location or project above these needs a full compute
+    /// (it may be a new directory under an open folder project, or a
+    /// project made since).
     max_location: i64,
+    max_project: i64,
     may_include_inherited: bool,
 }
 
@@ -540,24 +741,24 @@ pub(crate) enum Applied {
 }
 
 impl Watched {
-    /// A project's window from its full sums. `locations` are the ones its
-    /// facts count from; `max_location` the largest ID the computation knew
-    /// (`i64::MAX` when new locations cannot matter).
+    /// A project's window from its full sums; `scope` says whose facts
+    /// count and how far the computation knew the IDs.
     pub(crate) fn project(
         project: ProjectInfo,
         window: Window,
         days: &[(LocalDate, Range<i64>)],
-        locations: Vec<i64>,
-        max_location: i64,
+        scope: Scope,
         totals: &Totals,
     ) -> Watched {
-        let mut acc = ProjectAcc::new(project, window, days, locations);
+        let (max_location, max_project) = (scope.max_location, scope.max_project);
+        let mut acc = ProjectAcc::new(project, window, days, scope);
         fill_project(&mut acc, totals);
         Watched {
             acc: Acc::Project(acc),
             texts: totals.texts.clone(),
             commits: totals.commits,
             max_location,
+            max_project,
             may_include_inherited: totals.may_include_inherited,
         }
     }
@@ -570,7 +771,7 @@ impl Watched {
         open: &[ProjectKey],
         totals: &Totals,
     ) -> Watched {
-        let max_location = owners.max_location;
+        let (max_location, max_project) = (owners.max_location, owners.max_project);
         let mut acc = AllAcc::new(window, days, owners, open);
         fill_all(&mut acc, totals);
         Watched {
@@ -578,6 +779,7 @@ impl Watched {
             texts: totals.texts.clone(),
             commits: totals.commits,
             max_location,
+            max_project,
             may_include_inherited: totals.may_include_inherited,
         }
     }
@@ -613,26 +815,33 @@ impl Watched {
         if commit <= self.commits {
             return Applied::Unchanged;
         }
-        if commit != self.commits + 1 || deltas.iter().any(|d| d.location > self.max_location) {
+        if commit != self.commits + 1
+            || deltas
+                .iter()
+                .any(|d| d.location > self.max_location || d.project > self.max_project)
+        {
             return Applied::Recompute;
         }
         self.commits = commit;
         let mut changed = false;
         match &mut self.acc {
             Acc::Project(acc) => {
-                let locations = std::mem::take(&mut acc.locations);
-                for d in deltas.iter().filter(|d| locations.contains(&d.location)) {
+                let scope = std::mem::take(&mut acc.scope);
+                for d in deltas
+                    .iter()
+                    .filter(|d| scope.accepts(d.location, d.project))
+                {
                     let agent = agent_text(&self.texts, d.agent);
                     let model = model_text(&self.texts, d.model);
                     acc.add(d.bucket, &agent, &model, &d.micro, d.rows);
                     changed = true;
                 }
-                acc.locations = locations;
+                acc.scope = scope;
             }
             Acc::All(acc) => {
                 for d in deltas {
                     let agent = agent_text(&self.texts, d.agent);
-                    acc.add(d.location, d.bucket, &agent, &d.micro, d.rows);
+                    acc.add((d.location, d.project), d.bucket, &agent, &d.micro, d.rows);
                     changed = true;
                 }
             }
