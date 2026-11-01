@@ -19,7 +19,8 @@ use lectern_logging::{Field, Value};
 use lectern_project::{ProjectDeps, ProjectPlugin};
 use lectern_project_home::{
     PLUGIN_ID as PROJECT_HOME_ID, ProjectHomeDeps, ProjectHomePlugin, ProjectHomeUsagePlugin,
-    USAGE_PLUGIN_ID as PROJECT_HOME_USAGE_ID, UsageSlot,
+    ProjectHomeWaitingPlugin, USAGE_PLUGIN_ID as PROJECT_HOME_USAGE_ID, UsageSlot,
+    WAITING_PLUGIN_ID as PROJECT_HOME_WAITING_ID, WaitingSlot,
 };
 use lectern_review::ReviewDeps;
 use lectern_review_view::PLUGIN_ID as REVIEW_VIEW_ID;
@@ -94,9 +95,10 @@ impl Profile {
 
     /// Desktop: `project`, the two session sources, `review`, `usage`,
     /// `workspace`, `welcome`, `welcome-discovery`, `welcome-review`,
-    /// `project-home`, `project-home-usage`, `review-view`, `worktrees`,
-    /// `worktrees-usage`, `terminal`, `conversations`, `conversation`,
-    /// `conversation-live` and `conversation-terminal`
+    /// `project-home`, `project-home-usage`, `project-home-waiting`,
+    /// `review-view`, `worktrees`, `worktrees-usage`, `terminal`,
+    /// `conversations`, `conversation`, `conversation-live` and
+    /// `conversation-terminal`
     /// (docs/design/app.md「插件与资源」).
     /// Test: none. With the number of plugins, for the log (`PluginSet` does
     /// not expose it). No IO.
@@ -146,6 +148,9 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
     // One cell for the two project-home plugins: `dyn Usage` may be absent,
     // so the interest in the project's usage is reconciled in it.
     let slot = UsageSlot::default();
+    // And one for the sessions that wait for the user: `dyn Conversations` may
+    // be absent too (docs/design/app.md「project_home 的等待标记」).
+    let waiting = WaitingSlot::default();
     // The window skeleton. Its Welcome screen comes from `welcome`;
     // `project-home` registers no screen until its views are merged.
     let mut set = set
@@ -169,11 +174,16 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
             ProjectHomePlugin::new(ProjectHomeDeps {
                 executor: r.executor.clone(),
                 usage: slot.clone(),
+                waiting: waiting.clone(),
             }),
         )
         .with(
             PROJECT_HOME_USAGE_ID,
             ProjectHomeUsagePlugin::new(r.executor.clone(), slot),
+        )
+        .with(
+            PROJECT_HOME_WAITING_ID,
+            ProjectHomeWaitingPlugin::new(waiting),
         );
     // The review screen. Its second plugin, "review-view-handoff", requires
     // `dyn Reader` and `dyn CodeIntel`, which no assembled plugin provides
@@ -220,7 +230,7 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
         .with(CONVERSATION_ID, page)
         .with(CONVERSATION_LIVE_ID, live)
         .with(CONVERSATION_TERMINAL_ID, terminal_page);
-    (set, count + 13)
+    (set, count + 14)
 }
 
 /// `usage`'s local time zone: `platform::time::utc_offset`

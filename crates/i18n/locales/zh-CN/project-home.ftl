@@ -13,6 +13,8 @@ project-home-views = 项目
 project-home-untitled-session = 未命名会话
 # 运行中的会话行尾绿点的无障碍名称。
 project-home-running = 运行中
+# 会话有权限请求在等用户确认时，会话行尾橙点的无障碍名称。
+project-home-waiting = 等你处理
 project-home-packages = 包
 # 子项目行尾数字的无障碍名称和提示。
 project-home-changed-today = 今天 { $count }

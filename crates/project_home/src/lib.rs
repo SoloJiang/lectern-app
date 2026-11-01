@@ -16,6 +16,11 @@
 //! sidebar panel), the actions and key bindings, and the contributions the
 //! plugin registers with `dyn Contributions`.
 //!
+//! The waiting marks (prerequisite H of docs/design/conversation.md):
+//! [`ProjectHomeWaitingPlugin`] ("project-home-waiting") and [`WaitingSlot`] put
+//! the optional `dyn Conversations` into a cell; the views read the sessions
+//! that wait for the user from it and redraw on `WaitingChanged`.
+//!
 //! No code here runs before the first frame or does IO; the views read the
 //! snapshot and send `WorkspaceCommand`s.
 
@@ -32,6 +37,7 @@ mod screen;
 mod sidebar;
 pub mod snapshot;
 mod usage_slot;
+mod waiting_slot;
 
 #[cfg(test)]
 mod testing;
@@ -43,9 +49,11 @@ pub use actions::{
 };
 pub use home::Home;
 pub use plugin::{
-    PLUGIN_ID, ProjectHomeDeps, ProjectHomePlugin, ProjectHomeUsagePlugin, USAGE_PLUGIN_ID,
+    PLUGIN_ID, ProjectHomeDeps, ProjectHomePlugin, ProjectHomeUsagePlugin,
+    ProjectHomeWaitingPlugin, USAGE_PLUGIN_ID, WAITING_PLUGIN_ID,
 };
 pub use screen::HomeScreen;
 pub use sidebar::HomeSidebar;
 pub use snapshot::HomeSnapshot;
 pub use usage_slot::UsageSlot;
+pub use waiting_slot::WaitingSlot;

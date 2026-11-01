@@ -2,11 +2,11 @@
 
 项目主页与项目侧栏：Overview（Needs Review、Outside Any Session、Recently Done）、Sessions、Packages，底部 Usage 额度条。
 
-- 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "project-home"（依赖 `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions`）和 "project-home-usage"（依赖 `dyn Usage`），都是 `AfterFirstFrame`。只依赖 kernel 层和非插件的库 crate（`ui`、`i18n`、`executor`、`logging`），不依赖 `project`、`agents`、`review`、`usage`、`workspace` 这些插件 crate（dev-dependency 也不行，架构检查第 6 条）；只有 `app` 依赖本 crate。
+- 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "project-home"（依赖 `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions`）、"project-home-usage"（依赖 `dyn Usage`）和 "project-home-waiting"（依赖 `dyn Conversations`），都是 `AfterFirstFrame`。只依赖 kernel 层和非插件的库 crate（`ui`、`i18n`、`executor`、`logging`），不依赖 `project`、`agents`、`review`、`usage`、`workspace` 这些插件 crate（dev-dependency 也不行，架构检查第 6 条）；只有 `app` 依赖本 crate。
 - 设计文档：[docs/design/project_home.md](../../docs/design/project_home.md)
 - issue：[#30](https://github.com/SoloJiang/lectern-app/issues/30)
 - ADR：[0012](../../docs/adr/0012.md)、[0022](../../docs/adr/0022.md)、[0025](../../docs/adr/0025.md)、[0046](../../docs/adr/0046.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`snapshot`（`HomeSnapshot` 与纯函数 `snapshot::build`）、`Home`（插件状态与合成任务）、`ProjectHomePlugin`、`ProjectHomeUsagePlugin`、`UsageSlot`。第 2 步已实现，依赖 GPUI：`HomeScreen`（主区）、`HomeSidebar`（侧栏面板）、`actions`（Action 与快捷键）、`contribute`（`activate` 里登记的四项贡献）、`nodes`（探针 ID）、`present`（行里的文字）。`app` 已装配两个插件（[#247](https://github.com/SoloJiang/lectern-app/pull/247)）。第 3 步已实现：`Overview.packages` 已接入（[#239](https://github.com/SoloJiang/lectern-app/pull/239)），`app/open_project`、`app/idle_monorepo`、`app/idle_100k`、`project_home/build_1000` 是生效的基准；`app/home_frames`、`project_home/resident_bytes` 仍是计划中（设计文档「与设计的差异」第 3 步）。
+- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`snapshot`（`HomeSnapshot` 与纯函数 `snapshot::build`）、`Home`（插件状态与合成任务）、`ProjectHomePlugin`、`ProjectHomeUsagePlugin`、`UsageSlot`。第 2 步已实现，依赖 GPUI：`HomeScreen`（主区）、`HomeSidebar`（侧栏面板）、`actions`（Action 与快捷键）、`contribute`（`activate` 里登记的四项贡献）、`nodes`（探针 ID）、`present`（行里的文字）。`app` 已装配两个插件（[#247](https://github.com/SoloJiang/lectern-app/pull/247)）。第 3 步已实现：`Overview.packages` 已接入（[#239](https://github.com/SoloJiang/lectern-app/pull/239)），`app/open_project`、`app/idle_monorepo`、`app/idle_100k`、`project_home/build_1000` 是生效的基准；`app/home_frames`、`project_home/resident_bytes` 仍是计划中（设计文档「与设计的差异」第 3 步）。第 4 步已实现：会话行与卡片的等待标记（[conversation 设计](../../docs/design/conversation.md#对其他-crate-的要求)的 H）：`ProjectHomeWaitingPlugin`、`WaitingSlot`、`Home::waiting()`，`app` 装配第三个插件，共 20 个。
 
 ## 模块
 
@@ -14,7 +14,7 @@
 |---|---|
 | `snapshot.rs`、`snapshot/` | `HomeSnapshot` 与 `build`（纯函数，不依赖视图）；`NodeId` 随快照建一次 |
 | `home.rs` | `Home`：插件状态、合成任务、视图的唤醒通道（`attach_view`）、经 `Contributions` 的 `dispatch` / `sidebar_entries` / 里程碑 |
-| `plugin.rs`、`usage_slot.rs` | 两个插件与共用的 `UsageSlot` |
+| `plugin.rs`、`usage_slot.rs`、`waiting_slot.rs` | 三个插件与两个共用的格子：`UsageSlot`（`dyn Usage` 与对账）、`WaitingSlot`（`dyn Conversations`，读 `waiting()`，变化只唤醒视图） |
 | `contribute.rs` | `Screen`、`SidebarPanel`、`SidebarEntry("overview")`、`KeyBindings` 的载荷与登记 |
 | `screen.rs` | `HomeScreen`：大标题与说明、三个 `GroupedList`（Needs Review 的卡片、Outside 卡片、Recently Done 的行）、选中项、Needs Review 进度环的 `Transition`、等待概览的占位、滚动到可见 |
 | `sidebar.rs` | `HomeSidebar`：一个 `uniform_list` 装 `Project` 条目、快照的行（会话混排只列最近 3 个，其余折成「N more」，折叠是视图的状态）、`Views` 小标题和条目，行是 `ui::SidebarRow::compact()`；底部固定 `Bottom` 条目（Usage 卡片） |
@@ -23,7 +23,7 @@
 
 ## 视图的规则
 
-- 视图只读 `Home::snapshot()` 的 `Arc` 并发 `WorkspaceCommand`（经 `Home::dispatch`），不做 IO、不调阻塞的服务方法。`Home` 在快照、条目或当前屏幕变化时唤醒视图（`attach_view` 的通道，消息不带内容），视图自己重读。
+- 视图只读 `Home::snapshot()` 的 `Arc`、`Home::waiting()`（等待用户确认的会话，取锁复制 `Arc`；建好时和每次被唤醒时各读一次存着，画行时不调服务）并发 `WorkspaceCommand`（经 `Home::dispatch`），不做 IO、不调阻塞的服务方法。`Home` 在快照、条目或当前屏幕变化时唤醒视图（`attach_view` 的通道，消息不带内容），视图自己重读。
 - 不写颜色值、字体名和动画时长：颜色与字体经 `lectern_ui::colors` / `TextRole`，动画用 `motion` 里的常量（`PROGRESS`、`HOVER_IN`、`LOADING_SKELETON_AT` 等）。`Duration::from_millis` 也不出现（验收的 `rg`）。
 - 界面字符串只经 `keys::project_home::*`；会话标题、分支名、子项目名、agent 名用 `Text::verbatim` 或 `Args::str`。
 - `NodeId` 的键来自文件和路径，一律先过 `nodes::safe`（换行和 `].` 会让 `NodeId` 在调试构建里 panic）。
@@ -48,10 +48,11 @@ just test -p lectern-project-home
 
 - 本 crate 依赖 `gpui` 与 `lectern-ui`，只在 macOS 上编译和测试（Linux 的 `just` 命令按依赖图自动排除它），结果以 macOS CI 为准。`snapshot::build` 与插件的测试仍是普通 `#[test]`，不开窗口。
 - `src/tests/build.rs`：`snapshot::build` 的分类规则，`HomeSnapshot` 渲染成文本（`snapshot/render.rs`）做 insta 快照（`src/tests/snapshots/`）；快照改动要在 PR 里逐个看过，更新用 `INSTA_UPDATE=always just test -p lectern-project-home`，之后 `git diff` 检查。
-- `src/tests/plugin.rs`：两个插件在真实的 kernel 里（`Kernel::start`，假服务由 `testing::Provide` 提供，被测插件用 `Manual` 包一层，由测试决定激活顺序），`Executor::manual()` 在测试说跑的时候才跑合成任务；事件由测试经 `Kernel::emitter()` 同步发出。
+- `src/tests/plugin.rs`：三个插件在真实的 kernel 里（`Kernel::start`，假服务由 `testing::Provide` 提供，被测插件用 `Manual` 包一层，由测试决定激活顺序），`Executor::manual()` 在测试说跑的时候才跑合成任务；事件由测试经 `Kernel::emitter()` 同步发出。
 - `src/tests/logs.rs`：金丝雀测试 `canary_stays_out_of_home_logs`，`lectern_logging::testing::capture()`。
-- 假服务在 `src/testing.rs`（`FakeProjects`、`FakeSessions`、`FakeReview`、`FakeUsage`、`FakeContributions`），不依赖 `review`、`usage` 等插件 crate 的 `test-support`；本 crate 不得调用的方法（`read`、`turns`、`load`、`resolve` 等）一律 `unreachable!`。
+- 假服务在 `src/testing.rs`（`FakeProjects`、`FakeSessions`、`FakeReview`、`FakeUsage`、`FakeConversations`、`FakeContributions`），不依赖 `review`、`usage` 等插件 crate 的 `test-support`；本 crate 不得调用的方法（`read`、`turns`、`load`、`resolve` 等）一律 `unreachable!`。
 - `src/tests/stage.rs`：视图的 GPUI 台架。`rig(cx)` 做 `init_fixed`、`allow_parking`（kernel 线程会唤醒视图的前台任务）并建 `Rig`；`standard(&rig)` 是有六个会话的夹具；`window(cx, &rig)` 用插件登记的 `Screen` / `SidebarPanel` 工厂建两个视图（侧栏在 248pt 的 `Sidebar` 区，主区在 `Content` 区的 760pt 栏里），绑定登记的键绑定（谓词必须能被 GPUI 解析）；`tree(vcx, …)` 在 `ui::semantic::Recorder` 下画一帧，输出紧凑的语义树文本（没有 `bounds` 和 `declared_at`）；`click(vcx, id)` 点节点的中心。
 - `src/tests/views.rs`：`#[gpui::test]` 的行为测试（按键、点击、跟随服务、占位、滚动、里程碑）。`src/tests/tree.rs`：三份语义树的 insta 快照（`src/tests/snapshots/`，更新用 `INSTA_UPDATE=always just test -p lectern-project-home`，之后用 `git diff` 逐个看）。`src/tests/present.rs`：行里的文字（文字不在语义树里）。记录器的开关是进程级的，要用 nextest（`just test` 就是）。
 - 可交互元素带稳定 ID（`视图.区域.条目[业务键]`）；语义树里 `Row` 和 `SidebarRow` 自己的节点只有 `selected`，行的事实（agent、进度、信号、运行中、标签）在行内容的 `….facts` 节点上。
+- 等待标记的测试：插件测试里 `FakeConversations::set_waiting` 设定 `waiting()`、`Rig::set_waiting` 同时发 `ConversationEvent::WaitingChanged`，`Rig::activate_waiting` / `deactivate_waiting` 激活与停用 "project-home-waiting"（`Manual` 包一层）；视图测试和语义树快照（`trees_with_waiting_sessions`）在 `standard(&rig)` 之后 `rig.activate_waiting()`。`WaitingChanged` 只唤醒视图、不重建快照，`a_change_of_who_waits_wakes_the_views_and_does_not_recompose` 守着。
 - 视图只读领域层提供的快照。测试里直接构造快照，不使用真实的 git、会话扫描或文件 IO。

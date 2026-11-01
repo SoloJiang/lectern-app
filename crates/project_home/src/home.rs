@@ -28,6 +28,7 @@ use lectern_services::workspace::{
 use crate::diag::{count, session};
 use crate::snapshot::{self, HomeSnapshot, Inputs, UsageInputs};
 use crate::usage_slot::UsageSlot;
+use crate::waiting_slot::WaitingSlot;
 
 /// The time of day, injected so that the tests fix it.
 pub(crate) type Wall = Arc<dyn Fn() -> Timestamp + Send + Sync>;
@@ -40,6 +41,7 @@ pub(crate) struct Parts {
     pub review: ServiceRef<dyn Review>,
     pub contributions: ServiceRef<dyn Contributions>,
     pub usage: UsageSlot,
+    pub waiting: WaitingSlot,
     pub wall: Wall,
 }
 
@@ -52,6 +54,7 @@ pub struct Home {
     review: ServiceRef<dyn Review>,
     contributions: ServiceRef<dyn Contributions>,
     usage: UsageSlot,
+    waiting: WaitingSlot,
     wall: Wall,
     state: Mutex<State>,
     /// The wake-up channels of the views that are built (「数据结构」). A
@@ -110,6 +113,7 @@ impl Home {
             review: parts.review,
             contributions: parts.contributions,
             usage: parts.usage,
+            waiting: parts.waiting,
             wall: parts.wall,
             state: Mutex::new(State::default()),
             views: Mutex::new(Vec::new()),
@@ -159,6 +163,14 @@ impl Home {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .len()
+    }
+
+    /// The sessions whose permission request waits for the user (empty without
+    /// `dyn Conversations`). The marks are drawn from it, not from the
+    /// snapshot, so a change redraws the views and does not recompose. A lock
+    /// and an `Arc` copy; main thread.
+    pub fn waiting(&self) -> Arc<[SessionKey]> {
+        self.waiting.waiting()
     }
 
     /// Whether the window shows the project home (the Overview entry of the
@@ -245,6 +257,14 @@ impl Home {
         self.usage.set_on_change(Arc::new(move || {
             if let Some(home) = weak.upgrade() {
                 home.request_rebuild();
+            }
+        }));
+        // A change of who waits only wakes the views; the snapshot is not
+        // composed again.
+        let weak = Arc::downgrade(self);
+        self.waiting.set_on_change(Arc::new(move || {
+            if let Some(home) = weak.upgrade() {
+                home.wake();
             }
         }));
         let open = self

@@ -100,6 +100,9 @@ pub struct HomeScreen {
     /// ring goes from its old value to the new one.
     rings: HashMap<SessionKey, Transition>,
     waiting: Option<Waiting>,
+    /// The sessions that wait for the user, as of the last wake-up
+    /// (`Home::waiting`): their cards say so on the first line.
+    asking: Arc<[SessionKey]>,
     /// Where each item was painted in the last frame (window coordinates).
     bounds: Rc<RefCell<HashMap<Pick, Bounds<Pixels>>>>,
     _wake: Task<()>,
@@ -121,6 +124,7 @@ impl HomeScreen {
         });
         let mut screen = HomeScreen {
             snapshot: home.snapshot(),
+            asking: home.waiting(),
             home,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
@@ -135,8 +139,14 @@ impl HomeScreen {
         screen
     }
 
-    /// The snapshot changed (or the project closed): swap it in.
+    /// The snapshot changed (or the project closed), or the set of sessions
+    /// that wait for the user did: swap it in.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        let asking = self.home.waiting();
+        let asking_changed = *asking != *self.asking;
+        if asking_changed {
+            self.asking = asking;
+        }
         let next = self.home.snapshot();
         let same = match (&self.snapshot, &next) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -144,6 +154,9 @@ impl HomeScreen {
             _ => false,
         };
         if same {
+            if asking_changed {
+                cx.notify();
+            }
             return;
         }
         self.snapshot = next;
@@ -325,17 +338,24 @@ impl HomeScreen {
         });
 
         let title = present::title(strings, &card.session);
-        let meta = present::meta(strings, card, now);
+        let waiting = self.asking.contains(&key);
+        let meta = present::meta(strings, card, now, waiting);
         let signals = present::signals(strings, &card.signals);
 
         let mut text = StyledText::new(meta.text);
         if let Some((range, status)) = meta.status {
-            // Running and waiting are the system green; ended stays grey.
-            if status != SessionStatus::Ended {
+            // Running is the system green, waiting for the user the system
+            // orange (as the dot in the sidebar); ended stays grey.
+            let color = match status {
+                SessionStatus::Running => Some(SystemColor::Green),
+                SessionStatus::Waiting => Some(SystemColor::Orange),
+                SessionStatus::Ended => None,
+            };
+            if let Some(color) = color {
                 text = text.with_highlights([(
                     range,
                     HighlightStyle {
-                        color: Some(palette.system(SystemColor::Green)),
+                        color: Some(palette.system(color)),
                         ..HighlightStyle::default()
                     },
                 )]);
@@ -421,7 +441,7 @@ impl HomeScreen {
                 this.update(cx, |this, cx| this.open_session(key, cx)).ok();
             })
             .child(semantic(
-                card_facts(&node, card, &title),
+                card_facts(&node, card, &title, waiting),
                 content.relative().child(self.probe(pick)),
             ))
     }
@@ -465,7 +485,10 @@ impl HomeScreen {
                 let key = key.clone();
                 this.update(cx, |this, cx| this.open_session(key, cx)).ok();
             })
-            .child(semantic(card_facts(&node, card, &title), content))
+            .child(semantic(
+                card_facts(&node, card, &title, self.asking.contains(&card.session.key)),
+                content,
+            ))
     }
 
     /// The Outside Any Session card: how many files changed on the branch and
@@ -607,10 +630,16 @@ fn dot_slot(agent: &lectern_services::session::Agent) -> gpui::Div {
 
 /// What the probe reads off a card, on the node of its content (`Row` has
 /// no attributes of its own).
-fn card_facts(node: &lectern_ui::semantic::NodeId, card: &Card, title: &Text) -> Semantic {
+fn card_facts(
+    node: &lectern_ui::semantic::NodeId,
+    card: &Card,
+    title: &Text,
+    waiting: bool,
+) -> Semantic {
     let mut facts = Semantic::new(node.child("facts"), Role::Group)
         .label(title)
         .attr("agent", agent_attr(&card.session.agent))
+        .attr("waiting", flag(waiting))
         .attr("critical", card.signals.critical.to_string())
         .attr("changed", card.signals.changed_since_seen.to_string())
         .attr("drifted", flag(card.signals.drifted));

@@ -1,5 +1,6 @@
-//! The two plugins (docs/design/project_home.md「本 crate 的公开项」):
-//! "project-home" and "project-home-usage", both `AfterFirstFrame`. `activate`
+//! The three plugins (docs/design/project_home.md「本 crate 的公开项」):
+//! "project-home", "project-home-usage" and "project-home-waiting", all
+//! `AfterFirstFrame`. `activate`
 //! takes the services, registers the contributions (`ctx.own_staged`: they
 //! take effect at the commit) and subscribes; nothing is read or submitted
 //! before `started`.
@@ -13,6 +14,8 @@ use lectern_executor::{Executor, Priority};
 use lectern_kernel::{
     Activation, Active, Context, Manifest, Plugin, PluginError, PluginHandle, ServiceRef, service,
 };
+use lectern_logging::trace;
+use lectern_services::conversation::{ConversationEvent, Conversations};
 use lectern_services::project::{ProjectEvent, Projects};
 use lectern_services::review::{Review, ReviewEvent};
 use lectern_services::session::{SessionSource, SessionsChanged, Timestamp};
@@ -22,11 +25,14 @@ use lectern_services::workspace::{Contributions, WorkspaceEvent};
 use crate::contribute;
 use crate::home::{Home, Parts, Wall};
 use crate::usage_slot::UsageSlot;
+use crate::waiting_slot::WaitingSlot;
 
 /// The ID of "project-home" in the `PluginSet`.
 pub const PLUGIN_ID: &str = "project-home";
 /// The ID of "project-home-usage" in the `PluginSet`.
 pub const USAGE_PLUGIN_ID: &str = "project-home-usage";
+/// The ID of "project-home-waiting" in the `PluginSet`.
+pub const WAITING_PLUGIN_ID: &str = "project-home-waiting";
 
 /// What `app` hands "project-home". Building it does no IO.
 pub struct ProjectHomeDeps {
@@ -34,6 +40,8 @@ pub struct ProjectHomeDeps {
     /// The cell shared with [`ProjectHomeUsagePlugin`]: `app` builds one and
     /// gives a clone to each.
     pub usage: UsageSlot,
+    /// The cell shared with [`ProjectHomeWaitingPlugin`], built the same way.
+    pub waiting: WaitingSlot,
 }
 
 /// "project-home": requires `dyn Projects`, `dyn SessionSource`, `dyn Review`
@@ -105,6 +113,7 @@ impl Plugin for ProjectHomePlugin {
             review: ctx.service::<dyn Review>(),
             contributions: contributions.clone(),
             usage: self.deps.usage.clone(),
+            waiting: self.deps.waiting.clone(),
             wall: self.wall.clone(),
         });
         {
@@ -218,5 +227,71 @@ impl Drop for UsageActive {
     /// Drops the usage interest and has "project-home" recompose once.
     fn drop(&mut self) {
         self.slot.clear_usage();
+    }
+}
+
+/// "project-home-waiting": only puts `dyn Conversations` into the shared cell.
+/// `agents` (the ACP client) provides it; when its plugin fails or is off, the
+/// project home works without the waiting marks (the kernel has no optional
+/// dependencies).
+pub struct ProjectHomeWaitingPlugin {
+    slot: WaitingSlot,
+}
+
+impl ProjectHomeWaitingPlugin {
+    /// Does no IO and submits no task.
+    pub fn new(slot: WaitingSlot) -> ProjectHomeWaitingPlugin {
+        ProjectHomeWaitingPlugin { slot }
+    }
+}
+
+impl Plugin for ProjectHomeWaitingPlugin {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            provides: Vec::new(),
+            requires: vec![service::<dyn Conversations>()],
+            activation: vec![Activation::AfterFirstFrame],
+        }
+    }
+
+    /// Takes the service reference and subscribes. The slot is written in
+    /// `started`: `activate` has no side effects.
+    fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        let conversations = ctx.service::<dyn Conversations>();
+        let slot = self.slot.clone();
+        ctx.on::<ConversationEvent>(move |event, _| {
+            // `Changed` is about the items of one conversation, which the
+            // sidebar and the cards do not show.
+            if matches!(event, ConversationEvent::WaitingChanged) {
+                trace!("home event"; event = "waiting-changed");
+                slot.changed();
+            }
+        });
+        Ok(Box::new(WaitingActive {
+            slot: self.slot.clone(),
+            conversations: Some(conversations),
+        }))
+    }
+}
+
+struct WaitingActive {
+    slot: WaitingSlot,
+    conversations: Option<ServiceRef<dyn Conversations>>,
+}
+
+impl Active for WaitingActive {
+    /// Records the service and wakes the views. Reading it needs the
+    /// provider's admission, not this plugin's, so nothing waits for the token.
+    fn started(&mut self, _: PluginHandle) {
+        if let Some(conversations) = self.conversations.take() {
+            self.slot.set_conversations(conversations);
+        }
+    }
+}
+
+impl Drop for WaitingActive {
+    /// The marks go away and the views are woken once.
+    fn drop(&mut self) {
+        self.slot.clear_conversations();
     }
 }

@@ -14,6 +14,9 @@ project-home-views = Project
 project-home-untitled-session = Untitled session
 # The accessible name of the green dot at the end of a running session's row.
 project-home-running = Running
+# The accessible name of the orange dot at the end of a session's row while a
+# permission request of the session waits for the user.
+project-home-waiting = Waiting for you
 project-home-packages = Packages
 # The accessible name and hint of the number at the end of a package row.
 project-home-changed-today = { $count } today

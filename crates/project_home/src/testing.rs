@@ -18,6 +18,10 @@ use lectern_kernel::{
     Activation, Active, Context, Kernel, Manifest, Name, Plugin, PluginError, PluginSet, Service,
     service,
 };
+use lectern_services::conversation::{
+    ConversationCommand, ConversationEvent, ConversationInterest, ConversationSnapshot,
+    Conversations,
+};
 use lectern_services::project::{
     ActiveTree, ChangedParts, FileList, Head, Location, OpenRequest, Package, PackageMatch,
     ProjectEvent, ProjectKey, ProjectSnapshot, Projects, ResolveError, Resolved, Scan, ScanError,
@@ -46,10 +50,12 @@ use lectern_ui::contrib::SidebarItem;
 
 use crate::home::Home;
 use crate::plugin::{
-    PLUGIN_ID, ProjectHomeDeps, ProjectHomePlugin, ProjectHomeUsagePlugin, USAGE_PLUGIN_ID,
+    PLUGIN_ID, ProjectHomeDeps, ProjectHomePlugin, ProjectHomeUsagePlugin,
+    ProjectHomeWaitingPlugin, USAGE_PLUGIN_ID, WAITING_PLUGIN_ID,
 };
 use crate::snapshot::HomeSnapshot;
 use crate::usage_slot::UsageSlot;
+use crate::waiting_slot::WaitingSlot;
 
 /// The composing time of the tests: 2027-01-15 08:00 UTC, in milliseconds.
 pub(crate) const NOW: i64 = 1_800_000_000_000;
@@ -699,6 +705,41 @@ impl Usage for FakeUsage {
     }
 }
 
+/// `dyn Conversations`: this crate only reads `waiting()`; the test sets it
+/// and sends `WaitingChanged` itself, as the provider does.
+#[derive(Default)]
+pub(crate) struct FakeConversations {
+    waiting: Mutex<Arc<[SessionKey]>>,
+    calls: AtomicUsize,
+}
+
+impl FakeConversations {
+    /// What `waiting()` answers from now on (no event: the test sends it).
+    pub fn set_waiting(&self, sessions: Vec<SessionKey>) {
+        *lock(&self.waiting) = Arc::from(sessions);
+    }
+    /// How often `waiting()` was called.
+    pub fn waiting_calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Conversations for FakeConversations {
+    fn watch(&self, _: &SessionKey) -> ConversationInterest {
+        unreachable!("project_home watches no conversation")
+    }
+    fn snapshot(&self, _: &SessionKey) -> Option<Arc<ConversationSnapshot>> {
+        unreachable!("project_home reads no conversation")
+    }
+    fn command(&self, _: &SessionKey, _: ConversationCommand) {
+        unreachable!("project_home sends no conversation command")
+    }
+    fn waiting(&self) -> Arc<[SessionKey]> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        lock(&self.waiting).clone()
+    }
+}
+
 /// The window's side of `dyn Contributions`: keeps what was registered (the
 /// payloads the views are built from), lists the sidebar entries the way
 /// `workspace` does (an entry is applied when registered), and records the
@@ -907,6 +948,7 @@ pub(crate) struct Rig {
     pub sessions: Arc<FakeSessions>,
     pub review: Arc<FakeReview>,
     pub usage: Arc<FakeUsage>,
+    pub conversations: Arc<FakeConversations>,
     pub contributions: Arc<FakeContributions>,
     home: Arc<Mutex<Option<Arc<Home>>>>,
 }
@@ -918,11 +960,14 @@ impl Rig {
         let sessions = Arc::new(FakeSessions::new("fake"));
         let review = Arc::new(FakeReview::default());
         let usage = Arc::new(FakeUsage::default());
+        let conversations = Arc::new(FakeConversations::default());
         let contributions = Arc::new(FakeContributions::default());
         let slot = UsageSlot::default();
+        let waiting = WaitingSlot::default();
         let home_plugin = ProjectHomePlugin::new(ProjectHomeDeps {
             executor: executor.clone(),
             usage: slot.clone(),
+            waiting: waiting.clone(),
         })
         .with_wall_clock(|| Timestamp(NOW));
         let home = home_plugin.home.clone();
@@ -935,6 +980,10 @@ impl Rig {
             .with("mock-review", Provide::<dyn Review>(review.clone()))
             .with("mock-usage", Provide::<dyn Usage>(usage.clone()))
             .with(
+                "mock-conversations",
+                Provide::<dyn Conversations>(conversations.clone()),
+            )
+            .with(
                 "mock-contributions",
                 Provide::<dyn Contributions>(contributions.clone()),
             )
@@ -942,6 +991,10 @@ impl Rig {
             .with(
                 USAGE_PLUGIN_ID,
                 Manual(ProjectHomeUsagePlugin::new(executor.clone(), slot.clone())),
+            )
+            .with(
+                WAITING_PLUGIN_ID,
+                Manual(ProjectHomeWaitingPlugin::new(waiting)),
             );
         let kernel = Kernel::start(set);
         kernel.barrier();
@@ -952,6 +1005,7 @@ impl Rig {
             sessions,
             review,
             usage,
+            conversations,
             contributions,
             home,
         }
@@ -970,6 +1024,25 @@ impl Rig {
     pub fn deactivate_usage(&self) {
         self.kernel.set_enabled(USAGE_PLUGIN_ID, false);
         self.kernel.barrier();
+    }
+
+    pub fn activate_waiting(&self) {
+        self.kernel.activate(WAITING_PLUGIN_ID);
+        self.kernel.barrier();
+    }
+
+    pub fn deactivate_waiting(&self) {
+        self.kernel.set_enabled(WAITING_PLUGIN_ID, false);
+        self.kernel.barrier();
+    }
+
+    /// The sessions that wait for the user from now on, and the event the
+    /// provider sends for it.
+    pub fn set_waiting(&self, sessions: Vec<SessionKey>) {
+        self.conversations.set_waiting(sessions);
+        self.kernel
+            .emitter()
+            .emit(ConversationEvent::WaitingChanged);
     }
 
     /// The state of the activation. Panics before `activate_home`.

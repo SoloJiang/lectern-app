@@ -1,0 +1,18 @@
+---
+source: crates/project_home/src/tests/tree.rs
+expression: "tree(vcx, | id | main_part(id) && id.contains(\"needs-review.item\"))"
+---
+project-home.needs-review.item[s1] ListItem
+  project-home.needs-review.item[s1].facts Group label="Fix the login redirect" agent=claude-code waiting=true critical=1 changed=0 drifted=true seen=2 total=5
+    project-home.needs-review.item[s1].seen Text label=[project-home-progress]
+      project-home.needs-review.item[s1].progress Progress fraction=0.400
+project-home.needs-review.item[s2] ListItem
+  project-home.needs-review.item[s2].facts Group label="Add the search index" agent=codex waiting=true critical=0 changed=0 drifted=false seen=0 total=3
+    project-home.needs-review.item[s2].seen Text label=[project-home-progress]
+      project-home.needs-review.item[s2].progress Progress fraction=0.000
+project-home.needs-review.item[s5] ListItem
+  project-home.needs-review.item[s5].facts Group label=[project-home-untitled-session] agent=other waiting=false critical=0 changed=0 drifted=false
+project-home.needs-review.item[s6] ListItem
+  project-home.needs-review.item[s6].facts Group label="Tidy the error messages" agent=claude-code waiting=false critical=0 changed=2 drifted=false seen=3 total=3
+    project-home.needs-review.item[s6].seen Text label=[project-home-progress]
+      project-home.needs-review.item[s6].progress Progress fraction=1.000
