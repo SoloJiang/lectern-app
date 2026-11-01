@@ -80,6 +80,27 @@ fn logs_hold_no_conversation_contents() {
     );
     rig.engine
         .on_sessions_changed(&changed(&claude_source(), &session));
+    // A turn that was sent live and is in the log now: the live items give way to the history.
+    rig.engine.with_live(&session, |live| {
+        live.begin_prompt(
+            &format!("{CANARY_PROMPT} {CANARY_TOKEN}"),
+            PromptOrigin::User,
+            0,
+        );
+        live.agent_text(&format!("{CANARY_REPLY} {CANARY_TOKEN}"));
+        live.finish(crate::acp::wire::Stop::EndTurn);
+    });
+    rig.engine
+        .on_sessions_changed(&changed(&claude_source(), &session));
+    assert!(
+        rig.engine
+            .snapshot(&session)
+            .unwrap()
+            .entries
+            .iter()
+            .all(|e| !e.key.0.starts_with("l:1:")),
+        "the live copy of the logged turn is gone (l:0 is the prompt whose process never started)"
+    );
     // A session whose source is gone, and a missing program.
     let gone = key(
         &lectern_services::session::SourceId("session-gone".into()),

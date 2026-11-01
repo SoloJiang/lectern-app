@@ -648,11 +648,65 @@ fn call_state(status: &str) -> Option<CallState> {
     }
 }
 
+/// 一个请求里最多看几个文件的改动。
+pub(crate) const DIFF_FILES: usize = 8;
+
+/// 工具调用内容里的一份改动（`content` 里 `type` 为 `diff` 的项）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DiffContent {
+    pub(crate) path: String,
+    /// 改动前的内容；None 是新文件。
+    pub(crate) old: Option<String>,
+    pub(crate) new: String,
+}
+
+/// 工具调用的 `content` 里的改动，至多 [`DIFF_FILES`] 个。形状不对的项和字段当作没有。
+pub(crate) fn diffs(tool_call: &str) -> Vec<DiffContent> {
+    #[derive(Deserialize)]
+    struct Call<'a> {
+        #[serde(borrow)]
+        content: Option<&'a RawValue>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        #[serde(rename = "type", default)]
+        kind: String,
+        path: Option<String>,
+        #[serde(rename = "oldText")]
+        old: Option<String>,
+        #[serde(rename = "newText")]
+        new: Option<String>,
+    }
+    let Ok(call) = serde_json::from_str::<Call<'_>>(tool_call) else {
+        return Vec::new();
+    };
+    let Some(Ok(items)) = call
+        .content
+        .map(|content| serde_json::from_str::<Vec<Item>>(content.get()))
+    else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter(|item| item.kind == "diff")
+        .filter_map(|item| {
+            Some(DiffContent {
+                path: item.path?,
+                old: item.old,
+                new: item.new.unwrap_or_default(),
+            })
+        })
+        .take(DIFF_FILES)
+        .collect()
+}
+
 /// `session/request_permission` 的参数。
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PermissionAsk {
     pub(crate) session_id: String,
     pub(crate) tool: ToolInfo,
+    /// 工具调用内容里的改动（改动预览的输入）。
+    pub(crate) diffs: Vec<DiffContent>,
     /// 认识的种类的选项，按 agent 给的顺序。
     pub(crate) options: Vec<(String, OptionKind)>,
 }
@@ -689,9 +743,11 @@ pub(crate) fn permission(params: Option<&RawValue>) -> Result<PermissionAsk, Mal
             Some((option.id, kind))
         })
         .collect();
+    let diffs = diffs(parsed.tool_call.get());
     Ok(PermissionAsk {
         session_id: parsed.session_id,
         tool,
+        diffs,
         options,
     })
 }
@@ -967,6 +1023,58 @@ mod tests {
             ]
         );
         assert!(permission(Some(&raw(r#"{"sessionId":"s","options":[]}"#))).is_err());
+    }
+
+    #[test]
+    fn diffs_come_from_the_content_of_the_tool_call() {
+        let call = r#"{"toolCallId":"t","kind":"edit","content":[
+            {"type":"content","content":{"type":"text","text":"x"}},
+            {"type":"diff","path":"/a.rs","oldText":"old","newText":"new"},
+            {"type":"diff","path":"/b.rs","oldText":null,"newText":"created"},
+            {"type":"diff","oldText":"no path","newText":"x"},
+            {"type":"diff","path":"/c.rs","oldText":"gone"}]}"#;
+        assert_eq!(
+            diffs(call),
+            [
+                DiffContent {
+                    path: "/a.rs".into(),
+                    old: Some("old".into()),
+                    new: "new".into()
+                },
+                DiffContent {
+                    path: "/b.rs".into(),
+                    old: None,
+                    new: "created".into()
+                },
+                DiffContent {
+                    path: "/c.rs".into(),
+                    old: Some("gone".into()),
+                    new: String::new()
+                },
+            ]
+        );
+        // At most eight files; shapes that are wrong give none.
+        let many: Vec<String> = (0..12)
+            .map(|n| format!(r#"{{"type":"diff","path":"/f{n}","newText":""}}"#))
+            .collect();
+        let call = format!(r#"{{"toolCallId":"t","content":[{}]}}"#, many.join(","));
+        assert_eq!(diffs(&call).len(), DIFF_FILES);
+        for bad in [
+            r#"{"toolCallId":"t"}"#,
+            r#"{"toolCallId":"t","content":5}"#,
+            r#"{"toolCallId":"t","content":[{"type":"diff","path":"/a","newText":3}]}"#,
+            "not json",
+        ] {
+            assert!(diffs(bad).is_empty(), "{bad}");
+        }
+        // The permission request carries them.
+        let params = raw(
+            r#"{"sessionId":"sid","toolCall":{"toolCallId":"t1","kind":"edit","content":[{"type":"diff","path":"/a.rs","oldText":"a","newText":"b"}]},
+                "options":[{"optionId":"a","name":"A","kind":"allow_once"}]}"#,
+        );
+        let ask = permission(Some(&params)).unwrap();
+        assert_eq!(ask.diffs.len(), 1);
+        assert_eq!(ask.diffs[0].path, "/a.rs");
     }
 
     /// Every message in the synthetic scripts parses as the shape its script says

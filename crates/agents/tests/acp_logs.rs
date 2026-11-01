@@ -17,7 +17,7 @@ const CANARY_TOKEN: &str = "sk-ant-api03-Zq7XbR2mK9vT4wLp8NcY3hJd6FsA1gUe5oIkQ0r
 const CANARY_VAR: &str = "CANARY_VAR_NAME_6b17e9";
 const CANARY_VALUE: &str = "canary-value-0c4aa8";
 /// In `tests/fixtures/acp/loud.jsonl`.
-const AGENT_CANARIES: [&str; 8] = [
+const AGENT_CANARIES: [&str; 14] = [
     "CANARY-STDERR-TEXT",
     "CANARY-REPLY-TEXT",
     "CANARY-TOOL-TITLE",
@@ -26,6 +26,15 @@ const AGENT_CANARIES: [&str; 8] = [
     "CANARY-PERMISSION-TITLE",
     "CANARY-OPTION-ID",
     "CANARY-PLAN-TEXT",
+    // The change preview of an edit request: the title, the file, both sides of the change.
+    "CANARY-EDIT-TITLE",
+    "CANARY-DIFF-PATH",
+    "CANARY-DIFF-OLD",
+    "CANARY-DIFF-NEW",
+    // The error text of a failed `session/prompt` (`LinkError::PromptFailed` keeps its first line for
+    // the user; the log gets the kind only).
+    "CANARY-ERROR-TEXT",
+    "CANARY-ERROR-SECOND",
 ];
 
 /// The names of the methods the log may carry (`wire::Method::name`).
@@ -59,11 +68,36 @@ fn logs_hold_no_conversation_contents() {
     );
     h.wait_link(&session, Link::Idle);
 
-    // A second turn on the same connection, stopped while the request waits; then the clock closes it.
+    // A second turn on the same connection: an edit request with a change preview, stopped while it
+    // waits.
     h.prompt(&session, CANARY_PROMPT);
-    h.wait(&session, "a request", |s| s.permissions.len() == 1);
+    let edit = h.wait(&session, "an edit request", |s| s.permissions.len() == 1);
+    assert!(
+        matches!(
+            edit.permissions[0].detail,
+            lectern_services::conversation::PermissionDetail::Edits(_)
+        ),
+        "the preview was computed"
+    );
     h.command(&session, ConversationCommand::Cancel);
     h.wait_link(&session, Link::Idle);
+
+    // A third turn fails with an error text; then the clock closes the connection.
+    h.prompt(&session, CANARY_PROMPT);
+    let failed = h.wait(&session, "the failed prompt", |s| {
+        matches!(
+            s.link,
+            Link::Failed(lectern_services::conversation::LinkError::PromptFailed { .. })
+        )
+    });
+    assert!(
+        matches!(
+            &failed.link,
+            Link::Failed(lectern_services::conversation::LinkError::PromptFailed { message })
+                if &**message == "CANARY-ERROR-TEXT"
+        ),
+        "the user gets the first line, the log does not"
+    );
     h.clock.advance(Duration::from_secs(11 * 60));
     h.wait_link(&session, Link::None);
     wait_for("the exit record", || {
@@ -163,4 +197,18 @@ fn logs_hold_no_conversation_contents() {
             .all(|l| l.contains("\"took_us\":") && l.contains("\"ok\":") && l.contains("\"req\":"))
     );
     assert!(!find("acp turn finished").is_empty());
+    // A failed prompt is logged by its kind only.
+    let failures = find("acp link failed");
+    assert!(
+        failures
+            .iter()
+            .any(|l| l.contains("\"error\":\"prompt_failed\"")),
+        "{failures:?}"
+    );
+    assert!(
+        failures
+            .iter()
+            .all(|l| !l.contains("message") && l.contains("\"session\":")),
+        "{failures:?}"
+    );
 }

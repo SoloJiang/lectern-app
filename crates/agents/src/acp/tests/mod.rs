@@ -9,4 +9,5 @@ mod logs;
 mod lookup;
 mod plugin;
 pub(crate) mod support;
+mod swap;
 mod watch;

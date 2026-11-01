@@ -4594,6 +4594,7 @@ dependencies = [
  "lectern-cache",
  "lectern-executor",
  "lectern-fs-watch",
+ "lectern-git",
  "lectern-kernel",
  "lectern-logging",
  "lectern-platform",
