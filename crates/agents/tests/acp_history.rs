@@ -124,12 +124,11 @@ fn acp_a_turn_that_is_in_the_log_but_not_finished_shows_only_its_live_items() {
     // The adapter has written the turn so far; the turn is still running.
     let calls = h.claude.turns_calls();
     log_with_turn(&h, &session, "hello");
-    // Two announcements, two reads one after the other: when the second read starts, the first one has
-    // installed its window, which holds the turn (the snapshot has nothing new to show for it, so there
-    // is nothing else to wait for).
-    announce(&h, &session);
-    announce(&h, &session);
+    // Announcements that arrive before a read starts merge into that read, so keep announcing until a
+    // second read has started: by then the first one has installed its window, which holds the turn (the
+    // snapshot has nothing new to show for it, so there is nothing else to wait for).
     wait_for("the history to be read twice", || {
+        announce(&h, &session);
         (h.claude.turns_calls() >= calls + 2).then_some(())
     });
     let running = h.snapshot(&session);
