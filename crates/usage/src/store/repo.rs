@@ -381,6 +381,7 @@ impl Store {
     /// Writes the records of a batch and the segments they make, in the
     /// order they were read, with nothing known about the repository beyond
     /// the records.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn repo_batch(
         &self,
         common_dir: &Path,
