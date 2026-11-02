@@ -387,7 +387,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 屏幕与层：审阅屏幕占内容区，`ScreenLayout { sidebar: Hidden, back_button: true, reading_column: true, inspector: true, floating_bar: true }`（[workspace 设计「数据结构」](workspace.md#数据结构)的区域表）。常驻层：简报、叙事、浮条；按需层：检查器的 Files 页（Progress）与 Conversation 页、上下文面板；收起层经 ⇧⌘O 进入阅读视图。双栏视图需要整个内容区（「对其他 crate 的要求」A）。
 - 工具栏（`ui::contrib::Screen::toolbar`，容器由 `workspace` 画，横跨整个窗口宽，检查器在它下面；以设计画布的 Review 画板为准，[#283](https://github.com/SoloJiang/lectern-app/issues/283)）：左边是 `workspace` 的返回图标按钮；标题（Headline 层级）是会话标题（`SessionSummary::title`，没有时 `review-title-untitled`；`Outside` 为 `review-title-outside`，`Range` 为 `review-title-range`）；副标题（Subheadline 层级，次要色）会话审阅是「agent 名 · 分支 · N 轮」（agent 名同卡片，分支是会话所在 worktree 的分支，轮数用 `review-stats-turns`，用 ` · ` 连接，缺哪项省略哪项），`Outside` 与 `Range` 是「分支 · `review-files-changed`」。原来副标题里的已看进度去掉，进度在检查器的 Files 页。右边的控件由本屏幕给出，至多 2 个，加上 `workspace` 画的检查器开关一共不超过 3 个：
   - 「隐藏纯格式改动」开关（`review-hide-formatting` 的标签加一个开关）：忽略纯格式变化的结构化 diff 是 [#21](https://github.com/SoloJiang/lectern-app/issues/21)，`ui` 的开关控件也还没有（[ui 设计](ui.md)只定义了开关的动效常量），两者都有之前不画。
-  - Mark Reviewed 按钮（次要样式，标签 `review-mark-reviewed`，后面跟次要色的键提示 V）：触发 `review::MarkSeenAndNext`。
+  - Mark Reviewed 按钮（次要样式，标签 `review-mark-reviewed`，后面跟次要色的键提示 V：`Button::hint(Text::key(review-mark-reviewed-shortcut))`，是按钮里单独的一段，不拼进标签；辅助名只有标签）：触发 `review::MarkSeenAndNext`。
   - 原来在这里的统一 / 双栏分段控件和 Refresh 不再占工具栏：Action（`review::ToggleDiffMode`、`review::Refresh`）和键值保留，入口改到应用菜单栏的 View 菜单（`app` 设计的应用菜单现在只有四项，加 View 菜单是 `app` 的要求，见「对其他 crate 的要求」G）；在那之前只能经 Action 触发。画布没有给这两个操作留位置，这是需要产品确认的取舍（见「未决问题」5）。
 - `ui` 的控件与动效原语：颜色经 `colors(window, cx)`，文字经 `Text` 与 `TextRole`（层级见[交互规范「视觉」](interaction.md#视觉)的文字样式表，下文只写层级名），代码行 `TextRole::Code` 加 `mono_metrics` 的格宽与行高，`code_style` 着色；`CircleCheck`（文件卡片头与 Files 页的行）、`Progress`（Files 页的进度条，`ProgressShape::Bar`）、`Button`、`AgentDot`（子 agent 行）、`GroupedList` 与 `Row`（文件卡片、折叠的文件行）、`Skeleton`、`Expander`（展开 `Fold` 时下方内容下移）；浮条的胶囊容器、分段控件（检查器的页签）、开关来自 `ui`（见「对其他 crate 的要求」I）；动效：`CHECK_FILL`、`CHECK_STROKE`、`PROGRESS`、`SCROLL_NEXT`（V 之后的滚动，`ListState::scroll_to` 的目标由 `Transition` 逐帧给出）、`ARRIVE`（新一轮到达时 `Turn` 项从下方 8pt 淡入）、`SEGMENT`、`HOVER_IN` / `HOVER_OUT`、`EXPAND_HEIGHT` / `EXPAND_FADE`；减弱动态效果由 `Motion::effective` 处理。进入会话的 `ENTER_SESSION` 弹簧动画由 `project_home` 的行标题在 `Push` 前后完成（它拥有那段文字），本 crate 的内容按 `ARRIVE` 淡入。本 crate 不写任何颜色值、字体和时长（验收用 `rg` 检查）。
 - diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），符号栏里 `+` 用绿色、`−` 用红色；两个行号栏右对齐、用三级次要色，和符号栏、代码各占固定宽度；行高比字号高（画布是 12pt 的字配 20pt 的行高，由 `mono_metrics` 给出，不在这里写数值）；词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。选中的行保留增删的淡底色，左边加一条 2pt 的强调色竖条，行号换成强调色；行尾出现一个圆形的 + 按钮（`Button::icon_only(Icon::Plus)`，悬停说明 `review-note-add-here`；点击同 C，「审阅意见（#22）」）。有意见的行，行号栏里画一个 6pt 圆点。
@@ -897,6 +897,10 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 真实窗口（`just automation`，临时 HOME，调试构建，合成的仓库与会话，2026-10-30）：在增加的行和删除的行上各按 C、输入、⌘↩，两条意见画在各自的行下，行号栏有圆点，浮条显示条数和 Discard；删除的行上 Esc 后再按 C，文字带回；Copy as Prompt 写进系统剪贴板，`pbpaste` 读出的文字与 `review` 的模板一致（`src/lib.rs:6` 和「line 6 of the version before your changes」两种位置），这同时走过了 `platform::clipboard` 排到主线程的写入；用别的文字覆盖剪贴板后按 Copy Again，读出相同的 `[lectern-notes …]` 标记和 23 行文字。行尾的 + 没有被裁。
 - 没有验证：粘贴进真实的 agent 会话、agent 回应后那一轮标题有 `review-turn-answers`（`notes_link_*` 只用合成的轮次）；放弃的系统确认框；真实输入法组字时 Esc 与 ⌘↩；深色外观；编辑框开着时点另一行的 + 换锚点。
 
+### 审阅意见的入口与工具栏的键提示（`Refs #22`）
+
+- 工具栏的 Mark Reviewed：`ui::Button::hint`（新，`docs/design/ui.md` 已补）。测试：`screen.rs` 的 `the_toolbar_button_keeps_its_key_hint_apart`（把 `Screen::toolbar` 的控件放进一个窗口并打开记录器：辅助名 / 探针标签是 `Mark Reviewed`，键 `review-mark-reviewed`，属性 `hint` 是 `V`），`ui` 的 `button_hint_is_a_part_after_the_label`（有提示的按钮比没有的宽，辅助名不含提示）。
+
 ### 用量插件（`review-view-usage`，`Refs #31`）
 
 把会话用量从 `review-view-handoff` 拆出来，单独成 `review-view-usage`（只 requires `dyn Usage`），`app` 装配它。叠在 `main`（`usage` 第 3 到第 5 步已合并）上，在 macOS（arm64）上运行，没有打开真实窗口：下面全部是无窗口的 `#[gpui::test]` 和 `just` 入口。
@@ -908,6 +912,10 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - 没有验证：真实窗口里的简报用量行与轮次标题（发布 / 自动化构建里打开一个有用量的会话的 Diff）；`usage` 插件和 `review-view-usage` 一起启动、会话还没读进 `usage` 时的先后（用 `UsageEvent::Changed` 补上，测试里用假服务的事件覆盖，没有用真实引擎）。
 
 ## 与设计的差异
+
+### 工具栏的键提示与意见的入口（`Refs #22`）
+
+- **工具栏的键提示是 `Button::hint`，不是拼进标签的文字。** 设计写「后面跟次要色的键提示」，第 1 步实现成 `Text::verbatim(format!("{label} {hint}"))`，整个按钮一种颜色，读起来像错字。`toolbar` 没有 `Window`，不能像文件卡片的 Open File 那样在按钮旁边画一个 `text_role` 的元素，所以 `ui::Button` 加了 `hint`：标签之后 5pt 的一段，`secondary_label`（禁用时半透明）；辅助名只有标签。浮条的发送和编辑框的保存按钮仍把 ⌘↩ 拼在标签里（主按钮上的提示）；它们的探针标签带着提示（`Add Note ⌘↩`），改它们是另一次改动。
 
 ### 用量插件（`review-view-usage`，`Refs #31`）
 

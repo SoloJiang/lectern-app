@@ -420,6 +420,53 @@ fn icon_only_button_is_a_28pt_square_with_a_label(cx: &mut TestAppContext) {
     assert_eq!(records[2].semantic.state.checked, Some(false));
 }
 
+/// A key hint is a part of the button after its label: the accessible name
+/// stays the label, the probe has the hint as an attribute, and the button is
+/// wider than the same one without it.
+#[gpui::test]
+fn button_hint_is_a_part_after_the_label(cx: &mut TestAppContext) {
+    let records = record_scene(cx, |_, _| {
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .child(Button::new(
+                root().child("plain"),
+                verbatim("Mark Reviewed"),
+            ))
+            .child(
+                Button::new(root().child("hinted"), verbatim("Mark Reviewed")).hint(verbatim("V")),
+            )
+            .into_any_element()
+    });
+    let plain = records
+        .iter()
+        .find(|r| r.semantic.id.as_str() == "snap.root.plain");
+    let hinted = records
+        .iter()
+        .find(|r| r.semantic.id.as_str() == "snap.root.hinted");
+    let (Some(plain), Some(hinted)) = (plain, hinted) else {
+        panic!("the nodes: {records:#?}");
+    };
+    let name = |r: &crate::semantic::Record| {
+        r.semantic
+            .label
+            .as_ref()
+            .map(|label| label.text.to_string())
+    };
+    assert_eq!(name(plain).as_deref(), Some("Mark Reviewed"));
+    assert_eq!(name(hinted).as_deref(), Some("Mark Reviewed"));
+    assert!(plain.semantic.attrs.iter().all(|(key, _)| *key != "hint"));
+    assert!(
+        hinted
+            .semantic
+            .attrs
+            .iter()
+            .any(|(key, value)| *key == "hint" && value.as_ref() == "V")
+    );
+    assert!(hinted.bounds.size.width > plain.bounds.size.width);
+}
+
 /// What a snapshot keeps of a record: no bounds (they depend on fonts) and
 /// no call site (it is a line of this crate).
 #[derive(Debug)]
