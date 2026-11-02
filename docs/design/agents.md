@@ -872,6 +872,28 @@ conversation 设计 C 要求先按两个适配器的公开源码确认下面六�
 
 来源提交：claude-agent-acp 是 [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) 的 `eb78afa8556b8fc4082495e48e3fd1762fb6a50f`；codex-acp 是 [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp) 的 `927c4802f83c0859b439e7d641b5eb692560e5df`。两者现在都是 Node 程序，由用户安装（ADR 0050）；codex-acp 另启动一个 `codex app-server` 子进程，所以关闭时必须终止整个进程组。
 
+**真实适配器的运行核对（2026-11-02）。** 用真实的 `conversations` 插件和真实时钟连接 `claude-agent-acp` 0.99.1 和 `codex-acp` 2.5.0，登录用本机现有的 Claude Code 和 Codex。项目是临时目录，会话是先用命令行创建的合成会话，提示词都是合成的。会话来源和 `Projects` 是假的，所以没有经过真实的历史读取，也没有读本机日志。这次检查没有入库，也没有打开窗口。
+
+| 项 | claude-agent-acp | codex-acp |
+|---|---|---|
+| 握手、`session/resume`、一轮回复 | 通过 | 通过 |
+| 新进程恢复后记得这个会话的第一句回复 | 通过 | 通过 |
+| 回复逐步到达快照（`streaming: true`） | 通过，约每 50 ms 一次 | 通过，但实测正文在一轮结束前整段到达 |
+| `usage_update` 进入 `context` | 通过 | 通过 |
+| 写文件的权限请求：允许后写入，拒绝后不写入 | 通过 | 通过，只在 `INITIAL_AGENT_MODE=read-only` 下出现请求 |
+| 执行命令的 `rawInput.command` 进入工具行 | 通过（`Execute` 行） | 通过（`Execute` 行） |
+| 执行命令的权限请求（`PermissionDetail::Command`） | 未触发：本机设置直接放行 | 未触发：只读模式下命令被沙箱直接拒绝 |
+| `Cancel`：先 `Stopping`，再 `Idle` 和 `Ended(Cancelled)` | 通过，约 50 ms | 通过，约 60 ms |
+| `Disconnect` 终止整个进程组 | 通过，9 个进程在约 0.7 秒内全部退出 | 通过，7 个进程在约 0.5 秒内全部退出，包括 `codex app-server` |
+
+运行中看到的行为（都不是 Lectern 的缺陷，界面设计时要知道）：
+
+- 是否出现权限请求由用户自己的配置决定。本机的 Codex 配置下，写文件和执行命令都不经请求直接完成；Claude Code 下写文件有请求，`touch`、`mkfifo` 没有。
+- 用户的 Codex 配置产生的警告（如启用了开发中的功能）由适配器作为 agent 正文的开头发出，界面显示为回复的一部分。
+- Claude Code 可能把长时间运行的命令放到后台：工具行是 `Completed`、一轮结束，而命令还在运行。这时 `Cancel` 和 `Disconnect` 都不针对它。
+
+仍然没有运行验证的：上面表里「经 ACP 的轮次是否写进 CLI 同一份本机日志」两项（要读本机日志）；真实登录 shell 里找到适配器的路径（`login_env()`，这次用 `with_login_env` 传入）；空闲 10 分钟退出。
+
 没有查到的：`session/update` 的 `tool_call` 对其他工具的 `rawInput` 形状（不影响，只有执行命令的请求读命令文本）；适配器在 `session/load` 时回放更新的数量（实现时按「丢弃并计数」处理）。适配器会变：不认识的字段忽略，`initialize` 回复的版本不是 1 就是 `Unsupported`，所以格式变化不会让连接带错数据继续。
 
 ### 插件与模块
