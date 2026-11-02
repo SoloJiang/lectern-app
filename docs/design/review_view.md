@@ -16,7 +16,7 @@
   - 交接：⇧⌘O 经 `dyn Reader` 打开完整文件（[file_reader 设计](file_reader.md)），diff 两侧的对象库内容经 `Reader::share_object` 登记；`CodeIntel::set_focus` 的 `Review`、`Touched`、`Current`（[code_intel 设计「接口」](code_intel.md#接口)）；Space 打开上下文面板。
   - 两侧文本的语法高亮：在 executor 上调用 `syntax` 的 `highlight::window`（[file_reader 设计「`syntax` 的公开项」](file_reader.md#syntax-的公开项)），结果按 OID 缓存。
   - 全部界面字符串的 Fluent 键、UI 探针的语义节点、具名 Action 与快捷键、向 `workspace` 登记的贡献、`DiffShown` 里程碑。
-  - 审阅意见（#22，「审阅意见（#22）」）：C 或行尾的 + 在选中的行上打开编辑框，⌘↩ 保存、Esc 关闭；意见画在锚点行之下，行号栏有标记；浮条显示待发送的条数、放弃、发送（⌘↩）和最近一批的再次复制；回应一批意见的那一轮在标题上标出。
+  - 审阅意见（#22，「审阅意见（#22）」）：点行号、C 或行尾的 + 在这一行上打开编辑框（点行号一下就够，不必先选中），⌘↩ 保存、Esc 关闭；意见画在锚点行之下，行号栏有标记；浮条显示待发送的条数、放弃、发送（⌘↩）和最近一批的再次复制；回应一批意见的那一轮在标题上标出。
 - 不做：
   - 归因、改动链、已看状态、简报规则、噪声列表、展示行与正文的计算：`review`。本 crate 不读 git、不读会话日志、不碰文件系统。
   - 窗口骨架、侧栏、工具栏容器、检查器容器、面板容器、导航栈：`workspace`。
@@ -310,7 +310,9 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
 
 意见的存储、位置（`NotePlace`）和发送都在 `review`（[review 设计「审阅意见」](review.md#审阅意见)）；本 crate 只读 `snapshot.notes`、`snapshot.notes_state`，发 `AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`、`SendNotes`、`CopyBatch`。发命令之前按 `services::review::limits` 做同样的检查，所以命令不会被 `review` 忽略。
 
-- 打开编辑框（C，或选中行行尾的 +）：
+- 打开编辑框（点一行的行号，C，或行尾的 +）：
+  - 点行号：行号栏是一个点击目标（统一视图里旧、新两个行号合成一个，双栏里左右各一个），一下点击先选中这一行再打开编辑框，同 C，选中项与锚点一样；点的是代码（行的其他部分）时只选中这一行，不打开。双栏里一项是一对行（删除加增加）时，点左边的行号锚在旧一侧，点右边的锚在新一侧；那一侧没有行时按 C 的规则。
+  - 行尾的 +：选中的行和指针下的行都画（`ReviewModel::hovered_row`，行的 `on_hover` 更新，离开时只清自己的标记；指针停在 + 上时行仍是悬停的）。
   - 选中项是 `Row`：锚在这一行。增加的行和上下文行取新一侧，删除的行取旧一侧；双栏里一项是一对行时取新一侧，没有新一侧时取旧一侧。`anchor.oid` 是那一侧的 `RowsSide::oid`，`anchor.file` 是这份行的文件；`oid` 为 None（这一侧没有文本）时不可用。
   - 选中项是 `Hunk`（J / K 之后）：锚在这个 hunk 的第一个增加的行，没有增加的行时取第一个删除的行。
   - 其他选中项或没有选中：不做事。
@@ -390,14 +392,14 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
   - Mark Reviewed 按钮（次要样式，标签 `review-mark-reviewed`，后面跟次要色的键提示 V：`Button::hint(Text::key(review-mark-reviewed-shortcut))`，是按钮里单独的一段，不拼进标签；辅助名只有标签）：触发 `review::MarkSeenAndNext`。
   - 原来在这里的统一 / 双栏分段控件和 Refresh 不再占工具栏：Action（`review::ToggleDiffMode`、`review::Refresh`）和键值保留，入口改到应用菜单栏的 View 菜单（`app` 设计的应用菜单现在只有四项，加 View 菜单是 `app` 的要求，见「对其他 crate 的要求」G）；在那之前只能经 Action 触发。画布没有给这两个操作留位置，这是需要产品确认的取舍（见「未决问题」5）。
 - `ui` 的控件与动效原语：颜色经 `colors(window, cx)`，文字经 `Text` 与 `TextRole`（层级见[交互规范「视觉」](interaction.md#视觉)的文字样式表，下文只写层级名），代码行 `TextRole::Code` 加 `mono_metrics` 的格宽与行高，`code_style` 着色；`CircleCheck`（文件卡片头与 Files 页的行）、`Progress`（Files 页的进度条，`ProgressShape::Bar`）、`Button`、`AgentDot`（子 agent 行）、`GroupedList` 与 `Row`（文件卡片、折叠的文件行）、`Skeleton`、`Expander`（展开 `Fold` 时下方内容下移）；浮条的胶囊容器、分段控件（检查器的页签）、开关来自 `ui`（见「对其他 crate 的要求」I）；动效：`CHECK_FILL`、`CHECK_STROKE`、`PROGRESS`、`SCROLL_NEXT`（V 之后的滚动，`ListState::scroll_to` 的目标由 `Transition` 逐帧给出）、`ARRIVE`（新一轮到达时 `Turn` 项从下方 8pt 淡入）、`SEGMENT`、`HOVER_IN` / `HOVER_OUT`、`EXPAND_HEIGHT` / `EXPAND_FADE`；减弱动态效果由 `Motion::effective` 处理。进入会话的 `ENTER_SESSION` 弹簧动画由 `project_home` 的行标题在 `Push` 前后完成（它拥有那段文字），本 crate 的内容按 `ARRIVE` 淡入。本 crate 不写任何颜色值、字体和时长（验收用 `rg` 检查）。
-- diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），符号栏里 `+` 用绿色、`−` 用红色；两个行号栏右对齐、用三级次要色，和符号栏、代码各占固定宽度；行高比字号高（画布是 12pt 的字配 20pt 的行高，由 `mono_metrics` 给出，不在这里写数值）；词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。选中的行保留增删的淡底色，左边加一条 2pt 的强调色竖条，行号换成强调色；行尾出现一个圆形的 + 按钮（`Button::icon_only(Icon::Plus)`，悬停说明 `review-note-add-here`；点击同 C，「审阅意见（#22）」）。有意见的行，行号栏里画一个 6pt 圆点。
+- diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），符号栏里 `+` 用绿色、`−` 用红色；两个行号栏右对齐、用三级次要色，和符号栏、代码各占固定宽度；行高比字号高（画布是 12pt 的字配 20pt 的行高，由 `mono_metrics` 给出，不在这里写数值）；词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。选中的行保留增删的淡底色，左边加一条 2pt 的强调色竖条，行号换成强调色；行尾出现一个圆形的 + 按钮（`Button::icon_only(Icon::Plus)`，悬停说明 `review-note-add-here`；点击同 C，「审阅意见（#22）」）；指针下的行也画它，不必先选中。点两个行号栏（光标变成手形）一下直接打开编辑框；点代码只移动当前行。有意见的行，行号栏里画一个 6pt 圆点。
 - 阅读栏（背景是页面底色，卡片带描边，[交互规范「视觉」](interaction.md#视觉)；宽度 760pt）从上到下，每一块是 `Item` 的一种：
   - 标题区（新的 `Item::Header`，会话审阅和规则分组视图都有）：标题（Title 1 层级，粗体；文字同工具栏标题），下面一行统计（Body 层级，次要色），用 ` · ` 连接：轮数（`review-stats-turns`，规则分组视图没有）、文件数（`review-stats-files`；有包数时用 `review-stats-files-packages`）、增删行数（`review-added` 绿色、`review-removed` 红色，取 `ChangeTotals::added` / `removed`）。包数（涉及几个子项目）要 `review` 的快照提供（「对其他 crate 的要求」H），没有时只写文件数。
   - 简报（没有卡片）：标题行 `review-brief-title`，旁边次要文字 `review-brief-source`，右边是 Analyze 的按钮（`review-analyze-with`，点名分析用的 agent）或进行中 / 重新分析的状态（下面「简报」一节写了状态）；条目前的标记是 8pt 圆点，不用画布 Review 画板里的 16pt 图标（[交互规范「视觉」](interaction.md#视觉)：状态用圆点）；条目末尾的 See impact 链接打开上下文面板，要 `context_drawer`（[#20](https://github.com/SoloJiang/lectern-app/issues/20)），没有它时不画；分支用量行前有分支图标。Analyze 进行中的说明和进度条、结果卡片的内容归 [#66](https://github.com/SoloJiang/lectern-app/issues/66)，这里只留出位置：说明在条目列表下面，结果卡片在同一位置。
   - 轮次：每轮之间一条 0.5pt 分隔线。展开的轮次：标题行是 `Turn N`（Headline 层级，次要色）和一段次要文字（Callout 层级）「开始时间（时:分）· 文件数 · token」，用 ` · ` 连接（`review-turn-files`、`review-turn-tokens`；token 要交接插件，没有时省略）；没有 agent 圆点。prompt 用 Title 2 层级、主文字色，没有引用块的左边线；agent 说明用 Body 层级、次要文字色，保留换行。折叠的轮次是一行：展开箭头、`Turn N`（半粗）、prompt 的预览、右端次要文字（没有改动是 `review-turn-none`，否则是 `review-turn-files`）；点一下展开，再点收起。哪些轮次默认折叠见「未决问题」3。
   - 文件卡片：一个文件（会话审阅里是一轮里的一步，规则分组视图里是最终改动的一个文件）一张卡片，头部和 diff 在同一个圆角卡片里，头部与 diff 之间一条 0.5pt 分隔线。头部：`CircleCheck`、路径（`Code` 层级的等宽字）、增删行数（`review-added` / `review-removed`）、右端一个朴素的 Open File 文字按钮（`review-open-file`，后面跟次要色的键提示 ⇧⌘O；没有交接插件时置灰）。diff 里的折叠行（`Fold`）与代码文字左对齐，次要色。文件卡片一直展开，没有折叠成一行的文件行，也没有收起卡片的控件。画布把后面两个文件画成折叠行，这是原型的状态；产品已决定不做文件卡片的折叠（「未决问题」6）。
   - Drifted 提示：diff 里无法对齐的改动块之前画一行警示色（橙）的字，带图标：`review-drift-note`（「Drifted — you edited these lines at 14:02, after the session.」）和一个 Compare 链接（`review-compare`）。编辑时间要 `review` 提供；没有时用 `review-drift-note-untimed`。Compare 的界面还没有设计，没有它时不画链接。原来的 2pt 竖条和「Drifted」标签去掉。规则分组视图的 hunk 标题（`review-hunk-turn`、`review-hunk-other-session`）保留：那里一个文件的改动可能来自几轮、几个会话。会话审阅的每一步已经在某一轮之下，hunk 不再画归因标题（是否保留见「未决问题」7）。
-  - 审阅意见（#22）：编辑框（C 或行尾的 + 展开，`EXPAND_HEIGHT` / `EXPAND_FADE`）和行内的意见块画在锚点行之下；`Drifted` 的意见在文件标题之后；不在审阅里的文件上的意见在叙事末尾一块。画法见「审阅意见（#22）」。
+  - 审阅意见（#22）：编辑框（点行号、C 或行尾的 + 展开，`EXPAND_HEIGHT` / `EXPAND_FADE`）和行内的意见块画在锚点行之下；`Drifted` 的意见在文件标题之后；不在审阅里的文件上的意见在叙事末尾一块。画法见「审阅意见（#22）」。
 - 检查器：页签是撑满宽度的分段控件（`Segmented`），画布是 Files / Conversation 两项；本 crate 登记 Files 页（`InspectorTab`，标签 `review-progress-title`，值改成 Files），Conversation 页归 `conversation`（[#23](https://github.com/SoloJiang/lectern-app/issues/23)）。Files 页：顶上一行「已看 2/6」（`review-files-reviewed`）和右端的百分比（`review-files-percent`），下面一条细进度条（`Progress::Bar`，增长动画 `PROGRESS`）；再下面是文件列表，每行：`CircleCheck`、短名（路径的最后一段，列表里有重名时加上上一级目录）、右端次要色的 `Turn N`（该文件最早被改动的那一轮，规则分组视图里没有）；选中的行用淡灰填充（不是强调色），两侧内缩、圆角，没有分隔线；噪声组和折叠的文件不变。选中行的辅助文字 `review-reviewing` 去掉（画布没有）。
 - 浮条：贴底居中的胶囊，宽度由内容决定。从左到右：审阅意见数或发送状态（`review-comments` 等，半粗）、Copy Again（朴素按钮，最近一批还没有回应时）、放弃（朴素按钮，有待发送的意见时）、Looks Good（次要按钮）、发送失败后的 Copy as Prompt（朴素按钮）、发送（强调色按钮，`review-send-to` 或只有剪贴板途径时的 `review-copy-prompt`，后面跟键提示 ⌘↩）；规则见「审阅意见（#22）」。#22 实现之前意见数总是 0，发送置灰；全部已看（`progress.seen == total`）时 Looks Good 换成不可点的 `review-all-reviewed`。已看进度不在浮条里（在检查器的 Files 页），原来浮条上的进度条和「n/m reviewed」去掉。胶囊容器（材质、阴影、半径）由 `ui` 的浮条容器给出，位置由 `workspace` 留出（[workspace 设计「界面」](workspace.md#界面)），内容由本 crate 画。
 - 加载：`ui::loading_phase(now - opened_at)`：`Nothing` 时内容区空白（工具栏已显示标题）；`Skeleton` 时简报与前两轮的位置各一块 `Skeleton`；`Progress` 时一行 `review-loading` 加取消（`dispatch(Pop)`）。
@@ -553,7 +555,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
   | `review.diff[<rows-key>]` | `Diff` | `attrs`：`rows`、`context`、`prepared`、`highlighted`（两侧各 `plain` / `spans`） |
   | `review.diff[…].hunk[<old>:<new>]` | `DiffHunk` | `attrs`：`turns`、`others`、`drifted` |
   | `review.diff[…].row[<old>:<new>]`（只导出可见的） | `DiffLine` | `attrs`：`kind`、`drifted`、`notes`（这一行的意见数，#22）；`selected` |
-  | `review.diff[…].row[…].add-note` | `Button` | #22：行尾的 +，只在选中或悬停时出现 |
+  | `review.diff[…].row[…].add-note` | `Button` | #22：行尾的 +，只在选中或指针下的行上出现。行号栏不是探针节点（每行加一个会让每份树快照多一行）；测试按行的位置点它 |
   | `review.diff[…].fold[<old>]` | `Button` | `Label::key` = `review-fold` |
   | `review.diff[…].placeholder` | `Group` | `attrs`：`lines` |
   | `review.call[<id>]` | `Text` | `attrs`：`kind`（`command` / `subagent` / `tool`）、`files`、`status` |
@@ -595,7 +597,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
   | `review::Escape` | Esc | `review` | 面板或覆盖层开着时（`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里）不处理，Esc 冒泡到 `workspace` 先关面板；没有开着的层而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
   | `review::SelectNext` / `SelectPrevious` / `JumpToSelected` | ↓ / ↑ / ↵ | `review-progress` | Progress 列表的选择与跳转（跳到那个文件的步标题） |
   | `review::Back` | — | `review` | 失败态的返回按钮：`dispatch(Pop)` |
-  | `review::AddNote` | C | `review` | #22：在选中的行或 hunk 上打开编辑框（「审阅意见（#22）」）；行尾的 + 触发同一个 Action |
+  | `review::AddNote` | C | `review` | #22：在选中的行或 hunk 上打开编辑框（「审阅意见（#22）」）；行尾的 + 触发同一个 Action；点行号不经 Action，直接选中那一行并打开 |
   | `review::SendNotes` | ⌘↩ | `review` | #22：`SendNotes { route: routes[0].id }`；没有待发送的意见或正在发送时不处理。编辑框有焦点时 ⌘↩ 由文本框处理（保存），这个绑定收不到 |
   | `review::CopyNotesAsPrompt` | — | `review` | #22：经剪贴板途径（`"clipboard"`）发 `SendNotes`；浮条的备用按钮 |
   | `review::DiscardNotes` | — | `review` | #22：系统确认框，选放弃后发 `DiscardNotes` |
@@ -771,6 +773,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 ## 已知限制
 
+- 不能拖选几行再加一条意见：diff 行里没有文字选区（行是 `div` 加 `StyledText`），意见的锚点只有一个行号（`NoteAnchor::line`、日志里的 `line`、`Excerpt`、prompt 的 `PromptNote::line` 都是单行）。做它要改 `services`（锚点加终止行）、`review`（日志记录多一个字段并兼容旧记录、摘录取一段、prompt 模板标出范围、`NotePlace` 的归位与 Drifted 判断按范围）和本 crate（行的拖选跟踪、浮出的「Add Note」、编辑框与意见块标出范围），应另开一个 issue。复制所选文字同理，随选区一起做。
 - 高亮窗口 8 ms 内解析不完时这一侧保持纯文本，本次打开不重试。
 - `Changed` 与 `Prepared` 之间（< 3 ms）旧行与新快照并存，hunk 标签可能与新的 `FileAttribution` 短暂不一致。
 - ⌘E 只能打开文件，进入编辑要再按一次 ⌘E（`Reader::open` 没有直接编辑的参数）。
@@ -899,6 +902,8 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 ### 审阅意见的入口与工具栏的键提示（`Refs #22`）
 
+- 点行号、代码与悬停（`src/tests/notes.rs`）：`a_click_on_a_line_number_opens_the_editor`（什么都没选时点增加行的代码：只选中，没有编辑框；点删除行的行号：选中并打开，锚在旧一侧；点从没选过的上下文行的行号：锚在新一侧）、`a_click_on_a_line_number_side_by_side_takes_that_side`（双栏一对行：左边的行号旧一侧，右边的新一侧）、`the_plus_shows_on_the_row_under_the_pointer`（指针移到一行上出现 +，没有选中任何行；移到另一行后前一行的 + 消失；点 + 打开编辑框）。三个测试都把对应的实现临时改掉确认会失败。`INSTA_UPDATE=no just test -p lectern-review-view`：161 个通过，没有快照变化（行号栏与悬停都不是探针节点，静止时的树不变）。
+- 没有验证：真实窗口里的手形光标、悬停时 + 出现的手感（重画的开销）、指针停在 + 上时行是否一直算悬停（GPUI 的命中检测，测试平台里点击 + 通过）、行号栏点击区的大小。
 - 工具栏的 Mark Reviewed：`ui::Button::hint`（新，`docs/design/ui.md` 已补）。测试：`screen.rs` 的 `the_toolbar_button_keeps_its_key_hint_apart`（把 `Screen::toolbar` 的控件放进一个窗口并打开记录器：辅助名 / 探针标签是 `Mark Reviewed`，键 `review-mark-reviewed`，属性 `hint` 是 `V`），`ui` 的 `button_hint_is_a_part_after_the_label`（有提示的按钮比没有的宽，辅助名不含提示）。
 
 ### 用量插件（`review-view-usage`，`Refs #31`）
@@ -915,6 +920,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 
 ### 工具栏的键提示与意见的入口（`Refs #22`）
 
+- **点行号一下打开编辑框；多行选择没有做。** 行号栏是点击目标（统一视图一个、双栏左右各一个，`render_diff.rs` 的 `gutter`），不是探针节点。`selection_anchor` 加了一个 `prefer` 参数：双栏的一对行点左边的行号锚在旧一侧。多行选择（拖选几行出现「Add Note」）没有做，原因见「已知限制」。
 - **工具栏的键提示是 `Button::hint`，不是拼进标签的文字。** 设计写「后面跟次要色的键提示」，第 1 步实现成 `Text::verbatim(format!("{label} {hint}"))`，整个按钮一种颜色，读起来像错字。`toolbar` 没有 `Window`，不能像文件卡片的 Open File 那样在按钮旁边画一个 `text_role` 的元素，所以 `ui::Button` 加了 `hint`：标签之后 5pt 的一段，`secondary_label`（禁用时半透明）；辅助名只有标签。浮条的发送和编辑框的保存按钮仍把 ⌘↩ 拼在标签里（主按钮上的提示）；它们的探针标签带着提示（`Add Note ⌘↩`），改它们是另一次改动。
 
 ### 用量插件（`review-view-usage`，`Refs #31`）
@@ -937,7 +943,7 @@ C ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─▶ command
 - **公开项比设计多。** `items::NoteIndex`（每份快照建一次，O(意见数)）、`EditorAt`、`NoteRef`、`NotesCtx`、`build_noted`、`rows_items_with`、`placeholder_items`、`BuildOptions::editor`（设计只列了 `build` / `build_with`；`bench` 的 `BuildOptions` 字面量随之加了 `editor: None`）。
 - **编辑框的打开和关闭整表重建（`rebuild_in_place`，O(项数)），不用 `ListState::splice`。** `Prepared` 和行离开范围时，`note_file` 为 Some（有意见或编辑框）的 diff 用 `rows_items_with` / `placeholder_items` 带上意见再 `replace_segment`；没有意见时路径不变。`known_lines` 不数意见项。
 - **键绑定的谓词是 `(Content > review) && !Input`，不是 `Content > review`。** gpui 在焦点路径的每个深度上都试绑定，所以焦点在编辑框里时 `Content > review` 仍然匹配，J、K、V、C、空格会被屏幕拿走，意见里打不出这几个字符（写测试时发现）。`>` 比 `&&` 弱，括号不能省。`tests/plugin.rs` 里的断言随之改了。副作用：编辑框开着时在编辑框里按 C 是打字，设计里「已经有一个编辑框开着时按 C：存草稿、换到新锚点」键盘上到不了，改成 Esc 之后再 C，或点另一行再点它的 +（`escape_in_the_editor_keeps_a_draft` 里换锚点那一步由测试把焦点设回屏幕）。
-- **行尾的 + 只在行被选中时出现，悬停不出现**（设计是选中或悬停）：`Button` 没有悬停时才出现的接口。选中 hunk 时第一行画选中样式，没有 +。+ 是 `ButtonSize::Small` 的图标按钮。
+- **行尾的 + 在选中的行和指针下的行出现。** 第 4 步只做了选中（`Button` 没有悬停时才出现的接口）；现在行的 `on_hover` 把行的键放进 `hovered_row`，该行有 + 才画。没有用 `group_hover` 加透明度：那样每行都有一个看不见的按钮，探针和辅助功能树里每行多一个 `add-note`。代价是指针过每一行边界时屏幕重画一次（列表只画可见的项）。选中 hunk 时第一行画选中样式，没有 +。+ 是 `ButtonSize::Small` 的图标按钮。
 - **没有悬停说明。** `review-note-add-here.tooltip`、`review-notes-copy-again.tooltip`、`review-copy-prompt.tooltip` 已在 .ftl 里，没有调用方（`ui::Button` 没有悬停说明的接口）。
 - **`ui::Button::attr`（新，`docs/design/ui.md` 已补）：** 探针节点要带属性（`review.bar.send` 的 `route`、`review.bar.copy-again` 的 `batch`）。
 - **探针：** 节点 ID 与其他节点同一写法：`review.note.item[<16 位十六进制>]`、`….edit`、`….delete`（设计表写 `review.note[<id>]`）；加了 `review.note-editor.too-long`（超过上限时的 `review-note-too-long`）；`review.bar.comments` 的 `sending` 是 bool。
