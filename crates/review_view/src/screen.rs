@@ -130,6 +130,11 @@ impl Render for ReviewScreen {
                 model.list.remeasure();
             }
             let now = Instant::now();
+            // A new note editor is brought above the bar once the list has
+            // laid it out (#380); nothing else is done when none is opening.
+            if model.bring_editor_into_view(BAR_RESERVE) {
+                window.request_animation_frame();
+            }
             model.tick_glide(window, now);
             if model.tick_drag(window, now, cx) {
                 window.request_animation_frame();
