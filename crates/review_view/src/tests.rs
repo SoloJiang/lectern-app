@@ -14,6 +14,7 @@ mod notes;
 mod plugin;
 mod range;
 mod redraw;
+mod reveal;
 mod screen;
 mod scroll;
 mod step2;

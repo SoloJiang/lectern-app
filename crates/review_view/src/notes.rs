@@ -8,7 +8,10 @@
 
 use std::sync::Arc;
 
-use gpui::{AppContext as _, Context, Entity, FocusHandle, SharedString, Subscription, Window};
+use gpui::{
+    AppContext as _, Context, Entity, FocusHandle, ListOffset, Pixels, SharedString, Subscription,
+    Window,
+};
 use lectern_kernel::Name;
 use lectern_logging::debug;
 use lectern_services::review::{
@@ -24,6 +27,13 @@ use crate::model::ReviewModel;
 
 /// The most drafts kept; the earliest is dropped first.
 pub(crate) const MAX_DRAFTS: usize = 20;
+
+/// How many frames the screen waits for the list to lay a new editor out
+/// before it gives up bringing the editor into view. The frame that draws
+/// the editor is enough when it is near what is shown; one more is for the
+/// editor that is not (it is scrolled to first), and the rest for a rebuild
+/// that resets the list again in between.
+const REVEAL_FRAMES: u8 = 4;
 
 /// The Conversation page of the inspector, selected after a send into the
 /// session.
@@ -229,15 +239,63 @@ impl ReviewModel {
             _changed: changed,
         });
         self.rebuild_in_place(cx);
-        if let Some(ix) = self
+        // The rebuild reset the list: every item is unmeasured and has no
+        // height, so `scroll_to_reveal_item` finds nothing to bring in
+        // (#380). The screen moves the editor in a later frame, when the
+        // list has laid it out.
+        self.reveal_editor = REVEAL_FRAMES;
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Brings a newly opened editor, whole, above the floating bar: called
+    /// from the screen's `render` while `reveal_editor` is set, which is
+    /// from `open_editor` until the list has laid the editor out. `reserve`
+    /// is the room the bar takes at the bottom of the list. An editor taller
+    /// than the room is put at the top of the list, so that its text field
+    /// stays in view. Returns whether another frame is needed: the editor is
+    /// not laid out yet, or the list was moved and the view reads its layout
+    /// on the next one.
+    pub(crate) fn bring_editor_into_view(&mut self, reserve: Pixels) -> bool {
+        if self.reveal_editor == 0 {
+            return false;
+        }
+        let Some(ix) = self
             .items
             .iter()
             .position(|item| matches!(item, Item::NoteEditor { .. }))
-        {
-            self.list.scroll_to_reveal_item(ix);
+        else {
+            // Closed, or taken away by a change, before it was drawn.
+            self.reveal_editor = 0;
+            return false;
+        };
+        let Some(bounds) = self.list.bounds_for_item(ix) else {
+            self.reveal_editor -= 1;
+            if self.reveal_editor == REVEAL_FRAMES - 2 {
+                // Still not laid out a frame after it was drawn: the editor
+                // is further from what is shown than the list lays out (the
+                // last line of a range dragged upwards), or above it. Put it
+                // at the top; the frame after that measures it and the move
+                // above the bar follows.
+                self.list.scroll_to(ListOffset {
+                    item_ix: ix,
+                    offset_in_item: Pixels::ZERO,
+                });
+            }
+            return self.reveal_editor > 0;
+        };
+        self.reveal_editor = 0;
+        let viewport = self.list.viewport_bounds();
+        // How far the bottom is below the free part of the list, and how
+        // far the top may go up before it leaves the list.
+        let down = bounds.bottom() - (viewport.bottom() - reserve);
+        let up = bounds.top() - viewport.top();
+        let distance = down.max(Pixels::ZERO).min(up);
+        if distance.abs() < gpui::px(0.5) {
+            return false;
         }
-        window.focus(&focus, cx);
-        cx.notify();
+        self.list.scroll_by(distance);
+        true
     }
 
     /// Takes an open editor down, keeping the text of a new note as the

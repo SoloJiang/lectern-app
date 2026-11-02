@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。
+状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。编辑框打开后一定在浮条上方（[#380](https://github.com/SoloJiang/lectern-app/issues/380)）：见「审阅意见（#22）」的「编辑框的位置」，差异与验证见同名小节。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -321,6 +321,7 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
   - 已经有一个编辑框开着：它是新意见且有文字时，文字存为它的锚点的草稿，然后关掉它，再打开新的。
   - 这个锚点有草稿时，编辑框带上草稿的文字。
   - 编辑框是一个 `Item::NoteEditor`，插在锚点行（范围的 `anchor.last`）的意见之后，展开用 `EXPAND_HEIGHT` / `EXPAND_FADE`；焦点移到文本框（`TextAreaState::focus_handle`）。
+  - 编辑框的位置（#380）：不管用哪一种方式打开（点行号、C、行尾的 +、Add Note、编辑已有的意见），编辑框整个（含取消和保存）都在浮条上方，不在浮条下面。打开会整表重建，`ListState::reset` 把每一项都当作没测过、高度记为 0，这时 `scroll_to_reveal_item` 看不到新项的高度，什么也不会滚。所以 `open_editor` 只置 `reveal_editor`（等几帧，至多 `REVEAL_FRAMES`），屏幕的 `render` 在列表排完这一帧后（`ListState::bounds_for_item` 有值）调 `ReviewModel::bring_editor_into_view(BAR_RESERVE)`：编辑框的下缘低于「列表的下缘减去 `BAR_RESERVE`」时，用 `ListState::scroll_by` 向上滚这个距离；列表只排版可见范围之外 `OVERDRAW`（400pt）以内的项，编辑框离得更远时（向上拖选的范围，`last` 是按下的那一行，之后又滚走）或在列表之上时，它画出一帧之后仍没有高度，这时先 `scroll_to` 到它（放在列表的最上面），再下一帧照常移到浮条上方；编辑框比空出的地方还高时只滚到它的上缘与列表的上缘对齐，文本框留在视野里；上缘已在列表之上时滚回来；已经整个在视野里时不动。没有编辑框在打开时，`render` 里只多一次 `reveal_editor == 0` 的判断，不请求额外的帧。编辑框在画出之前被关掉或被快照换代拿走时，等待取消。
 - 编辑框里：`ui::TextArea`（`lines(2, 8)`，占位 `review-note-placeholder`）；下面一行右边是取消（朴素按钮，`review-cancel`）和保存（主按钮：新意见 `review-note-add`，已有的意见 `review-note-save`，后面跟键提示 ⌘↩）。文字去掉首尾空白后为空、超过 `limits::NOTE_BYTES` 字节、或与原来相同（已有的意见）时保存不可用；超过上限时左边显示 `review-note-too-long`；锚点是范围时左边先显示 `review-note-lines`。
   - ⌘↩：文本框的 `on_submit` 派发 `review::SaveNote`（gpui-component 的 `Input` 的上下文比屏幕的 KeyContext 深，屏幕上 ⌘↩ 的绑定收不到这个键，[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求) F）。新意见发 `AddNote { rows: Some(这份行的 RowsKey), anchor, text, excerpt: None }`，已有的意见发 `EditNote`。`command` 返回时快照里已经有这条意见：编辑框随即收起，焦点回到屏幕，选中项不变，这个锚点的草稿删掉。
   - Esc：文本框的 `on_cancel` 派发 `review::CancelNote`：编辑框收起，焦点回到屏幕。新意见有文字时存为这个锚点的草稿（`drafts`，至多 20 条，超出时丢最早的；屏幕 drop 时丢弃），之后在同一行按 C 时带回，打出的文字不会因为一次 Esc 丢失；改已有的意见时丢弃这次的改动，意见本身不变。输入法组字时 Esc 先给输入法。
@@ -351,7 +352,7 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
   - 范围的样子：`line` 到 `last` 之间、这一侧有行号且 OID 相同的行，画选中行的左边条（`BAR`、`accent`）和强调色的行号，增删的底色不变；探针的 `selected` 不变，另有 `in_range`。统一视图里，新一侧的范围中间的删除行不画：它们不在锚点里。每行只与当前的一个范围比较（拖动中的，否则 `range`，否则开着的新意见编辑框的锚点，否则选中的意见的锚点），O(1)。
   - Add Note：松开之后，`at` 那一行（松开的位置，向上拖时不是 `last`）的右端画一个次要按钮（`ButtonKind::Secondary`、`ButtonSize::Small`，24pt，文字 `review-note-add-range`，`.tooltip` 带行号），取代那一行的 +；用 `HOVER_IN` 淡入。它不是主按钮，「一个区域至多一个主色按钮」不受影响。放在 `at` 而不是 `last`：向上拖并自动滚动时，`last` 可能已经滚出屏幕，而松开的那一行一定在屏幕上。
     - 按钮用 `deferred` 画（`window.defer_draw`，不带 `ContentMask`）：行高约 16pt，行有 `overflow_hidden`，24pt 的按钮放在行里会被裁掉；上下各超出行约 4pt，盖住相邻的行。按钮的容器 `occlude`，所以按它不会触发下面的行。这一行滚出屏幕时按钮随行消失，C 仍然可用。
-    - 点击派发 `review::AddNote`，与 C 相同：还没发出的意见已满时不打开，显示 `review-notes-full`。编辑框在 `anchor.last` 之后展开，同「展开评论框」的动画，必要时滚到它。
+    - 点击派发 `review::AddNote`，与 C 相同：还没发出的意见已满时不打开，显示 `review-notes-full`。编辑框在 `anchor.last` 之后展开，同「展开评论框」的动画，必要时滚到浮条上方（见「编辑框的位置」）。
   - 清除范围：Esc（`review::Escape`，先于清空选中）；任何 `select`（点别的行、J、K、V）；切换统一 / 双栏；`AddNote` 保存之后。快照换代之后，这份行还在（`same_diff`）且这一侧的 OID 还等于 `oid` 时范围留着，否则清除；按下期间这样的变化直接取消 `press`。在编辑框里按 Esc 只关编辑框，范围留着，再按 C 带回这段范围的草稿（草稿的键是整个 `NoteAnchor`，含 `last`）。
   - 没有鼠标时：`review::ExtendRangeUp`、`review::ExtendRangeDown`（默认不绑定键，按交互规范「每个操作都是一个具名 Action」）从选中的行开始，把范围向上、向下扩一行，规则同上（统一视图的一侧、`Fold` 边界）。探针也用它们建范围，不必模拟拖动。
 - 浮条（从左到右，会话审阅和规则分组视图相同）：
@@ -397,7 +398,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 | 打开一个会话的 Diff < 50 ms（产品能力完成之前 CI 按 < 260 ms 判定，[ADR 0059](../adr/0059.md)；`app/open_diff`：项目主页 ↵ 到第一个文件的 diff 行画出，终点 `Milestone::DiffShown`） | review 的份额 < 35 ms（冷）加第一个文件的行 < 3 ms（review 设计「性能」）。本 crate ≤ 11 ms：工厂建模型与 `open` < 1 ms；`Changed` 投递到主线程 < 1 ms；`snapshot()` 加 `items::build`（50 个文件、20 轮、第一个文件 300 行）< 2 ms；`Prepare` 的发出在同一次更新里；`Prepared` 到达后 `rows()` 与 `splice` < 0.5 ms；画出第一屏（约 60 行等宽文本，纯文本）≤ 6 ms。高亮不在这条路径上：行先按纯文本画出并报告里程碑，区间之后到达 |
 | 滚动与输入 120 fps（5000 行的 diff） | `list` 只排版可见的项（约 60 行）；每项的元素构造是常数：`NodeId` 克隆、`Token` 切片、固定行高。每帧 ≤ 8.3 ms（`review_view/scroll_5000`）。滚动期间 `Prepare` 每帧至多一次，命令立即返回 |
 | 勾选 | `command(MarkSeen)` 返回前 review 已换出 `seen`（< 0.2 ms）；本 crate 只重画 Progress 行和步标题，勾选动画只改透明度与描边进度（`CHECK_FILL`、`CHECK_STROKE`） |
-| 审阅意见（#22） | C 到编辑框画出在下一帧（插入一项，`ListState::splice`）；`command(AddNote)` 返回前 review 已换出 `notes`（< 0.2 ms）；`items::build` 多 O(意见数) 的建表；滚动时每项的元素构造不变，意见块按项排版。prompt 不经过本 crate |
+| 审阅意见（#22） | C 到编辑框画出在下一帧（整表重建，见第 4 步的差异）；编辑框在浮条之下时，再下一帧滚到浮条上方（#380，一次 `bounds_for_item` 和一次 `scroll_by`）；`command(AddNote)` 返回前 review 已换出 `notes`（< 0.2 ms）；`items::build` 多 O(意见数) 的建表；滚动时每项的元素构造不变，意见块按项排版。prompt 不经过本 crate |
 | 拖选（#373） | 只在按下期间有开销。指针移动：先比较 `focus` 的一个 `bounds_for_item`，换行时查约 60 个可见项和一次 `range_of`（5000 行的一段约 10 µs），目标 < 0.1 ms。`focus` 变化时重画可见的行，与悬停相同，每帧 ≤ 8.3 ms。自动滚动就是滚动（`review_view/scroll_5000`）。松开不改 `items`，没有 `splice`。`items::build` 不变：意见仍按一个键（`anchor.last`）进 `by_line`，O(意见数)。每行多一次 O(1) 的范围比较。按下之前和冷启动没有新的工作，模型多两个 `Option`。预算不变，不加基准 |
 | 刷新 | `Changed` 到新画面：`items::build` < 2 ms（5000 行时 < 4 ms），锚点找回 O(1)；不等 `Prepared` |
 | 空闲内存（采样状态，没有打开审阅） | 本 crate 没有屏幕时 < 16 KiB（`Shared` 与注册的工厂）。屏幕在 `Pop` 时 drop，不保留 |
@@ -773,6 +774,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - `edit_and_delete_act_on_the_note`：编辑打开带原文的编辑框，保存发 `EditNote`；删除发 `RemoveNote`；已发送的意见只有删除，发送中的都没有。
   - `the_editor_follows_its_line_across_a_refresh`：快照换代后编辑框仍在锚点行之后；锚点行没了时跟在文件标题之后，保存照常发出。
   - `the_turn_title_shows_the_answered_notes`：`TurnEntry::answers` 的轮次标题有 `review-turn-answers`，折叠成一行时也有。
+  - 编辑框的位置（#380，`src/tests/reveal.rs`，列表里是 300 行的 diff，滚到中间，在最低的一行上打开）：`a_line_number_at_the_bottom_opens_the_editor_above_the_bar`、`c_at_the_bottom_*`、`the_plus_at_the_bottom_*`、`add_note_for_a_range_at_the_bottom_*`、`edit_at_the_bottom_*`：编辑框、取消、保存、文本框的下缘都不低于浮条（`review.bar`）的上缘，上缘都不高于列表；`an_editor_higher_than_the_room_keeps_its_text_field_in_view`（窗口只有 140pt 高）文本框在列表之内、浮条之上；`an_editor_far_below_the_list_is_brought_into_view`、`an_editor_above_the_list_is_brought_into_view`（选中一行，滚走一屏以上再按 C）；`an_editor_in_view_does_not_move_the_list`；`a_closed_editor_leaves_nothing_to_reveal`（画出之前关掉，不再等待）。
 - 语义树：`review_tree_session`、`review_tree_groups`、`review_tree_progress`、`review_tree_failed` 的 insta 快照；#22 加 `review_tree_notes`（意见、编辑框、`NotesElsewhere`、浮条的再次复制、放弃与发送），#373 加 `review_tree_note_range`（`in_range`、`review.range.add-note`、`last`）（`ui_probe` 的 `tree::snapshot`，[#6](https://github.com/SoloJiang/lectern-app/issues/6) 合并后接入；之前用 `Recorder::finish` 的记录去掉 `bounds` 后快照）。
 - 日志：`logs_hold_no_contents`。
 - fixtures：没有外部格式；`testing::snapshot_fixture` 在代码里合成。
@@ -999,7 +1001,28 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - 输入法组字时 Esc、⌘↩ 与范围的编辑框。
   - 一条已变的范围的意见（`review-note-drifted-range`）的文字：它不是探针节点，测试只看到类型检查通过和 `excerpt_lines`。
 
+### 编辑框在浮条上方（`Closes #380`）
+
+真实窗口（1080×700）里点最低一行的行号：文本框在 y=661.5，取消在 y=718.5，浮条从 y=645.5 起，窗口到 y=700 为止，列表过 2 s 也不滚。无窗口的测试平台里同样复现（`src/tests/reveal.rs`，窗口 1920×1080）：修复前编辑框下缘在 1157，浮条上缘在 1017。在 macOS（arm64）上运行，没有打开真实窗口，没有运行 `just automation`、`app` 的窗口测试和基准。
+
+- 原因（有证据）：`open_editor` 先 `rebuild_in_place`，其中 `ListState::reset` 把所有项换成没测过的，高度记为 0（gpui-pre 0.3.7 的 `ListItem::Unmeasured` 在 `size_hint` 为 None 时 `height` 为 0）；紧接着的 `scroll_to_reveal_item(ix)` 用这棵树算下缘，新项和前面的项都是 0 高，算出的目标不在当前位置之后，所以什么也没滚。诊断：调用时 `bounds_for_item(编辑框)` 是 None，`logical_scroll_top` 调用前后都是第 67 项、偏移 0；而下一帧列表排完之后（编辑框已有高度）再调一次 `scroll_to_reveal_item`，编辑框的下缘从 1157 变为 1004，在浮条上缘 1017 之上。浮条的占位（`BAR_RESERVE` 作为列表的下内边距）没有问题：`scroll_to_reveal_item` 本来就计入 `padding.bottom`。
+- 修复：见「审阅意见（#22）」的「编辑框的位置」。`open_editor` 不再调 `scroll_to_reveal_item`，改为置 `reveal_editor`；屏幕的 `render` 在列表排好之后调 `bring_editor_into_view`，用 `bounds_for_item`、`viewport_bounds` 和 `scroll_by` 把编辑框移到浮条上方。
+- 测试：`INSTA_UPDATE=no just test -p lectern-review-view -p lectern-ui`：297 个通过（`lectern-review-view` 196 个，原 186 个，新增 10 个，都在 `src/tests/reveal.rs`；`lectern-ui` 101 个），没有快照变化。把屏幕里的调用临时改掉，9 个新测试失败（只有「编辑框已在视野里不动列表」照常通过）；把「先 `scroll_to`」临时改掉，两个「离得远」的测试失败。`just check` 通过。
+- 没有验证（要在真实窗口里看）：
+  - 编辑框真的移上来了：在真实窗口里打开后，一两帧之内编辑框到浮条上方，不是 2 s 后还在浮条下面（测试的 `Opened::draw` 每次强制画两帧，分不出「第二帧移了」和「从来没移」；实际靠 `request_animation_frame` 再重画屏幕，与 `tick_drag` 同一个机制）。
+  - 编辑框先在浮条之下画出一帧、下一帧才移上来，是否看得出跳动（测试平台一次点击要画几帧，看不出这一点）；离得远的编辑框要多一帧（先 `scroll_to`），也要看。
+  - 向上拖选再 Add Note（`last` 已滚到列表之外）的真实手感：只有「离得远」的两个测试用选中一行再滚走来代替。
+  - 1080×700 的窗口里五种打开方式，编辑框、取消和保存整个在浮条之上，文本框有焦点。
+  - 在编辑框里连续打字，文本框长到 8 行（`lines(2, 8)`）时，下缘可能再次低于浮条：这次只处理打开的时刻，没有在打字时重新滚动。
+  - 深色外观、减弱动态效果下的样子。
+
 ## 与设计的差异
+
+### 编辑框在浮条上方（#380）
+
+- **编辑框打开后晚一帧才滚到位。** 设计在「审阅意见（#22）」写「必要时滚到它」，没有说怎样滚；第 4 步的实现在 `open_editor` 里立刻调 `scroll_to_reveal_item`，因为整表重建后项没有高度，这一句是空操作（#380）。现在 `open_editor` 置 `reveal_editor`，屏幕的 `render` 在列表排好之后调 `bring_editor_into_view`：编辑框先按原位置画出一帧，下一帧移到浮条上方。要避开这一帧，得在 `open_editor` 里知道新项的高度，`ListState` 在 0.3.7 里没有给单项设高度提示的接口（只有 `reset_with_uniform_height`，对所有项），也不升级 gpui。
+- **离得远的编辑框先 `scroll_to` 到它，再移到浮条上方。**`ListState` 只排版 `OVERDRAW` 以内的项，向上拖选后 `last` 可能在一屏之外，立即 `scroll_to_reveal_item` 或 `bounds_for_item` 都不行；多一帧，编辑框先在列表最上面。
+- **不用 `scroll_to_reveal_item`。** 它在编辑框比空出的地方还高时会把上缘滚出列表，文本框看不见；`bring_editor_into_view` 限制滚动距离，使上缘不高于列表的上缘。上缘已在列表之上时它也滚回来。
 
 ### 第 5 步（审阅意见的范围，#373）
 

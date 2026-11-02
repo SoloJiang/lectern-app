@@ -196,6 +196,9 @@ pub struct ReviewModel {
     pub(crate) notes_full_hint: bool,
     /// #22: `AddNote` commands sent since the screen opened (the log).
     pub(crate) notes_added: u32,
+    /// #380: frames the screen still waits for the list to lay the editor
+    /// out before it brings the editor above the bar; 0 when nothing waits.
+    pub(crate) reveal_editor: u8,
     /// #22: the notes of the snapshot arranged for the item builder.
     pub(crate) note_index: NoteIndex,
     /// #22: where each note is in `snapshot.notes`.
@@ -300,6 +303,7 @@ impl ReviewModel {
             switched_for: None,
             notes_full_hint: false,
             notes_added: 0,
+            reveal_editor: 0,
             note_index: NoteIndex::default(),
             note_pos: HashMap::new(),
             screen_focus: None,
@@ -392,6 +396,7 @@ impl ReviewModel {
             switched_for: None,
             notes_full_hint: false,
             notes_added: 0,
+            reveal_editor: 0,
             note_index: NoteIndex::default(),
             note_pos: HashMap::new(),
             screen_focus: None,
