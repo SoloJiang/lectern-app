@@ -243,11 +243,10 @@ fn acp_requests_for_capabilities_it_did_not_declare_get_method_not_found() {
         &snapshot.entries.last().unwrap().body,
         EntryBody::AgentText { text, .. } if &*text.text == "no client capabilities used"
     ));
-    let record = &h.records()[0];
+    // The script does not wait for these answers, so the turn can end before the fake adapter has
+    // read them.
     for id in ["fs-1", "term-1"] {
-        let response = record
-            .response(id)
-            .unwrap_or_else(|| panic!("{id} answered"));
+        let response = wait_for(id, || h.records()[0].response(id).cloned());
         assert_eq!(response["error"]["code"], -32601, "{id}");
     }
 }
