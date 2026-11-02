@@ -20,6 +20,14 @@ pub(crate) fn target_kind(target: &ReviewTarget) -> &'static str {
     }
 }
 
+/// The name of a diff mode, for the `note range` record.
+pub(crate) fn mode_kind(mode: crate::items::DiffMode) -> &'static str {
+    match mode {
+        crate::items::DiffMode::Unified => "unified",
+        crate::items::DiffMode::SideBySide => "side_by_side",
+    }
+}
+
 /// The kind of a failure, for `review failed shown`.
 pub(crate) fn error_kind(error: &ReviewError) -> &'static str {
     match error {

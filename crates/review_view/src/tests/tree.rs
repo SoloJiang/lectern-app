@@ -252,3 +252,59 @@ fn review_tree_notes(cx: &mut TestAppContext) {
     let text = render_tree(&opened.record(cx));
     insta::assert_snapshot!("review_tree_notes", text);
 }
+
+/// A dragged range with its Add Note button, a note on a range under its last
+/// line, and a changed range with an excerpt that left lines out (#373).
+#[gpui::test]
+fn review_tree_note_range(cx: &mut TestAppContext) {
+    use lectern_services::review::{DiffSide, Excerpt, ExcerptGap, NotePlace, NoteState};
+
+    use crate::testing::file_key;
+    use crate::tests::notes::{change, note, on_step, sample, set_notes};
+
+    let (rig, opened) = sample(cx);
+    // A pending note on the new lines 1 to 2 (the added line and the context
+    // line after it), a drifted one on 20 to 40 with 17 lines left out.
+    let mut ranged = note(1, DiffSide::New, 1, NoteState::Pending, on_step());
+    ranged.anchor.last = 2;
+    let mut drifted = note(
+        2,
+        DiffSide::New,
+        20,
+        NoteState::Pending,
+        NotePlace::Drifted { file: file_key(0) },
+    );
+    drifted.anchor.last = 40;
+    drifted.excerpt = Some(Excerpt {
+        first: 20,
+        lines: Arc::from(vec![Arc::<str>::from("a"), Arc::from("b"), Arc::from("c")]),
+        gap: Some(ExcerptGap { at: 2, lines: 17 }),
+    });
+    change(&rig, &opened, cx, |snapshot| {
+        set_notes(snapshot, vec![ranged, drifted]);
+    });
+    // A drag from the first row to the added one, released there.
+    let mut visual = opened.visual(cx);
+    let records = opened.record(cx);
+    let point_on = |lines: &str| {
+        let bounds = crate::tests::screen::must(
+            &records,
+            &format!("review.diff.item[step:0].row.item[{lines}]"),
+        )
+        .bounds;
+        gpui::point(bounds.origin.x + bounds.size.width / 2.0, bounds.center().y)
+    };
+    let (start, end) = (point_on("0:0"), point_on("-:1"));
+    visual.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+    opened.draw(cx);
+    visual.simulate_mouse_move(
+        end,
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    opened.draw(cx);
+    visual.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+    opened.draw(cx);
+    let text = render_tree(&opened.record(cx));
+    insta::assert_snapshot!("review_tree_note_range", text);
+}

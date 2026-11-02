@@ -54,9 +54,15 @@ actions!(
         JumpToSelected,
         /// The failed state's button.
         Back,
-        /// C, or the + at the end of a row: write a review note on the
-        /// selected row or hunk.
+        /// C, the + at the end of a row, or the Add Note button of a dragged
+        /// range: write a review note on the range, or on the selected row or
+        /// hunk.
         AddNote,
+        /// Make the range from the selected row (or the range there is) one
+        /// row longer at the top.
+        ExtendRangeUp,
+        /// The same at the bottom.
+        ExtendRangeDown,
         /// ⌘↩: send the pending review notes the first way there is.
         SendNotes,
         /// Send the pending review notes through the clipboard (the bar's

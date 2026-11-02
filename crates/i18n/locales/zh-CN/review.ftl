@@ -196,6 +196,12 @@ review-note-save = 保存
 review-note-too-long = 这条意见太长。
 review-note-add-here = 添加意见
     .tooltip = 添加审阅意见（C）
+review-note-add-range = 添加意见
+    .tooltip = 为第 { $first }–{ $last } 行添加审阅意见（C）
+# $first、$last 从 1 起。
+review-note-lines = 第 { $first }–{ $last } 行
+review-note-drifted-range = 第 { $first }–{ $last } 行在写下这条意见之后变了
+review-note-excerpt-gap = 还有 { $count } 行
 review-note-edit = 编辑
 review-note-delete = 删除
 review-note-pending = 未发送

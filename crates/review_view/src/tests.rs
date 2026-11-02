@@ -12,6 +12,7 @@ mod logs;
 mod needs;
 mod notes;
 mod plugin;
+mod range;
 mod redraw;
 mod screen;
 mod scroll;

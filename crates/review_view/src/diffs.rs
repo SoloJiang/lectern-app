@@ -231,6 +231,9 @@ impl ReviewModel {
             return;
         }
         self.mode = mode;
+        // Display rows change: a press or a range does not mean the same rows.
+        self.end_press("cancelled");
+        self.drop_range();
         self.shared.set_mode(mode);
         self.shared.dispatch(WorkspaceCommand::SetReadingColumn(
             mode == DiffMode::Unified,
