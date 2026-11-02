@@ -866,7 +866,7 @@ conversation 设计 C 要求先按两个适配器的公开源码确认下面六�
 | `initialize` 回复的协议版本 | `protocolVersion: 1` 写死（`src/acp-agent.ts` 的 `initialize`） | 客户端发 1 时走 v1 路径，回复 SDK 常量 `PROTOCOL_VERSION`，该常量在 `@agentclientprotocol/sdk` 2.2.0（`package-lock.json` 锁定的版本）里是 1；v2 只对声明 v2 的客户端启用 |
 | 恢复会话 | `agentCapabilities.loadSession: true`，`sessionCapabilities.resume`；`session/resume` 与 `session/load` 都调 `createSession`，把请求里的 `sessionId` 作为 SDK `query()` 的 `resume` 选项 | `loadSession: true`，`sessionCapabilities.resume`；`thread/resume` 的 `threadId` 就是请求里的 `sessionId` |
 | ACP 会话 ID 是否就是上游会话 ID | 是：恢复时不设 `options.sessionId`，也不设 `forkSession`，SDK 沿用原会话 | 是：ACP 的 `sessionId` 就是 Codex 的线程 ID |
-| 经 ACP 的轮次是否写进 CLI 同一份本机日志 | 是，依据：适配器不设 `CLAUDE_CONFIG_DIR`，`settingSources` 是 `user`、`project`、`local`，工作目录取请求的 `cwd`；`@anthropic-ai/claude-agent-sdk` 0.3.316 的 `sdk.d.ts` 说明 `forkSession` 为 true 时才换新的会话 ID。**未运行验证**：SDK 怎样落盘看的是类型声明里的说明，不是 SDK 实现 | 是，依据：适配器启动 `codex app-server` 时传自己的 `process.env`，不改 `CODEX_HOME`；同一线程的轮次追加在原来的 rollout。**未运行验证** |
+| 经 ACP 的轮次是否写进 CLI 同一份本机日志 | 是，依据：适配器不设 `CLAUDE_CONFIG_DIR`，`settingSources` 是 `user`、`project`、`local`，工作目录取请求的 `cwd`；`@anthropic-ai/claude-agent-sdk` 0.3.316 的 `sdk.d.ts` 说明 `forkSession` 为 true 时才换新的会话 ID。SDK 怎样落盘看的是类型声明里的说明，不是 SDK 实现。2026-11-02 经恢复会话确认（证据是 CLI 的回答，不是读日志文件，见下文） | 是，依据：适配器启动 `codex app-server` 时传自己的 `process.env`，不改 `CODEX_HOME`；同一线程的轮次追加在原来的 rollout。2026-11-02 经恢复会话确认（证据是 CLI 的回答，不是读日志文件，见下文） |
 | `usage_update`（`used`、`size`） | 发（每个 `result` 之后，另在流式中途发；带 `cost`，不读） | 发（`CodexEventHandler`，`used`、`size` 都有且 `size > 0` 才发） |
 | 执行命令的原始输入里命令在哪 | `rawInput.command`（Bash 工具的输入）；没有工作目录字段 | `rawInput.command` 和 `rawInput.cwd`（`CommandReporter.permission`，命令已去掉 shell 前缀） |
 
@@ -890,9 +890,18 @@ conversation 设计 C 要求先按两个适配器的公开源码确认下面六�
 
 - 是否出现权限请求由用户自己的配置决定。本机的 Codex 配置下，写文件和执行命令都不经请求直接完成；Claude Code 下写文件有请求，`touch`、`mkfifo` 没有。
 - 用户的 Codex 配置产生的警告（如启用了开发中的功能）由适配器作为 agent 正文的开头发出，界面显示为回复的一部分。
-- Claude Code 可能把长时间运行的命令放到后台：工具行是 `Completed`、一轮结束，适配器说命令还在运行。这次没有核对这条命令在 `Disconnect` 之后是否退出。
+- Claude Code 可能把长时间运行的命令放到后台：工具行是 `Completed`、一轮结束，适配器说命令还在运行。这条命令在 `Disconnect` 之后不会退出，见下面的「已知限制」。
 
-仍然没有运行验证的：「核对」第一张表里「经 ACP 的轮次是否写进 CLI 同一份本机日志」两项（要读本机日志）；真实登录 shell 里找到适配器的路径（`login_env()`，这次用 `with_login_env` 传入）；空闲 10 分钟退出。
+随后补充的运行核对（同样用合成会话和假项目，没有入库，没有打开窗口）：
+
+- 经 ACP 发出的一轮，之后 CLI 看得到：用两个命令行各自恢复同一个会话，都答出了那一轮里给的暗号。「核对」第一张表里「经 ACP 的轮次是否写进 CLI 同一份本机日志」一项因此成立；没有读本机日志文件，依据是 CLI 的回答。
+- 登录 shell 的程序查找在适配器没有安装时返回 `NotInstalled`，用时约 0.6 秒。
+- 空闲的适配器约 603 秒后退出（claude-agent-acp），与 10 分钟的设计一致。codex-acp 的空闲退出没有测。
+- Codex 的正文增量成批到达：799 个增量约 0.01 秒内到齐。直接对 `codex app-server` 用同样的方法测，结果一样，所以成批到达来自上游，不是 Lectern 或适配器造成的。已由人决定：继续经适配器走 ACP，不增加直连 `codex app-server` 的客户端。上面表里「实测正文在一轮结束前整段到达」就是这个现象。
+
+已知限制：Claude Code 放到后台的命令（测试里是 `sleep 97`）在 `Disconnect` 之后还活着，因为它在自己的进程组里，而 `Disconnect` 终止的是适配器的进程组。
+
+仍然没有运行验证的：真实登录 shell 里找到适配器的路径（`login_env()`，这次用 `with_login_env` 传入；只测了找不到的情形）。
 
 没有查到的：`session/update` 的 `tool_call` 对其他工具的 `rawInput` 形状（不影响，只有执行命令的请求读命令文本）；适配器在 `session/load` 时回放更新的数量（实现时按「丢弃并计数」处理）。适配器会变：不认识的字段忽略，`initialize` 回复的版本不是 1 就是 `Unsupported`，所以格式变化不会让连接带错数据继续。
 
