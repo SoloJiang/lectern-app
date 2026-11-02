@@ -12,7 +12,9 @@ use lectern_services::usage::{Tokens, Window};
 use rusqlite::Connection;
 
 use super::support::*;
-use crate::store::schema::{CREATE_V6, CURRENT, Migration, Schema, V1, V2, V3, V4};
+use crate::store::schema::{
+    CREATE_V6, CURRENT, DERIVED_VERSION, Migration, Schema, V1, V2, V3, V4,
+};
 use crate::store::{BACKUP_PREFIX, Checked, Mode, SALVAGE_FILE, Step, StoreError, fail_at};
 use crate::testing::FakeSessions;
 
@@ -54,6 +56,23 @@ pub(super) fn pragma(conn: &Connection, name: &str) -> i64 {
 fn store_page_cache_is_bounded() {
     let h = Harness::new();
     insta::assert_snapshot!(h.store().pragmas());
+}
+
+#[test]
+fn store_derived_version_waits_for_batched_rebuild() {
+    // Issue #366: `dedup::rebuild` and `rebuild_in` recompute every hot fact
+    // row and share in one writer transaction (`usage/rebuild_30d` takes about
+    // 18 s; a 396-day window takes minutes) and run while the database is
+    // opened. A bump of `DERIVED_VERSION` makes every existing database run
+    // that rebuild once. Do not change this number until the rebuild runs by
+    // session in batches of at most 50 ms (docs/design/usage.md「数据流与线程」)
+    // and this test is updated in the same change.
+    assert_eq!(
+        DERIVED_VERSION, 1,
+        "DERIVED_VERSION must stay 1 until the rebuild is batched (#366): \
+         the rebuild is one writer transaction that blocks the writer and \
+         the database open for minutes on a long window"
+    );
 }
 
 #[test]
