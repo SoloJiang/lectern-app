@@ -1825,8 +1825,9 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
-    // (step 7) `notes::prompt` of 40 notes with 4 KiB of text and a
-    // five-line excerpt each.
+    // (step 7) `notes::prompt` of 40 notes with 4 KiB of text and an
+    // eight-line excerpt each (#373: the most an excerpt keeps; every fifth
+    // note is a range with a gap).
     share(
         "review/notes_prompt_40",
         &[median(Limit::TimeBelow(ms(5)))],
@@ -1881,8 +1882,8 @@ pub static BUDGETS: &[Budget] = &[
         Memory,
     ),
     // (step 6) The annotation log's index with 280 review notes (40 not
-    // sent, 240 sent; 200 bytes of text and five excerpt lines each):
-    // 300 KB (2^10 bytes).
+    // sent, 240 sent; 200 bytes of text and five excerpt lines each, 28 of
+    // them ranges with eight lines, #373): 300 KB (2^10 bytes).
     share(
         "review/resident_notes_bytes",
         &[median(Limit::BytesBelow(300 << 10))],

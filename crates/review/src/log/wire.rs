@@ -28,7 +28,9 @@ use lectern_services::changes::{
     BaseSpec, ChangePath, FileMode, RawIdentity, SideIdentity, UnavailableKind,
 };
 use lectern_services::project::BlobId;
-use lectern_services::review::{BatchId, DiffSide, Excerpt, FileKey, NoteAnchor, NoteId, SentVia};
+use lectern_services::review::{
+    BatchId, DiffSide, Excerpt, ExcerptGap, FileKey, NoteAnchor, NoteId, SentVia,
+};
 use lectern_services::session::Timestamp;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -274,6 +276,10 @@ struct Anchor<'a> {
     file: File<'a>,
     side: NoteSide,
     line: u32,
+    /// Only written when it is after `line` (#373); a record without it is
+    /// a note on the one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last: Option<u32>,
     oid: BlobId,
 }
 
@@ -282,6 +288,15 @@ struct ExcerptLines<'a> {
     first: u32,
     #[serde(borrow)]
     lines: Vec<Cow<'a, str>>,
+    /// Only written when the middle of a long range is left out (#373).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gap: Option<GapLines>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GapLines {
+    at: u32,
+    lines: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -370,6 +385,10 @@ struct Line<'a> {
 }
 
 /// What a record line holds.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per line read, on the stack and moved once; a Box would allocate for every record of a 16 000-line load"
+)]
 pub(super) enum Decoded {
     Record(Record),
     /// A record type this version does not know: kept verbatim.
@@ -476,11 +495,16 @@ pub(super) fn encode(record: &Record, out: &mut Vec<u8>) {
                     DiffSide::New => NoteSide::New,
                 },
                 line: n.anchor.line,
+                last: (n.anchor.last > n.anchor.line).then_some(n.anchor.last),
                 oid: n.anchor.oid,
             },
             excerpt: n.excerpt.as_ref().map(|e| ExcerptLines {
                 first: e.first,
                 lines: e.lines.iter().map(|l| Cow::Borrowed(&**l)).collect(),
+                gap: e.gap.map(|g| GapLines {
+                    at: g.at,
+                    lines: g.lines,
+                }),
             }),
             text: &n.text,
             created: n.created.0,
@@ -670,6 +694,10 @@ fn known_record(l: Line<'_>, strs: &mut Interner) -> Option<Record> {
             let excerpt = l.excerpt.map(|e| Excerpt {
                 first: e.first,
                 lines: e.lines.iter().map(|line| strs.str(line)).collect(),
+                gap: e.gap.map(|g| ExcerptGap {
+                    at: g.at,
+                    lines: g.lines,
+                }),
             });
             Some(Record::Note(NoteRecord {
                 at,
@@ -685,6 +713,9 @@ fn known_record(l: Line<'_>, strs: &mut Interner) -> Option<Record> {
                         NoteSide::New => DiffSide::New,
                     },
                     line: a.line,
+                    // A `last` before `line` (a file edited by hand) reads as
+                    // the one line; the note is kept.
+                    last: a.last.map_or(a.line, |last| last.max(a.line)),
                     oid: a.oid,
                 },
                 excerpt,

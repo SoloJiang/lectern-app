@@ -246,6 +246,7 @@ fn logs_hold_no_note_contents(cx: &mut TestAppContext) {
     drifted.excerpt = Some(Excerpt {
         first: 0,
         lines: Arc::from(vec![Arc::<str>::from(format!("excerpt {CANARY}"))]),
+        gap: None,
     });
     let mut elsewhere = note(
         2,

@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（[#326](https://github.com/SoloJiang/lectern-app/pull/326)）；第 6 步（意见的存储、命令与位置：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`，`NotePlace`，摘录，标注日志的 `note`、`note_removed`、`notes_sent` 的读取、索引、保留与压缩，`review/note_add`、`review/resident_notes_bytes`）已实现（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）。第 7 步（发送、prompt 与回应的那一轮：`SendNotes`、`CopyBatch`，内置的剪贴板途径，`register_note_route`，`notes::prompt`，批次与回应的那一轮的对应，`notes_sent` 的写入，「日志与诊断」里 #22 的发送记录，`review/notes_prompt_40`）已实现（[#331](https://github.com/SoloJiang/lectern-app/pull/331)）。真实的 Claude Code 与 Codex 会话里粘贴 prompt 的手动检查还没做，随 `review_view` 的一步进行（见「实际验证」第 7 步的「没有验证的」）。并行 worktree 总览（[worktrees 设计「对其他 crate 的要求」](worktrees.md#对其他-crate-的要求)的 A 的 `review` 部分：`Review::worktrees`、`watch_worktrees`、`refresh_worktrees`、`ReviewEvent::Worktrees`，`review/worktrees_cloudprint`）已实现（#337），见「概览」的「并行 worktree 总览」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）：设计已接受，尚未实现，见「审阅意见」的「范围」和「验收」第 8 步。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。`Overview.packages`（[project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 A）已实现（[#239](https://github.com/SoloJiang/lectern-app/pull/239)）。审阅意见（#22，「审阅意见」）已设计；前置条件 H（`services` 的审阅意见类型与 `NoteRoute`）已实现（[#326](https://github.com/SoloJiang/lectern-app/pull/326)）；第 6 步（意见的存储、命令与位置：`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`，`NotePlace`，摘录，标注日志的 `note`、`note_removed`、`notes_sent` 的读取、索引、保留与压缩，`review/note_add`、`review/resident_notes_bytes`）已实现（[#328](https://github.com/SoloJiang/lectern-app/pull/328)）。第 7 步（发送、prompt 与回应的那一轮：`SendNotes`、`CopyBatch`，内置的剪贴板途径，`register_note_route`，`notes::prompt`，批次与回应的那一轮的对应，`notes_sent` 的写入，「日志与诊断」里 #22 的发送记录，`review/notes_prompt_40`）已实现（[#331](https://github.com/SoloJiang/lectern-app/pull/331)）。真实的 Claude Code 与 Codex 会话里粘贴 prompt 的手动检查还没做，随 `review_view` 的一步进行（见「实际验证」第 7 步的「没有验证的」）。并行 worktree 总览（[worktrees 设计「对其他 crate 的要求」](worktrees.md#对其他-crate-的要求)的 A 的 `review` 部分：`Review::worktrees`、`watch_worktrees`、`refresh_worktrees`、`ReviewEvent::Worktrees`，`review/worktrees_cloudprint`）已实现（#337），见「概览」的「并行 worktree 总览」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）：「验收」第 8 步（`services` 的 `NoteAnchor::last`、`Excerpt::gap`、`limits::EXCERPT_LINES`，本 crate 的标注日志字段、范围的摘录、prompt 模板版本 2、`note changed` 的 `lines`，`review_view`、`bench` 里补 `last`、`gap` 的构造处）已实现，拖选的界面在 `review_view` 的第 5 步，见「审阅意见」的「范围」和「实际验证」第 8 步。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的领域部分（意见的存储、锚点与 Drifted、攒批、拼成 prompt、经发送途径送出、与回应它的那一轮对应）。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
@@ -1059,7 +1059,7 @@ pub mod noise {
 /// 审阅意见的 prompt（#22，「审阅意见」的模板）。纯函数，任何线程；`prompt_*` 测试和 `review/notes_prompt_40` 直接调它。
 pub mod notes {
     pub mod prompt {
-        pub const TEMPLATE_VERSION: u32 = 1;
+        pub const TEMPLATE_VERSION: u32 = 2;
         /// 一条意见，按写进 prompt 的顺序给出。`line` 是锚点的行号，0 起，输出时加一；`path` 是相对 worktree 根的路径（新路径，删除的文件用旧路径），不是 UTF-8 的字节输出为 U+FFFD。
         pub struct PromptNote { pub path: ChangePath, pub line: u32, pub last: u32, pub place: Where, pub excerpt: Option<Excerpt>, pub text: Arc<str> }
         pub enum Where { Current, Base, Earlier }
@@ -2036,6 +2036,33 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - 基准，只跑不开窗口的两个目标（`cargo bench --locked -p lectern-bench --all-features --bench time -- review/worktrees_cloudprint`、`--bench memory -- review/resident`）：`review/worktrees_cloudprint` 中位数 686 ms（11 个 worktree、728 个文件、冷缓存，只记录；见「与设计的差异」）；`review/resident_cloudprint_bytes` 84.8 KB、`review/resident_100k_bytes` 8.86 KB（都含并行 worktree 总览关注再放下之后保留的数据，预算 < 1 MB），`review/resident_notes_bytes` 228 KB（预算 < 300 KB，不变）。
 - 没有验证：真实 fs_watch 的仓库批次到标记的整条路径（`Driven` 没有 watcher，批次经 `Driven::worktrees_batch` 交一个构造好的 `RepoBatch`；插件测试只验证了仓库被监听、第一个批次不触发比较、停用时释放）；每个 worktree 4000 个改动路径时约 650 KB 的内存估算（夹具里 10 万文件形状的 linked worktree 只有索引，比较都是 `Capped`，保留的只有计数）；真实仓库上的耗时（夹具的索引没有 stat 信息，每次比较都要读每个文件）；`just deny`；在桌面应用里的实际行为（屏幕在 worktrees 的第 2、3 步）。
 
+### 第 8 步（范围，#373）
+
+在 macOS（Darwin，本机，Rust 1.97.0）上运行，基于 main 的 9d32bf29（含设计 PR #376）；屏幕没有操作，没有运行应用，也没有运行打开窗口的测试或基准（基准只跑了 `time`、`memory` 两个进程内的目标，筛选到下面的条目）。拖选的界面不在这一步，在 `review_view` 的第 5 步。
+
+- `just check`（格式、架构规则、文档链接、整个工作区的 clippy，警告即失败）通过。`INSTA_UPDATE=no just test -p lectern-review -p lectern-services --no-fail-fast`：`lectern-review` 314 个、`lectern-services` 121 个，全部通过。改了构造处的 `lectern-review-view`（161 个，`#[gpui::test]` 的测试平台，不开真实窗口）和 `lectern-bench`（181 个，跳过 6 个）也通过。`just deny` 没有运行（没有改依赖）。
+- 新增 26 个测试（`lectern-review` 从 288 个到 314 个）：
+  - `notes_excerpt_range_*` 7 个（`src/notes/tests.rs`）：2 与 4 行带前后各 2 行、文件开头和结尾处上下文变短；5 与 8 行没有上下文；9 行省掉 1 行、5000 行省掉 4992 行（`gap.at` 为 4，`gap` 之后的行号是 `first + k + gap.lines`）；范围超过文件末尾时停在最后一行、`gap` 按实际取到的行数算，没有末尾换行的最后一行，起点不存在时没有摘录；范围内一行超过 4 KiB 被截断而不丢后面的行，最后一行超过 4 KiB 时后面的行找不到（与一行的意见相同），第一行之前 4 KiB 之外的行找不到；`last == line` 与 `last < line` 的结果和一行的摘录相同；从行的字节偏移起算的结果相同。
+  - `prompt_range_*` 7 个（`src/notes/prompt/tests.rs`）：`prompt_range_the_design_example` 把「prompt 的模板」的范围例子逐字比对并存快照；三种位置的写法（`path:n-m`、`lines n-m of the version before your changes`、`lines n-m when this note was written; …`）；范围内每一行有 `> `、前后的行没有；`gap` 之后行号的宽度按最大的行号对齐，`gap` 那一行在围栏里、没有行号，围栏比摘录里最长的反引号多一；一行的意见与 `last` 等于或小于 `line` 的输出相同；40 条各 4 KiB 文字、8 行 160 字节摘录、200 字节路径的 prompt 不超过 256 KiB。
+  - `log_notes_range_*` 5 个（`src/log/tests.rs`）：`last` 和 `gap` 只在有范围时写（一行的意见的记录没有这两个字段，`"line":41,"oid"` 之间没有别的字段），文件头的 `v` 仍是 1；往返；没有 `last` 的旧记录读成一行、文字和摘录不变；`last` 小于 `line` 的记录读成一行、不算坏行；按旧版本 wire 类型的形状（没有 `deny_unknown_fields`）读新记录得到 `line`、摘录和文字。`log_notes_compaction_keeps_the_index` 加了一条带 `gap` 的范围意见，压缩之后范围和 `gap` 还在。
+  - `notes_range_*` 7 个（`src/engine/tests/notes.rs`）：范围的意见进快照和日志、新引擎读回；`last < line` 按一行处理且日志里没有 `last`；一行的意见的记录与原来相同；整段一起 `Drifted`、文件不再有改动时整段 `Elsewhere`；改文字之后范围、摘录和 `gap` 不变（改的记录也带这两个字段）；按 `line` 排序；范围写进剪贴板的 prompt 是 `f.txt:1-3` 和三行 `> `。
+  - `logs_hold_no_note_contents` 多一条范围意见，文字和摘录（含 `gap`）都放金丝雀：`note changed` 的 `lines` 是 2（一行的意见是 1），没有 `line`、`last` 字段，没有记录含金丝雀。
+  - `lectern-services` 的 JSON 往返加了一条带 `gap` 的范围意见和一条范围的 `AddNote`，`limits::EXCERPT_LINES` 是 8。
+- 快照：`log_format` 只多一行（`git diff` 里只有增加的一行：范围的 `note` 记录放在 `notes_sent` 之前，原有的行没有变），新增三个 `prompt_range_*` 快照（`the_design_example`、`places`、`context`），原有的快照（`prompt_the_design_example` 等）没有变；`TEMPLATE_VERSION` 是 2。
+- 基准（`cargo bench --locked -p lectern-bench --all-features --bench time -- review/notes_prompt_40 review/note_add`、`--bench memory -- review/resident_notes_bytes`，同一台机器）：
+
+  | 条目 | 预算 | 第 7 步 | 本步 |
+  |---|---|---|---|
+  | `review/notes_prompt_40`（每条 8 行摘录，每五条一条 20 行的范围带 `gap`） | 中位数 < 5 ms | 22.5、23.1 µs（5 行摘录） | 29.5、29.3 µs |
+  | `review/note_add` | 中位数 < 0.2 ms | 46.3、130、93.6 µs | 135、131、137 µs（报告标为 noisy） |
+  | `review/resident_notes_bytes`（28 条是范围、8 行摘录） | < 300 KB | 228 KB | 239 KB |
+
+  `review/note_add` 比第 6、7 步的几次高，但夹具里不放范围意见（把 `note_records` 的范围去掉）时同样是 132、136 µs，所以不是这一步的改动；机器上的负载不同，余量约 30%。`review/resident_notes_bytes` 多了 11 KB（28 条意见多 3 行摘录和一个 `gap`），余量约 20%。
+- 没有验证的：
+  - 范围在界面里的行为（拖选、行内的画法、Copy as Prompt 的手动检查）：`review_view` 的第 5 步。粘贴到真实 Claude Code 与 Codex 会话的检查（第 7 步留下的）仍没做。
+  - `review_view/items_5000`：夹具里 4 条范围意见是 `review_view` 的第 5 步，这一步没有动那个夹具，也没有运行那个基准。
+  - 没有在 CI 的 macOS runner 上测量基准。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -2219,3 +2246,12 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **路径哈希的释放。** 超过 65 536 个时，放下关注 30 秒后放下哈希；这些 worktree 在下一次关注开始时重新比较。没有 host（`Driven` 不带计时器）时立即放下。
 - **基准夹具。** `review/resident_100k_bytes` 的 10 万文件夹具是只有索引的形状，linked worktree 的比较都是 `Capped`，所以夹具加了 3 个同形状的 linked worktree（保留的只有计数）；`review/resident_cloudprint_bytes` 加了 10 个各改 20 个文件的 linked worktree（保留的路径哈希和重叠在内）。设计写的「17 个 worktree、每个 4000 个改动路径」的最坏情形（约 650 KB）没有基准，也没有测量。
 - **`review/worktrees_cloudprint` 的数。** 中位数 686 ms（11 个 worktree），约每个 worktree 60 ms，而 worktrees 设计「性能」估算「cloudprint 形状每个 worktree 几毫秒」。夹具的索引条目没有 stat 信息（`TestRepo::write_index` 的默认），每次比较都要读并哈希每个文件（728 个），真实仓库的索引带 stat，只读 stat 不一致的文件。该基准只记录，真实仓库上的耗时没有测量；估算是否成立要在 worktrees 的第 3 步手动检查时看。
+
+### 第 8 步（范围，#373）
+
+- **摘录只用 `line` 的字节偏移起算。** 设计写从 `line` 向前、从 `last` 向后找行尾，两端都可以用 `DiffRow` 的 `*_byte`。实现只用 `line` 的提示（`notes::hint`），范围里的行从 `line` 起用 `memchr` 数行尾，结果相同，成本是范围的字节数的一次线性扫描（在 `Background` 任务里，没有单独测量）。范围里的行（不含最后一行）不受 4 KiB 的限制；最后一行和它后面的行、第一行前面的行按原来的 4 KiB 窗口，所以 4 KiB 的规则对一行的意见与原来完全一致。
+- **档位按实际取到的行数。** 设计的表按范围的行数 n；范围超过文件末尾（OID 相同时不会出现，只有手工改过的日志才有）时，按实际取到的行数选档、算 `gap`，与「找不到的部分缺少时不报错，`gap` 按实际取到的行号算」一致。
+- **`gap` 只有一行时写成 `1 more lines`。** 范围 9 行时省掉 1 行，模板固定写 `> ... <k> more lines ...`，没有为 1 行改成单数；读者是 agent，模板里的字一律不变。要改单数时升 `TEMPLATE_VERSION`。
+- **`log_format` 的范围记录放在 `notes_sent` 之前。** 设计写「原有的行不变，加一行」；样本的最后一条是 `notes_sent`，放在它之后会让快照文件的最后一行因为文件末尾的换行而出现在 `git diff` 里，所以放在前面，`git diff` 里只有增加的一行。
+- **`wire::Decoded` 加了 `#[allow(clippy::large_enum_variant)]`（带 `reason`）。** `NoteAnchor`、`Excerpt` 多了字段，`Record` 超过 clippy 的 200 字节阈值；`Decoded` 每读一行产生一个、立即消费，装箱会让 16 000 行的 `review/log_load_16k` 每行多一次分配。
+- **基准夹具。** `review/notes_prompt_40`：每条 8 行摘录，每五条一条是 20 行的范围（前 4 行、后 4 行、`gap` 12 行），其余是 4 行的范围加前后各 2 行；`testing::note_records`（`review/resident_notes_bytes`、`review/note_add` 的种子）：每十条一条是 20 行的范围，8 行摘录带 `gap`（280 条里 28 条）。预算没有改。

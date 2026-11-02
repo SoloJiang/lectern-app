@@ -482,6 +482,7 @@ fn anchor() -> NoteAnchor {
         file: modified("src/lib.rs"),
         side: DiffSide::New,
         line: 41,
+        last: 41,
         oid: oid(3),
     }
 }
@@ -498,7 +499,24 @@ fn note(id: u64, state: NoteState, place: NotePlace) -> Note {
         excerpt: Some(Excerpt {
             first: 39,
             lines: Arc::from(vec![text("fn a() {"), text(""), text("}")]),
+            gap: None,
         }),
+    }
+}
+
+/// A note on lines 41 to 60 with the middle of the excerpt left out (#373).
+fn range_note(id: u64, state: NoteState, place: NotePlace) -> Note {
+    Note {
+        anchor: NoteAnchor {
+            last: 60,
+            ..anchor()
+        },
+        excerpt: Some(Excerpt {
+            first: 41,
+            lines: Arc::from(vec![text("a"), text("b"), text("c"), text("d")]),
+            gap: Some(ExcerptGap { at: 2, lines: 12 }),
+        }),
+        ..note(id, state, place)
     }
 }
 
@@ -733,6 +751,7 @@ fn note_types_round_trip() {
     assert_eq!(round_trip(&NotesState::default()), NotesState::default());
     assert_eq!(limits::NOTE_BYTES, 4096);
     assert_eq!(limits::PENDING_NOTES, 40);
+    assert_eq!(limits::EXCERPT_LINES, 8);
 }
 
 #[test]
@@ -939,6 +958,23 @@ fn targets_and_commands_round_trip() {
             excerpt: Some(Excerpt {
                 first: 0,
                 lines: Arc::from(Vec::new()),
+                gap: None,
+            }),
+        },
+        ReviewCommand::AddNote {
+            rows: None,
+            anchor: NoteAnchor {
+                last: 99,
+                ..anchor()
+            },
+            text: text("Range"),
+            excerpt: Some(Excerpt {
+                first: 41,
+                lines: Arc::from(vec![text("a"), text("b")]),
+                gap: Some(ExcerptGap {
+                    at: 1,
+                    lines: u32::MAX,
+                }),
             }),
         },
         ReviewCommand::EditNote {
@@ -1013,6 +1049,7 @@ fn snapshot_round_trips() {
                     },
                 ),
                 note(3, NoteState::Sent(BatchId(7)), NotePlace::Elsewhere),
+                range_note(4, NoteState::Pending, NotePlace::Elsewhere),
             ]),
             notes_state: Arc::new(notes_state()),
             ..s.clone()

@@ -12,7 +12,7 @@ use lectern_services::review::{BatchId, Excerpt};
 mod tests;
 
 /// The version of the template. A change of the format raises it.
-pub const TEMPLATE_VERSION: u32 = 1;
+pub const TEMPLATE_VERSION: u32 = 2;
 
 /// Where the anchor's line is, as the agent can find it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,8 +32,11 @@ pub struct PromptNote {
     /// Relative to the worktree root: the new path, the old one for a file
     /// that was deleted.
     pub path: ChangePath,
-    /// The anchor's line, 0-based.
+    /// The anchor's first line, 0-based.
     pub line: u32,
+    /// The anchor's last line, 0-based, included (#373); `line` for a note
+    /// on one line.
+    pub last: u32,
     pub place: Where,
     pub excerpt: Option<Excerpt>,
     pub text: std::sync::Arc<str>,
@@ -83,20 +86,30 @@ fn size_hint(note: &PromptNote) -> usize {
 fn write_note(out: &mut String, n: usize, note: &PromptNote) {
     let path = String::from_utf8_lossy(&note.path.0);
     let line = u64::from(note.line) + 1;
-    let _ = match note.place {
-        Where::Current => write!(out, "{n}. {path}:{line}"),
-        Where::Base => write!(
+    let last = u64::from(note.last.max(note.line)) + 1;
+    let _ = match (note.place, last > line) {
+        (Where::Current, false) => write!(out, "{n}. {path}:{line}"),
+        (Where::Current, true) => write!(out, "{n}. {path}:{line}-{last}"),
+        (Where::Base, false) => write!(
             out,
             "{n}. {path} (line {line} of the version before your changes)"
         ),
-        Where::Earlier => write!(
+        (Where::Base, true) => write!(
+            out,
+            "{n}. {path} (lines {line}-{last} of the version before your changes)"
+        ),
+        (Where::Earlier, false) => write!(
             out,
             "{n}. {path} (line {line} when this note was written; the code may have changed since)"
+        ),
+        (Where::Earlier, true) => write!(
+            out,
+            "{n}. {path} (lines {line}-{last} when this note was written; the code may have changed since)"
         ),
     };
     if let Some(excerpt) = note.excerpt.as_ref().filter(|e| !e.lines.is_empty()) {
         out.push_str("\n   ");
-        write_excerpt(out, excerpt, note.line);
+        write_excerpt(out, excerpt, note.line, note.last.max(note.line));
     }
     out.push_str("\n   Note:");
     // The text as written; a line break at its end would leave an empty
@@ -112,8 +125,9 @@ fn write_note(out: &mut String, n: usize, note: &PromptNote) {
 }
 
 /// The fence with the lines of the excerpt: line numbers right-aligned to
-/// one width, `> ` before the anchor's line.
-fn write_excerpt(out: &mut String, excerpt: &Excerpt, anchor: u32) {
+/// one width, `> ` before the lines of the range `anchor..=last`. The place
+/// of a gap is a line `> ... <k> more lines ...` without a number.
+fn write_excerpt(out: &mut String, excerpt: &Excerpt, anchor: u32, last: u32) {
     let longest = excerpt
         .lines
         .iter()
@@ -121,12 +135,24 @@ fn write_excerpt(out: &mut String, excerpt: &Excerpt, anchor: u32) {
         .max()
         .unwrap_or(0);
     let fence = "`".repeat((longest + 1).max(3));
-    let last = u64::from(excerpt.first) + excerpt.lines.len() as u64;
-    let width = last.to_string().len();
+    let skipped = excerpt.gap.map_or(0, |g| u64::from(g.lines));
+    let widest = u64::from(excerpt.first) + excerpt.lines.len() as u64 + skipped;
+    let width = widest.to_string().len();
     out.push_str(&fence);
     for (k, text) in excerpt.lines.iter().enumerate() {
-        let at = u64::from(excerpt.first) + k as u64;
-        let mark = if at == u64::from(anchor) { "> " } else { "  " };
+        if let Some(gap) = excerpt.gap.filter(|g| g.at as usize == k) {
+            let _ = write!(out, "\n   > ... {} more lines ...", gap.lines);
+        }
+        let past = excerpt
+            .gap
+            .filter(|g| k >= g.at as usize)
+            .map_or(0, |g| u64::from(g.lines));
+        let at = u64::from(excerpt.first) + k as u64 + past;
+        let mark = if (u64::from(anchor)..=u64::from(last)).contains(&at) {
+            "> "
+        } else {
+            "  "
+        };
         let _ = write!(out, "\n   {mark}{:>width$} | {text}", at + 1);
     }
     let _ = write!(out, "\n   {fence}");

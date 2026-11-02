@@ -11,7 +11,7 @@ use lectern_services::changes::{
 };
 use lectern_services::project::BlobId;
 use lectern_services::review::{
-    BatchId, DiffSide, Excerpt, FileKey, NoteAnchor, NoteId, SeenState, SentVia,
+    BatchId, DiffSide, Excerpt, ExcerptGap, FileKey, NoteAnchor, NoteId, SeenState, SentVia,
 };
 use lectern_services::session::Timestamp;
 
@@ -178,6 +178,7 @@ fn anchor(p: &[u8], side: DiffSide, line: u32, oid: u8) -> NoteAnchor {
         },
         side,
         line,
+        last: line,
         oid: BlobId::Sha1([oid; 20]),
     }
 }
@@ -186,6 +187,7 @@ fn excerpt(first: u32, lines: &[&str]) -> Excerpt {
     Excerpt {
         first,
         lines: lines.iter().map(|l| Arc::<str>::from(*l)).collect(),
+        gap: None,
     }
 }
 
@@ -204,6 +206,32 @@ fn note_at(target: &TargetKey, id: u64, text: &str, created: Timestamp, at: Time
 
 fn note(target: &TargetKey, id: u64, text: &str) -> Record {
     note_at(target, id, text, NOW, NOW)
+}
+
+/// A note on lines 41 to 60 (0-based) whose excerpt leaves out the middle
+/// (#373).
+fn range_note_at(
+    target: &TargetKey,
+    id: u64,
+    text: &str,
+    created: Timestamp,
+    at: Timestamp,
+) -> Record {
+    Record::Note(NoteRecord {
+        at,
+        target: target.clone(),
+        id: NoteId(id),
+        anchor: NoteAnchor {
+            last: 60,
+            ..anchor(b"src/lib.rs", DiffSide::New, 41, 3)
+        },
+        excerpt: Some(Excerpt {
+            gap: Some(ExcerptGap { at: 2, lines: 16 }),
+            ..excerpt(41, &["a", "b", "c", "d"])
+        }),
+        text: Arc::from(text),
+        created,
+    })
 }
 
 fn removed(target: &TargetKey, ids: &[u64], at: Timestamp) -> Record {
@@ -307,6 +335,8 @@ fn sample_records() -> Vec<Record> {
             created: at(8),
         }),
         removed(&s, &[N2], at(9)),
+        // Before the batch, so that the snapshot only gets a line (#373).
+        range_note_at(&s, N3, "Split this", at(10), at(10)),
         sent(&s, B1, &[N1], at(10)),
     ]
 }
@@ -375,8 +405,9 @@ fn log_roundtrip() {
     assert_eq!(found, (0, 0, false));
     assert_eq!(records_of(&read), records_of(&written));
     // The unseen replaced the seen of src/lib.rs: 5 marks and 2 bases; the
-    // removal took one of the two notes, the batch is the other record.
-    assert_eq!(read.len(), 9);
+    // removal took one of the two notes, the batch is the other record, and
+    // the range note (#373) is one more.
+    assert_eq!(read.len(), 10);
     let first = notes_of(&read, &session(SESSION_A));
     assert_eq!(
         first[0].1, "Why \"this\"?\nLine two é 🙂",
@@ -1157,6 +1188,8 @@ fn log_notes_compaction_keeps_the_index() {
     index.record(sent(&s, B1 + 8, &[N1 + 20, N1 + 4], at(103)));
     index.record(note(&other, N2, "elsewhere"));
     index.record(note(&range, N3, "in the main worktree"));
+    // A range with a gap (#373), pending: it must come back as it was.
+    index.record(range_note_at(&s, N1 + 52, "a range", at(106), at(106)));
     index.record(Record::Note(NoteRecord {
         at: at(104),
         target: s.clone(),
@@ -1192,6 +1225,14 @@ fn log_notes_compaction_keeps_the_index() {
     let late = found.iter().find(|n| n.0 == N1 + 40).unwrap();
     let want = (Some(excerpt(5, &["x", "y", "z"])), Some(B1 + 16));
     assert_eq!((late.2.clone(), late.3), want);
+    // The range and its gap are in the compacted file.
+    let tn = read.target_notes(&s).unwrap();
+    let ranged = tn.note(NoteId(N1 + 52)).unwrap();
+    assert_eq!((ranged.anchor.line, ranged.anchor.last), (41, 60));
+    assert_eq!(
+        ranged.excerpt.as_ref().unwrap().gap,
+        Some(ExcerptGap { at: 2, lines: 16 })
+    );
     // A removed note that a batch lists stays out; the batch keeps its size.
     assert!(found.iter().all(|n| n.0 != N1 + 4));
     let batch = read
@@ -1259,4 +1300,132 @@ fn log_notes_shares_the_paths_of_a_read() {
     let tn = read.target_notes(&s).unwrap();
     let new = |i: usize| tn.notes[i].anchor.file.new.clone().unwrap();
     assert!(Arc::ptr_eq(&new(0).0, &new(1).0) && Arc::ptr_eq(&new(1).0, &new(2).0));
+}
+
+// ---- log_notes_range_* (#373) -------------------------------------------
+
+#[test]
+fn log_notes_range_adds_two_optional_fields_and_nothing_else() {
+    let fx = Fixture::new();
+    let s = target_a();
+    fx.write(vec![
+        note(&s, N1, "one line"),
+        range_note_at(&s, N2, "a range", NOW, NOW),
+    ]);
+    let text = fx.text();
+    let lines: Vec<&str> = text.lines().collect();
+    // The record of a note on one line has neither field, as before.
+    assert!(!lines[1].contains("\"last\""), "{}", lines[1]);
+    assert!(!lines[1].contains("\"gap\""), "{}", lines[1]);
+    assert!(lines[1].contains("\"line\":41,\"oid\""), "{}", lines[1]);
+    assert!(
+        lines[2].contains("\"line\":41,\"last\":60,\"oid\""),
+        "{}",
+        lines[2]
+    );
+    assert!(
+        lines[2].contains("\"lines\":[\"a\",\"b\",\"c\",\"d\"],\"gap\":{\"at\":2,\"lines\":16}}"),
+        "{}",
+        lines[2]
+    );
+    // The header does not change: no `v` bump.
+    assert!(lines[0].contains("\"v\":1"), "{}", lines[0]);
+}
+
+#[test]
+fn log_notes_range_roundtrip() {
+    let fx = Fixture::new();
+    let s = target_a();
+    let written = fx.write(vec![
+        note(&s, N1, "one line"),
+        range_note_at(&s, N2, "a range", NOW, NOW),
+    ]);
+    let (read, report) = fx.reload();
+    assert_eq!((report.bad_lines, report.unknown), (0, 0));
+    assert_eq!(records_of(&read), records_of(&written));
+    let tn = read.target_notes(&s).unwrap();
+    let one = tn.note(NoteId(N1)).unwrap();
+    assert_eq!((one.anchor.line, one.anchor.last), (41, 41));
+    assert_eq!(one.excerpt.as_ref().unwrap().gap, None);
+    let many = tn.note(NoteId(N2)).unwrap();
+    assert_eq!((many.anchor.line, many.anchor.last), (41, 60));
+    assert_eq!(
+        many.excerpt.as_ref().unwrap().gap,
+        Some(ExcerptGap { at: 2, lines: 16 })
+    );
+    assert_eq!(&*many.text, "a range");
+}
+
+#[test]
+fn log_notes_range_a_record_from_before_reads_as_one_line() {
+    let fx = Fixture::new();
+    let s = target_a();
+    fx.write(vec![note(&s, N1, "written by this version")]);
+    // A record as the version before #373 wrote it.
+    let old = fx
+        .text()
+        .lines()
+        .nth(1)
+        .unwrap()
+        .replace(N1_HEX, "0190f3a2c4b60410");
+    assert!(!old.contains("last"));
+    fx.append_raw(format!("{old}\n").as_bytes());
+    let (read, report) = fx.reload();
+    assert_eq!((report.bad_lines, report.unknown), (0, 0));
+    let tn = read.target_notes(&s).unwrap();
+    let n = tn.note(NoteId(0x0190_f3a2_c4b6_0410)).unwrap();
+    assert_eq!((n.anchor.line, n.anchor.last), (41, 41));
+    assert_eq!(n.excerpt, Some(excerpt(39, &["fn a() {", "    b();"])));
+    assert_eq!(&*n.text, "written by this version");
+}
+
+const N1_HEX: &str = "0190f3a2c4b60400";
+
+#[test]
+fn log_notes_range_a_last_before_line_reads_as_one_line() {
+    let fx = Fixture::new();
+    let s = target_a();
+    fx.write(vec![range_note_at(&s, N1, "edited by hand", NOW, NOW)]);
+    let hand = fx
+        .text()
+        .lines()
+        .nth(1)
+        .unwrap()
+        .replace("\"last\":60", "\"last\":7")
+        .replace(N1_HEX, "0190f3a2c4b60410");
+    fx.append_raw(format!("{hand}\n").as_bytes());
+    let (read, report) = fx.reload();
+    // Not a bad line: the note is kept.
+    assert_eq!((report.bad_lines, report.unknown), (0, 0));
+    let tn = read.target_notes(&s).unwrap();
+    let n = tn.note(NoteId(0x0190_f3a2_c4b6_0410)).unwrap();
+    assert_eq!((n.anchor.line, n.anchor.last), (41, 41));
+    assert_eq!(&*n.text, "edited by hand");
+    assert_eq!(tn.notes.len(), 2);
+}
+
+#[test]
+fn log_notes_range_an_old_reader_keeps_the_text_and_the_first_line() {
+    // The wire types of the version before #373: no `deny_unknown_fields`,
+    // so a record with the new fields is read, as a note on `line`.
+    #[derive(serde::Deserialize)]
+    struct OldAnchor {
+        line: u32,
+    }
+    #[derive(serde::Deserialize)]
+    struct OldExcerpt {
+        first: u32,
+        lines: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OldNote {
+        anchor: OldAnchor,
+        excerpt: OldExcerpt,
+        text: String,
+    }
+    let fx = Fixture::new();
+    fx.write(vec![range_note_at(&target_a(), N1, "kept", NOW, NOW)]);
+    let note: OldNote = serde_json::from_str(fx.text().lines().nth(1).unwrap()).unwrap();
+    assert_eq!((note.anchor.line, note.excerpt.first), (41, 41));
+    assert_eq!((note.excerpt.lines.len(), note.text.as_str()), (4, "kept"));
 }

@@ -1,0 +1,18 @@
+---
+source: crates/review/src/notes/prompt/tests.rs
+expression: text
+---
+Review notes from Lectern [lectern-notes 0190f3a2c4b60401]: 3 notes on your changes.
+Please address each note.
+
+1. a.rs:10-12
+   Note:
+   Current.
+
+2. b.rs (lines 1-5 of the version before your changes)
+   Note:
+   Base.
+
+3. c.rs (lines 100-101 when this note was written; the code may have changed since)
+   Note:
+   Earlier.

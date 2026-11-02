@@ -534,6 +534,46 @@ fn logs_hold_no_note_contents() {
     assert_eq!(field(&refused, "error"), Some("\"rejected\""));
     d.clipboard().set_mode(ClipMode::Accept);
 
+    // A note on a range (#373): its text and its excerpt, with the gap,
+    // hold the canary. The record says how many lines, never which.
+    let mut ranged = notes::anchor(modified(&name), DiffSide::New, 0, oid);
+    ranged.last = 1;
+    d.command(
+        id,
+        notes::add(
+            None,
+            ranged,
+            &format!("range {CANARY}"),
+            Some(lectern_services::review::Excerpt {
+                gap: Some(lectern_services::review::ExcerptGap { at: 1, lines: 90 }),
+                ..notes::excerpt(0, &[CANARY, CANARY])
+            }),
+        ),
+    );
+    d.run();
+    let changed: Vec<String> = log
+        .lines()
+        .into_iter()
+        .filter(|l| {
+            l.contains("\"msg\":\"note changed\"") && l.contains("logs_hold_no_note_contents")
+        })
+        .collect();
+    let added: Vec<&String> = changed
+        .iter()
+        .filter(|l| field(l, "op") == Some("\"add\""))
+        .collect();
+    let lines: Vec<Option<&str>> = added.iter().map(|l| field(l, "lines")).collect();
+    // The notes on one line, then the range of two lines.
+    assert_eq!(lines.last(), Some(&Some("2")), "{changed:#?}");
+    assert!(
+        lines[..lines.len() - 1].iter().all(|n| *n == Some("1")),
+        "{changed:#?}"
+    );
+    for line in &changed {
+        assert!(!line.contains(CANARY), "{line}");
+        assert!(!line.contains("\"last\""), "{line}");
+        assert!(!line.contains("\"line\""), "{line}");
+    }
     // A prompt over the limit is not sent; the notes are discarded.
     d.command(id, ReviewCommand::DiscardNotes);
     for i in 0..limits::PENDING_NOTES {

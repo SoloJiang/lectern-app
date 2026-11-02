@@ -24,8 +24,8 @@ use lectern_services::changes::ChangePath;
 use lectern_services::project::BlobId;
 use lectern_services::project::ProjectKey;
 use lectern_services::review::{
-    AttributionState, BatchId, DiffSide, Excerpt, LoadState, Need, NoteAnchor, NoteId, NoteState,
-    ReviewCommand, ReviewEvent, ReviewId, RowsKey,
+    AttributionState, BatchId, DiffSide, Excerpt, ExcerptGap, LoadState, Need, NoteAnchor, NoteId,
+    NoteState, ReviewCommand, ReviewEvent, ReviewId, RowsKey,
 };
 
 use crate::review_repo;
@@ -541,6 +541,7 @@ fn note_add(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         file: snapshot.files[0].key.clone(),
         side: DiffSide::New,
         line: 3,
+        last: 3,
         oid: BlobId::Sha1([7; 20]),
     };
     let excerpt = Excerpt {
@@ -549,6 +550,7 @@ fn note_add(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             .into_iter()
             .map(Arc::from)
             .collect(),
+        gap: None,
     };
     let text: Arc<str> = Arc::from("Does this still hold after the rename?");
     let mut rejected = 0;
@@ -606,23 +608,29 @@ fn notes_prompt_40(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         .map(|i| {
             let words = format!("Why does this {i} hold after the rename, and what about the callers? ");
             let text: String = words.chars().cycle().take(4096).collect();
+            // The most an excerpt keeps (#373): 8 lines. Every fifth note is
+            // a range of 20 lines whose middle is left out; the others are
+            // a range of 4 lines with two lines of context either side.
+            let long = i % 5 == 0;
+            let line = 100 + i;
+            let line_text = |k: u32| {
+                Arc::from(format!(
+                    "    let value_{k} = compute({i}, \"fixture line of a hundred bytes or so, 0123456789\");"
+                ))
+            };
             PromptNote {
                 path: ChangePath(Arc::from(format!("crates/review/src/engine/m{i}.rs").as_bytes())),
-                line: 100 + i,
+                line,
+                last: line + if long { 19 } else { 3 },
                 place: match i % 3 {
                     0 => Where::Current,
                     1 => Where::Base,
                     _ => Where::Earlier,
                 },
                 excerpt: Some(Excerpt {
-                    first: 98 + i,
-                    lines: (0..5)
-                        .map(|k| {
-                            Arc::from(format!(
-                                "    let value_{k} = compute({i}, \"fixture line of a hundred bytes or so, 0123456789\");"
-                            ))
-                        })
-                        .collect(),
+                    first: if long { line } else { line - 2 },
+                    lines: (0..8).map(line_text).collect(),
+                    gap: long.then_some(ExcerptGap { at: 4, lines: 12 }),
                 }),
                 text: Arc::from(text),
             }
