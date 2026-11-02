@@ -1198,6 +1198,20 @@ fn range_autoscroll_follows_the_pointer(cx: &mut TestAppContext) {
     tick(&mut visual, begin + Duration::from_micros(100_000));
     assert_eq!(top(cx), before, "not near an edge");
 
+    // Just above the floating bar: it scrolls down.
+    visual.simulate_mouse_move(
+        point(x, viewport.bottom() - crate::screen::BAR_RESERVE - px(4.0)),
+        Some(LEFT),
+        Modifiers::default(),
+    );
+    tick(&mut visual, begin + Duration::from_micros(120_000));
+    tick(&mut visual, begin + Duration::from_micros(190_000));
+    let above_bar = top(cx);
+    assert!(
+        above_bar > before,
+        "above the bar: {before:?} to {above_bar:?}"
+    );
+
     // Below the list's bottom edge: it scrolls down, by time.
     visual.simulate_mouse_move(
         point(x, viewport.bottom() + px(40.0)),
@@ -1209,7 +1223,7 @@ fn range_autoscroll_follows_the_pointer(cx: &mut TestAppContext) {
     tick(&mut visual, begin + Duration::from_micros(200_000));
     tick(&mut visual, begin + Duration::from_micros(300_000));
     let down = top(cx);
-    assert!(down > before, "scrolled down: {before:?} to {down:?}");
+    assert!(down > above_bar, "scrolled down: {above_bar:?} to {down:?}");
     tick(&mut visual, begin + Duration::from_micros(400_000));
     tick(&mut visual, begin + Duration::from_micros(500_000));
     assert!(top(cx) > down, "and on");

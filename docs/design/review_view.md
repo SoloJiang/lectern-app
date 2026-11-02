@@ -334,7 +334,7 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
   - 按下：行的 `on_mouse_down`（左键，没有修饰键）记下 `press`：这份行的 `RowsKey`、显示行下标 `start`、按下的一半（双栏时）、焦点行 `focus = start`、这一段的边界 `run`（从 `start` 向两边走到 `Fold` 为止的显示行下标）。行尾的 + 和 Add Note 的容器在 `on_mouse_down` 里 `stop_propagation`，从它们开始不算按下。按下不改选中项，不打开编辑框。
   - 跟踪：`press` 存在时，屏幕根部多画一个 `canvas`，在它的 paint 里注册 `window.on_mouse_event` 的 `MouseMoveEvent` 和 `MouseUpEvent`（仓库里的先例是 `terminal_view/src/element.rs`）。这两个监听不受命中区域限制，指针离开行、离开列表、离开窗口时都收得到。没有按下时不注册，普通的指针移动没有额外开销。
   - 指针下的行：先看 `focus` 的 `ListState::bounds_for_item`，还在里面时不做事；否则在可见的项里找（约 60 项）。指针超出列表的上下边时按边上的那一项算。找到的项是这份行的 `Item::Row` 时，`focus` 取它的下标，限制在 `run` 里；是别的项（意见、编辑框、`Hunk`、别的文件）时 `focus` 不变。所以范围只在一份 diff 之内，不跨 `Fold`：折叠的行用户没有看到。要跨过去，先展开折叠。
-  - 自动滚动：指针离列表的上下边不到 24pt 或已经超出时，每个动画帧（`window.request_animation_frame`，只在按下期间）`ListState::scroll_by`，速度按时间算，随超出的距离线性增加，上限每秒 40 行，然后重新算指针下的行。这份行在滚动中不会被丢弃（在可见范围里，`needs` 照常）。
+  - 自动滚动：指针离列表的上边、浮条（`BAR_RESERVE`）的上沿不到 24pt 或已经超出时，每个动画帧（`window.request_animation_frame`，只在按下期间）`ListState::scroll_by`，速度按时间算，随超出的距离线性增加，上限每秒 40 行，然后重新算指针下的行。这份行在滚动中不会被丢弃（在可见范围里，`needs` 照常）。
   - 这一侧（范围总在一侧，[review 设计「范围」](review.md#范围373)）：`focus` 每变一次，用纯函数 `items::range_of(display, start, focus, half, mode)` 重算，O(这一段的行数)：
 
     | 视图 | 这一段的行 | 这一侧 |
@@ -995,7 +995,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - 测试里用的鼠标是 GPUI 测试平台的 `simulate_mouse_*`，两次事件之间画帧（跟踪指针的 `canvas` 从按下之后的下一帧才有）。自动滚动用 `tick_drag(window, now, cx)` 直接给帧的时间。
 - 没有验证（要在真实窗口里看）：
   - 真实指针：拖动的手感、`MouseMoveEvent::pressed_button` 在 macOS 拖动时是否总是左键、指针拖出窗口再松开、两次点击很快时的先后。
-  - 自动滚动：边缘区 24pt 在浮条（`BAR_RESERVE`）上方是否合适、速度曲线、每帧重画的开销（`review_view/scroll_5000` 没有跑）。
+  - 自动滚动：速度曲线、每帧重画的开销（`review_view/scroll_5000` 没有跑）。
   - Add Note 按钮：`deferred` 的按钮不被行裁掉、盖住上下相邻两行的样子、`occlude` 后按它不触发下面的行、淡入、深色外观；双栏里左右两半按下的位置。
   - 统一和双栏里各拖一段、Add Note、写一条、Copy as Prompt，粘贴出的文字与 [review 设计「prompt 的模板」](review.md#prompt-的模板)的范围写法比较；拖到列表边上的自动滚动；点行号、点代码、悬停的 +、C 与 #374 比较；重启后范围的意见还在。
   - 输入法组字时 Esc、⌘↩ 与范围的编辑框。
