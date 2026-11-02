@@ -809,7 +809,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | 进入编辑 ≤ 100 ms | 1 MiB、没有长行的文件：`InputState::set_value` 与换行信息在 UI 线程上约 3 ms（ADR 0034），首次整文件解析在后台，不等它 | `app/enter_edit` |
 | 空闲内存（采样状态：没有打开文件） | 插件常驻 ≤ 0.5 MB：`Engine`、空的 LRU、语言表（未编译的查询）；LRU ≤ 8 MiB、编译过的查询、打开的文档只因阅读才有，不在采样状态里（ADR 0035） | `plugin/file-reader/resident`；`syntax/lru_bytes` |
 | 阅读时的内存（不设顶层预算） | 打开的文档：≤ 16 MiB 的文本，或 ≤ 8 MiB 的页；行索引每 1024 行 8 字节加长行的格数检查点；窗口计算的临时内存（一个窗口和它的树）≤ 8 MiB；编辑模式的语法树 ≤ 41 MiB，退出即释放 | `syntax/window_peak` ≤ 8 MiB、`syntax/edit_tree_bytes` ≤ 41 MiB |
-| 目录表（`project` 的份额） | 10 万文件 ≤ 20 ms、≤ 1.5 MB，计入 `plugin/project/resident_100k` < 16 MB | `project/dirs_100k`、`project/dirs_100k_bytes` |
+| 目录表（`project` 的份额） | 10 万文件 ≤ 28 ms（[ADR 0055](../adr/0055.md)）、≤ 1.5 MB，计入 `plugin/project/resident_100k` < 16 MB | `project/dirs_100k`、`project/dirs_100k_bytes` |
 | 安装包 ≤ 80 MB | 四个新 grammar 的解析表（`tree-sitter-md` 最大），由 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 测量 | `app/bundle_size` |
 
 批量线程上的等待：`syntax/prefetch_wait`（真实的 `code_intel` 建 10 万文件的索引时，预取从入队到开始）p95 ≤ 500 ms，最大值只记录：每个批量线程上的一批（抽取约 310 ms 加一次提交，约 350 ms）加一个窗口任务（≤ 50 ms），名义约 400 ms，留 25% 的余量，见「批量线程上的先后」。
