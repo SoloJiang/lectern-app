@@ -622,7 +622,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 | `resolve_package`，非当前 worktree：缓存命中（读 index 校验和，加上约 25 个清单各一次 `lstat`）/ 未命中、清单缓存已热，`cloudprint` 形状 / 未命中，10 万文件 | < 1 ms / < 20 ms / < 150 ms | `project/resolve_package` |
 | `index` 变化后的刷新（重建文件列表与 facts、重算成员解析，清单缓存已热；不含新 index 的解析，它是 fs_watch 重建过滤器时 `git` 的工作，在批次交付之前完成），`cloudprint` 形状 / 10 万文件 | < 15 ms / < 60 ms | `project/refresh_index` |
 | `contains`：文件名与 `*.ext` 模式 / 含 `/` 的模式（10 万文件，未缓存：这个模式的结果还没有缓存，不是指 facts 建好之后的第一次调用；第一次调用的耗时只记录，`project/facts_contains/name_first`） | < 1 µs / < 5 ms | `project/facts_contains` |
-| 目录表（[file_reader 设计「性能」](file_reader.md#性能)的份额）：10 万文件，建表任务（`DirTable::new` 加发布）/ 表本身的存活字节（不含共用的文件列表） | ≤ 20 ms / ≤ 1.5 MB | `project/dirs_100k`、`project/dirs_100k_bytes` |
+| 目录表（[file_reader 设计「性能」](file_reader.md#性能)的份额）：10 万文件，建表任务（`DirTable::new` 加发布）/ 表本身的存活字节（不含共用的文件列表） | ≤ 28 ms（[ADR 0055](../adr/0055.md)） / ≤ 1.5 MB | `project/dirs_100k`、`project/dirs_100k_bytes` |
 | 常驻内存：`cloudprint` 形状 / 10 万文件（含 16 个非当前 worktree 的子项目列表缓存，文件列表带 blob OID；不含 fs_watch 过滤器持有的、与当前 worktree 句柄共用的解析后 index，那是 `git` 的份额 `git/filter_cloudprint_bytes`、`git/filter_100k_bytes`，见 [ADR 0035](../adr/0035.md)） | < 2 MB / < 16 MB | `project/resident_cloudprint_bytes`、`project/resident_100k_bytes`（进程内的存活字节）；`plugin/project/resident_*`（静止后按 kernel「性能」一节测 `phys_footprint`，随 bench 第 5 步） |
 
 - 对应[性能预算](tech-research.md#性能预算)的「打开项目到项目主页可用 < 100 ms」「切换 worktree / 分支 < 100 ms」和 ADR 0017 的「打开一个 monorepo 后空闲 < 100 MB」；10 万文件的常驻份额对应 ADR 0035 的「10 万文件的仓库空闲 < 120 MB」，各份额的加总见那条 ADR。主页在文件列表就绪后即可用，子项目稍后填入侧栏的 Packages。

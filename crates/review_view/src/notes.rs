@@ -106,7 +106,19 @@ impl ReviewModel {
     /// C, or the + at the end of a row: the row or hunk selected becomes the
     /// anchor of a new note. Nothing selected, or a side without text: no-op.
     pub(crate) fn add_note_at_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((rows, anchor)) = self.selection_anchor() else {
+        self.add_note_on(None, window, cx);
+    }
+
+    /// A click on a line number: the row selected is the anchor, on the side
+    /// whose number it was when the row has that side (a side-by-side row
+    /// holds an old and a new line); `None` is the rule of C.
+    pub(crate) fn add_note_on(
+        &mut self,
+        side: Option<DiffSide>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((rows, anchor)) = self.selection_anchor(side) else {
             return;
         };
         if self.snapshot.notes_state.unsent >= limits::PENDING_NOTES {
@@ -120,7 +132,7 @@ impl ReviewModel {
     /// The diff and the anchor of the selection: a row on its new side when
     /// it has one (a context line too), otherwise its old side; a hunk on
     /// its first added line, or its first removed line when it adds none.
-    fn selection_anchor(&self) -> Option<(RowsKey, NoteAnchor)> {
+    fn selection_anchor(&self, prefer: Option<DiffSide>) -> Option<(RowsKey, NoteAnchor)> {
         let selected = self.selection.as_ref()?;
         let at = anchor::find(&self.items, selected)?;
         let (rows_key, row) = match &self.items[at] {
@@ -147,10 +159,11 @@ impl ReviewModel {
             }
             _ => return None,
         };
-        let (side, line) = match (row.right, row.left) {
-            (Some(side), _) => (DiffSide::New, side.line),
-            (None, Some(side)) => (DiffSide::Old, side.line),
-            (None, None) => return None,
+        let (side, line) = match (prefer, row.left, row.right) {
+            (Some(DiffSide::Old), Some(side), _) => (DiffSide::Old, side.line),
+            (_, _, Some(side)) => (DiffSide::New, side.line),
+            (_, Some(side), None) => (DiffSide::Old, side.line),
+            (_, None, None) => return None,
         };
         let held = self.rows.get(&rows_key)?;
         let oid = match side {

@@ -681,12 +681,11 @@ pub(crate) fn toolbar(cx: &mut App) -> ToolbarItems {
         )
     };
     let weak = model.downgrade();
-    let label = strings.get(keys::review::MARK_REVIEWED);
-    let hint = strings.get(keys::review::MARK_REVIEWED_SHORTCUT);
     let mark = Button::new(
         nodes::plain("toolbar").child("mark-reviewed"),
-        Text::verbatim(format!("{label} {hint}")),
+        Text::key(&strings, keys::review::MARK_REVIEWED),
     )
+    .hint(Text::key(&strings, keys::review::MARK_REVIEWED_SHORTCUT))
     .kind(ButtonKind::Secondary)
     .size(ButtonSize::Toolbar)
     .disabled(!ready || folder || no_files)

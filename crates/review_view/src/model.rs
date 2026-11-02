@@ -166,6 +166,8 @@ pub struct ReviewModel {
     pub(crate) collapsed_turns: HashSet<TurnRef>,
     pub(crate) noise_expanded: bool,
     pub(crate) selection: Option<ItemKey>,
+    /// The diff row under the pointer: it shows the + that writes a note.
+    pub(crate) hovered_row: Option<ItemKey>,
     needs: Arc<[Need]>,
     pub(crate) visible: Range<usize>,
     pub(crate) line_height: Pixels,
@@ -274,6 +276,7 @@ impl ReviewModel {
             collapsed_turns: HashSet::new(),
             noise_expanded: false,
             selection: None,
+            hovered_row: None,
             needs: Arc::from(Vec::new()),
             visible: 0..0,
             line_height: px(16.0),
@@ -363,6 +366,7 @@ impl ReviewModel {
             collapsed_turns: HashSet::new(),
             noise_expanded: false,
             selection: None,
+            hovered_row: None,
             needs: Arc::from(Vec::new()),
             visible: 0..0,
             line_height: px(16.0),
@@ -976,6 +980,26 @@ impl ReviewModel {
         if self.selection != key {
             self.selection = key;
             self.sync_current();
+            cx.notify();
+        }
+    }
+
+    /// The pointer entered or left a diff row. Leaving clears the mark only
+    /// while it is still this row's: when the pointer crosses from one row
+    /// to the next, the new row may have been marked first.
+    pub(crate) fn hover_row(
+        &mut self,
+        key: &ItemKey,
+        hovered: bool,
+        cx: &mut Context<ReviewModel>,
+    ) {
+        if hovered {
+            if self.hovered_row.as_ref() != Some(key) {
+                self.hovered_row = Some(key.clone());
+                cx.notify();
+            }
+        } else if self.hovered_row.as_ref() == Some(key) {
+            self.hovered_row = None;
             cx.notify();
         }
     }

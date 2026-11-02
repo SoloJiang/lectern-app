@@ -354,13 +354,37 @@ impl Store {
     }
 
     /// Whether a session counted at these locations in `range` (hot facts)
-    /// has `inheritance_unknown`.
+    /// has `inheritance_unknown`, counting only the facts `accepts` (called
+    /// with a fact's location and project, 0 for none).
     pub(crate) fn inherited_in(
         &self,
         locations: &[i64],
+        accepts: &dyn Fn(i64, i64) -> bool,
         range: Range<i64>,
     ) -> Result<bool, StoreError> {
-        self.read(|conn| inherited_unknown(conn, Some(locations), &range))
+        self.read(|conn| {
+            let sessions: Vec<i64> = conn
+                .prepare_cached("SELECT id FROM session WHERE inheritance_unknown = 1")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut projects = conn.prepare_cached(
+                "SELECT DISTINCT coalesce(project, 0) FROM fact
+                 WHERE session = ?1 AND at >= ?2 AND at < ?3 AND location = ?4",
+            )?;
+            for session in sessions {
+                for &l in locations {
+                    let found = projects
+                        .query_map(params![session, range.start, range.end, l], |r| {
+                            r.get::<_, i64>(0)
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    if found.into_iter().any(|project| accepts(l, project)) {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        })
     }
 
     /// Sums of every fact in `range`, by location, bucket and agent.

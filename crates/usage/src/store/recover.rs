@@ -158,6 +158,11 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
             error!("cold segments that do not decode stay in the kept file"; segments = bad);
             lost += bad;
         }
+        // A file of table version 6 or older keeps its archived months
+        // without projects; the copy has them as project -1.
+        if months_without_projects(&out)? {
+            cold::split_months(&out)?;
+        }
         copy_meta(&out);
         let (c, l) = copy_frozen_derived(&out)?;
         copied += c;
@@ -374,6 +379,18 @@ fn raise_sequences(conn: &Connection, cold_top: &HashMap<String, i64>) -> rusqli
         }
     }
     Ok(())
+}
+
+/// Whether the old file has `cold_month` and its rows have no project
+/// column.
+fn months_without_projects(conn: &Connection) -> rusqlite::Result<bool> {
+    let (columns, projects): (i64, i64) = conn.query_row(
+        "SELECT count(*), count(CASE WHEN name = 'project' THEN 1 END)
+         FROM pragma_table_info('cold_month', 'old')",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(columns > 0 && projects == 0)
 }
 
 /// The derived rows of frozen months (docs/design/usage.md「冷热分层」): a

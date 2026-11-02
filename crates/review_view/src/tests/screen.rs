@@ -142,6 +142,46 @@ fn the_toolbar_names_the_session(cx: &mut TestAppContext) {
     assert_eq!(items.controls.len(), 1, "Mark Reviewed alone");
 }
 
+/// The controls `workspace` takes from `Screen::toolbar`, in a window of
+/// their own.
+struct ToolbarControls;
+
+impl gpui::Render for ToolbarControls {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement, Styled};
+        gpui::div()
+            .size_full()
+            .children(crate::screen::toolbar(cx).controls)
+    }
+}
+
+/// The key hint of Mark Reviewed is a part of its own: the button's name is
+/// the label alone, the V is the hint, and the two are not one text.
+#[gpui::test]
+fn the_toolbar_button_keeps_its_key_hint_apart(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    let (snapshot, _) = snapshot_fixture(2, 1, 4);
+    let opened = rig.open(cx, session(), Some(snapshot));
+    opened.draw(cx);
+    let window = cx.add_window(|_, _| ToolbarControls);
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let id = visual.update(|window, _| window.window_handle().window_id());
+    lectern_ui::semantic::Recorder::begin(id);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let records = lectern_ui::semantic::Recorder::finish();
+    let button = must(&records, "review.toolbar.mark-reviewed");
+    let label = button.semantic.label.as_ref().expect("a label");
+    assert_eq!(&*label.text, "Mark Reviewed");
+    assert_eq!(label_key(button), Some("review-mark-reviewed"));
+    assert_eq!(attr(button, "hint").as_deref(), Some("V"));
+    assert!(!button.semantic.state.disabled);
+}
+
 #[gpui::test]
 fn changed_event_reaches_the_main_thread_and_keeps_the_scroll(cx: &mut TestAppContext) {
     let (rig, opened, _) = ready(cx, 12, 3, 100);
