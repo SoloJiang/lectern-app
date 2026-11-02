@@ -17,6 +17,7 @@ use crate::anchor;
 use crate::diag;
 use crate::items::{self, Item, ItemKey, RangeSpan};
 use crate::model::{Direction, ReviewModel};
+use crate::screen::BAR_RESERVE;
 
 /// The distance from the list's top or bottom edge within which a drag
 /// scrolls the list.
@@ -360,7 +361,12 @@ impl ReviewModel {
             return false;
         }
         let pointer = window.mouse_position();
-        let (top, bottom) = (viewport.top() + EDGE, viewport.bottom() - EDGE);
+        // The floating bar covers the end of the list, so the zone at the
+        // bottom sits above the bar.
+        let (top, bottom) = (
+            viewport.top() + EDGE,
+            viewport.bottom() - BAR_RESERVE - EDGE,
+        );
         let (depth, upward) = if pointer.y < top {
             (top - pointer.y, true)
         } else if pointer.y > bottom {

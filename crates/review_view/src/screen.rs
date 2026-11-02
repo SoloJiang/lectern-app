@@ -40,7 +40,7 @@ use crate::notes::{Reason, Status};
 use crate::plugin::Shared;
 
 /// The room the floating bar takes at the bottom of the list.
-const BAR_RESERVE: Pixels = px(72.0);
+pub(crate) const BAR_RESERVE: Pixels = px(72.0);
 
 /// The review screen. `Screen("review")`'s factory builds one for each
 /// `Push(Route { screen: "review", target: Target::Review(…) })`; popping
