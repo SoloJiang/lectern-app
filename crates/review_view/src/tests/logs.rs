@@ -339,6 +339,66 @@ fn logs_hold_no_note_contents(cx: &mut TestAppContext) {
             .any(|(_, command)| matches!(command, ReviewCommand::CopyBatch(_)))
     );
 
+    // A range (#373): a changed one whose excerpt left lines out and has the
+    // canary in it, then a drag over two rows, Add Note, a text with the
+    // canary, ⌘↩, and a range that Esc ends.
+    let mut ranged = note(
+        9,
+        DiffSide::New,
+        1,
+        NoteState::Pending,
+        NotePlace::Drifted {
+            file: crate::testing::file_key(0),
+        },
+    );
+    ranged.anchor.last = 30;
+    ranged.text = Arc::from(format!("range {CANARY}"));
+    ranged.excerpt = Some(Excerpt {
+        first: 1,
+        lines: Arc::from(vec![
+            Arc::<str>::from(format!("first {CANARY}")),
+            Arc::from(format!("last {CANARY}")),
+        ]),
+        gap: Some(lectern_services::review::ExcerptGap { at: 1, lines: 27 }),
+    });
+    change(&rig, &opened, cx, |snapshot| {
+        let mut notes = snapshot.notes.to_vec();
+        notes.push(ranged);
+        set_notes(snapshot, notes);
+    });
+    let drag_between = |visual: &mut gpui::VisualTestContext, cx: &mut TestAppContext| {
+        let records = opened.record(cx);
+        let middle = |lines: &str| {
+            let bounds = crate::tests::screen::must(
+                &records,
+                &format!("review.diff.item[step:0].row.item[{lines}]"),
+            )
+            .bounds;
+            gpui::point(bounds.origin.x + bounds.size.width / 2.0, bounds.center().y)
+        };
+        let (start, end) = (middle("0:0"), middle("-:1"));
+        visual.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        opened.draw(cx);
+        visual.simulate_mouse_move(
+            end,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        opened.draw(cx);
+        visual.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        opened.draw(cx);
+    };
+    drag_between(&mut visual, cx);
+    visual.simulate_keystrokes("c");
+    opened.draw(cx);
+    visual.simulate_input(&format!("on a range {CANARY}"));
+    visual.simulate_keystrokes("cmd-enter");
+    visual.run_until_parked();
+    drag_between(&mut visual, cx);
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    assert_eq!(opened.read(cx, |model| model.range.clone()), None);
+
     // The screen goes away.
     let window = opened.window;
     drop(opened);
@@ -357,6 +417,27 @@ fn logs_hold_no_note_contents(cx: &mut TestAppContext) {
             .iter()
             .any(|line| line.contains(&format!("\"msg\":\"{msg}\"")))
     };
+    // The range records: how, how many lines, in which mode; no line number.
+    let ranges: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("\"msg\":\"note range\""))
+        .collect();
+    for how in ["set", "cleared"] {
+        assert!(
+            ranges
+                .iter()
+                .any(|line| line.contains(&format!("\"how\":\"{how}\""))
+                    && line.contains("\"lines\":2")
+                    && line.contains("\"mode\":\"unified\"")),
+            "no note range record for {how}: {ranges:#?}"
+        );
+    }
+    for line in &ranges {
+        assert!(
+            !line.contains("\"line\":") && !line.contains("\"last\":"),
+            "a line number in {line}"
+        );
+    }
     assert!(has("note editor"), "{lines:#?}");
     assert!(has("notes discard"));
     assert!(has("review screen closed"));
@@ -364,8 +445,8 @@ fn logs_hold_no_note_contents(cx: &mut TestAppContext) {
         .iter()
         .find(|line| line.contains("\"msg\":\"review screen closed\""))
         .unwrap();
-    // Two notes were added through the editor.
-    assert!(closed.contains("\"notes_added\":2"), "{closed}");
+    // Three notes were added through the editor, the last one on a range.
+    assert!(closed.contains("\"notes_added\":3"), "{closed}");
     for how in ["opened", "drafted", "saved"] {
         assert!(
             lines

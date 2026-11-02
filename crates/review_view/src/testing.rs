@@ -1000,8 +1000,9 @@ pub fn head_range() -> ReviewTarget {
 /// Adds `count` pending notes to a fixture snapshot, spread over its files:
 /// each on a line of the new side of its file's step (the narrative's) and
 /// of the file's final diff, as `review` places a note whose content is in
-/// both. Their text is `note n`. The fixture's rows are those of
-/// `snapshot_fixture`.
+/// both. Their text is `note n`. Every tenth is a range of four lines (#373:
+/// 4 of the 40 the bench adds), the others are on one line. The fixture's rows
+/// are those of `snapshot_fixture`.
 pub fn add_notes(snapshot: &mut ReviewSnapshot, count: u32) {
     let files = snapshot.files.len() as u32;
     if files == 0 {
@@ -1017,7 +1018,7 @@ pub fn add_notes(snapshot: &mut ReviewSnapshot, count: u32) {
                 file: file_key(file),
                 side: DiffSide::New,
                 line,
-                last: line,
+                last: if n % 10 == 0 { line + 3 } else { line },
                 oid: BlobId::Sha1([1; 20]),
             },
             text: Arc::from(format!("note {n}")),

@@ -549,6 +549,100 @@ pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow> {
     out
 }
 
+/// The display rows around `start` that no fold interrupts: the stretch a
+/// dragged line range stays in (#373; half-open indexes into `display`).
+pub fn run_of(display: &[DisplayRow], start: usize) -> Range<usize> {
+    if display.get(start).is_none_or(|row| row.fold.is_some()) {
+        return start..start;
+    }
+    let mut first = start;
+    while first > 0 && display[first - 1].fold.is_none() {
+        first -= 1;
+    }
+    let mut end = start + 1;
+    while end < display.len() && display[end].fold.is_none() {
+        end += 1;
+    }
+    first..end
+}
+
+/// The lines of one side a dragged range covers (#373): `line` and `last`
+/// are 0-based, both included.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RangeSpan {
+    pub side: DiffSide,
+    pub line: u32,
+    pub last: u32,
+}
+
+/// The side and the lines of the range from display row `start` to `focus`
+/// (either may be the first), which must lie in one `run_of` stretch. A
+/// range is always on one side (docs/design/review_view.md「拖选范围」):
+///
+/// - side by side: the half that was pressed (`half`), or the other half when
+///   the pressed row has no line there;
+/// - unified: the new side when the stretch has an added line, the old side
+///   when it has removed lines but no added one, the new side otherwise (a
+///   context line has a number on both sides).
+///
+/// `line` and `last` are the first and the last line of that side in the
+/// stretch. None when a fold is in the way or the side has no line.
+pub fn range_of(
+    display: &[DisplayRow],
+    start: usize,
+    focus: usize,
+    half: Option<DiffSide>,
+    mode: DiffMode,
+) -> Option<RangeSpan> {
+    let (first, last) = (start.min(focus), start.max(focus));
+    let stretch = display.get(first..=last)?;
+    if stretch.iter().any(|row| row.fold.is_some()) {
+        return None;
+    }
+    let has = |row: &DisplayRow, side: DiffSide| match side {
+        DiffSide::Old => row.left.is_some(),
+        DiffSide::New => row.right.is_some(),
+    };
+    let side = match mode {
+        DiffMode::SideBySide => {
+            let pressed = half.unwrap_or(DiffSide::New);
+            let other = match pressed {
+                DiffSide::Old => DiffSide::New,
+                DiffSide::New => DiffSide::Old,
+            };
+            if has(display.get(start)?, pressed) {
+                pressed
+            } else {
+                other
+            }
+        }
+        DiffMode::Unified => {
+            if stretch
+                .iter()
+                .any(|row| row.right.is_some_and(|side| side.kind == RowKind::Added))
+            {
+                DiffSide::New
+            } else if stretch
+                .iter()
+                .any(|row| row.left.is_some_and(|side| side.kind == RowKind::Removed))
+            {
+                DiffSide::Old
+            } else {
+                DiffSide::New
+            }
+        }
+    };
+    let lines = stretch.iter().filter_map(|row| match side {
+        DiffSide::Old => row.left.map(|side| side.line),
+        DiffSide::New => row.right.map(|side| side.line),
+    });
+    let (line, last) = lines.fold(None, |found: Option<(u32, u32)>, n| match found {
+        None => Some((n, n)),
+        Some((lo, hi)) => Some((lo.min(n), hi.max(n))),
+    })?;
+    Some(RangeSpan { side, line, last })
+}
+
 /// What `build` needs besides the snapshot and the rows.
 pub struct BuildOptions<'a> {
     /// How the diffs' rows are laid out.
@@ -571,7 +665,8 @@ pub struct BuildOptions<'a> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum EditorAt {
     /// A new note: after the row (`side`, `line`) of the diff `rows` whose
-    /// side has the content `oid`. When that row is not there (the file
+    /// side has the content `oid`. `line` is the last line of a range
+    /// (#373: `NoteAnchor::last`). When that row is not there (the file
     /// changed), the editor sits at the head of the diff, below the title.
     Row {
         rows: RowsKey,
@@ -654,7 +749,8 @@ impl NoteIndex {
                                 .entry((kind, note.anchor.file.clone()))
                                 .or_default();
                             per.by_line
-                                .entry((side_ord(note.anchor.side), note.anchor.line))
+                                // A range is drawn after its last line (#373).
+                                .entry((side_ord(note.anchor.side), note.anchor.last))
                                 .or_default()
                                 .push(note_ref);
                             per.all.push(note_ref);

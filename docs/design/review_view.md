@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：「验收」第 1 到第 4 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）：设计已接受，尚未实现，见「审阅意见（#22）」的「拖选范围」和「验收」第 5 步。
+状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -603,8 +603,10 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   | `review.range.add-note` | `Button` | #373：拖选之后的 Add Note。`attrs`：`side`、`line`、`last`；没有 `disabled`：意见已满时点击显示 `review-notes-full`，与 C 相同。按钮是 `deferred` 的，在所有节点之后 prepaint，那时 `semantic` 的父节点栈已空，所以它是窗口节点的直接子节点，不在行之下；ID 也不带行。`at` 那一行不在屏幕上时没有这个节点 |
   | `review.note[<id>]` | `Comment` | #22：`Label::text` 是意见原文（探针关闭时不构造）；`selected`；`attrs`：`state`（`pending` / `sending` / `sent`）、`place`（`rows` / `drifted` / `elsewhere`）、`side`、`line`、`last`（#373，只在范围上有） |
   | `review.note[<id>].edit`、`review.note[<id>].delete` | `Button` | #22：`disabled` |
+  | `review.note[<id>].lines` | `Text` | #373：范围的意见第一行的 `review-note-lines`（`Label::key`），一行的意见没有 |
   | `review.note-editor` | `Group` | #22：`attrs`：`target`（`new` / `existing`）、`side`、`line`、`last`（#373，只在范围上有）、`too_long` |
   | `review.note-editor.text` | `TextField` | #22：`ui::TextArea` 的节点，不记录文字 |
+  | `review.note-editor.lines` | `Text` | #373：锚点是范围时左下的 `review-note-lines` |
   | `review.note-editor.save`、`review.note-editor.cancel` | `Button` | #22：`disabled` |
   | `review.notes-elsewhere` | `Group` | #22：`attrs`：`count` |
   | `review.failed` | `Text` | `Label::key` 是失败的键 |
@@ -748,7 +750,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - `escape_goes_to_the_panel_first`：面板开着（假 `Contributions` 发 `LayerChanged { open: true }`）且有选中项时 Esc 不清空选中、冒泡到 `workspace`；面板关了之后 Esc 清空选中。
 - 审阅意见（#22，`src/tests/notes.rs`；`FakeReview` 按命令换出 `notes`、`notes_state`）：
   - 纯函数 `items_notes_*`：意见项跟在锚点行之后（`Rows([Step])` 在会话审阅、`Rows([Final])` 在规则分组视图）、同一行几条按时刻、锚点行在折叠段里时跟在 `Fold` 之后、`Drifted` 跟在文件标题之后、`Elsewhere` 进 `NotesElsewhere`、编辑框的位置。
-  - 范围（#373，`src/tests/notes.rs`）：
+  - 范围（#373，`src/tests/range.rs`；`items.rs` 的纯函数与 `GPUI` 的鼠标模拟在同一个文件）：
     - 纯函数 `range_of_*`：统一视图的三种情况（有增加的行、只有删除和上下文、只有上下文）；双栏的两侧、按在没有行的一半上；向上拖；到 `Fold` 为止；这一侧没有 OID。
     - `items_notes_range_*`：意见和编辑框跟在 `last` 那一行之后；`last` 在折叠段里时跟在 `Fold` 之后。
     - `range_drag_sets_a_range_and_shows_add_note`：经 `simulate_mouse_down` / `move` / `up` 从一行拖到另一行：行有 `in_range`，有 `review.range.add-note`，它的 `bounds` 在 `at` 那一行的右端，拖动中没有 + 和这个按钮；向上拖时按钮在松开的那一行。
@@ -980,11 +982,44 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - 对照 `usage` 真实输出（不是假服务的形状）：见「与设计的差异」「用量插件」。
 - 没有验证：真实窗口里的简报用量行与轮次标题（发布 / 自动化构建里打开一个有用量的会话的 Diff）；`usage` 插件和 `review-view-usage` 一起启动、会话还没读进 `usage` 时的先后（用 `UsageEvent::Changed` 补上，测试里用假服务的事件覆盖，没有用真实引擎）。
 
+### 第 5 步
+
+审阅意见的范围（`Closes #373`）：拖选、Add Note、`ExtendRangeUp` / `ExtendRangeDown`、范围的意见与编辑框、Drifted 的范围与摘录的 gap。叠在 `impl/review-note-range`（`services` 的 `NoteAnchor::last`、`Excerpt::gap`，`review` 的第 8 步）上，在 macOS（arm64）上运行。屏幕锁定，没有运行应用，没有打开真实窗口（没有 `app` 的窗口测试、没有 `just automation`、没有 `just bench app/…`）：下面全部是无窗口的 `#[gpui::test]`、纯函数测试和 `just` 入口。
+
+- `just check` 通过（格式、架构规则、文档链接、clippy `-D warnings`）。「验收」的五条 `rg` 检查都没有结果；`rg -n 'on_mouse_event' crates/review_view/src` 只有 `screen.rs` 里 `tracker` 的两处，`rg -n 'on_drag'` 没有结果；`rg -c` 四个键在 en、zh-CN 的 `review.ftl` 里各 4 处。
+- `INSTA_UPDATE=no just test` 分 crate：`lectern-review-view` 186 个通过（原 161 个，新增 25 个：`src/tests/range.rs` 24 个、`review_tree_note_range` 1 个；`logs_hold_no_note_contents` 扩展，没有新增），`lectern-review` 314 个，`lectern-ui` 101 个，`lectern-i18n` 57 个，全部通过。`review_tree_note_range` 是新快照（拖选后的 `in_range`、`review.range.add-note`、两条范围的意见的 `last` 与 `lines`）；`review_tree_notes` 与其他快照没有变。
+- #374 的点击测试（`a_click_on_a_line_number_opens_the_editor`、`…_side_by_side_takes_that_side`、`the_plus_shows_on_the_row_under_the_pointer`）和第 4 步的 `c_opens_*`、`notes_are_drawn_*` 没有改就通过。`range_a_press_that_stays_on_a_row_is_a_click` 另外覆盖：点代码、点行号、按下后拖出去再回到起点松开（代码与行号两种）、两次事件之间没有画帧的点击，都没有范围，也没有留下按下。
+- 基准（`cargo bench --locked -p lectern-bench --all-features --bench time -- review_view/items_5000`，进程内，不开窗口）：`review_view/items_5000` 中位数 55.1 µs（预算 < 4 ms）。夹具的 40 条意见里 4 条是范围（`testing::add_notes`：每第十条跨 4 行）。
+- 测试里用的鼠标是 GPUI 测试平台的 `simulate_mouse_*`，两次事件之间画帧（跟踪指针的 `canvas` 从按下之后的下一帧才有）。自动滚动用 `tick_drag(window, now, cx)` 直接给帧的时间。
+- 没有验证（要在真实窗口里看）：
+  - 真实指针：拖动的手感、`MouseMoveEvent::pressed_button` 在 macOS 拖动时是否总是左键、指针拖出窗口再松开、两次点击很快时的先后。
+  - 自动滚动：边缘区 24pt 在浮条（`BAR_RESERVE`）上方是否合适、速度曲线、每帧重画的开销（`review_view/scroll_5000` 没有跑）。
+  - Add Note 按钮：`deferred` 的按钮不被行裁掉、盖住上下相邻两行的样子、`occlude` 后按它不触发下面的行、淡入、深色外观；双栏里左右两半按下的位置。
+  - 统一和双栏里各拖一段、Add Note、写一条、Copy as Prompt，粘贴出的文字与 [review 设计「prompt 的模板」](review.md#prompt-的模板)的范围写法比较；拖到列表边上的自动滚动；点行号、点代码、悬停的 +、C 与 #374 比较；重启后范围的意见还在。
+  - 输入法组字时 Esc、⌘↩ 与范围的编辑框。
+  - 一条已变的范围的意见（`review-note-drifted-range`）的文字：它不是探针节点，测试只看到类型检查通过和 `excerpt_lines`。
+
 ## 与设计的差异
+
+### 第 5 步（审阅意见的范围，#373）
+
+- **测试在 `src/tests/range.rs`，不在 `notes.rs`。** 名字照「测试」；多出的：`range_of_*`（5 个纯函数，含 `run_of` 与没有这一行的情况）、`excerpt_lines_leave_a_gap_and_mark_the_range`、`range_add_note_with_a_full_batch_shows_the_limit`、`range_side_by_side_takes_the_pressed_half`、`range_stays_in_the_rows_before_a_fold`、`range_needs_a_side_with_content`、`range_an_unseen_release_cancels_the_press`、`range_autoscroll_follows_the_pointer`。`logs_hold_no_note_contents` 在原有流程之后加了范围（拖选、C、⌘↩、Esc），所以它的 `notes_added` 从 2 变成 3。
+- **`ExtendRangeUp` / `ExtendRangeDown` 移动范围的终点（`at`），与拖动时的焦点行一样。** 设计写「向上、向下扩一行」，没有说起点。起点是选中的行，之后记在 `LineRange::from`；所以先向下扩两行、再向上扩一行，范围缩短一行，不是在顶端多一行。`LineRange` 因此比设计多 `from` 和 `half`（按下的那一半，双栏用）。
+- **松开另有一条后备路径。** 设计只在按下期间的 `canvas` 里收松开。点击比一帧还快时（按下和松开之间没有画过帧）`canvas` 还不在，`press` 会留在模型里。屏幕根元素加了 `capture_any_mouse_up` 与 `on_mouse_up_out(Left)`，调同一个 `finish_press`；移动事件的 `pressed_button` 不是左键时取消按下，仍照设计。`rg on_mouse_event` 仍只在 `screen.rs` 的 `canvas` 里。
+- **指针在这个 diff 的行之前、之后的别的项上时，焦点取这一段的第一行、最后一行；**设计是「焦点不变」。快速拖过文件卡片的边缘时，移动事件会跳过最后几行，松开时范围会比指针短。指针在这个 diff 的行之间的意见、hunk 标题上时仍然不变。
+- **行不在内存里时范围留着。** 设计是「这份行还在且 OID 相同时留着，否则清除」。滚到一屏之外后 `release_unwanted` 会放掉行，照字面范围就丢了，滚回来要重拖。现在只在这份 diff 的行还在而那一侧的 OID 不同、或文件已不在审阅里时清除（`check_range`，在 `apply_snapshot` 与 `store_rows` 之后）；按下期间 OID 变了或这份 diff 的行被换掉，取消按下。
+- **自动滚动的常数：**边缘区 24pt（设计）；深度到 48pt（边缘区的两倍，含超出边缘的部分）时到上限，每秒 40 行（设计）；一帧最多算 50 ms，晚到的帧不会一下子滚过一屏。列表的上下边取 `ListState::viewport_bounds`，没有扣掉浮条占的 `BAR_RESERVE`，浮条上方 24pt 是否合适要在真实窗口里看。`tick_drag` 返回指针是否在边缘区，屏幕据此 `request_animation_frame`（它只能在布局、绘制阶段调用，测试里直接调 `tick_drag`）。
+- **Esc 在按下期间先结束这次按下**（然后才是范围、选中项），设计的 Esc 一行没有写按下。
+- **行尾的 + 在任何按下期间都不画，**不只是拖动期间：按下时还不知道是点击还是拖选，松开后选中的行照常出现 +。
+- **Add Note 的点击直接调 `add_note_at_selection`，不经 `window.dispatch_action`；**效果与 C 相同（有范围时锚在范围上），不依赖焦点在哪里。按钮淡入用 `HOVER_IN`，动画的 ID 由松开那一行的行号组成（同一行上连续两次范围不重播）。
+- **没有悬停说明。** `review-note-add-range.tooltip` 在 .ftl 里，`ui::Button` 没有接口，同第 4 步的几个 `.tooltip`。
+- **编辑框的展开动画（`EXPAND_HEIGHT`、`EXPAND_FADE`）仍没有：**第 4 步就没有做，这一步没有补，编辑框照旧是整表重建后的下一帧出现。
+- **多出的探针节点：**`review.note[<id>].lines`、`review.note-editor.lines`（`Text`，`Label::key` 是 `review-note-lines`），测试靠它们看到 Lines n–m；摘录的画法拆成纯函数 `render_notes::excerpt_lines`（`ExcerptLine::Gap` / `Line { own }`），gap 和第一行的颜色由单元测试覆盖，摘录的行本身不是探针节点。
+- **范围的 `lines` 在日志里是范围的行数（`last - line + 1`）；**`cancelled` 记按下时已有的范围的行数，没有时为 0。
 
 ### 工具栏的键提示与意见的入口（`Refs #22`）
 
-- **点行号一下打开编辑框；多行选择没有做。** 行号栏是点击目标（统一视图一个、双栏左右各一个，`render_diff.rs` 的 `gutter`），不是探针节点。`selection_anchor` 加了一个 `prefer` 参数：双栏的一对行点左边的行号锚在旧一侧。多行选择（拖选几行出现「Add Note」）没有做，原因见「已知限制」。
+- **点行号一下打开编辑框；多行选择当时没有做（#373 做了）。** 行号栏是点击目标（统一视图一个、双栏左右各一个，`render_diff.rs` 的 `gutter`），不是探针节点。`selection_anchor` 加了一个 `prefer` 参数：双栏的一对行点左边的行号锚在旧一侧。多行选择（拖选几行出现「Add Note」）当时没有做，后来由 #373 做了，见本节「第 5 步」。
 - **工具栏的键提示是 `Button::hint`，不是拼进标签的文字。** 设计写「后面跟次要色的键提示」，第 1 步实现成 `Text::verbatim(format!("{label} {hint}"))`，整个按钮一种颜色，读起来像错字。`toolbar` 没有 `Window`，不能像文件卡片的 Open File 那样在按钮旁边画一个 `text_role` 的元素，所以 `ui::Button` 加了 `hint`：标签之后 5pt 的一段，`secondary_label`（禁用时半透明）；辅助名只有标签。浮条的发送和编辑框的保存按钮仍把 ⌘↩ 拼在标签里（主按钮上的提示）；它们的探针标签带着提示（`Add Note ⌘↩`），改它们是另一次改动。
 
 ### 用量插件（`review-view-usage`，`Refs #31`）

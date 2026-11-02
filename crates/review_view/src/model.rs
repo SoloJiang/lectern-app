@@ -35,6 +35,7 @@ use crate::items::{self, BuildOptions, DiffMode, DisplayRow, Item, ItemKey, Note
 use crate::needs;
 use crate::notes::NoteEditor;
 use crate::plugin::{Job, JobReceiver, JobSender, Shared};
+use crate::range::{LineRange, Press};
 
 /// The items assumed visible before the list has been laid out once.
 const INITIAL_VISIBLE: usize = 40;
@@ -168,6 +169,10 @@ pub struct ReviewModel {
     pub(crate) selection: Option<ItemKey>,
     /// The diff row under the pointer: it shows the + that writes a note.
     pub(crate) hovered_row: Option<ItemKey>,
+    /// #373: a button held down on a row of a diff.
+    pub(crate) press: Option<Press>,
+    /// #373: the range the last drag left.
+    pub(crate) range: Option<LineRange>,
     needs: Arc<[Need]>,
     pub(crate) visible: Range<usize>,
     pub(crate) line_height: Pixels,
@@ -277,6 +282,8 @@ impl ReviewModel {
             noise_expanded: false,
             selection: None,
             hovered_row: None,
+            press: None,
+            range: None,
             needs: Arc::from(Vec::new()),
             visible: 0..0,
             line_height: px(16.0),
@@ -367,6 +374,8 @@ impl ReviewModel {
             noise_expanded: false,
             selection: None,
             hovered_row: None,
+            press: None,
+            range: None,
             needs: Arc::from(Vec::new()),
             visible: 0..0,
             line_height: px(16.0),
@@ -564,6 +573,8 @@ impl ReviewModel {
                 self.items.clear();
                 self.list.reset(0);
                 self.selection = None;
+                self.end_press("cancelled");
+                self.drop_range();
                 cx.notify();
                 return;
             }
@@ -585,6 +596,7 @@ impl ReviewModel {
                 took_us = started.elapsed()
             );
             self.sync_focus();
+            self.check_range();
             cx.notify();
             return;
         }
@@ -597,6 +609,7 @@ impl ReviewModel {
         self.check_consistent();
         let found = self.rebuild(&old_items, top, cx);
         self.sync_focus();
+        self.check_range();
         debug!(
             "snapshot applied";
             id = self.id.0,
@@ -918,6 +931,15 @@ impl ReviewModel {
         self.rows.insert(key.clone(), rows.clone());
         self.replace_segment(key, fresh);
         self.after_rows(key, &rows);
+        // The rows of a press changed under it, or the content of a range did.
+        if self
+            .press
+            .as_ref()
+            .is_some_and(|press| items::same_diff(&press.rows, key))
+        {
+            self.end_press("cancelled");
+        }
+        self.check_range();
         true
     }
 
@@ -977,6 +999,11 @@ impl ReviewModel {
 
     pub(crate) fn select(&mut self, key: Option<ItemKey>, cx: &mut Context<ReviewModel>) {
         self.pending_row = None;
+        // A new current line ends the range (#373): a range is set after it.
+        if self.range.is_some() {
+            self.drop_range();
+            cx.notify();
+        }
         if self.selection != key {
             self.selection = key;
             self.sync_current();
@@ -1018,6 +1045,7 @@ impl ReviewModel {
             ix
         };
         self.selection = Some(key);
+        self.drop_range();
         self.sync_current();
         self.list.scroll_to_reveal_item(reveal);
         cx.notify();
@@ -1294,6 +1322,7 @@ impl ReviewModel {
             .map(|(ix, _)| ix);
         let Some(ix) = next else { return };
         self.selection = Some(self.items[ix].key());
+        self.drop_range();
         self.glide_to(ix, cx);
         cx.notify();
     }
@@ -1433,7 +1462,20 @@ impl ReviewModel {
     /// action is not handled here, so that it goes on to `workspace`:
     /// while a panel or overlay is open, and when nothing is selected.
     pub(crate) fn escape(&mut self, cx: &mut Context<ReviewModel>) -> bool {
-        if self.layer_open || self.selection.is_none() {
+        if self.layer_open {
+            return false;
+        }
+        // The drag, then the range it left, then the current line (#373).
+        if self.press.is_some() {
+            self.cancel_press(cx);
+            return true;
+        }
+        if self.range.is_some() {
+            self.drop_range();
+            cx.notify();
+            return true;
+        }
+        if self.selection.is_none() {
             return false;
         }
         self.selection = None;

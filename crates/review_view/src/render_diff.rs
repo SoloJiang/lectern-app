@@ -6,15 +6,17 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, HighlightStyle, InteractiveElement, IntoElement,
-    ParentElement, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement,
-    Styled, StyledText, Window, div, px,
+    AnimationExt as _, AnyElement, ClickEvent, Context, HighlightStyle, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, ScrollDelta, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement, Styled, StyledText, Window, deferred, div, px,
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_services::review::{DiffSide, FileRows, RowsKey};
+use lectern_ui::motion::HOVER_IN;
 use lectern_ui::semantic::{Role, Semantic, State, semantic, semantic_interactive};
 use lectern_ui::{
-    Button, ButtonSize, Icon, Palette, SystemColor, Text, TextRole, TextRoleExt, mono_metrics,
+    Button, ButtonKind, ButtonSize, Icon, Palette, SystemColor, Text, TextRole, TextRoleExt,
+    mono_metrics,
 };
 
 use crate::highlight::{Half, SideSpans};
@@ -28,6 +30,9 @@ type Half2 = (Side, DisplayLine, Vec<(Range<usize>, HighlightStyle)>);
 
 /// What a click on a line number does (see `render_row`).
 type GutterClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App)>;
+
+/// What a button going down on a row starts (see `render_row`).
+type PressStart = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut gpui::App)>;
 
 /// The cells of a line-number column: five digits and the room after them.
 const NUMBER_CELLS: f32 = 6.0;
@@ -146,6 +151,44 @@ impl ReviewModel {
                 })
             }
         };
+        // Lines of a range (#373): the dragged one, the one a drag left, the
+        // one of a note being written or selected.
+        let mark = self.range_mark(&rows_key);
+        let covers = |side: DiffSide, line: Option<u32>| {
+            mark.is_some_and(|mark| {
+                mark.covers(side, line)
+                    && mark.oid.is_none_or(|oid| {
+                        let held = match side {
+                            DiffSide::Old => rows.old.oid,
+                            DiffSide::New => rows.new.oid,
+                        };
+                        held == Some(oid)
+                    })
+            })
+        };
+        let (in_old, in_new) = (covers(DiffSide::Old, old), covers(DiffSide::New, new));
+        let in_range = in_old || in_new;
+        if in_range {
+            spec = spec.attr("in_range", "true");
+        }
+        // A button going down on the row starts a drag; the ranges it makes
+        // end on another row, and a release on this one is a click.
+        let press = {
+            let weak = cx.weak_entity();
+            let press_rows = rows_key.clone();
+            move |half: Option<DiffSide>| -> PressStart {
+                let weak = weak.clone();
+                let rows = press_rows.clone();
+                Box::new(move |event, _, cx| {
+                    if event.modifiers.modified() {
+                        return;
+                    }
+                    let _ = weak.update(cx, |model, cx| {
+                        model.begin_press(rows.clone(), ix, half, cx);
+                    });
+                })
+            }
+        };
         let content = match self.mode {
             DiffMode::Unified => {
                 // The new side when the row has one (a context line is on both).
@@ -160,7 +203,7 @@ impl ReviewModel {
                     old,
                     new,
                     Some(side.kind),
-                    selected,
+                    selected || in_range,
                     &line,
                     code(&line, &spans, half, side, &rows, &row, palette),
                     offset,
@@ -182,7 +225,15 @@ impl ReviewModel {
                         None => halves.push(None),
                     }
                 }
-                self.split_row(halves, selected, offset, mono.cell_width, palette, &gutter)
+                self.split_row(
+                    halves,
+                    [selected || in_old, selected || in_new],
+                    offset,
+                    mono.cell_width,
+                    palette,
+                    &gutter,
+                    &press,
+                )
             }
         };
         let mut line = div()
@@ -198,11 +249,9 @@ impl ReviewModel {
             .line_height(self.line_height)
             .whitespace_nowrap()
             .child(
-                div()
-                    .w(BAR)
-                    .h_full()
-                    .flex_shrink_0()
-                    .bg(palette.accent.alpha(if selected { 1.0 } else { 0.0 })),
+                div().w(BAR).h_full().flex_shrink_0().bg(palette
+                    .accent
+                    .alpha(if selected || in_range { 1.0 } else { 0.0 })),
             )
             .child(content);
         if notes.count > 0 {
@@ -223,9 +272,17 @@ impl ReviewModel {
             );
         }
         let hovered = self.hovered_row.as_ref() == Some(&key);
-        if chosen || hovered {
+        // The Add Note button of a dragged range is at the row where the
+        // button went up; it takes the place of the +.
+        let range_here = self.press.is_none()
+            && self.range.as_ref().is_some_and(|range| {
+                range.at == (old, new) && items::same_diff(&range.rows, &rows_key)
+            });
+        if (chosen || hovered) && self.press.is_none() && !range_here {
             // The + at the end of the row writes a note on it, as C does; it
-            // shows on the selected row and on the one under the pointer.
+            // shows on the selected row and on the one under the pointer. It
+            // is not drawn while a button is held: the pointer is going
+            // somewhere else, and GPUI still hovers the rows it passes.
             let weak = cx.weak_entity();
             let add_key = ItemKey::Row {
                 rows: rows_key.clone(),
@@ -240,6 +297,8 @@ impl ReviewModel {
                     .h_full()
                     .flex()
                     .items_center()
+                    // A press on the button is not the press of a drag.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         Button::icon_only(
                             node.child("add-note"),
@@ -255,6 +314,20 @@ impl ReviewModel {
                         }),
                     ),
             );
+        }
+        if range_here && let Some(range) = &self.range {
+            line = line.child(self.range_button(
+                range.side,
+                range.line,
+                range.last,
+                (old, new),
+                strings,
+                window,
+                cx,
+            ));
+        }
+        if self.mode == DiffMode::Unified {
+            line = line.on_mouse_down(MouseButton::Left, press(None));
         }
         let click_key = key.clone();
         let hover_key = key;
@@ -275,6 +348,63 @@ impl ReviewModel {
                 this.scroll_sideways(&scroll_key, delta, mono.cell_width, cx);
             }));
         semantic_interactive(spec, line).into_any_element()
+    }
+
+    /// The Add Note button of a dragged range: a secondary button at the end of
+    /// the row where the drag ended. It is drawn deferred, without the
+    /// row's clip: the row is about a line high and the button 24pt, and
+    /// it covers a little of the rows above and below. Its container
+    /// takes the mouse, so a press on the button reaches no row.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the button's pieces: the range, the row and the frame's"
+    )]
+    fn range_button(
+        &self,
+        side: DiffSide,
+        line: u32,
+        last: u32,
+        at: (Option<u32>, Option<u32>),
+        strings: &Strings,
+        _window: &mut Window,
+        cx: &mut Context<ReviewModel>,
+    ) -> AnyElement {
+        let weak = cx.weak_entity();
+        let node = nodes::plain("range").child("add-note");
+        let button = Button::new(
+            node.clone(),
+            Text::key(strings, keys::review::NOTE_ADD_RANGE),
+        )
+        .kind(ButtonKind::Secondary)
+        .size(ButtonSize::Small)
+        .attr(
+            "side",
+            match side {
+                DiffSide::Old => "old",
+                DiffSide::New => "new",
+            },
+        )
+        .attr("line", line.to_string())
+        .attr("last", last.to_string())
+        .on_click(move |window, cx| {
+            // The same as C: the range is what it writes on.
+            let _ = weak.update(cx, |model, cx| model.add_note_at_selection(window, cx));
+        });
+        let id = gpui::ElementId::NamedInteger(
+            "range-add-note".into(),
+            (u64::from(at.0.unwrap_or(0)) << 32) | u64::from(at.1.unwrap_or(0)),
+        );
+        deferred(
+            div()
+                .absolute()
+                .right(px(8.0))
+                .top((self.line_height - px(24.0)) / 2.0)
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(button)
+                .with_animation(id, HOVER_IN.animation(cx), |el, t| el.opacity(t)),
+        )
+        .into_any_element()
     }
 
     /// The text of a line of one side of a row.
@@ -378,14 +508,19 @@ impl ReviewModel {
             .into_any_element()
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a row's pieces: both halves, their accents, the offset and the handlers"
+    )]
     fn split_row(
         &self,
         halves: Vec<Option<Half2>>,
-        selected: bool,
+        accent: [bool; 2],
         offset: Pixels,
         cell: Pixels,
         palette: &Palette,
         gutter: &dyn Fn(Option<DiffSide>) -> GutterClick,
+        press: &dyn Fn(Option<DiffSide>) -> PressStart,
     ) -> AnyElement {
         let mut row = div()
             .flex_1()
@@ -405,6 +540,13 @@ impl ReviewModel {
                         .bg(palette.separator),
                 );
             }
+            // A press on a half starts a range on that side; an empty half
+            // too (the range then takes the other side).
+            let pressed = if position == 0 {
+                DiffSide::Old
+            } else {
+                DiffSide::New
+            };
             let mut cell_div = div()
                 .flex_1()
                 .min_w_0()
@@ -412,7 +554,8 @@ impl ReviewModel {
                 .flex()
                 .flex_row()
                 .items_center()
-                .overflow_hidden();
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, press(Some(pressed)));
             if let Some((side, line, runs)) = half {
                 if let Some(background) = kind_background(side.kind, palette) {
                     cell_div = cell_div.bg(background);
@@ -433,7 +576,7 @@ impl ReviewModel {
                             .pr(cell)
                             .flex_shrink_0()
                             .text_right()
-                            .text_color(if selected {
+                            .text_color(if accent[position] {
                                 palette.accent
                             } else {
                                 palette.tertiary_label

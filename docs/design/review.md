@@ -1607,7 +1607,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 刷新 | agent 追加一轮、改一个文件后，从 `SessionsChanged` 和 fs_watch 的批次到新快照 < 20 ms |
 | 勾选 | `command(MarkSeen)` 到新快照替换 < 0.2 ms（5000 个文件） |
 | 审阅意见（#22） | `command(AddNote)`、`EditNote`、`RemoveNote`、`SendNotes` 到新快照替换 < 0.2 ms（40 条待发送、240 条已发送）；`Background` 上拼 40 条意见的 prompt < 5 ms；剪贴板在主线程上的写入是 `platform` 的一次 `NSPasteboard` 调用，不在本 crate 的份额里。每份快照重算 `place` 是 O(意见数) 的 OID 比较，不读文本 |
-| 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB（标注日志的索引含审阅意见：全部还没发出的，加 14 天内发出的；280 条的形状 < 300 KB，`review/resident_notes_bytes`；每个审阅对象还没发出的至多 40 条、约 210 KiB，审阅对象的个数没有上限，见「审阅意见」的「已知限制」），从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
+| 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB（标注日志的索引含审阅意见：全部还没发出的，加 14 天内发出的；280 条的形状 < 300 KB，`review/resident_notes_bytes`，这 300 KB 是夹具这个组成的预算：280 条里约 10%（28 条）是范围的意见（8 行摘录），其余是一行的意见（5 行摘录），范围的意见占比更高时常驻会更大；每个审阅对象还没发出的至多 40 条、约 210 KiB，审阅对象的个数没有上限，见「审阅意见」的「已知限制」），从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
 | 并行 worktree 总览（worktrees 屏幕，不在采样状态） | 比较在 `Background` 上逐个 worktree 进行，同一时刻一个项目一次，最后一个关注放下时取消。cloudprint 形状每个 worktree 几毫秒，10 万文件每个约 1 s（`git/compare_100k`），17 个 worktree 的第一轮约 17 s，只记录（`review/worktrees_cloudprint`）；每个 worktree 的两次比较至少隔 `max(2 s, 10 × 上一次耗时)`。关注放下后保留的计数、路径哈希（每个 worktree ≤ 4000 个，32 KB）和重叠（≤ 8 项，每项 ≤ 10 个样本路径）计入本 crate 自己的 < 1 MB 份额：10 万文件的形状 17 个 worktree 每个 4000 个改动路径时约 650 KB（路径哈希 544 KB、重叠样本约 110 KB），路径哈希合计超过 65 536 个时关注放下 30 秒后释放哈希。`review/resident_100k_bytes` 的夹具加了 linked worktree 和一次关注再放下（预算不变） |
 | 审阅打开时的内存（不在采样状态，按 ADR 0035「关键约束」各自设上限） | `ChangeList` 和它持有的 `ChangeSet`（git 的 32 MiB 保留上限）；中间版本 LRU 8 MiB；`FileRows` 只为 `Prepare` 的范围保留，合计 ≤ 8 MiB，超出时丢弃离可见范围最远的；正文 ≤ 2 MiB |
 | 磁盘 | 标注日志每个仓库 ≤ max(4 MiB, 一年内仍然有效的记录的两倍) 加一批记录，在压缩的前提成立时（「标注日志」的压缩，[ADR 0045](../adr/0045.md)）；只追加时（读取失败或只读了一部分、文件头坏了或 `v` 不是 1、别的写入者改过文件、压缩改名之后目录的 `fsync` 失败）文件一直增长，到下一次完整读取恢复压缩为止；`review.attribution` 在仓库分库的 512 MiB 预算里，按 LRU 淘汰 |
@@ -1651,7 +1651,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | `review/brief_5000` | 中位数 < 5 ms（5000 个文件的规则简报） |
 | `review/note_add` | 中位数 < 0.2 ms（#22：40 条待发送、240 条已发送时 `command(AddNote)` 到快照替换） |
 | `review/notes_prompt_40` | 中位数 < 5 ms（#22：`notes::prompt`，40 条意见，每条 4 KiB 文字；#373 起每条 8 行摘录，是摘录的上限；预算不变） |
-| `review/resident_notes_bytes` | 存活字节 < 300 KB（#22：标注日志的索引里 280 条意见，40 条待发送、240 条已发送，每条 200 字节文字和 5 行摘录；#373 起其中 28 条是范围，8 行摘录；预算不变，第 7 步实测 228 KB；`Memory`） |
+| `review/resident_notes_bytes` | 存活字节 < 300 KB（#22：标注日志的索引里 280 条意见，40 条待发送、240 条已发送，每条 200 字节文字和 5 行摘录；#373 起其中 28 条是范围，8 行摘录；预算不变，第 7 步实测 228 KB；300 KB 是这个夹具的组成的预算：约 10% 是范围的意见，其余是一行的意见，范围的意见占比更高时常驻会更大；`Memory`） |
 
 ## 状态与异常
 

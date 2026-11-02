@@ -296,6 +296,15 @@ review-note-save = Save
 review-note-too-long = This note is too long.
 review-note-add-here = Add Note
     .tooltip = Add a review note (C)
+review-note-add-range = Add Note
+    .tooltip = Add a review note on lines { $first }–{ $last } (C)
+# $first and $last are 1-based.
+review-note-lines = Lines { $first }–{ $last }
+review-note-drifted-range = Lines { $first }–{ $last } changed after this note was written
+review-note-excerpt-gap = { $count ->
+    [one] { $count } more line
+   *[other] { $count } more lines
+}
 review-note-edit = Edit
 review-note-delete = Delete
 review-note-pending = Not sent

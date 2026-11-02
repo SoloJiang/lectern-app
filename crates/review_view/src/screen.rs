@@ -8,9 +8,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight,
-    InteractiveElement, IntoElement, ParentElement, Pixels, PromptLevel, Render, Styled,
-    Subscription, Window, div, list, px,
+    AnyElement, AnyView, App, AppContext, Context, DispatchPhase, Entity, FocusHandle, Focusable,
+    FontWeight, InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, PromptLevel, Render, Styled, Subscription, Window, canvas, div, list,
+    px,
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_logging::warn;
@@ -28,9 +29,9 @@ use lectern_ui::{
 
 use crate::actions::{
     self, AddNote, Analyze, Back, CancelAnalyze, CancelNote, CopyNotesAgain, CopyNotesAsPrompt,
-    DeleteNote, DiscardNotes, Edit, EditNote, Escape, ExpandFold, LooksGood, MarkSeenAndNext,
-    NextHunk, OpenContext, OpenFile, PreviousHunk, Refresh, SaveNote, SendNotes, ToggleDiffMode,
-    ToggleEarlierTurns, ToggleNoise, ToggleSeen,
+    DeleteNote, DiscardNotes, Edit, EditNote, Escape, ExpandFold, ExtendRangeDown, ExtendRangeUp,
+    LooksGood, MarkSeenAndNext, NextHunk, OpenContext, OpenFile, PreviousHunk, Refresh, SaveNote,
+    SendNotes, ToggleDiffMode, ToggleEarlierTurns, ToggleNoise, ToggleSeen,
 };
 use crate::brief;
 use crate::model::{self, Direction, ReviewModel};
@@ -128,7 +129,11 @@ impl Render for ReviewScreen {
                 model.line_height = mono.line_height;
                 model.list.remeasure();
             }
-            model.tick_glide(window, Instant::now());
+            let now = Instant::now();
+            model.tick_glide(window, now);
+            if model.tick_drag(window, now, cx) {
+                window.request_animation_frame();
+            }
             model.sync_layout(cx);
         });
         let (state, shows_rows, ready, degraded_folder) = {
@@ -242,6 +247,14 @@ impl Render for ReviewScreen {
                 this.model
                     .update(cx, |model, cx| model.add_note_at_selection(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &ExtendRangeUp, _, cx| {
+                this.model
+                    .update(cx, |model, cx| model.extend_range(Direction::Backward, cx));
+            }))
+            .on_action(cx.listener(|this, _: &ExtendRangeDown, _, cx| {
+                this.model
+                    .update(cx, |model, cx| model.extend_range(Direction::Forward, cx));
+            }))
             .on_action(cx.listener(|this, _: &SendNotes, _, cx| {
                 this.model.update(cx, |model, cx| model.send_notes(cx));
             }))
@@ -278,15 +291,60 @@ impl Render for ReviewScreen {
                     cx.propagate();
                 }
             }))
+            // A button released where no frame saw the press begin (a click
+            // quicker than a frame) must not leave the press behind. The
+            // listener of a frame that drew the tracker comes first.
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                if event.button == MouseButton::Left {
+                    this.model.update(cx, |model, cx| model.finish_press(cx));
+                }
+            }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.model.update(cx, |model, cx| model.finish_press(cx));
+                }),
+            )
             .child(body);
         if ready {
             root = root.child(self.render_bar(degraded_folder, &strings, window, cx));
+        }
+        if model.read(cx).press.is_some() {
+            root = root.child(self.tracker());
         }
         root
     }
 }
 
 impl ReviewScreen {
+    /// While a button is held on a row: the listeners that follow the pointer
+    /// wherever it goes (out of the row, the list, the window) and see the
+    /// button go up. They are made in the paint of this element and last one
+    /// frame, so a frame without a press has none (docs/design/review_view.md
+    /// 「拖选范围」).
+    fn tracker(&self) -> impl IntoElement {
+        let weak = self.model.downgrade();
+        canvas(
+            |_, _, _| (),
+            move |_, (), window, _| {
+                let moved = weak.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = moved.update(cx, |model, cx| model.drag_moved(event, cx));
+                    }
+                });
+                let released = weak.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                        let _ = released.update(cx, |model, cx| model.finish_press(cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
+    }
+
     fn render_failed(
         &self,
         error: &ReviewError,

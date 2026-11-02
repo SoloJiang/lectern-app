@@ -24,7 +24,7 @@ pub const ITEMS_5000: Bench = Bench {
 fn items_5000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let (mut snapshot, rows) = snapshot_fixture(50, 20, 100);
     // 40 review notes, the most that can be unsent at a time, are on lines of
-    // the steps' rows.
+    // the steps' rows; 4 of them are ranges of four lines (#373).
     add_notes(&mut snapshot, 40);
     let rows: HashMap<_, _> = rows
         .into_iter()

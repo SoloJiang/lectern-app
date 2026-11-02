@@ -96,7 +96,8 @@ impl ReviewModel {
             EditorTarget::New { rows, anchor } => Some(EditorAt::Row {
                 rows: rows.clone(),
                 side: anchor.side,
-                line: anchor.line,
+                // The editor of a range sits after its last line (#373).
+                line: anchor.last,
                 oid: anchor.oid,
             }),
             EditorTarget::Existing(id) => Some(EditorAt::AfterNote(*id)),
@@ -118,7 +119,14 @@ impl ReviewModel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((rows, anchor)) = self.selection_anchor(side) else {
+        // A range (#373) is what C and Add Note write on; a click on a line
+        // number or on the +, which select their row first, are one line.
+        let found = if self.range.is_some() {
+            self.range_anchor()
+        } else {
+            self.selection_anchor(side)
+        };
+        let Some((rows, anchor)) = found else {
             return;
         };
         if self.snapshot.notes_state.unsent >= limits::PENDING_NOTES {
@@ -285,6 +293,13 @@ impl ReviewModel {
         match editor.target {
             EditorTarget::New { rows, anchor } => {
                 self.drafts.retain(|(at, _)| *at != anchor);
+                // The note is written; the range it was written on is over.
+                if self
+                    .range_anchor()
+                    .is_some_and(|(_, range_anchor)| range_anchor == anchor)
+                {
+                    self.drop_range();
+                }
                 let rows = self.current_rows_key(&rows);
                 self.command(ReviewCommand::AddNote {
                     rows: Some(rows),

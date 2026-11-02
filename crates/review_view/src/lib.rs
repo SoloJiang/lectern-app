@@ -30,6 +30,7 @@ mod nodes;
 mod notes;
 mod plugin;
 mod progress_tab;
+mod range;
 mod render;
 mod render_diff;
 mod render_notes;
