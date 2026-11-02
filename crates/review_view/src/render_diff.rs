@@ -6,12 +6,12 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Pixels,
-    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, StyledText,
-    Window, div, px,
+    AnyElement, ClickEvent, Context, HighlightStyle, InteractiveElement, IntoElement,
+    ParentElement, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement,
+    Styled, StyledText, Window, div, px,
 };
 use lectern_i18n::{Args, Strings, keys};
-use lectern_services::review::{FileRows, RowsKey};
+use lectern_services::review::{DiffSide, FileRows, RowsKey};
 use lectern_ui::semantic::{Role, Semantic, State, semantic, semantic_interactive};
 use lectern_ui::{
     Button, ButtonSize, Icon, Palette, SystemColor, Text, TextRole, TextRoleExt, mono_metrics,
@@ -25,6 +25,9 @@ use crate::nodes;
 
 /// One side of a side-by-side row: the line, its text and its runs.
 type Half2 = (Side, DisplayLine, Vec<(Range<usize>, HighlightStyle)>);
+
+/// What a click on a line number does (see `render_row`).
+type GutterClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App)>;
 
 /// The cells of a line-number column: five digits and the room after them.
 const NUMBER_CELLS: f32 = 6.0;
@@ -127,6 +130,22 @@ impl ReviewModel {
         let spans = self.highlighted.get(&rows_key).cloned().unwrap_or_default();
         let offset = self.hscroll.get(&rows_key).copied().unwrap_or(Pixels::ZERO);
         let mono = mono_metrics(window, cx);
+        // A click on a line number writes a note on this row, on that side.
+        let gutter = {
+            let weak = cx.weak_entity();
+            let gutter_key = key.clone();
+            move |side: Option<DiffSide>| -> GutterClick {
+                let weak = weak.clone();
+                let key = gutter_key.clone();
+                Box::new(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let _ = weak.update(cx, |model, cx| {
+                        model.select(Some(key.clone()), cx);
+                        model.add_note_on(side, window, cx);
+                    });
+                })
+            }
+        };
         let content = match self.mode {
             DiffMode::Unified => {
                 // The new side when the row has one (a context line is on both).
@@ -147,6 +166,7 @@ impl ReviewModel {
                     offset,
                     mono.cell_width,
                     palette,
+                    gutter(None),
                 )
             }
             DiffMode::SideBySide => {
@@ -162,7 +182,7 @@ impl ReviewModel {
                         None => halves.push(None),
                     }
                 }
-                self.split_row(halves, selected, offset, mono.cell_width, palette)
+                self.split_row(halves, selected, offset, mono.cell_width, palette, &gutter)
             }
         };
         let mut line = div()
@@ -202,8 +222,10 @@ impl ReviewModel {
                     }),
             );
         }
-        if chosen {
-            // The + at the end of the row writes a note on it, as C does.
+        let hovered = self.hovered_row.as_ref() == Some(&key);
+        if chosen || hovered {
+            // The + at the end of the row writes a note on it, as C does; it
+            // shows on the selected row and on the one under the pointer.
             let weak = cx.weak_entity();
             let add_key = ItemKey::Row {
                 rows: rows_key.clone(),
@@ -234,12 +256,16 @@ impl ReviewModel {
                     ),
             );
         }
-        let click_key = key;
+        let click_key = key.clone();
+        let hover_key = key;
         let scroll_key = rows_key.clone();
         let line_height = self.line_height;
         line = line
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select(Some(click_key.clone()), cx);
+            }))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.hover_row(&hover_key, *hovered, cx);
             }))
             .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
                 let delta = match event.delta {
@@ -307,6 +333,7 @@ impl ReviewModel {
         offset: Pixels,
         cell: Pixels,
         palette: &Palette,
+        gutter: GutterClick,
     ) -> AnyElement {
         let number_color = if selected {
             palette.accent
@@ -335,8 +362,17 @@ impl ReviewModel {
         if let Some(background) = kind.and_then(|kind| kind_background(kind, palette)) {
             row = row.bg(background);
         }
-        row.child(number(old))
-            .child(number(new))
+        // Both numbers are one target: a click opens the note editor.
+        let numbers = div()
+            .id("gutter")
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .cursor_pointer()
+            .on_click(gutter)
+            .child(number(old))
+            .child(number(new));
+        row.child(numbers)
             .child(sign_cell(kind.unwrap_or(RowKind::Context), cell, palette))
             .child(text_cell(line, runs, offset))
             .into_any_element()
@@ -349,6 +385,7 @@ impl ReviewModel {
         offset: Pixels,
         cell: Pixels,
         palette: &Palette,
+        gutter: &dyn Fn(Option<DiffSide>) -> GutterClick,
     ) -> AnyElement {
         let mut row = div()
             .flex_1()
@@ -380,9 +417,18 @@ impl ReviewModel {
                 if let Some(background) = kind_background(side.kind, palette) {
                     cell_div = cell_div.bg(background);
                 }
+                // A click on a half's number writes a note on that side.
+                let (id, at) = if position == 0 {
+                    ("gutter-old", DiffSide::Old)
+                } else {
+                    ("gutter-new", DiffSide::New)
+                };
                 cell_div = cell_div
                     .child(
                         div()
+                            .id(id)
+                            .cursor_pointer()
+                            .on_click(gutter(Some(at)))
                             .w(cell * NUMBER_CELLS)
                             .pr(cell)
                             .flex_shrink_0()

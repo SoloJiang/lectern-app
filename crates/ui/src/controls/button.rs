@@ -37,6 +37,7 @@ pub struct Button {
     size: ButtonSize,
     icon: Option<Icon>,
     icon_only: bool,
+    hint: Option<Text>,
     pill: bool,
     active: Option<bool>,
     disabled: bool,
@@ -103,6 +104,11 @@ const PILL_ACTIVE_ALPHA: f32 = 0.16;
 const PILL_PADDING_X: Pixels = px(14.0);
 /// How much of the `secondary_label` a disabled button's text keeps.
 const DISABLED_TEXT_OPACITY: f32 = 0.5;
+/// How much of the text colour a key hint keeps on a primary button, where
+/// the secondary label would not show on the accent.
+const PRIMARY_HINT_OPACITY: f32 = 0.7;
+/// The gap between a label and its key hint.
+const HINT_GAP: Pixels = px(5.0);
 
 impl Button {
     pub fn new(id: NodeId, text: Text) -> Button {
@@ -113,6 +119,7 @@ impl Button {
             size: ButtonSize::default(),
             icon: None,
             icon_only: false,
+            hint: None,
             pill: false,
             active: None,
             disabled: false,
@@ -132,6 +139,15 @@ impl Button {
             size: ButtonSize::Toolbar,
             ..Button::new(id, label)
         }
+    }
+
+    /// A key hint after the label (`V` after Mark Reviewed), drawn in the
+    /// secondary colour, or at 70 % of the text colour on a primary button.
+    /// It is not part of the accessible name; the probe node has it as the
+    /// attribute `hint`.
+    pub fn hint(mut self, hint: Text) -> Button {
+        self.hint = Some(hint);
+        self
     }
 
     /// The capsule form: radius half the height, 14pt at the sides (the
@@ -266,6 +282,9 @@ impl RenderOnce for Button {
         for (key, value) in self.attrs.iter() {
             spec = spec.attr(key, value.clone());
         }
+        if let Some(hint) = &self.hint {
+            spec = spec.attr("hint", hint.shared());
+        }
         let gpui_size = match self.size {
             ButtonSize::Small => Size::Small,
             ButtonSize::Regular | ButtonSize::Toolbar => Size::Medium,
@@ -284,11 +303,24 @@ impl RenderOnce for Button {
         if self.icon_only {
             button = button.w(self.size.height());
         } else {
-            let label = div()
+            let mut label = div()
                 .text_role(TextRole::Body, window, cx)
                 .text_color(text_color)
                 .whitespace_nowrap()
                 .child(self.text.shared());
+            if let Some(hint) = &self.hint {
+                let hint_color = match (self.kind, self.disabled) {
+                    (ButtonKind::Primary, false) => on_accent().opacity(PRIMARY_HINT_OPACITY),
+                    (_, false) => palette.secondary_label,
+                    (_, true) => palette.secondary_label.opacity(DISABLED_TEXT_OPACITY),
+                };
+                label = label
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(HINT_GAP)
+                    .child(div().text_color(hint_color).child(hint.shared()));
+            }
             let padding = if self.pill {
                 PILL_PADDING_X
             } else {

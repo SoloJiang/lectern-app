@@ -1752,3 +1752,149 @@ fn the_keys_of_the_screen_are_letters_in_the_editor(cx: &mut TestAppContext) {
         "the same editor is still open"
     );
 }
+
+// ----- entering a note without the + ------------------------------------
+
+/// A point on a row, `dx` from its left edge and halfway down.
+fn on_row(record: &Record, dx: f32) -> gpui::Point<gpui::Pixels> {
+    gpui::point(
+        record.bounds.origin.x + gpui::px(dx),
+        record.bounds.center().y,
+    )
+}
+
+/// The target of an editor on `line` of `side` of the sample's step.
+fn target_at(side: DiffSide, line: u32) -> Option<EditorTarget> {
+    Some(EditorTarget::New {
+        rows: step_key(),
+        anchor: NoteAnchor {
+            file: file_key(0),
+            side,
+            line,
+            oid: match side {
+                DiffSide::Old => old_oid(),
+                DiffSide::New => new_oid(),
+            },
+        },
+    })
+}
+
+/// One click on a line number opens the editor on that line, with nothing
+/// selected before; a click on the code only moves the current line.
+#[gpui::test]
+fn a_click_on_a_line_number_opens_the_editor(cx: &mut TestAppContext) {
+    let (_rig, opened) = sample(cx);
+    let mut visual = opened.visual(cx);
+    let steps = step_key();
+    assert_eq!(opened.read(cx, |model| model.selection.clone()), None);
+
+    // The code of an added line: selected, no editor.
+    let records = opened.record(cx);
+    let added = must(&records, "review.diff.item[step:0].row.item[-:1]");
+    let code = gpui::point(
+        added.bounds.origin.x + added.bounds.size.width / 2.0,
+        added.bounds.center().y,
+    );
+    visual.simulate_click(code, gpui::Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        opened.read(cx, |model| model.selection.clone()),
+        Some(row(&steps, None, Some(1)))
+    );
+    assert_eq!(
+        editor_target(&opened, cx),
+        None,
+        "the code does not open it"
+    );
+
+    // The number of a removed line, another row: selected and opened in one
+    // click, on its old side.
+    let records = opened.record(cx);
+    let removed = must(&records, "review.diff.item[step:0].row.item[1:-]");
+    visual.simulate_click(on_row(removed, 12.0), gpui::Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(
+        opened.read(cx, |model| model.selection.clone()),
+        Some(row(&steps, Some(1), None))
+    );
+    assert_eq!(editor_target(&opened, cx), target_at(DiffSide::Old, 1));
+    visual.dispatch_action(CancelNote);
+    visual.run_until_parked();
+
+    // The number of a context line, which was never selected: its new side.
+    let records = opened.record(cx);
+    let context = must(&records, "review.diff.item[step:0].row.item[2:2]");
+    visual.simulate_click(on_row(context, 12.0), gpui::Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(editor_target(&opened, cx), target_at(DiffSide::New, 2));
+}
+
+/// Side by side, each half's number writes a note on its own side of a
+/// row that is a removed line and an added one.
+#[gpui::test]
+fn a_click_on_a_line_number_side_by_side_takes_that_side(cx: &mut TestAppContext) {
+    let (_rig, opened) = sample(cx);
+    let mut visual = opened.visual(cx);
+    visual.dispatch_action(crate::actions::ToggleDiffMode);
+    visual.run_until_parked();
+    let records = opened.record(cx);
+    let pair = must(&records, "review.diff.item[step:0].row.item[1:1]");
+
+    visual.simulate_click(on_row(pair, 12.0), gpui::Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(editor_target(&opened, cx), target_at(DiffSide::Old, 1));
+    visual.dispatch_action(CancelNote);
+    visual.run_until_parked();
+
+    let records = opened.record(cx);
+    let pair = must(&records, "review.diff.item[step:0].row.item[1:1]");
+    let right = pair.bounds.size.width / 2.0;
+    visual.simulate_click(
+        on_row(pair, f32::from(right) + 12.0),
+        gpui::Modifiers::default(),
+    );
+    visual.run_until_parked();
+    assert_eq!(editor_target(&opened, cx), target_at(DiffSide::New, 1));
+}
+
+/// The + shows on the row under the pointer and goes when the pointer
+/// leaves; a click on it writes a note on that row.
+#[gpui::test]
+fn the_plus_shows_on_the_row_under_the_pointer(cx: &mut TestAppContext) {
+    let (_rig, opened) = sample(cx);
+    let mut visual = opened.visual(cx);
+    let plus = |records: &[Record], row: &str| {
+        find(
+            records,
+            &format!("review.diff.item[step:0].row.item[{row}].add-note"),
+        )
+        .is_some()
+    };
+    let records = opened.record(cx);
+    assert!(
+        !plus(&records, "-:1") && !plus(&records, "2:2"),
+        "none at rest"
+    );
+    let added = must(&records, "review.diff.item[step:0].row.item[-:1]");
+    let context = must(&records, "review.diff.item[step:0].row.item[2:2]");
+
+    visual.simulate_mouse_move(on_row(added, 40.0), None, gpui::Modifiers::default());
+    let records = opened.record(cx);
+    assert!(plus(&records, "-:1"), "under the pointer");
+    assert!(!plus(&records, "2:2"));
+    assert_eq!(
+        opened.read(cx, |model| model.selection.clone()),
+        None,
+        "hovering selects nothing"
+    );
+
+    visual.simulate_mouse_move(on_row(context, 40.0), None, gpui::Modifiers::default());
+    let records = opened.record(cx);
+    assert!(plus(&records, "2:2"));
+    assert!(!plus(&records, "-:1"), "the pointer left that row");
+
+    let button = must(&records, "review.diff.item[step:0].row.item[2:2].add-note");
+    visual.simulate_click(button.bounds.center(), gpui::Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(editor_target(&opened, cx), target_at(DiffSide::New, 2));
+}
