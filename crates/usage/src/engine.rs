@@ -1478,7 +1478,11 @@ impl Engine {
         };
         match store.arm(&arm) {
             Ok(()) => {
-                debug!("repository watched"; path = Value::path(common_dir), worktrees = heads.len())
+                debug!("repository watched"; path = Value::path(common_dir), worktrees = heads.len());
+                // The segments are new: a query computed before them counted
+                // none for the branches HEAD is on.
+                self.mark_all_dirty();
+                self.compute();
             }
             Err(e) => {
                 let _ = self.store_failed(&store, &e);
