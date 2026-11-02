@@ -1092,6 +1092,53 @@ fn plugin_watches_an_open_repository_and_writes_its_reflog_before_settling() {
 }
 
 #[test]
+fn plugin_worktree_row_asked_before_the_arm_is_right_after_it() {
+    use lectern_services::project::Head;
+    use lectern_services::usage::WorktreeUsage;
+    let (_dir, root, reads) = real_repo();
+    let common = root.join(".git");
+    reads.set_default(&common, "refs/heads/main");
+    let key = ProjectKey::Git {
+        common_dir: common.as_path().into(),
+    };
+    let setup = |p: &FakeProjects| {
+        p.repo(&root, &common);
+        p.set_head(&root, Head::Branch("refs/heads/feature".into()));
+    };
+    let rig = Rig::with_git(sources(), setup, reads);
+    rig.settle();
+    let worktree = rig.projects.snapshot(&key).unwrap().worktrees[0]
+        .key
+        .clone();
+    let query = UsageQuery::Worktree {
+        project: key.clone(),
+        worktree,
+    };
+    let row = |rig: &Rig| -> WorktreeUsage {
+        match rig.usage().snapshot(&query).as_deref() {
+            Some(UsageSnapshot::Worktree(w)) => w.clone(),
+            other => panic!("not a worktree snapshot: {other:?}"),
+        }
+    };
+    // The project opens and the row is asked for before the tasks run: the
+    // snapshot is computed before the arm commits the branch's segment.
+    rig.projects.set_open(&key, true);
+    rig.kernel().emitter().emit(ProjectEvent::Opened {
+        request: OpenRequest(1),
+        result: Ok(key.clone()),
+    });
+    let _interest = rig.usage().watch(query.clone());
+    rig.settle();
+    // No other event follows: the branch is counted, with no usage yet.
+    let w = row(&rig);
+    assert_eq!(
+        w.branch.as_ref().map(|b| &*b.name),
+        Some("refs/heads/feature")
+    );
+    assert_eq!(w.cumulative.map(|t| t.total()), Some(0), "{w:?}");
+}
+
+#[test]
 fn plugin_ends_the_spans_when_it_stops_and_a_crash_ends_them_at_the_last_record() {
     use super::branches::{Repo, batch};
     let (_dir, root, reads) = real_repo();
