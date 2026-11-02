@@ -12,7 +12,7 @@ use lectern_services::usage::{Tokens, Window};
 use rusqlite::Connection;
 
 use super::support::*;
-use crate::store::schema::{CREATE_V6, CURRENT, Migration, Schema, V1, V2, V3, V4};
+use crate::store::schema::{CREATE_V7, CURRENT, Migration, Schema, V1, V2, V3, V4, V6};
 use crate::store::{BACKUP_PREFIX, Checked, Mode, SALVAGE_FILE, Step, StoreError, fail_at};
 use crate::testing::FakeSessions;
 
@@ -95,40 +95,60 @@ fn store_records_and_cursor_commit_together() {
     assert_eq!(count(&conn, "fact"), 30);
 }
 
-/// Versions after the current one (6), for the migration tests.
-const V7_STEPS: &[Migration] = &[Migration {
-    from: 6,
-    sql: "CREATE TABLE extra_v6 (id INTEGER PRIMARY KEY);",
+/// Versions after the current one (7), for the migration tests.
+const V8_STEPS: &[Migration] = &[Migration {
+    from: 7,
+    sql: "CREATE TABLE extra_v7 (id INTEGER PRIMARY KEY);",
 }];
-static V7: Schema = Schema {
-    version: 7,
-    create: CREATE_V6,
-    migrations: V7_STEPS,
+static V8: Schema = Schema {
+    version: 8,
+    create: CREATE_V7,
+    migrations: V8_STEPS,
 };
-const V9_STEPS: &[Migration] = &[
-    Migration {
-        from: 6,
-        sql: "CREATE TABLE extra_v6 (id INTEGER PRIMARY KEY);",
-    },
+const V10_STEPS: &[Migration] = &[
     Migration {
         from: 7,
-        sql: "ALTER TABLE extra_v6 ADD COLUMN note TEXT;",
+        sql: "CREATE TABLE extra_v7 (id INTEGER PRIMARY KEY);",
     },
     Migration {
         from: 8,
-        sql: "CREATE TABLE extra_v8 (id INTEGER PRIMARY KEY);",
+        sql: "ALTER TABLE extra_v7 ADD COLUMN note TEXT;",
+    },
+    Migration {
+        from: 9,
+        sql: "CREATE TABLE extra_v9 (id INTEGER PRIMARY KEY);",
     },
 ];
-static V8: Schema = Schema {
-    version: 8,
-    create: CREATE_V6,
-    migrations: V9_STEPS,
-};
 static V9: Schema = Schema {
     version: 9,
-    create: CREATE_V6,
-    migrations: V9_STEPS,
+    create: CREATE_V7,
+    migrations: V10_STEPS,
 };
+static V10: Schema = Schema {
+    version: 10,
+    create: CREATE_V7,
+    migrations: V10_STEPS,
+};
+
+/// Turns the current tables into version 6's: `cold_month` without the
+/// project in its key.
+macro_rules! back_to_v6 {
+    () => {
+        "
+CREATE TABLE cold_month_v6 (
+  id INTEGER PRIMARY KEY, location INTEGER NOT NULL, ym INTEGER NOT NULL,
+  agent INTEGER NOT NULL, model INTEGER NOT NULL, review INTEGER NOT NULL,
+  input INTEGER NOT NULL, output INTEGER NOT NULL, cache_read INTEGER NOT NULL,
+  cache_write INTEGER NOT NULL, UNIQUE (location, ym, agent, model, review));
+INSERT INTO cold_month_v6 (location, ym, agent, model, review, input, output, cache_read, cache_write)
+  SELECT location, ym, agent, model, review, sum(input), sum(output), sum(cache_read),
+         sum(cache_write) FROM cold_month GROUP BY location, ym, agent, model, review;
+DROP TABLE cold_month;
+ALTER TABLE cold_month_v6 RENAME TO cold_month;
+"
+    };
+}
+pub(super) const BACK_TO_V6: &str = back_to_v6!();
 
 /// Turns the current tables into version 5's: the branch observations gone,
 /// `share` without segments, and the columns version 6 added dropped.
@@ -164,7 +184,7 @@ ALTER TABLE item DROP COLUMN cf;
 "
     };
 }
-pub(super) const BACK_TO_V5: &str = back_to_v5!();
+pub(super) const BACK_TO_V5: &str = concat!(back_to_v6!(), back_to_v5!());
 
 /// Turns the version 5 tables into version 4's: no calls, items and shares,
 /// and the turn and session columns of version 5 gone.
@@ -189,13 +209,14 @@ ALTER TABLE session DROP COLUMN parent_call;
 "
     };
 }
-pub(super) const BACK_TO_V4: &str = concat!(back_to_v5!(), back_to_v4!());
+pub(super) const BACK_TO_V4: &str = concat!(back_to_v6!(), back_to_v5!(), back_to_v4!());
 
 /// Turns the current tables into version 3's: the ones of version 4, then
 /// the `project` table with a unique location and without the columns of
 /// version 4, no identity tables, and `fact_bucket` without the project in
 /// its key.
 pub(super) const BACK_TO_V3: &str = concat!(
+    back_to_v6!(),
     back_to_v5!(),
     back_to_v4!(),
     "
@@ -237,16 +258,16 @@ fn store_migration_keeps_observations_after_a_backup() {
     h.read_all(&fake, "s");
     let before = h.total();
     h.close(true);
-    let reopened = h.open_with(&V7);
-    assert_eq!(reopened.migrated_from, Some(6));
+    let reopened = h.open_with(&V8);
+    assert_eq!(reopened.migrated_from, Some(7));
     assert_eq!(h.store().mode(), Mode::Writable);
     assert_eq!(h.total(), before);
-    // The copy is the version-6 file, whole.
-    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}6")));
-    assert_eq!(pragma(&copy, "user_version"), 6);
+    // The copy is the version-7 file, whole.
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}7")));
+    assert_eq!(pragma(&copy, "user_version"), 7);
     assert_eq!(count(&copy, "usage_source"), 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 7);
+    assert_eq!(pragma(&main, "user_version"), 8);
     assert_eq!(count(&main, "usage_source"), 5);
     drop((copy, main));
     // Writing still works on the migrated file.
@@ -256,12 +277,12 @@ fn store_migration_keeps_observations_after_a_backup() {
 
     // Two more migrations: only the two most recent copies stay.
     h.close(true);
-    h.open_with(&V8);
-    h.close(true);
     h.open_with(&V9);
+    h.close(true);
+    h.open_with(&V10);
     assert_eq!(
         backups(h.dir.path()),
-        [format!("{BACKUP_PREFIX}7"), format!("{BACKUP_PREFIX}8")]
+        [format!("{BACKUP_PREFIX}8"), format!("{BACKUP_PREFIX}9")]
     );
     assert_eq!(h.total().input, 7);
 }
@@ -308,7 +329,7 @@ fn store_migration_from_version_1_adds_the_cold_tables() {
     assert_eq!(reopened.migrated_from, Some(1));
     assert_eq!(h.total(), before);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 6);
+    assert_eq!(pragma(&main, "user_version"), 7);
     for table in [
         "cold_part",
         "cold_month",
@@ -361,7 +382,7 @@ fn store_migration_from_version_2_adds_the_limit_samples() {
     assert_eq!(reopened.migrated_from, Some(2));
     assert_eq!(h.total(), before);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 6);
+    assert_eq!(pragma(&main, "user_version"), 7);
     assert_eq!(count(&main, "limit_sample"), 0);
     assert_eq!(count(&main, "usage_source"), 5);
     let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}2")));
@@ -414,7 +435,7 @@ fn store_migration_from_version_3_keeps_every_project_and_sum() {
     }
     assert_eq!(h.project(&repo, Window::D7).total.input, 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 6);
+    assert_eq!(pragma(&main, "user_version"), 7);
     assert_eq!(count(&main, "project_fact"), 0);
     assert_eq!(count(&main, "alias"), 0);
     assert_buckets(&h);
@@ -461,11 +482,52 @@ fn store_migration_from_version_4_reads_every_session_again() {
     h.read_all(&fake, "s");
     assert_eq!(h.total(), before, "nothing counted twice");
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 6);
+    assert_eq!(pragma(&main, "user_version"), 7);
     assert_eq!(count(&main, "usage_source"), 5);
     assert_buckets(&h);
     let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}4")));
     assert_eq!(pragma(&copy, "user_version"), 4);
+}
+
+#[test]
+fn store_migration_from_version_6_keeps_the_months_and_adds_the_project() {
+    let mut h = Harness::new();
+    let fake = session("s", 5);
+    h.read_all(&fake, "s");
+    let before = h.total();
+    h.close(true);
+    // A version-6 file: `cold_month` without the project in its key.
+    let conn = raw(&h.db_path());
+    conn.execute_batch(BACK_TO_V6).unwrap();
+    conn.execute_batch("PRAGMA user_version = 6;").unwrap();
+    drop(conn);
+    let fresh = tempfile::tempdir().unwrap();
+    drop(crate::store::Store::open_with(fresh.path(), &V6, h.now).unwrap());
+    let names = |path: &Path| -> String {
+        raw(path)
+            .query_row(
+                "SELECT group_concat(name) FROM (SELECT name FROM sqlite_schema ORDER BY name)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(names(&h.db_path()), names(&fresh.path().join("usage.db")));
+    let reopened = h.open_with(&CURRENT);
+    assert_eq!(reopened.migrated_from, Some(6));
+    assert_eq!(h.total(), before);
+    let main = raw(&h.db_path());
+    assert_eq!(pragma(&main, "user_version"), 7);
+    let columns: String = main
+        .query_row(
+            "SELECT group_concat(name) FROM pragma_table_info('cold_month')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(columns.contains("project"), "{columns}");
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}6")));
+    assert_eq!(pragma(&copy, "user_version"), 6);
 }
 
 #[test]
@@ -476,14 +538,14 @@ fn store_failed_backup_leaves_the_old_version_read_only() {
     let before = h.total();
     h.close(true);
     // Something that cannot be replaced sits where the copy goes.
-    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}6"));
+    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}7"));
     std::fs::create_dir(&blocker).unwrap();
     std::fs::write(blocker.join("keep"), b"x").unwrap();
-    let reopened = h.open_with(&V7);
+    let reopened = h.open_with(&V8);
     assert_eq!(reopened.migrated_from, None);
     assert!(matches!(h.store().mode(), Mode::Unwritable(_)));
     let version = pragma(&raw(&h.db_path()), "user_version");
-    assert_eq!(version, 6, "not migrated");
+    assert_eq!(version, 7, "not migrated");
     // Read only: no write, the old data still readable.
     let more = session("t", 2);
     let refused = h.try_read_once(&more, "t", 1 << 20);

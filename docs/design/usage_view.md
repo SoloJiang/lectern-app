@@ -588,7 +588,7 @@ Action 与快捷键（探针可按名字触发）：
      ```
 
   另外，本 crate 依赖 `AllUsage::projects` 列出每个已打开过的项目，窗口内为 0 的也列出（第 1 步的实现已如此），「合并到…」的候选从这里取。测试：JSON 往返覆盖新字段；`identity_*` 加确认与撤销后 `confirmed`、`merged` 的变化；`limit_level_thresholds`。1、2 随 usage 第 3 步（项目标识）实现（已实现，见 usage 设计「与设计的差异」第 3 步），3 可以先做。
-- **A2. `usage`（显示 History 之前）**：`UsageQuery::History` 现在按位置求和，位置上先后有几个项目（`PrimaryRemoteChanged`、`LocalRewrite` 的临时项目与原项目共用一个位置，路径被无关仓库占用、改写历史也一样）时，`cold_month`、`inherited_in` 和热数据的按日明细会把它们混在一起（usage 设计「与设计的差异」第 3 步）。本 crate 显示 History 之前必须按项目拆开：`cold_month` 加项目，热的一侧按 `fact.project` 求和。现有的 Usage 页只读窗口快照，不受影响。
+- **A2. `usage`（显示 History 之前）**：已实现（[#365](https://github.com/SoloJiang/lectern-app/issues/365)，表结构版本 7）。`UsageQuery::History` 原来按位置求和，位置上先后有几个项目（`PrimaryRemoteChanged`、`LocalRewrite` 的临时项目与原项目共用一个位置，路径被无关仓库占用、改写历史也一样）时，`cold_month`、`inherited_in` 和热数据的按日明细会把它们混在一起。现在 `cold_month` 的键加了项目，热的一侧按 `fact.project` 求和，解压的段按每行的项目，归属与窗口快照相同（usage 设计「与设计的差异」第 3 步）；已知限制是迁移时读不出段的旧月份仍按位置计。本 crate 可以显示 History。
 - **B. `platform`**：新模块 `claude_statusline`，在 platform 设计里另加一节（现在列在「本文不覆盖」里）。本 crate 只用下面三个函数；文件格式、脚本内容、记录的位置由 platform 设计决定，但必须满足其后的约束。
 
   ```rust

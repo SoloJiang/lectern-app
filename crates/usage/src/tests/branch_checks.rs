@@ -296,7 +296,7 @@ fn store_migration_from_version_5_settles_every_turn_again() {
     // Every session is read again, every turn settled again.
     assert!(h.store().cursor(&key).unwrap().is_start());
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 6);
+    assert_eq!(pragma(&main, "user_version"), 7);
     assert_eq!(
         main.query_row("SELECT count(*) FROM turn WHERE done = 1", [], |r| r
             .get::<_, i64>(0))

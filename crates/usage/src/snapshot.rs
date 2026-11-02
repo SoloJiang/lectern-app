@@ -176,7 +176,9 @@ impl Scope {
         }
     }
 
-    fn accepts(&self, location: i64, project: i64) -> bool {
+    /// Whether a fact at `location` in `project` (0 for none) is this
+    /// project's.
+    pub(crate) fn accepts(&self, location: i64, project: i64) -> bool {
         if project != 0 {
             self.members.contains(&project)
         } else {

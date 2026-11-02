@@ -387,6 +387,11 @@ pub(crate) const RECLAIM: Reclaim = Reclaim {
     pages: 2048,
 };
 
+/// The `project` of a `cold_month` row that does not know its project: the
+/// summary of an archived month that table version 7 could not split
+/// (docs/design/usage.md「与设计的差异」第 3 步).
+pub(crate) const LEGACY_PROJECT: i64 = -1;
+
 /// Millionths per kind.
 type Micro = [i64; 4];
 
@@ -399,14 +404,22 @@ fn add(into: &mut Micro, from: &Micro, sign: i64) {
 /// `cold_month` and `cold_total` changes of some fact rows.
 #[derive(Default)]
 struct Summaries {
-    months: HashMap<(i64, i64, i64, i64, i64), Micro>,
+    /// By location, project, local month, agent, model and review.
+    months: HashMap<(i64, i64, i64, i64, i64, i64), Micro>,
     totals: HashMap<(i64, i64, i64), Micro>,
 }
 
 impl Summaries {
     /// Adds (`sign` 1) or takes back (-1) one fact row.
     fn fact(&mut self, row: &FactRow, sign: i64) {
-        let key = (row.location, row.ym, row.agent, row.model, row.review);
+        let key = (
+            row.location,
+            row.project,
+            row.ym,
+            row.agent,
+            row.model,
+            row.review,
+        );
         add(self.months.entry(key).or_default(), &row.micro, sign);
         let session = (TOTAL_SESSION, row.session, row.review);
         add(self.totals.entry(session).or_default(), &row.micro, sign);
@@ -417,18 +430,7 @@ impl Summaries {
     }
 
     fn write(&self, conn: &Connection) -> rusqlite::Result<()> {
-        let mut months = conn.prepare_cached(
-            "INSERT INTO cold_month (location, ym, agent, model, review,
-                                     input, output, cache_read, cache_write)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT (location, ym, agent, model, review) DO UPDATE SET
-               input = input + excluded.input, output = output + excluded.output,
-               cache_read = cache_read + excluded.cache_read,
-               cache_write = cache_write + excluded.cache_write",
-        )?;
-        for (k, m) in &self.months {
-            months.execute(params![k.0, k.1, k.2, k.3, k.4, m[0], m[1], m[2], m[3]])?;
-        }
+        self.write_months(conn)?;
         let mut totals = conn.prepare_cached(
             "INSERT INTO cold_total (kind, target, review, input, output, cache_read, cache_write)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -446,12 +448,34 @@ impl Summaries {
              DELETE FROM cold_total WHERE input = 0 AND output = 0 AND cache_read = 0 AND cache_write = 0;",
         )
     }
+
+    /// Only the `cold_month` rows (`split_months` has no use for the
+    /// totals, which did not change).
+    fn write_months(&self, conn: &Connection) -> rusqlite::Result<()> {
+        let mut months = conn.prepare_cached(
+            "INSERT INTO cold_month (location, project, ym, agent, model, review,
+                                     input, output, cache_read, cache_write)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT (location, project, ym, agent, model, review) DO UPDATE SET
+               input = input + excluded.input, output = output + excluded.output,
+               cache_read = cache_read + excluded.cache_read,
+               cache_write = cache_write + excluded.cache_write",
+        )?;
+        for (k, m) in &self.months {
+            months.execute(params![
+                k.0, k.1, k.2, k.3, k.4, k.5, m[0], m[1], m[2], m[3]
+            ])?;
+        }
+        Ok(())
+    }
 }
 
 /// The parts of a fact row the summaries use.
 struct FactRow {
     at: i64,
     location: i64,
+    /// 0 for a fact in no project.
+    project: i64,
     ym: i64,
     agent: i64,
     model: i64,
@@ -465,6 +489,8 @@ struct FactRow {
 struct FactColumns {
     at: usize,
     location: usize,
+    /// Missing in a segment of the first table version.
+    project: Option<usize>,
     agent: usize,
     model: usize,
     review: usize,
@@ -480,6 +506,7 @@ impl FactColumns {
         Some(FactColumns {
             at: find("at")?,
             location: find("location")?,
+            project: find("project"),
             agent: find("agent")?,
             model: find("model")?,
             review: find("review")?,
@@ -505,6 +532,7 @@ impl FactColumns {
         FactRow {
             at,
             location: int(self.location).unwrap_or(0),
+            project: self.project.and_then(int).unwrap_or(0),
             ym: self.ym.and_then(int).unwrap_or_else(ym_now),
             agent: int(self.agent).unwrap_or(0),
             model: int(self.model).unwrap_or(0),
@@ -517,10 +545,8 @@ impl FactColumns {
 }
 
 /// The zone of rows that carry their local month.
-#[cfg(any(test, feature = "test-support"))]
 struct Utc;
 
-#[cfg(any(test, feature = "test-support"))]
 impl LocalZone for Utc {
     fn offset_at(&self, _: i64) -> i32 {
         0
@@ -838,15 +864,20 @@ impl Store {
         self.read(|c| Ok(states(c)?.get(&m).copied())).unwrap()
     }
 
-    /// The history of some locations (docs/design/usage.md「读冷数据」):
-    /// per local month, whole months, the hot facts plus `cold_month`; with
-    /// `days`, per local day of the range the hot facts plus the cold
-    /// `fact` segments, decoded one at a time. The hot sums, the summaries
-    /// and the list of segments are read in one transaction, so an archive
-    /// step in between counts nothing twice. Blocking.
+    /// The history of a project (docs/design/usage.md「读冷数据」): the
+    /// facts at `locations` that `accepts` (called with a fact's location
+    /// and project, 0 for none), per local month, whole months, the hot
+    /// facts plus `cold_month`; with `days`, per local day of the range the
+    /// hot facts plus the cold `fact` segments, decoded one at a time. The
+    /// hot sums, the summaries and the list of segments are read in one
+    /// transaction, so an archive step in between counts nothing twice. A
+    /// month row of `LEGACY_PROJECT` has no project (an archived month that
+    /// table version 7 could not split, its segments being gone): it counts
+    /// for every project of its location. Blocking.
     pub(crate) fn history(
         &self,
         locations: &[i64],
+        accepts: &dyn Fn(i64, i64) -> bool,
         from: LocalDate,
         to: LocalDate,
         days: bool,
@@ -893,16 +924,21 @@ impl Store {
         let mut segments: Vec<i64> = Vec::new();
         let sums = |conn: &Connection| -> rusqlite::Result<()> {
             let mut hot = conn.prepare_cached(
-                "SELECT bucket, sum(input), sum(output), sum(cache_read), sum(cache_write)
-                 FROM fact WHERE location = ?1 AND at >= ?2 AND at < ?3 GROUP BY bucket",
+                "SELECT bucket, coalesce(project, 0), sum(input), sum(output), sum(cache_read),
+                        sum(cache_write)
+                 FROM fact WHERE location = ?1 AND at >= ?2 AND at < ?3
+                 GROUP BY bucket, coalesce(project, 0)",
             )?;
             for &l in locations {
                 let rows = hot
                     .query_map(params![l, months_range.start, months_range.end], |r| {
-                        Ok((r.get::<_, i64>(0)?, micro(r, 1)?))
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, micro(r, 2)?))
                     })?;
                 for row in rows {
-                    let (bucket, m) = row?;
+                    let (bucket, project, m) = row?;
+                    if !accepts(l, project) {
+                        continue;
+                    }
                     let at = bucket * BUCKET_MS;
                     let month = ym(window::local_date(at, zone));
                     if let Some(slot) = out.months.get_mut(&month) {
@@ -914,16 +950,20 @@ impl Store {
                 }
             }
             let mut cold = conn.prepare_cached(
-                "SELECT ym, sum(input), sum(output), sum(cache_read), sum(cache_write)
-                 FROM cold_month WHERE location = ?1 AND ym >= ?2 AND ym <= ?3 GROUP BY ym",
+                "SELECT ym, project, sum(input), sum(output), sum(cache_read), sum(cache_write)
+                 FROM cold_month WHERE location = ?1 AND ym >= ?2 AND ym <= ?3
+                 GROUP BY ym, project",
             )?;
             for &l in locations {
                 let rows = cold
                     .query_map(params![l, ym(from), ym(window::date_of(last))], |r| {
-                        Ok((r.get::<_, i64>(0)?, micro(r, 1)?))
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, micro(r, 2)?))
                     })?;
                 for row in rows {
-                    let (month, m) = row?;
+                    let (month, project, m) = row?;
+                    if project != LEGACY_PROJECT && !accepts(l, project) {
+                        continue;
+                    }
                     if let Some(slot) = out.months.get_mut(&month) {
                         plus(slot, &m);
                     }
@@ -956,7 +996,10 @@ impl Store {
             let Some(days) = out.days.as_mut() else { break };
             for row in &seg.rows {
                 let f = cols.row(row, zone);
-                if !wanted.contains(&f.location) || !range.contains(&f.at) {
+                if !wanted.contains(&f.location)
+                    || !accepts(f.location, f.project)
+                    || !range.contains(&f.at)
+                {
                     continue;
                 }
                 if let Some(d) = day_of(f.at) {
@@ -1289,6 +1332,81 @@ fn summarize(
         }
         _ => Ok(()),
     }
+}
+
+/// Splits the `cold_month` rows of project -1 (`LEGACY_PROJECT`: a file of
+/// table version 6 or older, migrated or salvaged) by project. The cold
+/// `fact` segments hold every archived fact with its project, so the rows
+/// are summed from them again; what the segments do not account for (one
+/// that does not decode, or is gone) stays as project -1. The table holds
+/// nothing but -1 rows when this runs. Returns the segments read.
+pub(crate) fn split_months(conn: &Connection) -> rusqlite::Result<usize> {
+    type Key = (i64, i64, i64, i64, i64);
+    let mut unsplit: HashMap<Key, Micro> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT location, ym, agent, model, review, input, output, cache_read, cache_write
+             FROM cold_month WHERE project = ?1",
+        )?;
+        let rows = stmt.query_map(params![LEGACY_PROJECT], |r| {
+            Ok((
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
+                [r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?],
+            ))
+        })?;
+        for row in rows {
+            let (key, micro) = row?;
+            unsplit.insert(key, micro);
+        }
+    }
+    conn.execute(
+        "DELETE FROM cold_month WHERE project = ?1",
+        params![LEGACY_PROJECT],
+    )?;
+    let ids: Vec<i64> = conn
+        .prepare("SELECT id FROM cold_part WHERE tbl = 'fact' ORDER BY id")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut rebuilt = Summaries::default();
+    let mut read = 0;
+    for id in ids {
+        let packed: Vec<u8> = conn
+            .prepare_cached("SELECT data FROM cold_part WHERE id = ?1")?
+            .query_row(params![id], |r| r.get(0))?;
+        let seg = segment::decompress(&packed).and_then(|r| segment::decode(&r));
+        let Some(cols) = seg.as_ref().and_then(|s| FactColumns::of(&s.columns)) else {
+            error!("cold segment does not decode; its months stay unsplit"; segment = id);
+            continue;
+        };
+        read += 1;
+        for row in seg.iter().flat_map(|s| &s.rows) {
+            rebuilt.fact(&cols.row(row, &Utc), 1);
+        }
+    }
+    // What the segments sum to, per key without the project.
+    let mut accounted: HashMap<Key, Micro> = HashMap::new();
+    for (k, m) in &rebuilt.months {
+        add(
+            accounted.entry((k.0, k.2, k.3, k.4, k.5)).or_default(),
+            m,
+            1,
+        );
+    }
+    for (key, micro) in unsplit {
+        let mut rest = micro;
+        add(&mut rest, accounted.get(&key).unwrap_or(&[0; 4]), -1);
+        if rest.iter().any(|v| *v > 0) {
+            let key = (key.0, LEGACY_PROJECT, key.1, key.2, key.3, key.4);
+            add(
+                rebuilt.months.entry(key).or_default(),
+                &rest.map(|v| v.max(0)),
+                1,
+            );
+        }
+    }
+    rebuilt.write_months(conn)?;
+    info!("cold months split by project"; segments = read);
+    Ok(read)
 }
 
 /// What the turns of a session that are still hot follow once the turns
