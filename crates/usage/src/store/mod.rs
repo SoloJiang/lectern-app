@@ -681,6 +681,9 @@ fn migrate(conn: &mut Connection, dir: &Path, schema: &Schema, from: i32) -> Res
             return Err(Migrate::Sqlite(rusqlite::Error::InvalidQuery));
         };
         tx.execute_batch(step.sql).map_err(Migrate::Sqlite)?;
+        if step.sql == schema::COLD_PROJECT_V7 {
+            cold::split_months(&tx).map_err(Migrate::Sqlite)?;
+        }
         at += 1;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {};", schema.version))

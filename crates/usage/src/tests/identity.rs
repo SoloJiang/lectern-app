@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use lectern_git::testing::TestRepo;
 use lectern_services::project::{ChangedParts, ProjectEvent, ProjectKey};
 use lectern_services::usage::{
-    AliasId, AllUsage, ForgeRepo, ProjectInfo, ProjectRef, ProjectStatus, ProjectUsage,
-    TemporaryReason, Tokens, UsageCommand, UsageDegraded, UsageProjectId, UsageQuery,
+    AliasId, AllUsage, ForgeRepo, HistoryUsage, LocalDate, ProjectInfo, ProjectRef, ProjectStatus,
+    ProjectUsage, TemporaryReason, Tokens, UsageCommand, UsageDegraded, UsageProjectId, UsageQuery,
     UsageSnapshot, UsageState, Window,
 };
 
@@ -1274,6 +1274,234 @@ fn identity_primary_remote_changed_is_a_temporary_project() {
             candidate: Some(one.project.pid)
         }
     );
+}
+
+// ---- History of projects that share a location ------------------------------------------
+
+fn utc_at(year: i32, month: u8, day: u8, hour: i64) -> i64 {
+    crate::window::day_number(LocalDate { year, month, day }) * DAY + hour * HOUR
+}
+
+/// Two projects at /work/app: `one` before 2025-09-10 and the temporary
+/// `two` from then on, both in the one location. 5 tokens on 2025-08-20
+/// (`one`), 3 on 2025-09-20 and 2 on 2026-10-20 (`two`).
+fn shared_world(first: &RepoFacts, then: &RepoFacts) -> (Harness, UsageProjectId, UsageProjectId) {
+    let mut h = Harness::new();
+    h.projects.repo(Path::new("/work/app"), Path::new(APP));
+    let (_, one) = h.identified(APP, first, utc_at(2025, 8, 1, 0), &[]);
+    let (_, two) = h.identified(APP, then, utc_at(2025, 9, 10, 0), &[]);
+    assert!(
+        matches!(two.outcome, Outcome::Temporary(_)),
+        "{:?}",
+        two.outcome
+    );
+    let fake = claude_fake();
+    session_in(&fake, "aug", "/work/app", utc_at(2025, 8, 20, 9), 5);
+    session_in(&fake, "sep", "/work/app", utc_at(2025, 9, 20, 9), 3);
+    session_in(&fake, "oct", "/work/app", utc_at(2026, 10, 20, 9), 2);
+    h.read_every(&fake);
+    (h, one.project.pid, two.project.pid)
+}
+
+fn history_by_id(h: &Harness, pid: UsageProjectId) -> HistoryUsage {
+    let query = UsageQuery::History {
+        project: ProjectRef::Id(pid),
+        from: LocalDate {
+            year: 2025,
+            month: 8,
+            day: 1,
+        },
+        to: LocalDate {
+            year: 2026,
+            month: 10,
+            day: 22,
+        },
+        days: true,
+    };
+    match h.snapshot(&query) {
+        Some(UsageSnapshot::History(u)) => u,
+        other => panic!("not a history: {other:?}"),
+    }
+}
+
+type MonthInputs = Vec<((i32, u8), u64)>;
+type DayInputs = Vec<(String, u64)>;
+
+/// The input tokens of the months and days that have any.
+fn history_inputs(u: &HistoryUsage) -> (MonthInputs, DayInputs) {
+    let months = u
+        .months
+        .iter()
+        .filter(|(_, t)| t.total() > 0)
+        .map(|(m, t)| (*m, t.input))
+        .collect();
+    let days = u
+        .days
+        .iter()
+        .flat_map(|d| d.iter())
+        .filter(|(_, t)| t.total() > 0)
+        .map(|(d, t)| (date(*d), t.input))
+        .collect();
+    (months, days)
+}
+
+fn assert_history_split(h: &Harness, one: UsageProjectId, two: UsageProjectId) {
+    let (months, days) = history_inputs(&history_by_id(h, one));
+    assert_eq!(months, vec![((2025, 8), 5)], "the first project's months");
+    assert_eq!(days, vec![("2025-08-20".to_owned(), 5)]);
+    let (months, days) = history_inputs(&history_by_id(h, two));
+    assert_eq!(
+        months,
+        vec![((2025, 9), 3), ((2026, 10), 2)],
+        "the temporary project's months"
+    );
+    assert_eq!(
+        days,
+        vec![("2025-09-20".to_owned(), 3), ("2026-10-20".to_owned(), 2)]
+    );
+}
+
+/// The History of each project counts what it owns, hot and archived,
+/// whichever way the second project came to share the location.
+fn history_of_shared_location_is_split(first: &RepoFacts, then: &RepoFacts) {
+    let (h, one, two) = shared_world(first, then);
+    assert_history_split(&h, one, two);
+    // The archived months come from `cold_month` and the cold `fact`
+    // segments, not from the hot facts.
+    h.store().archive_all(h.now, &h.zone).unwrap();
+    assert_eq!(h.store().month_state(i64::from(2025) * 12 + 8 - 1), Some(2));
+    assert_history_split(&h, one, two);
+}
+
+#[test]
+fn identity_history_splits_projects_after_primary_remote_changed() {
+    history_of_shared_location_is_split(
+        &facts(&["a"], Some("https://github.com/acme/app"), None),
+        &facts(&["a"], Some("https://github.com/me/app"), None),
+    );
+}
+
+#[test]
+fn identity_history_splits_projects_after_local_rewrite() {
+    history_of_shared_location_is_split(&facts(&["a"], None, None), &facts(&["b"], None, None));
+}
+
+#[test]
+fn identity_history_of_a_confirmed_project_counts_both() {
+    let first = facts(&["a"], None, None);
+    let then = facts(&["b"], None, None);
+    let (h, one, two) = shared_world(&first, &then);
+    h.store().archive_all(h.now, &h.zone).unwrap();
+    let applied = h.command(UsageCommand::ConfirmSame {
+        temporary: two,
+        into: one,
+    });
+    assert_eq!(
+        applied,
+        Commanded::Applied(crate::store::AliasKind::ConfirmSame)
+    );
+    let (months, _) = history_inputs(&history_by_id(&h, one));
+    assert_eq!(
+        months,
+        vec![((2025, 8), 5), ((2025, 9), 3), ((2026, 10), 2)]
+    );
+    // The joined project answers for the project it joined, too.
+    let (months, _) = history_inputs(&history_by_id(&h, two));
+    assert_eq!(
+        months,
+        vec![((2025, 8), 5), ((2025, 9), 3), ((2026, 10), 2)]
+    );
+}
+
+#[test]
+fn identity_history_inherited_flag_is_per_project() {
+    let first = facts(&["a"], None, None);
+    let then = facts(&["b"], None, None);
+    let (h, one, two) = shared_world(&first, &then);
+    // The October session, the temporary project's, may include inherited
+    // usage.
+    let conn = super::store::raw(&h.db_path());
+    conn.execute_batch(
+        "UPDATE session SET inheritance_unknown = 1
+         WHERE id IN (SELECT session FROM fact WHERE at >= 1790000000000)",
+    )
+    .unwrap();
+    drop(conn);
+    // The range of a History query covers all three months.
+    assert!(!history_by_id(&h, one).header.may_include_inherited);
+    assert!(history_by_id(&h, two).header.may_include_inherited);
+}
+
+/// The archived months of the shared location, rewritten as a file of
+/// table version 6 keeps them: summed by location.
+fn shared_world_archived_as_version_6() -> (Harness, UsageProjectId, UsageProjectId) {
+    let (h, one, two) = shared_world(&facts(&["a"], None, None), &facts(&["b"], None, None));
+    h.store().archive_all(h.now, &h.zone).unwrap();
+    assert_history_split(&h, one, two);
+    let conn = super::store::raw(&h.db_path());
+    conn.execute_batch(super::store::BACK_TO_V6).unwrap();
+    conn.execute_batch("PRAGMA user_version = 6;").unwrap();
+    (h, one, two)
+}
+
+fn cold_month_rows(h: &Harness, filter: &str) -> i64 {
+    let conn = super::store::raw(&h.db_path());
+    conn.query_row(
+        &format!("SELECT count(*) FROM cold_month WHERE {filter}"),
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn identity_history_migration_from_version_6_splits_the_archived_months() {
+    let (mut h, one, two) = shared_world_archived_as_version_6();
+    h.close(true);
+    let reopened = h.open_with(&crate::store::schema::CURRENT);
+    assert_eq!(reopened.migrated_from, Some(6));
+    assert_history_split(&h, one, two);
+    assert_eq!(
+        cold_month_rows(&h, "project = -1"),
+        0,
+        "every row has its project"
+    );
+    assert_eq!(cold_month_rows(&h, "project > 0"), 2);
+}
+
+#[test]
+fn identity_history_migration_keeps_a_month_whose_segment_is_gone() {
+    let (mut h, one, two) = shared_world_archived_as_version_6();
+    // The segment of August 2025 does not decode.
+    let conn = super::store::raw(&h.db_path());
+    conn.execute(
+        "UPDATE cold_part SET data = X'00' WHERE tbl = 'fact' AND month = ?1",
+        [i64::from(2025) * 12 + 8 - 1],
+    )
+    .unwrap();
+    drop(conn);
+    h.close(true);
+    h.open_with(&crate::store::schema::CURRENT);
+    // The month is kept as it was archived, without a project.
+    assert_eq!(cold_month_rows(&h, "project = -1"), 1);
+    let (months, _) = history_inputs(&history_by_id(&h, one));
+    assert_eq!(months, vec![((2025, 8), 5)]);
+    // Every other month is split.
+    let (months, _) = history_inputs(&history_by_id(&h, two));
+    assert_eq!(
+        months,
+        vec![((2025, 8), 5), ((2025, 9), 3), ((2026, 10), 2)],
+        "the unsplit month counts for both projects of its location"
+    );
+}
+
+#[test]
+fn identity_history_salvage_of_version_6_splits_the_archived_months() {
+    let (h, one, two) = shared_world_archived_as_version_6();
+    let recovery = h.store().salvage_now(h.now).unwrap();
+    assert_eq!(recovery.lost, 0);
+    assert_history_split(&h, one, two);
+    assert_eq!(cold_month_rows(&h, "project = -1"), 0);
 }
 
 // ---- unborn repositories ----------------------------------------------------------------

@@ -2445,14 +2445,19 @@ pub(crate) fn compute_full(
                 return Ok(None);
             };
             let owners = cx.owners()?;
-            let (info, locations) = match owners.listing_of(row.id) {
-                Some(i) => (owners.info(i, cx.open), owners.scope(i).locations),
-                None => (snapshot::info(&row, cx.open), vec![row.location]),
+            // Only the facts the project owns: a location can have had
+            // other projects, and the history is summed by project too.
+            let (info, scope) = match owners.listing_of(row.id) {
+                Some(i) => (owners.info(i, cx.open), owners.scope(i)),
+                None => (snapshot::info(&row, cx.open), Scope::single(&row)),
             };
-            let totals = cx.store.history(&locations, *from, *to, *days, cx.zone)?;
+            let accepts = |location, project| scope.accepts(location, project);
+            let totals =
+                cx.store
+                    .history(&scope.locations, &accepts, *from, *to, *days, cx.zone)?;
             let range = window::start(*from, cx.zone)
                 ..window::start(window::date_of(window::day_number(*to) + 1), cx.zone);
-            let inherited = cx.store.inherited_in(&locations, range)?;
+            let inherited = cx.store.inherited_in(&scope.locations, &accepts, range)?;
             Ok(Some(Computed::Snapshot(UsageSnapshot::History(
                 snapshot::history(cx.header(inherited), info, *from, &totals),
             ))))

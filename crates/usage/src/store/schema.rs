@@ -26,6 +26,39 @@ pub(crate) struct Schema {
 
 /// The tables this version writes.
 pub(crate) const CURRENT: Schema = Schema {
+    version: 7,
+    create: CREATE_V7,
+    migrations: &[
+        Migration {
+            from: 1,
+            sql: COLD_V2,
+        },
+        Migration {
+            from: 2,
+            sql: LIMITS_V3,
+        },
+        Migration {
+            from: 3,
+            sql: IDENTITY_V4,
+        },
+        Migration {
+            from: 4,
+            sql: CALLS_V5,
+        },
+        Migration {
+            from: 5,
+            sql: BRANCHES_V6,
+        },
+        Migration {
+            from: 6,
+            sql: COLD_PROJECT_V7,
+        },
+    ],
+};
+
+/// Version 6 alone, for the migration tests.
+#[cfg(test)]
+pub(crate) const V6: Schema = Schema {
     version: 6,
     create: CREATE_V6,
     migrations: &[
@@ -181,7 +214,8 @@ pub(crate) const OBSERVATION_TABLES: &[&str] = &[
 ///   `year * 12 + month - 1`), encoded by columns and compressed.
 /// - `cold_month`: the archived facts per location, local month (`ym`, the
 ///   same numbering, in the zone of the archive), agent, model and review,
-///   in millionths.
+///   in millionths (table version 7 adds the project to the key,
+///   `cold_project_sql`).
 /// - `cold_total`: the archived facts per session (`kind` 0) and segment
 ///   (`kind` 1).
 /// - `cold_anchor`: what hot turns of a session follow once the turns they
@@ -820,6 +854,43 @@ UPDATE session SET cursor = X'01', reached_end = 0, end_stamp = NULL;
     };
 }
 
+/// `cold_month` by project (docs/design/usage.md「冷热分层」), table version 7.
+///
+/// The key of the archived months gets the project, 0 for a fact in no
+/// project (a directory under a folder project's root): two projects that
+/// share a location have separate rows, and the History of one does not
+/// count the other's. The rows are copied as they were, with project -1
+/// (`cold::LEGACY_PROJECT`, the column's default); `cold::split_months`
+/// then sums them again from the cold `fact` segments, which hold each
+/// fact's project, and keeps as -1 only what no segment accounts for. It
+/// runs in the same transaction (`store::migrate`).
+macro_rules! cold_project_sql {
+    () => {
+        "
+CREATE TABLE cold_month_next (
+  id          INTEGER PRIMARY KEY,
+  location    INTEGER NOT NULL,
+  project     INTEGER NOT NULL DEFAULT -1,
+  ym          INTEGER NOT NULL,
+  agent       INTEGER NOT NULL,
+  model       INTEGER NOT NULL,
+  review      INTEGER NOT NULL,
+  input       INTEGER NOT NULL,
+  output      INTEGER NOT NULL,
+  cache_read  INTEGER NOT NULL,
+  cache_write INTEGER NOT NULL,
+  UNIQUE (location, project, ym, agent, model, review)
+);
+INSERT INTO cold_month_next (id, location, ym, agent, model, review,
+                             input, output, cache_read, cache_write)
+  SELECT id, location, ym, agent, model, review, input, output, cache_read, cache_write
+  FROM cold_month;
+DROP TABLE cold_month;
+ALTER TABLE cold_month_next RENAME TO cold_month;
+"
+    };
+}
+
 /// Version 1 (step 1 of docs/design/usage.md「验收」, first part).
 #[cfg(test)]
 pub(crate) const CREATE_V1: &str = v1_sql!();
@@ -848,6 +919,7 @@ pub(crate) const CREATE_V5: &str = concat!(
 );
 
 /// Version 6: version 5 and the branch observations.
+#[cfg(test)]
 pub(crate) const CREATE_V6: &str = concat!(
     v1_sql!(),
     cold_sql!(),
@@ -857,11 +929,25 @@ pub(crate) const CREATE_V6: &str = concat!(
     branches_sql!()
 );
 
+/// Version 7: version 6 and the archived months by project.
+pub(crate) const CREATE_V7: &str = concat!(
+    v1_sql!(),
+    cold_sql!(),
+    limits_sql!(),
+    identity_sql!(),
+    calls_sql!(),
+    branches_sql!(),
+    cold_project_sql!()
+);
+
 /// The step from version 4 to 5.
 pub(crate) const CALLS_V5: &str = calls_sql!();
 
 /// The step from version 5 to 6.
 pub(crate) const BRANCHES_V6: &str = branches_sql!();
+
+/// The step from version 6 to 7.
+pub(crate) const COLD_PROJECT_V7: &str = cold_project_sql!();
 
 /// The step from version 1 to 2.
 pub(crate) const COLD_V2: &str = cold_sql!();
