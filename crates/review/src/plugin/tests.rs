@@ -596,6 +596,7 @@ fn notes_cmd_on_the_ui_thread_do_no_io() {
         file,
         side: DiffSide::New,
         line: 0,
+        last: 0,
         oid: shown.new.oid.unwrap(),
     };
 
@@ -638,6 +639,7 @@ fn notes_cmd_on_the_ui_thread_do_no_io() {
             excerpt: Some(lectern_services::review::Excerpt {
                 first: 0,
                 lines: vec![Arc::<str>::from("one")].into(),
+                gap: None,
             }),
         },
     );
@@ -701,12 +703,14 @@ fn notes_send_through_the_plugin_to_a_route_and_to_the_clipboard() {
             file: file.clone(),
             side: DiffSide::New,
             line: 1,
+            last: 1,
             oid: lectern_services::project::BlobId::from_bytes(&[3; 20]).unwrap(),
         },
         text: text.into(),
         excerpt: Some(lectern_services::review::Excerpt {
             first: 1,
             lines: vec![Arc::<str>::from("two")].into(),
+            gap: None,
         }),
     };
     rig.review.command(id, note("through the route"));

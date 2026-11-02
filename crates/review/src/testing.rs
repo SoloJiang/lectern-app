@@ -31,7 +31,9 @@ use std::sync::Arc;
 use lectern_git::HashKind;
 use lectern_services::changes::{ChangePath, FileMode, SideIdentity};
 use lectern_services::project::BlobId;
-use lectern_services::review::{BatchId, DiffSide, Excerpt, FileKey, NoteAnchor, NoteId, SentVia};
+use lectern_services::review::{
+    BatchId, DiffSide, Excerpt, ExcerptGap, FileKey, NoteAnchor, NoteId, SentVia,
+};
 use lectern_services::session::Timestamp;
 
 use crate::chain::{self, ChainInput, Detail, Edit, Op, Outcome, Side, StepInput};
@@ -157,7 +159,9 @@ pub fn load_log(data_dir: &Path, common_dir: &Path) -> LogLoad {
 
 /// The notes of the shape of `review/resident_notes_bytes`: `pending` notes
 /// not sent and `sent` notes sent in batches of 40, each with 200 bytes of
-/// text and a five-line excerpt, spread over `path(i)` files. Written at
+/// text and a five-line excerpt, spread over `path(i)` files; every tenth
+/// is a range of 20 lines with an excerpt of 8 lines (#373: 28 of the 280).
+/// Written at
 /// an hour before the time `load_log` reads at, so that none has expired.
 pub(crate) fn note_records(
     target: &TargetKey,
@@ -179,7 +183,9 @@ pub(crate) fn note_records(
             .cycle()
             .take(200)
             .collect();
-        let lines: Vec<Arc<str>> = (0..5)
+        // Every tenth note is a long range: its first and last four lines.
+        let range = i % 10 == 0;
+        let lines: Vec<Arc<str>> = (0..if range { 8 } else { 5 })
             .map(|k| {
                 Arc::from(format!("    let value_{} = compute({i}, \"fixture\");", i + k).as_str())
             })
@@ -195,11 +201,13 @@ pub(crate) fn note_records(
                 },
                 side: DiffSide::New,
                 line: 10 + i as u32,
+                last: 10 + i as u32 + if range { 19 } else { 0 },
                 oid: oid(i, 3),
             },
             excerpt: Some(Excerpt {
-                first: 8 + i as u32,
+                first: if range { 10 } else { 8 } + i as u32,
                 lines: lines.into(),
+                gap: range.then_some(ExcerptGap { at: 4, lines: 12 }),
             }),
             text: Arc::from(text.as_str()),
             created: at,

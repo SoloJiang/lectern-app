@@ -33,9 +33,9 @@ pub use brief::{
     LineAnchor, NoiseKind, SensitiveKind,
 };
 pub use notes::{
-    BatchId, DeliveryOutcome, DeliveryReply, Excerpt, Note, NoteAnchor, NoteDelivery, NoteId,
-    NotePlace, NoteRoute, NoteRouteRegistration, NoteRows, NoteState, NotesState, RouteBlock,
-    RouteKind, RouteOffer, SendFailure, SendOutcome, SentBatch, SentVia, limits,
+    BatchId, DeliveryOutcome, DeliveryReply, Excerpt, ExcerptGap, Note, NoteAnchor, NoteDelivery,
+    NoteId, NotePlace, NoteRoute, NoteRouteRegistration, NoteRows, NoteState, NotesState,
+    RouteBlock, RouteKind, RouteOffer, SendFailure, SendOutcome, SentBatch, SentVia, limits,
 };
 pub use overview::{OutsideCount, Overview, SessionOverview};
 pub use rows::{DiffRow, FileRows, HunkAttribution, HunkInfo, InlineSpans, RowsKey, RowsSide};

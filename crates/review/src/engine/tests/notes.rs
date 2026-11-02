@@ -27,6 +27,7 @@ pub(super) fn excerpt(first: u32, lines: &[&str]) -> Excerpt {
     Excerpt {
         first,
         lines: lines.iter().map(|l| Arc::<str>::from(*l)).collect(),
+        gap: None,
     }
 }
 
@@ -35,6 +36,7 @@ pub(super) fn anchor(file: FileKey, side: DiffSide, line: u32, oid: BlobId) -> N
         file,
         side,
         line,
+        last: line,
         oid,
     }
 }
@@ -1176,4 +1178,204 @@ fn notes_cmd_a_new_id_never_replaces_a_note() {
     assert_eq!(ids.len(), 3, "{ids:?}");
     assert!(s.notes.iter().any(|n| &*n.text == "from the log"));
     assert!(s.notes.iter().any(|n| &*n.text == "and the next"));
+}
+
+// ---- notes_range_* (#373) -------------------------------------------------
+
+/// The anchor of `anchor(..)` on lines `line..=last`.
+fn ranged(file: FileKey, side: DiffSide, (line, last): (u32, u32), oid: BlobId) -> NoteAnchor {
+    NoteAnchor {
+        last,
+        ..anchor(file, side, line, oid)
+    }
+}
+
+#[test]
+fn notes_range_is_in_the_snapshot_and_the_log_and_survives_a_restart() {
+    let r = rig();
+    let shown = r.shown();
+    let a = ranged(modified("f.txt"), DiffSide::New, (0, 2), new_oid(&shown));
+    let s = r.command(add(Some(shown.fin_key.clone()), a, "the whole file", None));
+    assert_eq!(s.notes.len(), 1);
+    let note = &s.notes[0];
+    assert_eq!((note.anchor.line, note.anchor.last), (0, 2));
+    // The step's new side is the worktree's content too.
+    let both = vec![NoteRows::Final, NoteRows::Step(shown.step_id)];
+    assert_eq!(note.place, NotePlace::Rows(both.into()));
+    // The excerpt is taken in the background from the whole range.
+    r.d.run();
+    let note = &r.snapshot().notes[0];
+    assert_eq!(note.excerpt, Some(excerpt(0, &["A", "b", "C"])));
+    let written = lines_of(&r.fx, "note");
+    assert_eq!(written.len(), 1);
+    assert!(
+        written[0].contains("\"line\":0,\"last\":2,"),
+        "{}",
+        written[0]
+    );
+    let before = r.snapshot().notes.clone();
+    let Rig { fx, d, .. } = r;
+    drop(d);
+
+    let (_, sessions) = unrelated_commit_sessions(&fx);
+    let d = fx.driven(vec![sessions]);
+    let (_, s) = open(&d, target("a"));
+    assert_eq!(s.notes.len(), 1);
+    assert_eq!((s.notes[0].anchor.line, s.notes[0].anchor.last), (0, 2));
+    assert_eq!(s.notes[0].excerpt, before[0].excerpt);
+    assert_eq!(s.notes[0].place, before[0].place);
+}
+
+#[test]
+fn notes_range_a_last_before_the_line_is_a_note_on_the_line() {
+    let r = rig();
+    let shown = r.shown();
+    let a = ranged(modified("f.txt"), DiffSide::New, (2, 0), new_oid(&shown));
+    let s = r.command(add(None, a, "backwards", Some(excerpt(1, &["b", "C"]))));
+    // Not refused, not a range.
+    assert_eq!(s.notes.len(), 1);
+    assert_eq!((s.notes[0].anchor.line, s.notes[0].anchor.last), (2, 2));
+    r.d.run();
+    let written = lines_of(&r.fx, "note");
+    assert_eq!(written.len(), 1);
+    assert!(!written[0].contains("\"last\""), "{}", written[0]);
+}
+
+#[test]
+fn notes_range_a_note_on_one_line_writes_the_record_it_always_did() {
+    let r = rig();
+    let shown = r.shown();
+    let a = anchor(modified("f.txt"), DiffSide::New, 2, new_oid(&shown));
+    r.command(add(Some(shown.fin_key.clone()), a, "one line", None));
+    r.d.run();
+    let written = lines_of(&r.fx, "note");
+    assert_eq!(written.len(), 1);
+    assert!(!written[0].contains("\"last\""), "{}", written[0]);
+    assert!(!written[0].contains("\"gap\""), "{}", written[0]);
+    assert_eq!(
+        r.snapshot().notes[0].excerpt,
+        Some(excerpt(0, &["A", "b", "C"]))
+    );
+}
+
+#[test]
+fn notes_range_drifts_as_a_whole() {
+    // The worktree has a line no step wrote, as in the single-line case.
+    let (fx, sessions) = unrelated_commit();
+    fx.write("f.txt", "A\nb\nC\nby hand\n");
+    let d = fx.driven(vec![sessions]);
+    let (id, _) = open(&d, target("a"));
+    let r = Rig { fx, d, id };
+    let shown = r.shown();
+    let a = ranged(modified("f.txt"), DiffSide::New, (1, 3), new_oid(&shown));
+    r.command(add(
+        None,
+        a,
+        "the tail",
+        Some(excerpt(1, &["b", "C", "by hand"])),
+    ));
+    assert_eq!(
+        r.snapshot().notes[0].place,
+        NotePlace::Rows(vec![NoteRows::Final].into())
+    );
+    // The code moves on: the whole range is Drifted, none of it follows.
+    r.fx.write("f.txt", "A\nb\nC\nby hand, again\n");
+    r.d.command(r.id, ReviewCommand::Refresh);
+    r.d.run();
+    let s = r.snapshot();
+    assert_eq!(
+        s.notes[0].place,
+        NotePlace::Drifted {
+            file: modified("f.txt")
+        }
+    );
+    assert_eq!((s.notes[0].anchor.line, s.notes[0].anchor.last), (1, 3));
+    // The file has no change any more: Elsewhere, still the same range.
+    r.fx.write("f.txt", "a\nb\nc\n");
+    r.d.command(r.id, ReviewCommand::Refresh);
+    r.d.run();
+    let s = r.snapshot();
+    assert_eq!(s.notes[0].place, NotePlace::Elsewhere);
+    assert_eq!((s.notes[0].anchor.line, s.notes[0].anchor.last), (1, 3));
+}
+
+#[test]
+fn notes_range_editing_the_text_keeps_the_range_and_the_excerpt() {
+    let r = rig();
+    let shown = r.shown();
+    let a = ranged(modified("f.txt"), DiffSide::New, (0, 1), new_oid(&shown));
+    let given = Excerpt {
+        gap: Some(lectern_services::review::ExcerptGap { at: 1, lines: 7 }),
+        ..excerpt(0, &["A", "b"])
+    };
+    r.command(add(None, a, "before", Some(given.clone())));
+    let note = r.snapshot().notes[0].id;
+    r.d.set_now(Timestamp(NOW.0 + 1000));
+    r.command(ReviewCommand::EditNote {
+        note,
+        text: "after".into(),
+    });
+    r.d.run();
+    let s = r.snapshot();
+    assert_eq!((s.notes[0].anchor.line, s.notes[0].anchor.last), (0, 1));
+    assert_eq!(s.notes[0].excerpt, Some(given));
+    // The edit's record has the range and the gap too.
+    let written = lines_of(&r.fx, "note");
+    assert_eq!(written.len(), 2);
+    for line in &written {
+        assert!(line.contains("\"line\":0,\"last\":1,"), "{line}");
+        assert!(line.contains("\"gap\":{\"at\":1,\"lines\":7}"), "{line}");
+    }
+}
+
+#[test]
+fn notes_range_notes_are_ordered_by_their_first_line() {
+    let r = rig();
+    let shown = r.shown();
+    let f = modified("f.txt");
+    let new = new_oid(&shown);
+    let ex = Some(excerpt(0, &["x"]));
+    r.command(add(
+        None,
+        ranged(f.clone(), DiffSide::New, (1, 2), new),
+        "from line 1",
+        ex.clone(),
+    ));
+    r.d.set_now(Timestamp(NOW.0 + 10));
+    r.command(add(
+        None,
+        ranged(f.clone(), DiffSide::New, (0, 2), new),
+        "from line 0",
+        ex.clone(),
+    ));
+    r.d.set_now(Timestamp(NOW.0 + 20));
+    r.command(add(None, anchor(f, DiffSide::New, 2, new), "line 2", ex));
+    let texts: Vec<String> = r
+        .snapshot()
+        .notes
+        .iter()
+        .map(|n| n.text.to_string())
+        .collect();
+    assert_eq!(texts, ["from line 0", "from line 1", "line 2"]);
+}
+
+#[test]
+fn notes_range_goes_into_the_prompt_as_a_range() {
+    let r = rig();
+    let shown = r.shown();
+    let a = ranged(modified("f.txt"), DiffSide::New, (0, 2), new_oid(&shown));
+    r.command(add(Some(shown.fin_key.clone()), a, "all three", None));
+    r.d.run();
+    r.command(ReviewCommand::SendNotes {
+        route: "clipboard".into(),
+    });
+    r.d.run();
+    let written = r.d.clipboard().writes();
+    assert_eq!(written.len(), 1);
+    assert!(written[0].contains("\n1. f.txt:1-3\n"), "{}", written[0]);
+    assert!(
+        written[0].contains("\n   > 1 | A\n   > 2 | b\n   > 3 | C\n"),
+        "{}",
+        written[0]
+    );
 }

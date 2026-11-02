@@ -46,7 +46,8 @@ pub const RESIDENT_NOTES: Bench = Bench {
 };
 
 /// 40 notes not sent, 240 sent in six batches; 200 bytes of text and five
-/// lines of excerpt each.
+/// lines of excerpt each, but every tenth note (28) is a range of 20 lines
+/// with an excerpt of 8 lines and a gap (#373).
 fn resident_notes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let dir = ctx.scratch().join("notes-log");
     let common = std::path::Path::new("/bench/repo/.git");
@@ -66,8 +67,9 @@ fn resident_notes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         }
     }
     Ok(vec![
-        Measured::new("review/resident_notes_bytes", Value::Bytes(samples))
-            .with_note(Some("280 notes: 40 not sent, 240 sent".to_owned())),
+        Measured::new("review/resident_notes_bytes", Value::Bytes(samples)).with_note(Some(
+            "280 notes: 40 not sent, 240 sent, 28 ranges".to_owned(),
+        )),
     ])
 }
 

@@ -182,7 +182,11 @@ fn apply(index: &mut Index, target: &TargetKey, command: &ReviewCommand, env: &E
                 at: env.now,
                 target: target.clone(),
                 id,
-                anchor: anchor.clone(),
+                // A range that ends before it starts is the one line.
+                anchor: NoteAnchor {
+                    last: anchor.last.max(anchor.line),
+                    ..anchor.clone()
+                },
                 excerpt: excerpt.clone(),
                 text: Arc::clone(text),
                 created: env.now,
@@ -734,7 +738,9 @@ impl Engine {
                 NotePlace::Rows(_) => "rows",
                 NotePlace::Drifted { .. } => "drifted",
                 NotePlace::Elsewhere => "elsewhere",
-            })),
+            }),
+            // The size of the range, never its place in the file.
+            lines = note.anchor.last.saturating_sub(note.anchor.line).saturating_add(1)),
             None => debug!("note changed";
                 id = id.0, op = op.name(), pending = pending, sent = sent),
         }
@@ -821,7 +827,7 @@ impl Engine {
             .map(|(note, job)| {
                 let excerpt = notes::anchored_text(&job.rows, &job.anchor).and_then(|text| {
                     let hint = notes::hint(&job.rows, job.anchor.side, job.anchor.line);
-                    notes::excerpt(text, job.anchor.line, hint)
+                    notes::excerpt(text, job.anchor.line, job.anchor.last, hint)
                 });
                 (note, excerpt)
             })

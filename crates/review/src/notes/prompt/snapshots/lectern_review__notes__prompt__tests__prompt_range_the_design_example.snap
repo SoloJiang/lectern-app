@@ -1,0 +1,21 @@
+---
+source: crates/review/src/notes/prompt/tests.rs
+expression: text
+---
+Review notes from Lectern [lectern-notes 0190f3a2c4b60401]: 1 note on your changes.
+Please address each note.
+
+1. src/engine/mod.rs:42-51
+   ```
+   > 42 | fn prepare(key: &Key) -> Rows {
+   > 43 |     let rows = load(key);
+   > 44 |     let hunks = rows.hunks();
+   > 45 |     check(&hunks);
+   > ... 2 more lines ...
+   > 48 |     emit(&hunks);
+   > 49 |     flush();
+   > 50 |     close(key);
+   > 51 | }
+   ```
+   Note:
+   Split this function.

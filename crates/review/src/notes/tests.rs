@@ -1,6 +1,7 @@
 //! The excerpt kept with a note (`notes_excerpt_*`, docs/design/review.md
-//! 「审阅意见」 摘录): two lines either side of the anchor, each cut to 160
-//! bytes, nothing read further than 4 KiB from the anchor line.
+//! 「审阅意见」 摘录): two lines either side of a note on a line, the lines of
+//! a range (#373, `notes_excerpt_range_*`), each cut to 160 bytes, nothing
+//! read further than 4 KiB from the first and the last line.
 
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use lectern_services::review::{
 use super::{LINE_BYTES, anchored_text, excerpt, hint};
 
 fn lines(text: &[u8], line: u32) -> Option<(u32, Vec<String>)> {
-    let e = excerpt(text, line, None)?;
+    let e = excerpt(text, line, line, None)?;
     Some((e.first, e.lines.iter().map(|l| l.to_string()).collect()))
 }
 
@@ -143,14 +144,149 @@ fn notes_excerpt_starts_from_a_byte_offset_the_rows_know() {
     let text = numbered(20);
     // Line 12 starts at the sum of the widths of lines 0 to 11.
     let at: u64 = (0..12).map(|i| format!("line {i}\n").len() as u64).sum();
-    let plain = excerpt(&text, 14, None).unwrap();
-    assert_eq!(excerpt(&text, 14, Some((12, at))).unwrap(), plain);
+    let plain = excerpt(&text, 14, 14, None).unwrap();
+    assert_eq!(excerpt(&text, 14, 14, Some((12, at))).unwrap(), plain);
     // An offset past the text is not believed.
-    assert_eq!(excerpt(&text, 14, Some((12, 1 << 40))).unwrap(), plain);
+    assert_eq!(excerpt(&text, 14, 14, Some((12, 1 << 40))).unwrap(), plain);
     // A line after the one asked for is no help.
     assert_eq!(
-        excerpt(&text, 3, Some((12, at))).unwrap(),
-        excerpt(&text, 3, None).unwrap()
+        excerpt(&text, 3, 3, Some((12, at))).unwrap(),
+        excerpt(&text, 3, 3, None).unwrap()
+    );
+}
+
+/// An excerpt as the tests compare it: the first line, the lines, and where
+/// and how many lines are left out.
+type Kept = (u32, Vec<String>, Option<(u32, u32)>);
+
+/// The excerpt of the range `line..=last` as `(first, lines, gap)`.
+fn range(text: &[u8], line: u32, last: u32) -> Option<Kept> {
+    let e = excerpt(text, line, last, None)?;
+    let lines = e.lines.iter().map(|l| l.to_string()).collect();
+    Some((e.first, lines, e.gap.map(|g| (g.at, g.lines))))
+}
+
+/// "line a" to "line e", for the lines `from..=to` of `numbered`.
+fn names(from: usize, to: usize) -> Vec<String> {
+    (from..=to).map(|i| format!("line {i}")).collect()
+}
+
+#[test]
+fn notes_excerpt_range_two_to_four_lines_keep_two_either_side() {
+    let text = numbered(20);
+    for n in [2u32, 4] {
+        let (first, got, gap) = range(&text, 8, 8 + n - 1).unwrap();
+        assert_eq!((first, gap), (6, None), "{n} lines");
+        assert_eq!(got, names(6, 8 + n as usize - 1 + 2), "{n} lines");
+    }
+    // At the start and the end of the file the context is short.
+    let (first, got, _) = range(&text, 0, 2).unwrap();
+    assert_eq!((first, got), (0, names(0, 4)));
+    let (first, got, _) = range(&text, 17, 19).unwrap();
+    assert_eq!((first, got), (15, names(15, 19)));
+}
+
+#[test]
+fn notes_excerpt_range_five_to_eight_lines_have_no_context() {
+    let text = numbered(30);
+    for n in [5usize, 8] {
+        let (first, got, gap) = range(&text, 10, 10 + n as u32 - 1).unwrap();
+        assert_eq!((first, gap), (10, None), "{n} lines");
+        assert_eq!(got, names(10, 10 + n - 1), "{n} lines");
+    }
+}
+
+#[test]
+fn notes_excerpt_range_over_eight_lines_keep_four_and_four_with_a_gap() {
+    let text = numbered(6000);
+    let (first, got, gap) = range(&text, 10, 18).unwrap();
+    assert_eq!(first, 10);
+    let mut want = names(10, 13);
+    want.extend(names(15, 18));
+    assert_eq!(got, want, "9 lines: one is left out");
+    assert_eq!(gap, Some((4, 1)));
+    // The numbers of the lines after the gap: first + index + gap.
+    let (first, got, gap) = range(&text, 0, 4999).unwrap();
+    let (at, skipped) = gap.unwrap();
+    assert_eq!((first, at, skipped), (0, 4, 4992));
+    assert_eq!(got.len(), 8);
+    assert_eq!(got[3], "line 3");
+    assert_eq!(got[4], "line 4996", "first + 4 + 4992 is 4996");
+    assert_eq!(got[7], "line 4999");
+}
+
+#[test]
+fn notes_excerpt_range_to_the_start_and_the_end_of_the_file() {
+    let text = numbered(10);
+    // A range that reaches the last line: the lines after are not there.
+    let (first, got, gap) = range(&text, 7, 9).unwrap();
+    assert_eq!((first, gap), (5, None));
+    assert_eq!(got, names(5, 9));
+    // A range that runs past the end ends at the last line; the gap counts
+    // what was found.
+    let (first, got, gap) = range(&text, 0, 5000).unwrap();
+    assert_eq!((first, gap), (0, Some((4, 2))));
+    assert_eq!((got[3].as_str(), got[4].as_str()), ("line 3", "line 6"));
+    assert_eq!(got[7], "line 9");
+    let (first, got, gap) = range(&text, 8, 5000).unwrap();
+    assert_eq!((first, gap), (6, None));
+    assert_eq!(got, names(6, 9));
+    // Without a newline at the end the last line is still one.
+    let (first, got, gap) = range(b"a\nb\nc", 1, 9).unwrap();
+    assert_eq!(
+        (first, got, gap),
+        (0, vec!["a".into(), "b".into(), "c".into()], None)
+    );
+    // The range starts nowhere: no excerpt.
+    assert_eq!(range(&text, 10, 12), None);
+}
+
+#[test]
+fn notes_excerpt_range_a_line_over_4_kib_in_it_is_cut_not_lost() {
+    let long = "z".repeat(10_000);
+    // A long line inside the range is cut to 160 bytes and the lines after
+    // it are still found: nothing limits the range itself.
+    let text = format!("a\nb\n{long}\nd\ne\nf\ng\nh\n");
+    let (first, got, gap) = range(text.as_bytes(), 0, 5).unwrap();
+    assert_eq!((first, gap), (0, None));
+    assert_eq!(got.len(), 6);
+    assert_eq!(got[2].len(), LINE_BYTES);
+    assert_eq!(got[5], "f");
+    // A long last line ends what follows it, as for a note on one line.
+    let text = format!("a\n{long}\nnever\n");
+    let (_, got, _) = range(text.as_bytes(), 0, 1).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[1].len(), LINE_BYTES);
+    // The context before is looked for within 4 KiB of the first line.
+    let text = format!("{long}\nnear\nfirst\nsecond\n");
+    let (first, got, _) = range(text.as_bytes(), 2, 3).unwrap();
+    assert_eq!(
+        (first, got),
+        (1, vec!["near".into(), "first".into(), "second".into()])
+    );
+}
+
+#[test]
+fn notes_excerpt_range_of_one_line_is_the_excerpt_of_the_line() {
+    let text = numbered(10);
+    for line in 0..10 {
+        assert_eq!(
+            excerpt(&text, line, line, None),
+            excerpt(&text, line, line.saturating_sub(3), None),
+            "a last before the line is the line"
+        );
+        let e = excerpt(&text, line, line, None).unwrap();
+        assert_eq!(e.gap, None);
+    }
+}
+
+#[test]
+fn notes_excerpt_range_starts_from_a_byte_offset_the_rows_know() {
+    let text = numbered(40);
+    let at: u64 = (0..12).map(|i| format!("line {i}\n").len() as u64).sum();
+    assert_eq!(
+        excerpt(&text, 14, 30, Some((12, at))),
+        excerpt(&text, 14, 30, None)
     );
 }
 
@@ -234,6 +370,7 @@ fn notes_excerpt_text_is_the_anchored_side_only() {
         },
         side,
         line: 0,
+        last: 0,
         oid,
     };
     assert_eq!(

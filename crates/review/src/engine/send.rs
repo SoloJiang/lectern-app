@@ -789,6 +789,7 @@ fn prompt_note(note: &Note) -> PromptNote {
             .or_else(|| file.old.clone())
             .unwrap_or_else(|| ChangePath(Arc::from(&b""[..]))),
         line: note.anchor.line,
+        last: note.anchor.last.max(note.anchor.line),
         place: location(note),
         excerpt: note.excerpt.clone(),
         text: Arc::clone(&note.text),

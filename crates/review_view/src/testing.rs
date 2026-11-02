@@ -1017,6 +1017,7 @@ pub fn add_notes(snapshot: &mut ReviewSnapshot, count: u32) {
                 file: file_key(file),
                 side: DiffSide::New,
                 line,
+                last: line,
                 oid: BlobId::Sha1([1; 20]),
             },
             text: Arc::from(format!("note {n}")),

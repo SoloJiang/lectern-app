@@ -206,6 +206,7 @@ fn review_tree_notes(cx: &mut TestAppContext) {
     drifted.excerpt = Some(Excerpt {
         first: 0,
         lines: Arc::from(vec![Arc::<str>::from("a"), Arc::from("b"), Arc::from("c")]),
+        gap: None,
     });
     let mut elsewhere = note(
         4,

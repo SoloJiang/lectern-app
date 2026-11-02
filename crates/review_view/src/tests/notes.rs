@@ -35,6 +35,7 @@ pub(crate) fn note(id: u64, side: DiffSide, line: u32, state: NoteState, place: 
             file: file_key(0),
             side,
             line,
+            last: line,
             oid: match side {
                 DiffSide::Old => old_oid(),
                 DiffSide::New => new_oid(),
@@ -418,6 +419,7 @@ fn c_opens_the_editor_on_the_selected_row(cx: &mut TestAppContext) {
                 file: file_key(0),
                 side,
                 line,
+                last: line,
                 oid,
             },
         })
@@ -546,6 +548,7 @@ fn c_opens_the_editor_on_the_first_removed_line_of_a_deleting_hunk(cx: &mut Test
                 file: file_key(0),
                 side: DiffSide::Old,
                 line: 1,
+                last: 1,
                 oid: old_oid(),
             },
         })
@@ -653,6 +656,7 @@ fn cmd_return_in_the_editor_saves_the_note(cx: &mut TestAppContext) {
                 file: file_key(0),
                 side: DiffSide::New,
                 line: 1,
+                last: 1,
                 oid: new_oid(),
             },
             text: Arc::from("check  this\nline"),
@@ -782,6 +786,7 @@ fn escape_in_the_editor_keeps_at_most_twenty_drafts(cx: &mut TestAppContext) {
         file: file_key(0),
         side: DiffSide::New,
         line,
+        last: line,
         oid: new_oid(),
     };
     opened.update(cx, |model, _| {
@@ -849,6 +854,7 @@ fn notes_are_drawn_under_their_rows(cx: &mut TestAppContext) {
     drifted.excerpt = Some(Excerpt {
         first: 0,
         lines: Arc::from(vec![Arc::<str>::from("a"), Arc::from("b"), Arc::from("c")]),
+        gap: None,
     });
     change(&rig, &opened, cx, |snapshot| {
         set_notes(
@@ -1356,6 +1362,7 @@ fn copy_again_follows_the_latest_batch(cx: &mut TestAppContext) {
                 file: file_key(0),
                 side: DiffSide::New,
                 line: 3,
+                last: 3,
                 oid: new_oid(),
             },
             text: Arc::from("third"),
@@ -1413,6 +1420,7 @@ fn copy_again_follows_the_latest_batch(cx: &mut TestAppContext) {
                 file: file_key(0),
                 side: DiffSide::New,
                 line: 4,
+                last: 4,
                 oid: new_oid(),
             },
             text: Arc::from("fourth"),
@@ -1477,6 +1485,7 @@ fn a_session_route_switches_to_the_conversation_once(cx: &mut TestAppContext) {
                     file: file_key(0),
                     side: DiffSide::New,
                     line,
+                    last: line,
                     oid: new_oid(),
                 },
                 text: Arc::from("a note"),
@@ -1746,6 +1755,7 @@ fn the_keys_of_the_screen_are_letters_in_the_editor(cx: &mut TestAppContext) {
                 file: file_key(0),
                 side: DiffSide::New,
                 line: 1,
+                last: 1,
                 oid: new_oid(),
             },
         }),
@@ -1771,6 +1781,7 @@ fn target_at(side: DiffSide, line: u32) -> Option<EditorTarget> {
             file: file_key(0),
             side,
             line,
+            last: line,
             oid: match side {
                 DiffSide::Old => old_oid(),
                 DiffSide::New => new_oid(),

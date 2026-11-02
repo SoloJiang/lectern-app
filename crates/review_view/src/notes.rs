@@ -177,6 +177,7 @@ impl ReviewModel {
                 file,
                 side,
                 line,
+                last: line,
                 oid,
             },
         ))

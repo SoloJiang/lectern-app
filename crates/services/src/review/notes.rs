@@ -30,8 +30,8 @@ pub struct Note {
     pub state: NoteState,
     /// 每份快照重新算。
     pub place: NotePlace,
-    /// 写下意见时锚点所在那一侧的内容里，锚点前后各 2 行。后台取出之前、取不到时为
-    /// None。
+    /// 写下意见时锚点所在那一侧的内容里的几行（至多 `limits::EXCERPT_LINES` 行，
+    /// 摘录规则见设计文档）。后台取出之前、取不到时为 None。
     pub excerpt: Option<Excerpt>,
 }
 
@@ -50,8 +50,10 @@ pub struct NoteAnchor {
     /// (路径, 路径)。
     pub file: FileKey,
     pub side: DiffSide,
-    /// 这一侧内容里的行号，0 起（与 `DiffRow` 相同）。
+    /// 这一侧内容里的行号，0 起（与 `DiffRow` 相同）。范围的第一行。
     pub line: u32,
+    /// 范围的最后一行，含这一行（#373）。总是 `last >= line`；一行的意见 `last == line`。
+    pub last: u32,
     /// 这一侧内容的 OID（`RowsSide::oid`；改动链里的中间版本按 git 的 blob 格式计算）。
     pub oid: BlobId,
 }
@@ -66,7 +68,7 @@ pub enum NoteState {
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum NotePlace {
     /// 锚点的内容还在：这些展示行（最终改动或叙事里的一步）`anchor.side` 那一侧的
-    /// OID 等于 `anchor.oid`。视图把意见画在 `anchor.line` 那一行之后。
+    /// OID 等于 `anchor.oid`。视图把意见画在 `anchor.last` 那一行之后。
     Rows(Arc<[NoteRows]>),
     /// 文件还在 `files` 里，但没有哪份展示行的那一侧是锚点的内容：代码在写下意见之后
     /// 变了（Drifted）。`file` 是文件现在的标识。
@@ -84,10 +86,21 @@ pub enum NoteRows {
 
 /// `first` 是 `lines[0]` 在那一侧内容里的行号（0 起）。每行至多 160 字节，在字符
 /// 边界截断，不含行尾。
+///
+/// `gap`：范围太长时省掉了中间部分（#373），一行的意见没有。
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Excerpt {
     pub first: u32,
     pub lines: Arc<[Arc<str>]>,
+    pub gap: Option<ExcerptGap>,
+}
+
+/// 范围太长时省掉的中间部分（#373）：`lines[at]` 之前省掉了 `lines` 行，所以
+/// `lines[k]`（`k >= at`）的行号是 `first + k + lines`。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ExcerptGap {
+    pub at: u32,
+    pub lines: u32,
 }
 
 /// `Default` 是没有意见、没有途径的空状态；`review` 总放进剪贴板途径。
@@ -174,6 +187,8 @@ pub mod limits {
     /// 一个审阅对象还没发出的意见（待发送加发送中，`NotesState::unsent`）的上限，
     /// 也是一批的上限。
     pub const PENDING_NOTES: u32 = 40;
+    /// 一条意见的摘录的行数上限（#373；不含 `gap` 那一行）。
+    pub const EXCERPT_LINES: usize = 8;
 }
 
 /// 审阅意见的会话途径。不实现 `Service`。
