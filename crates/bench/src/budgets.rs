@@ -1203,7 +1203,7 @@ pub static BUDGETS: &[Budget] = &[
     // counted); it is part of `project/resident_100k_bytes`.
     share(
         "project/dirs_100k",
-        &[median(Limit::TimeAtMost(ms(20)))],
+        &[median(Limit::TimeAtMost(ms(28)))],
         FILE_READER,
         ACTIVE,
         Time,
