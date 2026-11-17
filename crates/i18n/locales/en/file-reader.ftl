@@ -22,3 +22,7 @@ file-reader-symlink = Symbolic link to { $target }
 file-reader-from-history = Version from { $source }
 # Shown when opening the file takes longer than a second.
 file-reader-loading = Loading…
+# The title of the Files tree in the sidebar, and of its entry in the project sidebar.
+file-reader-files-title = Files
+file-reader-files-empty = No tracked files
+file-reader-files-unavailable = Lectern can't read this worktree's index.

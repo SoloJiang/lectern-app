@@ -38,6 +38,9 @@ use crate::history::History;
 pub trait Host: Send + Sync {
     /// `Projects::snapshot`.
     fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>>;
+    /// `Projects::open_projects`: the projects in the order they were opened
+    /// (the Files tree shows the latest).
+    fn open_projects(&self) -> Vec<ProjectKey>;
     /// `CodeIntel::set_focus`.
     fn set_focus(&self, project: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus);
     /// Emits on the kernel's event bus, from the thread that calls (the
@@ -95,6 +98,9 @@ struct Current {
 
 struct Reading {
     current: Option<Current>,
+    /// What was shown last. It outlives the document (`close`): the Files
+    /// tree opens at it after the reader is left.
+    last: Option<ReadTarget>,
     history: History,
     viewport: Viewport,
     focus: Option<FocusSet>,
@@ -131,6 +137,7 @@ impl Session {
             wake: Arc::default(),
             reading: Mutex::new(Reading {
                 current: None,
+                last: None,
                 history: History::default(),
                 viewport: FIRST_VIEWPORT,
                 focus: None,
@@ -272,6 +279,23 @@ impl Session {
             .map(|focus| (focus.project.clone(), focus.text.clone()))
     }
 
+    /// The target of the document shown last, kept after the reading view
+    /// ends (`close`): what the Files tree reveals when it opens.
+    pub fn last_target(&self) -> Option<ReadTarget> {
+        lock(&self.reading).last.clone()
+    }
+
+    /// The project the window shows: the one opened last. The Files tree
+    /// reads its snapshot (`Projects::snapshot`, a copy of an `Arc`).
+    pub fn open_project(&self) -> Option<ProjectKey> {
+        self.host.open_projects().pop()
+    }
+
+    /// `Projects::snapshot` of `project`.
+    pub fn project_snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
+        self.host.snapshot(project)
+    }
+
     /// The current snapshot, without touching the focus.
     pub fn snapshot(&self) -> Option<Arc<DocSnapshot>> {
         lock(&self.reading)
@@ -374,6 +398,7 @@ impl Session {
                 Via::Back => reading.history.went_back(position),
                 Via::Forward => reading.history.went_forward(position),
             }
+            reading.last = Some(target.clone());
             reading.current = Some(Current {
                 handle,
                 target,

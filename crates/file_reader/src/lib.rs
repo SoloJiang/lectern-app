@@ -6,12 +6,14 @@
 //! the current document, the back and forward history and the focus handed
 //! to `code_intel`. [`ReadingView`] is the third-tier screen that draws it:
 //! a self-drawn fixed-row-height list of display rows, the line number
-//! column, the find bar and the history's buttons. Step 8 adds the edit
-//! mode and Files (step 7b) the sidebar tree. This crate does no IO and no
+//! column, the find bar and the history's buttons. [`FilesView`] is the
+//! sidebar panel that lists the active worktree's tracked files from the
+//! directory table. Step 8 adds the edit mode. This crate does no IO and no
 //! parsing: documents are `syntax`'s (`Engine`), read through snapshots.
 
 pub mod actions;
 mod diag;
+mod files;
 mod focus;
 mod history;
 mod nodes;
@@ -26,6 +28,7 @@ mod view;
 #[cfg(test)]
 mod tests;
 
+pub use files::FilesView;
 pub use history::{HISTORY_MAX, History};
 pub use plugin::{FileReaderDeps, FileReaderPlugin, PLUGIN_ID};
 pub use screen::LAYOUT;

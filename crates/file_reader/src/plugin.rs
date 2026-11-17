@@ -112,10 +112,20 @@ impl Plugin for FileReaderPlugin {
         drop(admitted);
         ctx.provide::<dyn Reader>(session.clone())?;
         let listener = session.clone();
-        ctx.on::<ProjectEvent>(move |event, _| {
-            if let ProjectEvent::Closed { project } = event {
+        let files = shared.clone();
+        ctx.on::<ProjectEvent>(move |event, _| match event {
+            ProjectEvent::Closed { project } => {
                 listener.close_project(project);
+                files.files_changed();
             }
+            // The Files tree follows the directory table (and the file list
+            // and the active worktree it is built from).
+            ProjectEvent::Changed { parts, .. } => {
+                if parts.dirs || parts.files || parts.active {
+                    files.files_changed();
+                }
+            }
+            ProjectEvent::Opened { .. } => files.files_changed(),
         });
         #[cfg(test)]
         {
@@ -169,6 +179,13 @@ struct KernelHost {
 impl Host for KernelHost {
     fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
         self.projects.get()?.snapshot(project)
+    }
+
+    fn open_projects(&self) -> Vec<ProjectKey> {
+        self.projects
+            .get()
+            .map(|projects| projects.open_projects())
+            .unwrap_or_default()
     }
 
     fn set_focus(&self, project: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus) {

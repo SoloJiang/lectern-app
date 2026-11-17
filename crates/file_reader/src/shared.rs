@@ -7,16 +7,31 @@
 //! reader screen, whose view installs its own wake-up and takes the
 //! request. When the view goes, the plugin's wake-up comes back.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lectern_kernel::{Name, ServiceRef};
 use lectern_services::code_intel::{CodeIntel, Query};
+use lectern_services::project::ProjectKey;
 use lectern_services::workspace::{
     Contributions, Milestone, Route, Target, WorkspaceCommand, screens,
 };
 
 use crate::session::{Session, Wake};
+
+/// What the Files tree keeps between its views. `workspace` drops the
+/// sidebar's view whenever the sidebar is hidden (the reader hides it), so
+/// the expansion and the selection live here, by path.
+#[derive(Default)]
+pub(crate) struct FilesMemory {
+    /// The project they belong to: another project starts afresh.
+    pub(crate) project: Option<ProjectKey>,
+    /// The directories that were expanded, by path.
+    pub(crate) expanded: HashSet<Box<str>>,
+    /// The row that was selected, by path.
+    pub(crate) selected: Option<Box<str>>,
+}
 
 pub(crate) struct Shared {
     pub(crate) session: Arc<Session>,
@@ -29,6 +44,11 @@ pub(crate) struct Shared {
     /// latest one's end puts the plugin's wake-up back.
     built: AtomicU64,
     latest: Mutex<u64>,
+    /// The Files tree's wake-up (`ProjectEvent::Changed`) and the number of
+    /// the view that installed it.
+    files_wake: Mutex<Option<(u64, Wake)>>,
+    files_built: AtomicU64,
+    files_memory: Mutex<FilesMemory>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -68,6 +88,9 @@ impl Shared {
                 push,
                 built: AtomicU64::new(0),
                 latest: Mutex::new(0),
+                files_wake: Mutex::new(None),
+                files_built: AtomicU64::new(0),
+                files_memory: Mutex::new(FilesMemory::default()),
             }
         })
     }
@@ -95,6 +118,52 @@ impl Shared {
         }
         self.session.close();
         self.install_push();
+    }
+
+    /// A Files view is built: its number. Its wake-up replaces the
+    /// previous one's.
+    pub(crate) fn attach_files(&self, wake: Wake) -> u64 {
+        let id = self.files_built.fetch_add(1, Ordering::SeqCst) + 1;
+        *lock(&self.files_wake) = Some((id, wake));
+        id
+    }
+
+    /// The Files view `id` ends: its wake-up goes unless a newer view
+    /// installed its own.
+    pub(crate) fn detach_files(&self, id: u64) {
+        let mut slot = lock(&self.files_wake);
+        if slot.as_ref().is_some_and(|(held, _)| *held == id) {
+            *slot = None;
+        }
+    }
+
+    /// The project's directory table, file list or active worktree changed
+    /// (a `ProjectEvent`, any thread): the Files tree reads the snapshot
+    /// again.
+    pub(crate) fn files_changed(&self) {
+        let wake = lock(&self.files_wake)
+            .as_ref()
+            .map(|(_, wake)| wake.clone());
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    /// What the last Files view kept, for a view of `project`.
+    pub(crate) fn take_files_memory(&self, project: Option<&ProjectKey>) -> FilesMemory {
+        let kept = std::mem::take(&mut *lock(&self.files_memory));
+        if kept.project.as_ref() == project {
+            kept
+        } else {
+            FilesMemory {
+                project: project.cloned(),
+                ..FilesMemory::default()
+            }
+        }
+    }
+
+    pub(crate) fn keep_files_memory(&self, memory: FilesMemory) {
+        *lock(&self.files_memory) = memory;
     }
 
     pub(crate) fn dispatch(&self, command: WorkspaceCommand) {

@@ -224,6 +224,8 @@ fn view_registers_the_screen_and_its_keys(cx: &mut TestAppContext) {
     assert_eq!(
         rig.contributions.kinds(),
         vec![
+            "sidebar-panel:files".to_owned(),
+            "sidebar-entry:files".to_owned(),
             "screen:reader".to_owned(),
             "key-bindings:file-reader".to_owned()
         ]
@@ -231,12 +233,32 @@ fn view_registers_the_screen_and_its_keys(cx: &mut TestAppContext) {
     let keys: Vec<String> = rig.contributions.keys().into_iter().map(|k| k.0).collect();
     assert_eq!(
         keys,
-        ["cmd-f", "cmd-g", "cmd-shift-g", "cmd-[", "cmd-]", "escape"]
+        [
+            "cmd-f",
+            "cmd-g",
+            "cmd-shift-g",
+            "cmd-[",
+            "cmd-]",
+            "escape",
+            "down",
+            "up",
+            "right",
+            "left",
+            "enter"
+        ]
     );
     assert_eq!(key_bindings().len(), keys.len());
-    // Esc is the only key that leaves a text box alone.
-    let escape = rig.contributions.keys().pop().unwrap();
+    // Esc is the only key that leaves a text box alone, and the reader's
+    // only: the Files tree has none (`workspace`'s Esc closes the panel).
+    let all = rig.contributions.keys();
+    let escape = all.iter().find(|k| k.0 == "escape").unwrap();
     assert_eq!(escape.2.as_deref(), Some("(Content > reader) && !Input"));
+    // The tree's keys work only inside the sidebar's region.
+    assert!(
+        all[6..]
+            .iter()
+            .all(|k| k.2.as_deref() == Some("Sidebar > files"))
+    );
 }
 
 #[gpui::test]
