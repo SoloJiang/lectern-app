@@ -1913,7 +1913,8 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share(
         "usage/backfill_batch",
-        &[median(Limit::TimeBelow(ms(150)))],
+        // ADR 0061: 150 ms until #386 removes SQLite 3.54's re-prepares.
+        &[median(Limit::TimeBelow(ms(270)))],
         USAGE,
         ACTIVE,
         Time,
