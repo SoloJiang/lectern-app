@@ -948,7 +948,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - 手动检查，用自动化构建（`just automation`，[ADR 0056](../adr/0056.md)），不是发布构建：它是 debug 构建，加了 gpui-mcp 的桥接。临时 `HOME` 是 `target/automation/home`；仓库和会话是合成的，由 `cargo run -p lectern-bench --example review_fixture` 生成（与 `app/open_diff` 的夹具相同：200 个文件，一个 Claude Code 会话在 17 轮里用 `Write` 改了 50 个文件）。用一个 stdio 的 MCP 客户端调用 `just automation-server` 的 `get_ui_tree`、`click_element`、`keyboard`、`scroll`、`screenshot`、`get_logs`、`get_frame_report`；View 菜单经 System Events 点击。结果：
   - 项目主页 ↵ 进入审阅：标题区（17 轮、50 个文件、+500 −500）、简报（「Nothing stands out」，没有 reflog 的提示）、轮次、文件卡片和 diff 行都显示。
   - V 勾选当前文件，Files 页显示「1 of 50 reviewed」，列表滚到下一个文件；⌥⌘I 打开检查器的 Files 页；滚动 5000 px 后显示后面的文件。
-  - ⇧⌘O 和 Open File 置灰，没有反应：`review-view-handoff` 没有装配（「与设计的差异」第 3 步）。简报的用量行和轮次 token 不在这里：它们由 `review-view-usage` 提供，已装配。
+  - ⇧⌘O 和 Open File 置灰，没有反应：`review-view-handoff` 没有装配（「与设计的差异」第 3 步；file_reader 第 7 步已装配它，见 [app 设计「code_intel 与 file_reader 的装配」](app.md#code_intel-与-file_reader-的装配)）。简报的用量行和轮次 token 不在这里：它们由 `review-view-usage` 提供，已装配。
   - View 菜单有「Unified / Side by Side」和「Refresh」；点「Unified / Side by Side」后 diff 变成双栏，内容区变宽。
   - ⌘[ 回到项目主页，卡片的进度从 0/50 变成 1/50。
   - 日志：`diff shown` 的 `took_us` 是 33 754 和 49 115（两次启动，debug 构建）；日志里没有 WARN 或 ERROR，也没有夹具的路径、标题和文件名。
@@ -1119,7 +1119,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - **`app/open_diff` 的夹具比「性能」写的小。** 不是 `review/open_session_50` 的仓库（2000 个提交、300 条 reflog），而是 200 个文件的合成仓库和一个 Claude Code 会话（17 轮，每轮用 `Write` 改 3 个约 300 行的文件，最后一轮 2 个，共 50 个）。会话日志写在临时 `HOME` 的 `.claude/projects/` 下，`app` 像对待真实会话一样发现、归位和归因，所以测量包含 `agents` 的读取。夹具在 `crates/bench/benches/fixtures/review_session.rs`。
 - **`Driver::open(Diff)` 的会话键是 `<来源>:<id>`**（如 `session-claude-code:<uuid>`），`app` 把它变成 `Push(Route { screen: REVIEW, target: Review(Session(key)) })`，与项目主页的会话行相同。
 - **手动检查用自动化构建，不用发布构建。** 自动化构建（ADR 0056）是 debug 构建加 gpui-mcp 的桥接，能按元素点击和截图；发布构建没有这个入口。功能与发布构建相同，数字（`took_us`）比发布构建大。
-- **`app` 只装 `review-view`。** 前置条件 C 要求两个插件都装；没有插件提供 `dyn Reader`、`dyn CodeIntel`（`file_reader` 还没有插件，`code_intel` 没有装配），`review-view-handoff` 装进去图校验报 `MissingProvider`，所以 `app` 丢掉它。屏幕照常，交接按钮置灰，与它单独停用时相同（`handoff_plugin_deactivates_on_its_own`）。用量行不在这里受影响：它们拆到了 `review-view-usage`，`app` 装配了它（「用量插件」）。
+- **`app` 只装 `review-view`（后来三个都装了：file_reader 第 7 步装配 `file-reader` 与 `code-intel`，`review-view-handoff` 随之装进来，app 设计「code_intel 与 file_reader 的装配」）。** 前置条件 C 要求两个插件都装；没有插件提供 `dyn Reader`、`dyn CodeIntel`（`file_reader` 还没有插件，`code_intel` 没有装配），`review-view-handoff` 装进去图校验报 `MissingProvider`，所以 `app` 丢掉它。屏幕照常，交接按钮置灰，与它单独停用时相同（`handoff_plugin_deactivates_on_its_own`）。用量行不在这里受影响：它们拆到了 `review-view-usage`，`app` 装配了它（「用量插件」）。
 
 ### 第 2 步
 

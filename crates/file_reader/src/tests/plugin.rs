@@ -25,6 +25,7 @@ struct Fixture {
     sessions: Arc<Mutex<Weak<Session>>>,
     projects: Arc<FakeProjects>,
     code_intel: Arc<FakeCodeIntel>,
+    contributions: Arc<FakeContributions>,
 }
 
 impl Fixture {
@@ -34,16 +35,18 @@ impl Fixture {
         let sessions = plugin.sessions();
         let projects = Arc::new(FakeProjects::default());
         let code_intel = Arc::new(FakeCodeIntel::default());
+        let contributions = Arc::new(FakeContributions::default());
         let kernel = TestKernel::new(plugin)
             .mock::<dyn Projects>(projects.clone())
             .mock::<dyn CodeIntel>(code_intel.clone())
-            .mock::<dyn Contributions>(Arc::new(FakeContributions::default()));
+            .mock::<dyn Contributions>(contributions.clone());
         Fixture {
             res,
             kernel,
             sessions,
             projects,
             code_intel,
+            contributions,
         }
     }
 
@@ -107,8 +110,10 @@ fn plugin_deactivation_ends_the_session() {
     drop(session);
     f.kernel.deactivate();
     // The focus was cleared while `code_intel` was still there, and the
-    // session is gone with the activation.
+    // session is gone with the activation (once `workspace` has dropped the
+    // screen it was given).
     assert_eq!(f.code_intel.current().last(), Some(&Focus::Current(None)));
+    f.contributions.forget();
     assert!(f.sessions.lock().unwrap().upgrade().is_none());
 }
 

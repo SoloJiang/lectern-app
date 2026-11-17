@@ -9,7 +9,9 @@ use lectern_services::project::{BlobId, FileKind, FileList, ProjectKey, Worktree
 use lectern_services::reader::{Anchor, ReadTarget};
 
 use super::rig::{folder_snapshot, git_snapshot};
-use crate::focus::{index_oid, root_of, text_ref};
+use lectern_syntax::Canonical;
+
+use crate::focus::{Decision, decide, index_oid, root_of};
 
 fn oid(n: u8) -> BlobId {
     BlobId::Sha1([n; 20])
@@ -98,35 +100,107 @@ fn focus_index_oid_finds_paths_by_binary_search() {
     assert_eq!(index_oid(&FileList::builder().build(), "a"), None);
 }
 
+/// The text that is current, if the decision is a focus.
+fn focused(decision: Decision) -> Option<lectern_services::code_intel::TextRef> {
+    match decision {
+        Decision::Focus(text) => Some(text),
+        _ => None,
+    }
+}
+
 #[test]
 fn focus_none_until_the_oid_is_known() {
     let (key, wt, root) = git();
     let snapshot = git_snapshot(&key, &wt, &root, &[("a.rs", oid(1))]);
     assert_eq!(
-        text_ref(&target(&key, Some(&wt), "a.rs"), None, Some(&snapshot)),
-        None
+        decide(
+            &target(&key, Some(&wt), "a.rs"),
+            None,
+            Canonical::NotAsked,
+            Some(&snapshot)
+        ),
+        Decision::None
     );
 }
 
 #[test]
-fn focus_a_workspace_file_needs_the_index_oid_to_equal_the_raw_one() {
+fn focus_a_workspace_file_the_index_names_uses_the_raw_oid() {
     let (key, wt, root) = git();
     let snapshot = git_snapshot(&key, &wt, &root, &[("a.rs", oid(1)), ("b.rs", oid(2))]);
     let a = target(&key, Some(&wt), "a.rs");
-    let text = text_ref(&a, Some(oid(1)), Some(&snapshot)).expect("unchanged");
+    let text = focused(decide(
+        &a,
+        Some(oid(1)),
+        Canonical::NotAsked,
+        Some(&snapshot),
+    ))
+    .expect("unchanged");
     assert_eq!(text.oid, oid(1));
     assert_eq!(&*text.path, "a.rs");
     assert_eq!(text.worktree, Some(wt.clone()));
     assert_eq!(text.origin, TextOrigin::Worktree);
-    // Modified (or converted by a filter): the canonical OID needs git.
-    assert_eq!(text_ref(&a, Some(oid(9)), Some(&snapshot)), None);
-    // Not in the index, or no snapshot, or not the active worktree.
+}
+
+#[test]
+fn focus_a_workspace_file_the_index_does_not_name_needs_the_canonical_oid() {
+    let (key, wt, root) = git();
+    let snapshot = git_snapshot(&key, &wt, &root, &[("a.rs", oid(1))]);
+    let a = target(&key, Some(&wt), "a.rs");
+    // Modified (or converted by a git attribute): the canonical OID is
+    // asked for, then waited for, then used.
+    assert_eq!(
+        decide(&a, Some(oid(9)), Canonical::NotAsked, Some(&snapshot)),
+        Decision::AskCanonical
+    );
+    assert_eq!(
+        decide(&a, Some(oid(9)), Canonical::Pending, Some(&snapshot)),
+        Decision::None
+    );
+    let known = focused(decide(
+        &a,
+        Some(oid(9)),
+        Canonical::Known(oid(4)),
+        Some(&snapshot),
+    ))
+    .expect("canonical");
+    assert_eq!(known.oid, oid(4), "the canonical OID, not the raw one");
+    // An external filter, or a file read in pages: no focus.
+    assert_eq!(
+        decide(&a, Some(oid(9)), Canonical::Unavailable, Some(&snapshot)),
+        Decision::None
+    );
+    // Not in the index (a new file), or no snapshot, or not the active
+    // worktree: the same, with the raw OID not trusted.
     let c = target(&key, Some(&wt), "c.rs");
-    assert_eq!(text_ref(&c, Some(oid(1)), Some(&snapshot)), None);
-    assert_eq!(text_ref(&a, Some(oid(1)), None), None);
+    assert_eq!(
+        decide(&c, Some(oid(1)), Canonical::NotAsked, Some(&snapshot)),
+        Decision::AskCanonical
+    );
+    assert_eq!(
+        decide(&a, Some(oid(1)), Canonical::NotAsked, None),
+        Decision::AskCanonical
+    );
     let other = WorktreeKey(Arc::from(Path::new("/other/.git")));
     let elsewhere = target(&key, Some(&other), "a.rs");
-    assert_eq!(text_ref(&elsewhere, Some(oid(1)), Some(&snapshot)), None);
+    assert_eq!(
+        decide(
+            &elsewhere,
+            Some(oid(1)),
+            Canonical::NotAsked,
+            Some(&snapshot)
+        ),
+        Decision::AskCanonical
+    );
+    assert_eq!(
+        focused(decide(
+            &elsewhere,
+            Some(oid(1)),
+            Canonical::Known(oid(1)),
+            Some(&snapshot)
+        ))
+        .map(|t| t.oid),
+        Some(oid(1))
+    );
 }
 
 #[test]
@@ -134,8 +208,13 @@ fn focus_a_folder_file_uses_the_raw_oid() {
     let root: Arc<Path> = Arc::from(Path::new("/folder"));
     let key = ProjectKey::Folder { root: root.clone() };
     let snapshot = folder_snapshot(&key, &root);
-    let text =
-        text_ref(&target(&key, None, "a.rs"), Some(oid(7)), Some(&snapshot)).expect("folder file");
+    let text = focused(decide(
+        &target(&key, None, "a.rs"),
+        Some(oid(7)),
+        Canonical::NotAsked,
+        Some(&snapshot),
+    ))
+    .expect("folder file");
     assert_eq!(text.oid, oid(7));
     assert_eq!(text.worktree, None);
 }
@@ -145,11 +224,20 @@ fn focus_an_object_uses_expect_and_a_dependency_the_raw_oid() {
     let (key, wt, _) = git();
     let mut object = target(&key, Some(&wt), "old.rs");
     object.origin = TextOrigin::Object;
-    assert_eq!(text_ref(&object, Some(oid(3)), None), None, "no expect");
+    let none = Canonical::NotAsked;
+    assert_eq!(
+        decide(&object, Some(oid(3)), none, None),
+        Decision::None,
+        "no expect"
+    );
     object.expect = Some(oid(3));
-    let text = text_ref(&object, Some(oid(3)), None).expect("object");
+    let text = focused(decide(&object, Some(oid(3)), none, None)).expect("object");
     assert_eq!((text.oid, text.origin), (oid(3), TextOrigin::Object));
-    assert_eq!(text_ref(&object, None, None), None, "OID not known");
+    assert_eq!(
+        decide(&object, None, none, None),
+        Decision::None,
+        "OID not known"
+    );
 
     let mut dep = target(&key, Some(&wt), "node_modules/x/index.js");
     dep.origin = TextOrigin::Dependency(DepOrigin {
@@ -160,6 +248,6 @@ fn focus_an_object_uses_expect_and_a_dependency_the_raw_oid() {
             dir: "node_modules/x".into(),
         },
     });
-    let text = text_ref(&dep, Some(oid(5)), None).expect("dependency");
+    let text = focused(decide(&dep, Some(oid(5)), none, None)).expect("dependency");
     assert_eq!(text.oid, oid(5));
 }

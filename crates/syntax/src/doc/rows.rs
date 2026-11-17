@@ -440,13 +440,16 @@ impl DocSnapshot {
             }
         };
         let tokens = self.tokens(pos.line_start, shown.clone(), map.as_deref());
+        let matches = self.matches(shown.clone());
+        let found = found_in(matches, &shown, map.as_deref());
         Some(Row::Text {
             pos,
             line,
             bytes,
             text,
             tokens: Cow::Owned(tokens),
-            matches: self.matches(shown),
+            matches,
+            found,
         })
     }
 
@@ -549,4 +552,28 @@ fn fold(
         pos += n as u64;
     }
     Some((begin.unwrap_or(size)..size, Some(None)))
+}
+
+/// `matches` (byte ranges of the file) as byte ranges of the row's shown
+/// text, clipped to `shown`, through `display`'s map.
+fn found_in(
+    matches: &[Range<u64>],
+    shown: &Range<u64>,
+    map: Option<&[(u32, u32)]>,
+) -> Vec<Range<u32>> {
+    matches
+        .iter()
+        .filter_map(|m| {
+            let (a, b) = (m.start.max(shown.start), m.end.min(shown.end));
+            if a >= b {
+                return None;
+            }
+            let (mut a, mut b) = ((a - shown.start) as u32, (b - shown.start) as u32);
+            if let Some(map) = map {
+                a = cells::remap(map, a);
+                b = cells::remap(map, b);
+            }
+            (a < b).then_some(a..b)
+        })
+        .collect()
 }

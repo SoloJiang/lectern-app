@@ -23,11 +23,12 @@ use lectern_services::project::{
 };
 use lectern_services::reader::{Anchor, ReadTarget, ReaderEvent};
 use lectern_services::workspace::{
-    CommandHandler, Contribution, Contributions, LeaveGuard, Milestone, Registration, Route,
-    SidebarEntry, WindowId, WorkspaceCommand,
+    CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone,
+    Registration, Route, SidebarEntry, WindowId, WorkspaceCommand,
 };
 use lectern_syntax::testing::{TestHost, host};
 use lectern_syntax::{DocSnapshot, Engine, EngineDeps, Languages};
+use lectern_ui::contrib::{KeyBindings, Screen};
 
 use crate::{Host, Session};
 
@@ -94,11 +95,17 @@ pub(crate) type FocusCall = (ProjectKey, Option<WorktreeKey>, Focus);
 #[derive(Default)]
 pub(crate) struct FakeCodeIntel {
     focus: Mutex<Vec<FocusCall>>,
+    prefetched: Mutex<Vec<Query>>,
 }
 
 impl FakeCodeIntel {
     pub(crate) fn calls(&self) -> Vec<FocusCall> {
         lock(&self.focus).clone()
+    }
+
+    /// The queries `prefetch` was given, in order.
+    pub(crate) fn prefetched(&self) -> Vec<Query> {
+        lock(&self.prefetched).clone()
     }
 
     /// The `Current` focus calls, in order.
@@ -122,7 +129,9 @@ impl CodeIntel for FakeCodeIntel {
 
     fn close(&self, _: QueryId) {}
 
-    fn prefetch(&self, _: Query) {}
+    fn prefetch(&self, query: Query) {
+        lock(&self.prefetched).push(query);
+    }
 
     fn names(&self, _: &ProjectKey) -> Names {
         Names::Unavailable
@@ -141,10 +150,17 @@ impl CodeIntel for FakeCodeIntel {
     }
 }
 
-/// `dyn Contributions`: the plugin requires it, and step 6 uses none of it.
+/// `dyn Contributions`: what was registered (the screen and the key
+/// bindings are kept), the commands dispatched and the milestones reported.
 #[derive(Default)]
 pub(crate) struct FakeContributions {
     pub(crate) registered: AtomicUsize,
+    kinds: Mutex<Vec<String>>,
+    screen: Mutex<Option<Screen>>,
+    bindings: Mutex<Option<KeyBindings>>,
+    keys: Mutex<Vec<(String, String, Option<String>)>>,
+    dispatched: Mutex<Vec<WorkspaceCommand>>,
+    milestones: Mutex<Vec<Milestone>>,
 }
 
 impl FakeContributions {
@@ -152,10 +168,92 @@ impl FakeContributions {
         self.registered.fetch_add(1, Ordering::SeqCst);
         Registration::new(|_| {}, || {})
     }
+
+    /// What `workspace` does when the contributions are unregistered: the
+    /// payloads (and what they hold) are dropped.
+    pub(crate) fn forget(&self) {
+        *lock(&self.screen) = None;
+        *lock(&self.bindings) = None;
+    }
+
+    /// `kind:id` of each registered contribution.
+    pub(crate) fn kinds(&self) -> Vec<String> {
+        lock(&self.kinds).clone()
+    }
+
+    pub(crate) fn screen(&self) -> Screen {
+        lock(&self.screen).clone().expect("a screen was registered")
+    }
+
+    /// The registered bindings: keystrokes, action name, context.
+    pub(crate) fn keys(&self) -> Vec<(String, String, Option<String>)> {
+        lock(&self.keys).clone()
+    }
+
+    pub(crate) fn dispatched(&self) -> Vec<WorkspaceCommand> {
+        lock(&self.dispatched).clone()
+    }
+
+    pub(crate) fn milestones(&self) -> Vec<Milestone> {
+        lock(&self.milestones).clone()
+    }
+
+    /// Binds the registered keys in the app, as `workspace` does.
+    pub(crate) fn bind(&self, cx: &mut gpui::App) {
+        let Some(bindings) = lock(&self.bindings).take() else {
+            return;
+        };
+        let mut loaded = Vec::new();
+        for (keystrokes, action, context) in bindings.0 {
+            let predicate = context.map(|context| {
+                std::rc::Rc::new(
+                    gpui::KeyBindingContextPredicate::parse(context).expect("a valid predicate"),
+                )
+            });
+            loaded.push(
+                gpui::KeyBinding::load(
+                    keystrokes,
+                    action,
+                    predicate,
+                    false,
+                    None,
+                    cx.keyboard_mapper().as_ref(),
+                )
+                .expect("a valid binding"),
+            );
+        }
+        cx.bind_keys(loaded);
+    }
 }
 
 impl Contributions for FakeContributions {
-    fn register(&self, _: Contribution, _: Option<ActivationToken>) -> Registration {
+    fn register(&self, contribution: Contribution, _: Option<ActivationToken>) -> Registration {
+        let kind = match contribution.kind {
+            ContributionKind::Screen(_) => "screen",
+            ContributionKind::KeyBindings => "key-bindings",
+            _ => "other",
+        };
+        lock(&self.kinds).push(format!("{kind}:{}", contribution.id));
+        let payload: Box<dyn std::any::Any + Send> = contribution.payload.0;
+        let payload = match payload.downcast::<Screen>() {
+            Ok(screen) => {
+                *lock(&self.screen) = Some(*screen);
+                return self.registration();
+            }
+            Err(payload) => payload,
+        };
+        if let Ok(bindings) = payload.downcast::<KeyBindings>() {
+            let mut keys = lock(&self.keys);
+            for (keystrokes, action, context) in &bindings.0 {
+                keys.push((
+                    (*keystrokes).to_owned(),
+                    action.name().to_owned(),
+                    context.map(str::to_owned),
+                ));
+            }
+            drop(keys);
+            *lock(&self.bindings) = Some(*bindings);
+        }
         self.registration()
     }
 
@@ -176,7 +274,9 @@ impl Contributions for FakeContributions {
         self.registration()
     }
 
-    fn dispatch(&self, _: WorkspaceCommand) {}
+    fn dispatch(&self, command: WorkspaceCommand) {
+        lock(&self.dispatched).push(command);
+    }
 
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         Arc::from(Vec::new())
@@ -186,7 +286,9 @@ impl Contributions for FakeContributions {
         None
     }
 
-    fn report_milestone(&self, _: Milestone) {}
+    fn report_milestone(&self, milestone: Milestone) {
+        lock(&self.milestones).push(milestone);
+    }
 }
 
 /// The session's `Host` over the fakes: events are kept.

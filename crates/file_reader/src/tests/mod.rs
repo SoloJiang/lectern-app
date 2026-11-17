@@ -8,3 +8,4 @@ mod logs;
 mod plugin;
 mod rig;
 mod session;
+mod view;

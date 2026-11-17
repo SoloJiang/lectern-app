@@ -14,12 +14,24 @@ layer = "view"
 plugin = true
 
 [dependencies]
+# The reading view: a self-drawn list, the find bar, actions
+# (docs/design/file_reader.md「依赖」).
+gpui.workspace = true
+# `Enter` (the find field's ↵ is taken before the text box's own handler).
+# Without the `tree-sitter` feature: the highlight goes through `syntax`
+# (ADR 0034).
+gpui-component.workspace = true
+# The wake-up channel from any thread to the view's foreground task:
+# `channel::mpsc::unbounded`.
+futures.workspace = true
 # `Cache`, handed to the engine (`syntax.lines`).
 lectern-cache = { path = "../cache" }
 # `Executor`, handed to the engine; the plugin submits no task of its own.
 lectern-executor = { path = "../executor" }
 # `Watcher`, handed to the engine.
 lectern-fs-watch = { path = "../fs_watch" }
+# `keys::file_reader::*`, `Args`, `Strings`.
+lectern-i18n = { path = "../i18n" }
 # `Plugin`, `Active`, `Context`, `PluginHandle`, `ServiceRef`.
 lectern-kernel = { path = "../kernel" }
 # Runtime logging (docs/design/file_reader.md「日志与诊断」, ADR 0046).
@@ -30,14 +42,19 @@ lectern-services = { path = "../services" }
 # `Engine`, `DocHandle`, `DocSnapshot`: the documents are `syntax`'s; this
 # crate only reads their snapshots (architecture rule 4).
 lectern-syntax = { path = "../syntax" }
+# Colours, code colouring, mono metrics, controls, motion and the probe's
+# semantic nodes (ADR 0015).
+lectern-ui = { path = "../ui" }
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 lectern-cache = { path = "../cache", features = ["test-support"] }
 lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 # `testing::capture` for the canary test.
 lectern-logging = { path = "../logging", features = ["test-support"] }
+lectern-ui = { path = "../ui", features = ["test-support"] }
 # `testing::host`, `testing::ts`: a plugin handle for the engine and
 # synthetic sources.
 lectern-syntax = { path = "../syntax", features = ["test-support"] }

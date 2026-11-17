@@ -141,21 +141,26 @@ fn startup_writes_a_header_and_an_end_record() {
     assert_eq!(records[ready]["accent"], "system", "{records:#?}");
     // project, two session sources, review, usage, workspace, welcome,
     // welcome-discovery, welcome-review, project-home, project-home-usage,
-    // project-home-waiting,
-    // review-view, review-view-usage, worktrees, worktrees-usage, terminal,
-    // conversations, conversation, conversation-live, conversation-terminal.
-    assert_eq!(records[assembled]["plugins"], 21);
+    // project-home-waiting, code-intel, file-reader, review-view,
+    // review-view-handoff, review-view-usage, worktrees, worktrees-usage,
+    // terminal, conversations, conversation, conversation-live,
+    // conversation-terminal.
+    assert_eq!(records[assembled]["plugins"], 24);
     // Nothing of the review screen runs before the first frame
     // (docs/design/review_view.md「验收」第 3 步), nor of the worktrees
     // overview (docs/design/worktrees.md「性能」), nor of the terminals
     // (docs/design/terminal.md「性能」), nor of the conversation
-    // (docs/design/conversation.md「性能」).
+    // (docs/design/conversation.md「性能」), nor of the code navigation and
+    // the reader (docs/design/code_intel.md「性能」, file_reader.md「性能」).
     assert!(
         records[..drawn].iter().all(|r| {
             r["tg"] != "review_view"
                 && r["tg"] != "worktrees"
                 && r["tg"] != "terminal"
                 && r["tg"] != "conversation"
+                && r["tg"] != "code_intel"
+                && r["tg"] != "file_reader"
+                && r["tg"] != "syntax"
         }),
         "{records:#?}"
     );

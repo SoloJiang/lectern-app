@@ -53,9 +53,16 @@ lectern-project = { path = "../project" }
 # `UsageSlot` (docs/design/project_home.md「对其他 crate 的要求」D).
 lectern-project-home = { path = "../project_home" }
 lectern-review = { path = "../review" }
-# The "review-view" plugin (docs/design/review_view.md「对其他 crate 的要求」C).
-# Its "review-view-handoff" is not assembled: no plugin provides `dyn Reader`.
+# The "review-view", "review-view-handoff" and "review-view-usage" plugins
+# (docs/design/review_view.md「对其他 crate 的要求」C).
 lectern-review-view = { path = "../review_view" }
+# The "code-intel" plugin, `CodeIntelDeps` and `NoGrammarPacks`
+# (docs/design/code_intel.md「本 crate 的公开项」, docs/design/app.md「code_intel
+# 与 file_reader 的装配」).
+lectern-code-intel = { path = "../code_intel" }
+# The "file-reader" plugin and `FileReaderDeps`
+# (docs/design/file_reader.md「本 crate 的公开项」).
+lectern-file-reader = { path = "../file_reader" }
 # The "worktrees" and "worktrees-usage" plugins and their shared `UsageLink`
 # (docs/design/worktrees.md「对其他 crate 的要求」D).
 lectern-worktrees = { path = "../worktrees" }

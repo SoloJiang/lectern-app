@@ -31,9 +31,9 @@ pub mod window;
 
 pub use change::TextEdit;
 pub use doc::{
-    DocHandle, DocSnapshot, DocState, EditSession, EditState, Editable, Engine, EngineDeps,
-    Highlighting, LineCount, LineNo, MergeOutcome, NotEditable, ReadError, Row, RowPos, SaveResult,
-    Tier, Viewport,
+    Canonical, DocHandle, DocSnapshot, DocState, EditSession, EditState, Editable, Engine,
+    EngineDeps, Highlighting, LineCount, LineNo, MergeOutcome, NotEditable, ReadError, Row, RowPos,
+    SaveResult, Tier, Viewport,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use doc::{StepEnd, Trace};

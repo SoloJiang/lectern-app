@@ -1,6 +1,7 @@
 //! The crate's tests, one file per prefix (docs/design/file_reader.md「测试」).
 
 mod batch_order;
+mod canonical;
 mod consistency;
 mod deadline;
 mod degrade;

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lectern_fs_watch::WorktreeSource;
-use lectern_git::{GitError, HashKind, Oid, Repo, WorktreeId};
+use lectern_git::{GitError, HashKind, Oid, Repo, RepoPath, Worktree, WorktreeId};
 use lectern_services::project::BlobId;
 
 use crate::util::lock;
@@ -29,6 +29,17 @@ pub(crate) trait GitAccess: Send + Sync {
     /// fs_watch's filter source for the worktree. Blocking (opens the
     /// worktree).
     fn watch_source(&self, tree: &Tree) -> Result<Arc<dyn WorktreeSource>, GitError>;
+    /// The OID of the canonical content of `raw`, the bytes of the
+    /// worktree's file at `path` (`Worktree::canonical_oid`: the
+    /// conversions git applies to the index, no external filter). None when
+    /// a filter applies or git cannot name the path. Blocking (reads the
+    /// index and the `.gitattributes` of the path's directories).
+    fn canonical_oid(
+        &self,
+        tree: &Tree,
+        path: &str,
+        raw: &[u8],
+    ) -> Result<Option<BlobId>, GitError>;
     /// Drops what is kept for the repository (the project closed).
     fn forget(&self, common_dir: &Path);
 }
@@ -70,6 +81,22 @@ impl LecternGit {
         lock(&self.repos).insert(common_dir.to_path_buf(), repo.clone());
         Ok(repo)
     }
+
+    /// The worktree `tree` names, in its repository.
+    fn worktree(&self, tree: &Tree) -> Result<Worktree, GitError> {
+        let repo = self.repo(&tree.common_dir)?;
+        let id = if *tree.git_dir == *repo.location().common_dir {
+            WorktreeId::Main
+        } else {
+            let name = tree
+                .git_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| GitError::Corrupt(format!("{}", tree.git_dir.display())))?;
+            WorktreeId::Linked(name.into())
+        };
+        repo.worktree(&id)
+    }
 }
 
 impl GitAccess for LecternGit {
@@ -82,18 +109,23 @@ impl GitAccess for LecternGit {
     }
 
     fn watch_source(&self, tree: &Tree) -> Result<Arc<dyn WorktreeSource>, GitError> {
-        let repo = self.repo(&tree.common_dir)?;
-        let id = if *tree.git_dir == *repo.location().common_dir {
-            WorktreeId::Main
-        } else {
-            let name = tree
-                .git_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| GitError::Corrupt(format!("{}", tree.git_dir.display())))?;
-            WorktreeId::Linked(name.into())
+        Ok(self.worktree(tree)?.watch_source())
+    }
+
+    fn canonical_oid(
+        &self,
+        tree: &Tree,
+        path: &str,
+        raw: &[u8],
+    ) -> Result<Option<BlobId>, GitError> {
+        let Some(path) = RepoPath::new(path.as_bytes()) else {
+            return Ok(None);
         };
-        Ok(repo.worktree(&id)?.watch_source())
+        Ok(self
+            .worktree(tree)?
+            .canonical_oid(&path, raw)?
+            .as_ref()
+            .map(blob_id))
     }
 
     fn forget(&self, common_dir: &Path) {

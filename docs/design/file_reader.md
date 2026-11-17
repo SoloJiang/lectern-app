@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`，本 PR）已实现；前置条件 E 和第 7、8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`，本 PR）已实现，Files 尚未实现；第 8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -64,7 +64,8 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gpui`、`gpui-component =0.7.0`（不开 `tree-sitter` feature） | 自绘元素、`uniform_list`、`InputState` | ADR 0016、0034 |
+| `gpui`、`gpui-component =0.7.0`（不开 `tree-sitter` feature） | 自绘元素、`uniform_list`（Files）、`InputState`（编辑）、`Enter`（查找栏的 ↵） | ADR 0016、0034 |
+| `futures`（`channel::mpsc`） | 唤醒通道：任何线程的唤醒回调把「有东西在等主线程」交给视图的前台任务 | 工作区已有，与 `review_view` 相同 |
 | `lectern-ui` | 系统色、代码配色、等宽字体度量、按钮、分段控件、动效原语 | ADR 0015 |
 | `lectern-syntax` | 文档快照、区间、编辑会话 | 视图只读快照（架构规则 4） |
 | `lectern-kernel`、`lectern-services` | 插件、`dyn Projects`、`dyn CodeIntel`、`dyn Contributions`，提供 `dyn Reader` | 插件之间只经 `services`（架构规则 7） |
@@ -443,6 +444,9 @@ impl DocHandle {
     pub fn scrolled(&self, top: RowPos);
     pub fn find(&self, query: FindQuery);
     pub fn clear_find(&self);
+    /// 请求规范内容的 OID（只对 git 项目里的工作区文件）：完整内容在内存里（≤ 16 MiB）之后，在 `Background` 任务里经
+    /// `Worktree::canonical_oid` 求出，结果出现在之后的快照的 `canonical` 里。同一份内容只求一次；内容变了（OID 不同）答案作废。
+    pub fn canonical_oid(&self);
     /// 进入编辑（只对 `editable == Yes`）。返回编辑会话，见「编辑」；已有会话时返回同一个会话的另一个句柄，
     /// 它的 `initial_text` 是会话当前的缓冲区；刚结束的会话还有保存没写完、文档还没重新读取时为 `Reloading`。
     /// 在调用的线程上把内容复制成缓冲区的文本（去掉 BOM、`\r\n` 换成 `\n`），第一次解析在任务里。
@@ -465,7 +469,14 @@ pub struct DocSnapshot {
     /// 视图滚到的初始位置（打开、重新定位时变化，`generation` 随之加一）。
     pub anchor: RowPos,
     pub find: Option<Arc<FindResults>>,
+    /// 规范内容的 OID（`DocHandle::canonical_oid`）。原始字节的 OID 与 `FileList` 里的不同时（文件改过、被换行转换或属性改过），
+    /// `code_intel` 的焦点要用它。
+    pub canonical: Canonical,
 }
+
+/// `NotAsked`：没有请求过这份内容的，或这不是 git 项目里的工作区文件；`Pending`：任务还没完成；`Known`：求出了；
+/// `Unavailable`：没有（外部过滤器、git 不认这个路径或读不了 index、内容不在内存里：档位 C）。
+pub enum Canonical { NotAsked, Pending, Known(BlobId), Unavailable }
 
 pub enum DocState {
     /// 首屏还没读到：视图按 100 ms 规则显示骨架。
@@ -520,6 +531,8 @@ pub enum Row<'a> {
         tokens: Cow<'a, [Token]>,
         /// 与这一行相交的查找结果（`FindResults::ranges` 的一段，文件里的字节区间），视图换算到行内。
         matches: &'a [Range<u64>],
+        /// 同样的匹配，换成 `text` 里的字节区间（按这一行截取，经显示文本的映射），视图直接画它。
+        found: Vec<Range<u32>>,
     },
     Pending { pos: RowPos },
 }
@@ -911,6 +924,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | `file-reader-find.placeholder` | Find | 查找 |
 | `file-reader-find-count` | { $current } of { $total } | 第 { $current } 处，共 { $total } 处 |
 | `file-reader-find-capped` | { $current } of 10,000+ | 第 { $current } 处，共 10,000+ 处 |
+| `file-reader-loading` | Loading… | 正在载入… |
 | `file-reader-missing` | This file no longer exists. | 这个文件已不存在。 |
 | `file-reader-unreadable` | Lectern can't read this file. | Lectern 无法读取这个文件。 |
 | `file-reader-unsupported` | This item isn't a regular file. | 这一项不是普通文件。 |
@@ -973,7 +987,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 ## 日志与诊断
 
-`syntax` 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `syntax`，字段值的写法集中在 `crates/syntax/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。`file_reader` 的记录（target 为 `file_reader`）：第 6 步的在本节下面，第 7、8 步的随视图和编辑写进本节。
+`syntax` 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `syntax`，字段值的写法集中在 `crates/syntax/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。`file_reader` 的记录（target 为 `file_reader`）：第 6 步的在本节下面；第 7 步的阅读视图没有新增记录（视图只读快照、发命令，没有失败路径要记：请求作废的记录在 `Session` 里，已有）；第 8 步的随编辑写进本节。
 
 - 默认记录：
 
@@ -986,6 +1000,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   | 档位 C 的流式扫描读失败，扫描停下 | error | `the scan of a large file stopped` | `path`、`offset`（这次读的起点）、`size`、`io` |
   | 档位 C 读可见部分的页失败，下次滚动再读 | warn | `cannot read the visible pages` | `path`、`io` |
   | 订阅时取不到过滤器的来源，文档不随改动刷新 | warn | `no watch for the document; it is not refreshed on changes` | `path`、`error`（`GitError` 的种类）、`io` |
+  | 求规范内容的 OID 时 git 出错，`code_intel` 得不到这份文本的焦点 | warn | `no canonical content OID for the document; code intel gets no focus on it` | `path`、`error`（`GitError` 的种类）、`io` |
   | 事件之后的检查打不开根 | warn | `cannot open the root to check a changed document` | `path`、`root`、`io` |
   | 编辑时，事件之后的检查读不出文件（标记 `unavailable`） | warn | `cannot read the edited file after a change on disk` | `path`、`op`、`error`、`io` |
   | 编辑时，合并读不出文件（`merged` 为 None） | error | `cannot read the file to merge` | `path`、`op`、`error`、`io` |
@@ -1140,7 +1155,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate，只有 `app` 和 tool 层依赖它；`rg -n 'tree-sitter' crates/file_reader/Cargo.toml` 没有结果。
    - `plugin/file-reader/activate` < 1 ms、`plugin/file-reader/resident` ≤ 0.5 MB。
 7. **阅读视图与 Files**（前置 B、E）：自绘元素、查找栏、前进后退、Files 面板、Fluent 资源、探针节点。
-   - macOS 上 `just test -p lectern-file-reader` 的 `#[gpui::test]` 通过；`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src` 没有结果（视图不做 IO）。
+   - macOS 上 `just test -p lectern-file-reader` 的 `#[gpui::test]` 通过；`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src --glob '!**/tests*'` 没有结果（视图不做 IO；测试的夹具要在临时目录里写文件，与 `syntax` 的同类检查一样不算）。
    - `app/open_file`（全部场景）、`app/scroll_frames`（64 MiB、压缩成一行）、`app/scroll_frames_indexing`、`app/nav_back`、`app/files_open`、`app/files_expand` 在 macOS CI 上改为生效并在预算内。
 8. **编辑模式**（前置 C、D、E 的离开守卫与退出钩子，第 5 步）：`InputState`、`InputHighlighter` 适配器、离开守卫、提示行与确认对话框。写 `Closes #10`。
    - `#[gpui::test]` 的编辑场景和 `leave_guard_*`（「测试」列出的每一种触发）通过；`rg -n 'features.*tree-sitter' Cargo.toml crates/file_reader/Cargo.toml` 没有 gpui-component 的 `tree-sitter` feature。
@@ -1283,6 +1298,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 没有测的：`plugin/file-reader/activate` < 1 ms 和 `plugin/file-reader/resident` ≤ 0.5 MB 是进程级基准，由启动 `lectern` 的测量构建给出（`plugin/*/activate` 按运行的插件展开），而 `app` 要到第 7 步才装配本插件，所以本步没有改 `budgets.rs`，两项在第 7 步随 `app` 的装配生效。本步只验证了它们的前提：`activate` 不提交任务、不做 IO（`Languages::core()` 建 11 个未编译查询的语言表，不读文件），`started` 不提交任务。
 - 没有在 Linux 上运行。
 
+第 7 步的 7a（阅读视图与 `app` 装配），在 macOS（arm64）上运行，没有打开真实窗口：
+
+- `just check` 通过（格式、架构检查、文档链接、整个工作区的 `cargo clippy --all-targets --all-features -- -D warnings`）。只对 `-p lectern-app` 跑 clippy 时 `lectern-code-intel` 会报 `drop_non_drop`（`phases::imp::Span` 在没有 `test-support` 时不实现 `Drop`）：`app` 现在依赖它，而 `-p` 不带上它的 `--all-features`；工作区级的 `just check` 不受影响，没有改 `code_intel`，用 `-p lectern-app -p lectern-code-intel` 一起跑通过。
+- `just test -p lectern-file-reader`：57 个测试通过（`view_*` 12、`text_*` 4、`session_*` 21、`focus_*` 8、`plugin_*` 5、`history_*` 6、`logs_*` 1）；`just test -p lectern-syntax`：176 个通过（新增 `canonical_*` 6、`find_rows_give_the_matches_in_the_shown_text`，`logs_hold_no_file_contents` 加了规范 OID 出错的记录与金丝雀）；`just test -p lectern-review-view`：196 个通过；`just test -p lectern-i18n`：57 个通过（新文件的键在 en 与 zh-CN 里一致，由编译期校验）；`just test -p lectern-app`：56 个通过（默认跳过打开真实窗口的三个二进制），其中 `every_profile_graph_validates` 的插件数为 24、图校验通过。`python3 scripts/check_architecture.py` 通过；`cargo tree -e features -i gpui-component` 里没有 `tree-sitter`；`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src --glob '!**/tests*'` 没有结果。
+- 视图的测试：只排版视图内的行（5000 行的文件排了不到 120 行，探针里是这些行的字节偏移键）；滚轮移动位置、历史带着滚动位置回来、两端不留像素偏移；⌘F 打开、设字段文字、「1 of 50」、⌘G / ⇧⌘G 及回绕、当前匹配在视图内、Esc 先关查找栏再原样交给 `workspace`（`ProbeEscape`）；⌘[ / ⌘] 与工具栏按钮的可用状态（探针节点）；缺失、不是普通文件的状态；指针停留 150 ms 的预取（前后、取消、不是标识符、同一处不重复）；视图结束时放掉文档、清除焦点并换回插件的推入回调；两种语言的字符串；`FileHighlighted` 里程碑只报一次。
+- 没有验证的：真实窗口里的显示（SF Mono 的度量、行高、滚动手感、查找栏的展开动画、悬停）、`app/*` 的任何基准、`tests/startup.rs` 与 `tests/bench_probe.rs` 的新插件数（24，需要图形会话，CI 运行）。`code_intel`、`file-reader` 装配后的启动开销（`plugin/*/activate` < 1 ms、`plugin/after_first_frame` < 5 ms、`app/open_project`、`app/idle_100k`、`app/idle_monorepo`，索引现在会随项目打开而开始）只能由 macOS CI 判定。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1403,10 +1425,29 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `ProjectEvent` 的监听在 `activate` 里订阅，不在 `started`（设计原来这样写）：`ctx.on` 在 `activate` 里订阅，监听到插件激活完成才开始收事件，`Engine::start` 在 `started` 里，两者的先后不影响结果；与 `code_intel` 相同。「本 crate 的公开项」的注释已改。
 - 离开守卫在第 6 步不登记：还没有编辑，守卫恒为「通过」，登记一个没有作用的守卫没有意义；第 8 步随编辑模式用 `register_leave_guard` 登记。`dyn Contributions` 在清单里（设计如此），但本步不使用；界面注册（`own_staged`）在第 7 步。
 - `Reader::open` 的请求在应用时找不到根（项目已关闭，或没有这个 worktree）时，发 `ReaderEvent::Open { Cancelled }`、什么都不换，记一条 warn：`OpenOutcome` 只有 `Shown` 和 `Cancelled`，设计没有规定这种情况。`Cancelled` 的说明（离开守卫选了取消，或保存时冲突）因此多了一种原因，`services::reader` 的注释没有改，等需要区分时再加一个结果。后退、前进找不到根时返回 false，历史不变。
-- `code_intel` 的焦点只覆盖一部分工作区文件：git 项目里的工作区文件，读到的原始 OID 与 `FileList` 里这个路径的 OID 相同时才设（二分查找，只对活动 worktree 的文件列表）。不相同的（文件已改，或被换行转换、过滤器改过）需要 `Worktree::canonical_oid`，那是 git 的阻塞调用，要在 `Background` 任务里做，而本 crate 不依赖 `git`（设计的依赖表里没有），`syntax` 也还没有提供，所以这些文件第 6 步不设焦点（`code_intel` 退回它自己的层）。这是常见的情形（agent 正在改的文件），要在第 7 步之前补上：由 `syntax::Engine` 在完整读取之后给出规范内容的 OID，或本 crate 加 `git` 依赖和一个 `Background` 任务，两种做法都不改 `Session` 的接口。文件夹项目取原始 OID，对象取 `expect`，依赖取原始 OID，与设计相同。
+- `code_intel` 的焦点在第 6 步只覆盖一部分工作区文件：git 项目里的工作区文件，读到的原始 OID 与 `FileList` 里这个路径的 OID 相同时才设（二分查找，只对活动 worktree 的文件列表）；不相同的（文件已改，或被换行转换、过滤器改过）要 `Worktree::canonical_oid`，那是 git 的阻塞调用，要在 `Background` 任务里做，当时本 crate 不依赖 `git`、`syntax` 也没有提供，所以这些文件没有焦点。这个缺口在第 7 步补上（见「第 7 步（阅读视图）」第 1 条）。文件夹项目取原始 OID，对象取 `expect`，依赖取原始 OID，与设计相同。
 - 焦点按「期望值」对齐：文档被替换时，新文档的 OID 还不知道，先发 `Current(None)`，OID 已知之后再设新的；OID 变化（文件在磁盘上改了、重新载入）或不再满足上一条时同样先清除。设计只写了「关闭时清除」。
 - 历史是前进、后退两个列表，各最多 100 个（设计写的是「最近 100 个阅读位置」），新的打开丢掉前进列表，与浏览器相同。位置取自视图最后一次 `scrolled` 的行（没有滚动过时取快照的 `anchor`），记为 `Anchor::Byte`，行号取自那一行；内容的 OID 记在 `expect` 里，回到那里时文件已改就按行号重新定位（「定位」）。
 - 日志：记录的 target 是 `file_reader`；只有一种默认记录（请求作废），见「日志与诊断」。设计的「依赖」表里 `file_reader` 没有 `lectern-logging`，已加上（kernel 层）。
 - 「验收」第 6 步写的 `prefetch` 调用是指针在标识符上停留 150 ms 之后的 `CodeIntel::prefetch(Definition)`（「数据流与线程」）：它由阅读视图的指针事件触发，第 7 步随视图加入；第 6 步只做 `Reader::prefetch` 的转发和 `set_focus`。
 - 测试用的 `FileReaderPlugin::sessions` 只在 `cfg(test)` 下存在，不是公开项。
 - `plugin/file-reader/activate`、`plugin/file-reader/resident`：见「实际验证」，`app` 装配之后才有数。
+
+第 7 步（阅读视图与 `app` 装配，7a；Files 是 7b）：
+
+- **规范内容的 OID 由 `syntax` 求，补上第 6 步的焦点缺口。** `DocHandle::canonical_oid()` 是一个幂等的命令（「`syntax` 的公开项」已补上）：git 项目里的工作区文件、完整内容在内存里（`Content::Text`，≤ 16 MiB）时，在 `Background` 任务里调 `Worktree::canonical_oid`，结果经 `DocSnapshot::canonical`（`NotAsked`、`Pending`、`Known`、`Unavailable`）出现在之后的快照里；答案记着它是为哪份内容（原始 OID）求的，内容变了自动作废。选 `syntax` 而不是本 crate 依赖 `git`：内容的字节只在 `syntax` 里（`DocSnapshot` 的 `content` 是 crate 私有的），视图不得做 IO 和 git 操作，`GitAccess` 本来就是 `syntax` 碰 git 的唯一入口（`FakeGit` 的替身随之加了 `canonical_oid`）。`Session::sync` 按 `focus::decide` 决定：`FileList` 指名这份原始 OID（活动 worktree、列表就绪）时用原始 OID；否则（改过、不在 index 里、列表还没好、不是活动 worktree）在 `NotAsked` 时请求，`Pending` 时不设焦点，`Known` 时用规范 OID，`Unavailable` 时不设焦点。`Unavailable` 的情形：外部过滤器（`canonical_oid` 返回 None）、git 出错（记一条 warn，字段只有 `path`、`error`、`io`，「日志与诊断」已补上）、档位 C（内容不在内存里，不读 > 16 MiB 的整文件）。`focus::text_ref` 因此换成 `focus::decide`。外部过滤器（如 Git LFS）的文件不设焦点，`code_intel` 退回它自己的层，与设计的「有外部过滤器时跳过」一致。
+- **`Row::Text` 多一个 `found`。** 设计让视图把 `matches`（文件里的字节区间）换算到行内，但换算要经显示文本的映射（控制字符、无效字节的显示比原字节长），映射只在 `syntax` 的 `cells` 里。`rows` 现在同时给出 `found`（相对 `text`、按这一行截取的字节区间），`matches` 保留；视图只用 `found`，再把制表符展开成空格时自己移一次。
+- **`Session` 多两个公开方法**：`find(Option<FindQuery>)`（转给文档的 `find` / `clear_find`）和 `current_text()`（当前焦点的项目和 `TextRef`，指针预取要用）。`Host` 没有变。
+- **阅读屏幕经唤醒回调推入。** 设计写「在 `token.enter()` 的准入内找到本窗口的阅读视图（没有时经 `dyn Contributions` 切到它）」。实现：`Session` 只有一个唤醒槽，没有视图时槽里是插件自己的回调（`started` 装上），请求到达且队列非空时它 `dispatch(Push(READER))`（路由是固定值，`workspace` 对同一路由的重复 `Push` 只处理一次）；屏幕建好后视图的回调换进槽里并接走队列里的请求，视图 drop 时放掉文档、清除焦点、把插件的回调换回来。多个视图（阅读屏幕下面压着别的屏幕时又来了请求）时只有最后建的那个在结束时换回。已知限制：阅读屏幕不在栈顶但还活着时，新的请求交给它，不会把它重新推到最上面。
+- **没有编辑，离开守卫恒通过。** 视图在主线程上取出请求直接 `apply`；守卫随第 8 步的编辑模式登记。`apply` 返回 `Cancelled` 且没有文档可看（项目已关闭）时视图 `dispatch(Pop)`，不留空屏幕。
+- **工具栏。** `ToolbarItems` 只有标题、副标题和右侧的至多 3 个控件，没有左侧的位置：后退、前进是右侧的两个图标按钮（`Button::icon_only`，不是一个分段控件；`ui::Button` 没有悬停提示，`file-reader-back.tooltip` 和 `-forward.tooltip` 的文字是它们的无障碍名字）。后退总可用（到历史起点之后 `dispatch(Pop)`，回到打开阅读视图之前的视图），前进只在前面有位置时可用。`ScreenLayout`：不要侧栏、阅读栏、浮条、`workspace` 自己的返回按钮；检查器也不要（目前贡献的检查器页只有审阅的 Progress，`screen: None` 会让它出现在阅读视图旁）。Edit… 不放：编辑模式是第 8 步，放一个永远置灰的按钮没有用。
+- **查找栏。** 字段用 `ui::TextArea` 的 `lines(1, 1)`，↵、⇧↵ 在栏上先于文本框处理（上一处、下一处），Esc 是文本框的 `on_cancel`；没有「上一处」「下一处」按钮（设计的探针节点表里有 `.next`、`.previous`，但键表里没有对应的文案，加按钮要新增文案），所以探针里只有 `file-reader.find.field` 和 `.count`。匹配的底色是 `ui` 调色板里系统黄（所有匹配）和系统橙（当前匹配）加透明度（`ui` 没有查找色，两个透明度在 `text.rs`），之后应由 `ui` 给一组查找色。找到的第一处是不早于屏幕顶端的那一处，找不到时计数显示「0 / 0」。查找栏关闭时清掉匹配，字段里的文字保留，再打开时重新查找。
+- **Fluent 键。** 只加了用到的：`file-reader-back.tooltip`、`-forward.tooltip`、`-find.placeholder`、`-find-count`、`-find-capped`、`-missing`、`-unreadable`、`-unsupported`、`-symlink`、`-from-history`；设计的表里没有的一条是 `file-reader-loading`（「Loading…」，首屏超过 1 s 的进度状态要一句话，`not-editable-not-loaded` 是另一个意思，不借用）。`back`、`forward`、`find` 是只有属性、没有值的消息。
+- **探针节点。** 视图名是 `file-reader`（`NodeId` 的视图名只允许 `[a-z0-9-]`），不是设计写的 `file_reader`；行节点是 `lines.item[<行首字节>.<显示行>]`（`NodeId` 只能写 `item[…]`，不是 `row[…]`）；文档节点是 `document.item[<worktree 目录名>:<路径>]`（worktree 的键是机器上的绝对路径，不进节点 ID），角色是 `Group`（`Role` 里没有 `Document`），属性有 `state`、`tier`、`highlight`、`lines`（估计时带 `~`）、`mode`（`readonly`）、`find`；工具栏只有 `toolbar.back`、`toolbar.forward`；其余（`edit`、`done`、`save`、`disk.*`、`unsaved.*`）随第 8 步。状态为空的消息是 `message` 节点，加载状态是 `loading`（`phase`：`nothing`、`skeleton`、`progress`）。
+- **依赖文件的副标题**：包名取自路径里最后一个 `node_modules/` 之后（带 scope 的取两段），版本只在 pnpm 的虚拟仓库路径（`.pnpm/<名>@<版本>/`）里有；没有版本时只写包名。对象库的内容在路径之后写 `file-reader-from-history`，来源是 `expect` 的前 7 位十六进制。
+- **指针预取按设计的 150 ms 实现，有保守的条件。** 指针停在标识符字符上 150 ms，且这一行的行号是精确的、是行的第一个显示行、从行首到指针处都是可打印 ASCII（格子数就是字节偏移，制表符、非 ASCII 字符、BOM 都会让它不等）、这一行的字节数与显示文本最多差一个 `\r`，才发 `CodeIntel::prefetch(Definition { at, position })`，`at` 是 `Session::current_text()`。不满足的位置不预取，也不退而求其次估算。滚动、换文档、指针离开都取消。
+- **自绘列表：只有滚轮和触控板，没有键盘滚动、滚动条拖动和复制。** 设计的 Action 表没有键盘滚动，「范围」里有复制，滚动条拖动（`at_fraction`）在「测试」里；它们都要另外的交互设计（选区模型、滚动条的样式），这一步没有做。滚动位置是 `RowPos` 加像素偏移，滚到末尾时最后几行填满视口，两端都不留像素偏移；横向按 `widest_cells` 限制。制表符在视图里按字符数展开到 4 的倍数（宽字符按一格，`syntax` 按两格，所以宽字符之后的制表位可能差一格）。
+- **里程碑。** 视图在文档的首屏画出之后（状态 `Ready`、高亮不在 `Pending`）的下一帧回调里报告 `Milestone::FileHighlighted`，每个文档一次。
+- **`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src` 的检查排除测试。** 第 6 步的测试夹具 `tests/rig.rs` 在临时目录里写文件（`std::fs`），原来的命令就有两处命中；「验收」第 7 步的命令按 `syntax` 同类检查的写法加了 `--glob '!**/tests*'`。非测试代码没有命中。
+- **本 crate 不再是 GPUI-free。** 第 6 步的测试曾在 Linux 上运行；现在 `lectern-file-reader` 依赖 `gpui`，Linux 的 `just` 命令按依赖图排除它（`crates/file_reader/AGENTS.md` 已改），测试以 macOS CI 为准。
+- **第 7 步的 bench 条目保持计划中。** `app/open_file`、`app/scroll_frames`、`app/nav_back` 是进程级基准，需要 `app` 的测量构建支持 `OpenTarget::File`、`OpenTarget::Scroll`，运行器侧的场景（cloudprint 形状的普通文件、4 MiB 与 64 MiB 的合成源码、压缩成一行的 JS、对象库内容的 hunk）和夹具生成，这些都还没有；里程碑（`FileHighlighted`）视图已经报告，`app` 的映射也已有。没有这些就改成生效会让 CI 的预算无法判定，所以按设计的要求留给后续，不猜。`app/scroll_frames_indexing` 另外要交互让路开关，也没有接（app 设计「code_intel 与 file_reader 的装配」）。`app/files_open`、`app/files_expand` 是 7b。

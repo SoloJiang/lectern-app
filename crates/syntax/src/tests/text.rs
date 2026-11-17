@@ -222,6 +222,7 @@ pub(crate) fn snapshot(content: Content, size: u64, lines: LineCount) -> DocSnap
         editable: Editable::No(NotEditable::NotLoaded),
         anchor: RowPos::default(),
         find: None,
+        canonical: crate::Canonical::NotAsked,
         content,
         spans: Arc::new([]),
     }

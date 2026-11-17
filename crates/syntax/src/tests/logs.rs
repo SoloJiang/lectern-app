@@ -160,6 +160,15 @@ fn logs_hold_no_file_contents() {
     unwatched.write(FILE, text.as_bytes());
     let (_doc, _) = unwatched.open_settled(unwatched.target(FILE, Anchor::Start));
 
+    // No canonical OID: git's answer carries the canary in its text.
+    let converting = Rig::new();
+    *converting.git.canonical.lock().unwrap() = Some(Err(format!("{CANARY} in an error")));
+    converting.write(FILE, text.as_bytes());
+    let (doc, _) = converting.open_settled(converting.target(FILE, Anchor::Start));
+    doc.canonical_oid();
+    converting.settle();
+    assert_eq!(doc.snapshot().canonical, crate::Canonical::Unavailable);
+
     // An engine that was never started.
     let (engine, _cache_dir) = unstarted();
     let _doc = engine.open(
@@ -207,6 +216,12 @@ fn logs_hold_no_file_contents() {
     );
     assert_eq!(field(&watch, "lv"), Some("\"warn\""));
     assert_eq!(field(&watch, "error"), Some("\"corrupt\""));
+    let canonical = record_of_file(
+        log,
+        "no canonical content OID for the document; code intel gets no focus on it",
+    );
+    assert_eq!(field(&canonical, "lv"), Some("\"warn\""));
+    assert_eq!(field(&canonical, "error"), Some("\"corrupt\""));
     let open = record_of_file(
         log,
         "open before the engine started; the document stays empty",

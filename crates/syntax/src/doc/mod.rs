@@ -59,10 +59,30 @@ pub struct DocSnapshot {
     /// Where the view scrolls to.
     pub anchor: RowPos,
     pub find: Option<Arc<FindResults>>,
+    /// The canonical-content OID of a worktree file of a git project, once
+    /// [`DocHandle::canonical_oid`] was asked for the content of `oid`.
+    pub canonical: Canonical,
     pub(crate) content: Content,
     /// The spans to colour rows with, the preferred first: the whole file's,
     /// then windows.
     pub(crate) spans: Arc<[Arc<WindowSpans>]>,
+}
+
+/// The canonical-content OID of the document (`DocHandle::canonical_oid`):
+/// the OID the git index, and so `code_intel`, names the content by, when the
+/// raw bytes' OID is another one (a CRLF file under `core.autocrlf`, a
+/// modified file).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Canonical {
+    /// Not asked for the content of `oid` (or the document is not a worktree
+    /// file of a git project).
+    NotAsked,
+    /// Asked; the task has not finished.
+    Pending,
+    Known(BlobId),
+    /// There is none: an external filter applies, git cannot name the path
+    /// or read the index, or the content is not all in memory (tier C).
+    Unavailable,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -172,6 +192,9 @@ pub enum Row<'a> {
         tokens: Cow<'a, [Token]>,
         /// The find matches meeting this row, as byte ranges of the file.
         matches: &'a [Range<u64>],
+        /// The same matches as byte ranges of `text`, clipped to the row
+        /// (what the view draws).
+        found: Vec<Range<u32>>,
     },
     /// The content is not in memory (a page of tier C not read yet):
     /// `scrolled` gets it read.
