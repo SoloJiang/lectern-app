@@ -39,7 +39,7 @@
 | `lectern-executor` | 后台任务 | UI 线程不做 IO |
 | `lectern-fs-watch` | `watch_repo`（reflog 记录与时刻、HEAD 与引用的变化）、`watch_worktree`（stash 恢复和分支切换的窗口）、`watch_dir`（statusline 目录） | fs_watch 设计「对其他 crate 的要求」已写好 `usage` 一方 |
 | `lectern-git` | `Repo::discover`、`worktrees`、`Worktree::head`、`branches`、`remotes`、`default_branch`、`resolve`、`root_commits`、`stash`、`tree_paths`、`tree_changes`、`is_ancestor`、`parse_reflog_line`、`line_diff`、计数用的 `Worktree::changes`、`Worktree::read_file`；前置条件 D 的 `ref_reflog`、`patch_id` | gix 只在 `git` 里使用 |
-| `rusqlite` =0.40.2（`bundled`、`cache`） | 本 crate 自己的数据库 | ADR 0027 选定，工作区依赖 |
+| `rusqlite` =0.41.1（`bundled`、`cache`） | 本 crate 自己的数据库 | ADR 0027 选定，工作区依赖 |
 | `serde`、`serde_json` | statusline JSON、观察里的 JSON 列、`services` 类型 | 工作区已有 |
 | `ruzstd` 0.9 | 冷数据段的压缩与解压（「冷热分层」） | 已是工作区依赖（`agents`、`cache` 在用，[ADR 0026](../adr/0026.md)），纯 Rust，不改 Cargo.lock |
 | `insta`、`tempfile`（dev）；`lectern-git`、`lectern-fs-watch`、`lectern-kernel` 的 `test-support`（dev） | 快照、临时目录、`TestRepo`、`FakeBackend`、`TestKernel` | 工作区统一依赖 |
