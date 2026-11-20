@@ -111,7 +111,7 @@ fn build(shared: &Arc<Shared>, window: &mut Window, cx: &mut App) -> AnyView {
     let focus = view.read(cx).focus.clone();
     window.focus(&focus, cx);
     // A request is waiting (it is why the screen was pushed): take it now.
-    view.update(cx, |view, cx| view.pump(cx));
+    view.update(cx, |view, cx| view.pump(window, cx));
     view.into()
 }
 
@@ -168,8 +168,8 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
             ),
         )
         .disabled(edit.editing)
-        .on_click(move |_, cx| {
-            let _ = weak.update(cx, |view, cx| view.go_back(cx));
+        .on_click(move |window, cx| {
+            let _ = weak.update(cx, |view, cx| view.go_back(window, cx));
         })
     };
     let mut controls = vec![back.into_any_element()];
@@ -217,8 +217,8 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
                 Text::key(&strings, keys::file_reader::FORWARD_TOOLTIP),
             )
             .disabled(!forward)
-            .on_click(move |_, cx| {
-                let _ = weak.update(cx, |view, cx| view.go_forward(cx));
+            .on_click(move |window, cx| {
+                let _ = weak.update(cx, |view, cx| view.go_forward(window, cx));
             })
         };
         controls.push(forward.into_any_element());
@@ -237,12 +237,15 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
                     view.enter_edit(window, cx);
                 });
             });
-            if let Some(reason) = edit.reason {
-                let key = reason_key(reason);
-                button = button
-                    .attr("reason", key.name())
-                    .attr("tooltip", Text::key(&strings, key).shared());
-            }
+            let tooltip = match edit.reason {
+                Some(reason) => {
+                    let key = reason_key(reason);
+                    button = button.attr("reason", key.name());
+                    key
+                }
+                None => keys::file_reader::EDIT_TOOLTIP,
+            };
+            button = button.attr("tooltip", Text::key(&strings, tooltip).shared());
             controls.push(button.into_any_element());
         }
     }

@@ -6,7 +6,7 @@
 //!
 //! The edit mode's actions are `Edit`, `Save` and the four of the row under
 //! the toolbar. ⌘E and ⌘S are bound only where the edit mode is reachable
-//! (`edit::EDIT_REACHABLE`): the leave guard is step 8b. The Files tree's
+//! (`edit::EDIT_REACHABLE`, on since the leave guard of step 8b). The Files tree's
 //! actions are the ones named `Files…` and
 //! `RevealCurrent`: its key context is `files`, in the sidebar's region.
 //! `ShowFiles` of the design is the Files entry's `WorkspaceCommand`

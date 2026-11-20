@@ -81,14 +81,19 @@ pub(super) fn numbered(lines: usize) -> String {
 }
 
 impl Rig {
-    /// The shipped configuration: edit mode is not reachable.
+    /// The shipped configuration (`edit::EDIT_REACHABLE`).
     pub(super) fn new(cx: &mut TestAppContext) -> Rig {
-        Rig::build(cx, false)
+        Rig::build(cx, crate::edit::EDIT_REACHABLE)
     }
 
-    /// A plugin whose views can enter edit mode.
+    /// A plugin whose views can enter edit mode (the shipped configuration).
     pub(super) fn editable(cx: &mut TestAppContext) -> Rig {
         Rig::build(cx, true)
+    }
+
+    /// A plugin with the edit mode switched off.
+    pub(super) fn locked(cx: &mut TestAppContext) -> Rig {
+        Rig::build(cx, false)
     }
 
     fn build(cx: &mut TestAppContext, edit: bool) -> Rig {
@@ -256,10 +261,12 @@ fn view_registers_the_screen_and_its_keys(cx: &mut TestAppContext) {
             "up",
             "right",
             "left",
-            "enter"
+            "enter",
+            "cmd-e",
+            "cmd-s"
         ]
     );
-    assert_eq!(key_bindings(false).len(), keys.len());
+    assert_eq!(key_bindings(true).len(), keys.len());
     // Esc is the only key that leaves a text box alone, and the reader's
     // only: the Files tree has none (`workspace`'s Esc closes the panel).
     let all = rig.contributions.keys();
@@ -267,7 +274,7 @@ fn view_registers_the_screen_and_its_keys(cx: &mut TestAppContext) {
     assert_eq!(escape.2.as_deref(), Some("(Content > reader) && !Input"));
     // The tree's keys work only inside the sidebar's region.
     assert!(
-        all[6..]
+        all[6..11]
             .iter()
             .all(|k| k.2.as_deref() == Some("Sidebar > files"))
     );
@@ -386,13 +393,13 @@ fn view_scrolling_moves_the_position_and_the_session_remembers_it(cx: &mut TestA
     rig.open(cx, "b.rs", Anchor::Start);
     assert_eq!(rig.read(cx, |view| view.top.line_start), 0);
     assert!(rig.session.can_back());
-    rig.view.update(cx, |view, cx| view.go_back(cx));
+    rig.with_view(cx, |view, window, cx| view.go_back(window, cx));
     rig.settle(cx);
     rig.draw(cx);
     let back = rig.read(cx, |view| view.top);
     assert_eq!(back.line_start, top.line_start);
     // Back to the end of the history asks `workspace` to pop.
-    rig.view.update(cx, |view, cx| view.go_back(cx));
+    rig.with_view(cx, |view, window, cx| view.go_back(window, cx));
     assert!(
         rig.contributions
             .dispatched()
@@ -532,11 +539,12 @@ fn view_history_buttons_follow_the_history(cx: &mut TestAppContext) {
     let items = toolbar(cx);
     assert_eq!(items.title.as_str(), "a.rs");
     assert_eq!(items.subtitle.as_ref().unwrap().as_str(), "a.rs");
-    assert_eq!(items.controls.len(), 2);
+    // Back, forward and Edit….
+    assert_eq!(items.controls.len(), 3);
     assert!(!rig.read(cx, |view| view.can_forward()));
     rig.open(cx, "b.rs", Anchor::Start);
     assert_eq!(toolbar(cx).title.as_str(), "b.rs");
-    rig.view.update(cx, |view, cx| view.go_back(cx));
+    rig.with_view(cx, |view, window, cx| view.go_back(window, cx));
     rig.settle(cx);
     assert!(rig.read(cx, |view| view.can_forward()));
     assert_eq!(toolbar(cx).title.as_str(), "a.rs");
@@ -576,7 +584,7 @@ fn view_history_buttons_follow_the_history(cx: &mut TestAppContext) {
     };
     // Here, at a.rs, b.rs is ahead.
     assert_eq!(enabled(cx), (true, true));
-    rig.view.update(cx, |view, cx| view.go_forward(cx));
+    rig.with_view(cx, |view, window, cx| view.go_forward(window, cx));
     rig.settle(cx);
     assert_eq!(enabled(cx), (true, false));
 }

@@ -161,6 +161,7 @@ pub(crate) struct FakeContributions {
     entries: Mutex<Vec<(String, SidebarSection, u16, SidebarItem)>>,
     bindings: Mutex<Option<KeyBindings>>,
     keys: Mutex<Vec<(String, String, Option<String>)>>,
+    guards: Mutex<Vec<Arc<dyn LeaveGuard>>>,
     dispatched: Mutex<Vec<WorkspaceCommand>>,
     milestones: Mutex<Vec<Milestone>>,
 }
@@ -178,6 +179,12 @@ impl FakeContributions {
         *lock(&self.panel) = None;
         lock(&self.entries).clear();
         *lock(&self.bindings) = None;
+        lock(&self.guards).clear();
+    }
+
+    /// The leave guards registered, in order.
+    pub(crate) fn guards(&self) -> Vec<Arc<dyn LeaveGuard>> {
+        lock(&self.guards).clone()
     }
 
     /// `kind:id` of each registered contribution.
@@ -307,9 +314,10 @@ impl Contributions for FakeContributions {
 
     fn register_leave_guard(
         &self,
-        _: Arc<dyn LeaveGuard>,
+        guard: Arc<dyn LeaveGuard>,
         _: Option<ActivationToken>,
     ) -> Registration {
+        lock(&self.guards).push(guard);
         self.registration()
     }
 
