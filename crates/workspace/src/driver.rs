@@ -191,7 +191,13 @@ impl Driver {
                 let env = env(&self.registry, self.projects.as_ref());
                 self.nav.project_event(&event, &env, out);
             }
-            Item::Milestone(milestone) => out.push(Effect::Milestone(milestone)),
+            Item::Milestone {
+                milestone,
+                presented,
+            } => out.push(Effect::Milestone {
+                milestone,
+                presented,
+            }),
             Item::Projects(projects) => {
                 self.projects = Some(projects);
                 self.retry(out);

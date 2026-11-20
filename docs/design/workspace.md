@@ -80,8 +80,11 @@ pub trait Contributions: Send + Sync {
     /// 根视图绑定窗口时（`install`、Dock 重开的 `attach`）记下当前屏幕，所以第一次 `ScreenChanged`（`from: None`，要等 `WorkspacePlugin::started`）之前也有值。
     fn current_route(&self, window: WindowId) -> Option<Route>;
 
-    /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：本 crate 在下一帧回调里
-    /// 记下时刻并转给 `app`。任何线程。
+    /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：本 crate 记下时刻并转给 `app`，
+    /// 从画出结果的那一帧到记时刻只等一帧。`Milestone::reported_after_frame()` 为 `true` 的（`DiffShown`、
+    /// `FileHighlighted`、`FilesShown`、`FilesExpanded`、`EditReady`），视图在 `Window::on_next_frame` 的回调里报告，那一帧已经显示，本 crate 按调用的时刻记
+    /// （`Hub` 在调用线程上取 `SystemTime::now()`，不等队列）；为 `false` 的（`ProjectHome`、`WorktreeSwitched`），
+    /// 视图在画这一帧时报告，本 crate 在下一帧回调里记。任何线程。
     fn report_milestone(&self, milestone: Milestone);
 }
 
@@ -294,7 +297,7 @@ pub struct WorkspaceDeps {
     /// 窗口状态变化时调用（去抖由 `app` 做）。在主线程上调用（状态机在主线程上），`app` 可以直接在这里切换 frame autosave 名
     /// （`project` 有值时 `"project"`，否则 `"welcome"`，见「对其他 crate 的要求」D）。
     pub on_state_changed: Arc<dyn Fn(WindowState) + Send + Sync>,
-    /// 里程碑画出后调用，`presented` 是下一帧回调的时刻（见「已知限制」）。任何线程。
+    /// 里程碑画出后调用，`presented` 是画出结果的那一帧之后的第一个帧回调的时刻（见「已知限制」）。任何线程。
     pub on_milestone: Arc<dyn Fn(Milestone, SystemTime) + Send + Sync>,
     /// 一段帧记录结束后调用（bench 设计「需要其他 crate 提供的接口」：滚动、动画、输入的逐帧时刻）。任何线程。
     pub on_frames: Arc<dyn Fn(FrameRecord) + Send + Sync>,
@@ -489,7 +492,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 首帧之后：插件激活只交出 `Arc`（`plugin/workspace/activate` < 1 ms）；注册表的应用每项常数时间；重建 keymap 与绑定数成正比（几十条，< 1 ms）。
 - 空闲内存：注册表、导航状态、队列合计 < 200 KiB；视图只在需要时建，关闭即 drop（检查器页、面板、覆盖层、弹出的屏幕）。本 crate 不持有快照：`Projects::snapshot` 只在渲染时取、不保存。
 - 帧时间：`Workspace::render` 只组合已建的视图和固定尺寸的容器，不排版文本；动画只用 `ui` 的原语（位移、透明度、裁剪，ADR 0015）。
-- 基准：`plugin/workspace/activate`、`plugin/workspace/resident` 随 bench 的插件基准自动覆盖；`app/open_project` 的终点 `Milestone::ProjectHome` 由 `project_home` 经 `report_milestone` 报告，本 crate 在下一帧回调里转交。不新增进程内基准。
+- 基准：`plugin/workspace/activate`、`plugin/workspace/resident` 随 bench 的插件基准自动覆盖；`app/open_project` 的终点 `Milestone::ProjectHome` 由 `project_home` 经 `report_milestone` 报告，本 crate 在下一帧回调里记时刻并转交（`DiffShown`、`FileHighlighted` 的视图已经等过一帧，本 crate 按报告的时刻转交，见「与设计的差异」）。不新增进程内基准。
 
 ## 界面
 
@@ -625,7 +628,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ## 已知限制
 
-- 里程碑的 `presented` 用下一帧回调的时刻，不是 `MTLDrawable.presentedTime`：`platform::frame::on_first_presented` 只给首帧，而且只在测量构建里有。要更精确时，用 `frame::record` 记下画出里程碑的那一帧（[platform 设计「帧的时刻」](platform.md#帧的时刻)的「已知限制」）。
+- 里程碑的 `presented` 用画出结果的那一帧之后的第一个帧回调的时刻，不是 `MTLDrawable.presentedTime`：`platform::frame::on_first_presented` 只给首帧，而且只在测量构建里有。要更精确时，用 `frame::record` 记下画出里程碑的那一帧（[platform 设计「帧的时刻」](platform.md#帧的时刻)的「已知限制」）。
 - 注册表不按窗口分：所有窗口共享同一套贡献（多窗口时也应如此，视图实例按窗口建）。
 - 由系统发起的退出不问离开守卫（app 设计「已知限制」）。
 - 进程插件不能贡献界面（「范围」）。
@@ -661,6 +664,11 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 空闲内存：空窗口的 `phys_footprint` 与 app 设计「实际验证」的 40 MB 相比增加不超过 1 MB。
 
 ## 实际验证
+
+### 里程碑只等一帧
+
+- 测试：`Hub` 层（`src/tests/registry.rs`）断言 `DiffShown` 的 effect 带调用时刻、`ProjectHome` 不带，四个里程碑各一遍；`src/tests/view.rs` 的两个 `#[gpui::test]` 用 `UiRig::next_frame`（`Window::simulate_next_frame`，测试窗口没有帧循环）固定帧数：`DiffShown`、`FileHighlighted` 在没有任何帧的时候已经到了 `on_milestone`，时刻在调用前后之间，之后的一帧不再记一次；`ProjectHome`、`WorktreeSwitched` 在第一帧之前没有到，第一帧之后到了一次，第二帧不再记。
+- 运行：`just check` 通过；`just test -p lectern-workspace -p lectern-services -p lectern-review-view -p lectern-bench`：582 个通过，跳过 6 个。没有运行进程级基准（要打开真实窗口），`app/open_diff` 等的新读数以 CI 为准。
 
 ### `current_route`（conversation 前置条件 A）
 
@@ -731,7 +739,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   - `src/tests/semantic.rs`：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 三份 insta 快照（`src/tests/snapshots/`），节点 ID 与角色按「UI 探针的语义节点」表。
   - `src/tests/logs.rs`：`canary_stays_out_of_workspace_logs` 加上 `restore(WindowState { project: 含金丝雀 })`。
 - 「验收」第 2 步的 `rg` 检查都没有结果：`std::fs|std::process|git2|gix`、`rgb\(|hsla\(|Duration::from_millis`、界面字符串字面量（`'"[A-Z][a-z]+ [a-z]'`，`--glob '!tests*'`）、`eprintln!|println!|log::`；`ui` 设计「视图 crate 接入后的持续检查」的 `rg`（含 `\.font_family\(`、`gpui_component::Button`）也没有结果。
-- 没有验证（`#[gpui::test]` 不画真实的帧：`TestWindow` 的帧请求回调只能从 GPUI 内部触发）：`on_next_frame` 驱动的每帧 `Tick`（测试直接发 `Item::Tick`）、里程碑的 `presented` 时刻、`RecordStop::AnimationsSettled`、面板滑入的视觉效果（`Transition` 的值在测试里不随帧推进）；窗口关闭后点 Dock 图标重开的真实流程（`attach` 只在测试窗口上验证）。这些随第 3 步在 macOS 上手动运行发布构建时检查。
+- 没有验证（`#[gpui::test]` 不画真实的帧：`TestWindow` 的帧请求回调只能从 GPUI 内部触发）：`on_next_frame` 驱动的每帧 `Tick`（测试直接发 `Item::Tick`）、里程碑的 `presented` 时刻（帧数由「与设计的差异」的「里程碑只等一帧」的测试固定，时刻本身不是画面的时刻）、`RecordStop::AnimationsSettled`、面板滑入的视觉效果（`Transition` 的值在测试里不随帧推进）；窗口关闭后点 Dock 图标重开的真实流程（`attach` 只在测试窗口上验证）。这些随第 3 步在 macOS 上手动运行发布构建时检查。
 
 ### 第 3 步
 
@@ -754,6 +762,12 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 没有验证：真实窗口里的样子（工具栏横跨检查器、窗口控件与返回按钮的间距、检查器与侧栏的底色在两种外观下的对比）；窗口控件在 52pt 工具栏里的竖直位置（前置条件 G，[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。
 
 ## 与设计的差异
+
+### 里程碑只等一帧
+
+- 原来 `Effect::Milestone` 一律在下一帧回调里记时刻。`review_view` 的 `DiffShown`、`file_reader` 的 `FileHighlighted` 本来就在 `on_next_frame` 的回调里报告，等于等了两帧，时刻偏晚一个帧周期（60 Hz 下最多约 16.7 ms），让 16 ms 一档的进程级基准（`app/open_file`、`app/nav_back`、`app/files_open`、`app/files_expand`）不可能达到。现在 `Milestone::reported_after_frame()`（`services`）为 `true` 的，`Hub::report_milestone` 在调用线程上取时刻，`Item::Milestone` 与 `Effect::Milestone` 带 `presented: Option<SystemTime>`，根视图收到 `Some` 就直接交给 `on_milestone`；`None`（`ProjectHome`、`WorktreeSwitched`，由 `project_home`、`worktrees` 在 `render` 里报告）仍在下一帧回调里记，各只等一帧，没有变化。时刻在 `Hub` 里取，不在队列处理时取：帧回调之后紧跟着这一帧的绘制，队列任务要等它结束。
+- 样本起点没有等帧：运行器在发 `Open` 之前取 `SystemTime::now()`，`app` 的 `BenchDriver::open` 把请求交给主线程的任务，直接 `dispatch`，中间没有帧回调。从打开到画出的时间里，到下一次显示回调的等待是画出这件事本身的延迟，不是偏差。
+- 对 CI 数字的影响：`app/open_diff`、`app/open_file` 等以 `DiffShown` 或 `FileHighlighted` 为终点的基准，读数最多低一个帧周期；`app/open_project`（`ProjectHome`）与 `app/switch_worktree`（`WorktreeSwitched`）原来就只等一帧，读数不变。
 
 ### `current_route`（conversation 前置条件 A）
 

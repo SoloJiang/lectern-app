@@ -25,8 +25,8 @@ pub struct WorkspaceDeps {
     /// The window state changed (the debounce is `app`'s). Main thread, so
     /// `app` can switch the frame autosave name here.
     pub on_state_changed: Arc<dyn Fn(WindowState) + Send + Sync>,
-    /// A milestone was drawn; `presented` is the next frame callback's time
-    /// (「已知限制」). Any thread.
+    /// A milestone was drawn; `presented` is the time of the first frame
+    /// callback after the frame that shows it (「已知限制」). Any thread.
     pub on_milestone: Arc<dyn Fn(Milestone, SystemTime) + Send + Sync>,
     /// A frame recording ended. Any thread.
     pub on_frames: Arc<dyn Fn(FrameRecord) + Send + Sync>,
