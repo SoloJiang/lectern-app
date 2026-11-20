@@ -848,7 +848,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
   由系统发起的退出（注销、关机、Dock 菜单里的退出）不经这个 Action：有未保存的编辑时会丢失，插件也不按顺序停用（「已知限制」，kernel 设计同样记下）；以后要拦住它们，得在 `platform` 里给应用代理加 `applicationShouldTerminate:`，涉及 GPUI 的应用代理，那时另行决定。
 - 窗口关闭回调和 `Quit` Action 分别由 `workspace`（#30）和 `app` 提供，是本 crate 编辑模式的前提（「验收」前置条件 E）。
-- 守卫管不到的丢失：项目根目录消失、`project` 自己关闭了项目、由系统发起的退出（见上）、进程崩溃。前两种情况本 crate 不 drop 有未保存改动的 `EditSession`，缓冲区留在阅读视图里，提示行说明文件已不可用（`file-reader-unavailable-while-editing`），只能复制内容或放弃；`Engine::close_project` 跳过这样的文档，等用户放弃后再释放。系统发起的退出和崩溃时未保存的改动丢失（「已知限制」：不做自动保存）。
+- 守卫管不到的丢失：项目根目录消失、`project` 自己关闭了项目、由系统发起的退出（见上）、进程崩溃。文件已不可用而项目还开着时，本 crate 不 drop 有未保存改动的 `EditSession`，缓冲区留在阅读视图里，提示行说明文件已不可用（`file-reader-unavailable-while-editing`），只能复制内容或放弃。`project` 自己关闭项目时（`ProjectEvent::Closed`，不经守卫），`workspace` 清空导航栈，阅读视图连同 `EditSession` 一起释放，未保存的改动丢失（第 8b 步的实现如此，「已知限制」）。系统发起的退出和崩溃时未保存的改动同样丢失（「已知限制」：不做自动保存）。
 - 退出编辑之后 drop `EditSession`，语法树随之释放（ADR 0034：不计入空闲内存），阅读视图按保存后的内容重新打开同一位置。
 
 ## 性能
@@ -1210,6 +1210,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 编辑模式里放弃缓冲区或静默重新载入之后，视图等文档读到「另一个内容」再进入编辑（比较内容的 OID）。agent 在这期间把文件恢复成结束编辑时文档持有的内容（例如保存之后 `git checkout`）时，文档读到的内容与之前相同，视图留在阅读视图里，不自动进入；Edit… 照常可用。
 - 查找只对 ASCII 字母不区分大小写，最多 10,000 个结果。
 - 高亮查询里的 `#is-not? local` 不求值（没有 locals 查询）：JavaScript 的 `console`、`require` 等内置名，同名的局部变量也按内置名着色。
+- `project` 自己关闭项目（`ProjectEvent::Closed`，例如根目录消失）不经离开守卫：阅读视图随导航栈一起释放，编辑中未保存的改动丢失。要留住缓冲区，需要 `workspace` 在清空导航栈之前把编辑中的视图留下，另行处理。
 
 ## 实际验证
 
