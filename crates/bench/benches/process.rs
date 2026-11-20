@@ -449,8 +449,10 @@ fn median(times: &[Duration]) -> Duration {
 /// `package-lock.json` at a byte offset, 4 MiB of JavaScript in one line,
 /// and the old side of a 4 MiB file the review's diff of the worktree's
 /// changes shows (its blob shared by the review, opened at the changed line).
-/// The budget applies to every scenario, so the result is the samples of
-/// the one with the largest median; the note gives each scenario's median.
+/// The budget applies to every scenario but the minified one, so the result
+/// is the samples of the one with the largest median; the note gives each
+/// scenario's median. The minified file is `app/open_file/minified`, record
+/// only (ADR 0065).
 fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let program = app(ctx)?;
     let repo = reader_files::ReaderRepo::cloudprint()?;
@@ -523,11 +525,20 @@ fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         session.quit()?;
     }
     results.push((format!("old side ({} bytes)", changed.bytes), times));
+    // The file minified into one line is recorded on its own, not judged
+    // (ADR 0065).
+    let at = results
+        .iter()
+        .position(|(name, _)| name.starts_with(reader_files::MINIFIED))
+        .ok_or_else(|| BenchError::new("no minified scenario"))?;
+    let (minified_name, minified) = results.remove(at);
     let (note, worst) = slowest(results)?;
     let (first_note, first) = slowest(firsts)?;
     Ok(vec![
         Measured::new("app/open_file", Value::Time(Samples(worst)))
             .with_note(Some(format!("the slowest scenario's samples; {note}"))),
+        Measured::new("app/open_file/minified", Value::Time(Samples(minified)))
+            .with_note(Some(format!("{minified_name}, record only (ADR 0065)"))),
         Measured::new("app/open_file/first", Value::Time(Samples(first))).with_note(Some(format!(
             "the first open of a language in a run, record only (ADR 0064); {first_note}"
         ))),

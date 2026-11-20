@@ -21,6 +21,10 @@ pub const MIB: usize = 1 << 20;
 /// gives at least the length asked for.
 pub const CHANGED_LEN: usize = 4 * MIB - (16 << 10);
 
+/// The name of the scenario of 4 MiB of JavaScript in one line: recorded
+/// on its own as `app/open_file/minified` (ADR 0065).
+pub const MINIFIED: &str = "minified one line";
+
 /// One file the reader opens: where, and at which byte (None: the start).
 #[derive(Clone, Debug)]
 pub struct Scenario {
@@ -134,7 +138,7 @@ impl ReaderRepo {
         drop(source);
         let minified = testing::minified_js(small, 0);
         self.write("big/app.min.js", &minified);
-        out.push(self.scenario("minified one line", "big/app.min.js", minified.len(), None));
+        out.push(self.scenario(MINIFIED, "big/app.min.js", minified.len(), None));
         drop(minified);
         let lock = testing::json(small, 0);
         self.write("big/package-lock.json", &lock);
