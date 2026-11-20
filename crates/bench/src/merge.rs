@@ -304,13 +304,20 @@ impl Read {
         self.json["shard"].as_str()
     }
 
-    /// A process report that ran its budgets: no entry is `sharded`.
-    fn ran_everything(&self) -> bool {
+    /// A process report that owns the `plugin/*` and `lsp/*` budgets: none
+    /// of its wildcard entries is `sharded`. The process shards of a run
+    /// all have `sharded` entries, but only the shard that owns the
+    /// wildcard budgets (and ran their benchmarks) has the lists
+    /// (ADR 0062).
+    fn owns_wildcards(&self) -> bool {
         !self.json["results"]
             .as_array()
             .into_iter()
             .flatten()
-            .any(|r| r["status"].as_str() == Some("sharded"))
+            .any(|r| {
+                r["status"].as_str() == Some("sharded")
+                    && r["id"].as_str().is_some_and(|id| id.contains('*'))
+            })
     }
 }
 
@@ -494,12 +501,12 @@ pub(crate) fn merge(
         }
     }
 
-    // The lists come from the one `process` report that ran its budgets;
-    // the shards' other `process` reports (there are none in the shard
-    // table) would have them `sharded`.
+    // The lists come from the `process` report that owns the wildcard
+    // budgets: the plain run's, or the shard that has `plugin/` and `lsp/`;
+    // the other process shards' reports have those entries `sharded`.
     let process = reports
         .iter()
-        .find(|r| r.target == Target::Process && r.ran_everything());
+        .find(|r| r.target == Target::Process && r.owns_wildcards());
     let plugins = process.map_or_else(Vec::new, |r| strings(&r.json["plugins"]));
     let language_servers = process.map_or_else(Vec::new, |r| strings(&r.json["language_servers"]));
 

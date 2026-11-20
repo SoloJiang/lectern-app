@@ -65,9 +65,9 @@ doctest: zig
 # Performance budget benchmarks: gated on Apple silicon macOS, a smoke run
 # elsewhere. `--measure` samples on Linux too (reported, not gated); other
 # arguments filter IDs, e.g. `just bench agents/`. On macOS,
-# `--shard <name>` runs one CI shard (code-intel, process, git or rest) and writes
-# its reports without merging them: CI merges the shards' reports.
-# See docs/design/bench.md.
+# `--shard <name>` runs one CI shard (code-intel, process, process-open-file,
+# process-app, git or rest) and writes its reports without merging them: CI
+# merges the shards' reports. See docs/design/bench.md.
 bench *args: zig
     #!/usr/bin/env bash
     set -euo pipefail
@@ -131,6 +131,57 @@ bench *args: zig
     fi
     # The merged report decides the result: a target that failed to build or crashed leaves no report.
     "${report[@]}" merge target/lectern-bench
+
+# The programs of the `process` benchmark target, built once into `dir`
+# (macOS): the empty window, the measurement build of `lectern` and the
+# `process` benchmark executable. CI builds them in one job and runs the
+# process shards from them with `just bench-prebuilt` (ADR 0062); the
+# executable keeps the target directory it was built in, so the shards run in
+# a checkout at the same path.
+bench-build dir: zig
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" != Darwin ]]; then
+        echo "just bench-build: runs only on macOS" >&2
+        exit 2
+    fi
+    cargo build --release --locked -p lectern-bench --all-features --example empty_window
+    cargo build --release --locked -p lectern-app --features bench-probe
+    exe="$(cargo bench --locked -p lectern-bench --all-features --bench process --no-run --message-format=json | python3 -c 'import json,sys; [print(m["executable"]) for m in map(json.loads, filter(lambda l: l.startswith("{"), sys.stdin)) if m.get("reason") == "compiler-artifact" and m["target"]["name"] == "process" and "bench" in m["target"]["kind"] and m.get("executable")]')"
+    if [[ -z "$exe" || "$exe" == *$'\n'* ]]; then
+        echo "just bench-build: expected one process benchmark executable, got '${exe}'" >&2
+        exit 2
+    fi
+    mkdir -p "{{dir}}"
+    cp target/release/examples/empty_window "{{dir}}/empty_window"
+    cp target/release/lectern "{{dir}}/lectern"
+    cp "$exe" "{{dir}}/process"
+
+# One shard of the `process` benchmark target (macOS), from the programs
+# `just bench-build` put in `dir`: no build, no cargo. Same as `just bench
+# --shard <shard>` for a process shard, same exit codes: 0 once the report is
+# written, 2 when it is not (an unknown shard name, a crash). The reports
+# are not merged: CI merges the shards' reports (ADR 0062).
+bench-prebuilt shard dir *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" != Darwin ]]; then
+        echo "just bench-prebuilt: runs only on macOS" >&2
+        exit 2
+    fi
+    # A fresh checkout has neither: the executable writes its scratch files
+    # and the report under the target directory it was built in.
+    mkdir -p target/tmp target/lectern-bench
+    rm -f target/lectern-bench/report-*.json target/lectern-bench/report.json
+    dir="$(cd "{{dir}}" && pwd)"
+    export LECTERN_BENCH_BASELINE="$dir/empty_window"
+    export LECTERN_BENCH_APP="$dir/lectern"
+    # `--bench` is what `cargo bench` passes: the measure mode.
+    "$dir/process" --bench --shard "{{shard}}" {{args}} || true
+    if [[ ! -f target/lectern-bench/report-process.json ]]; then
+        echo "just bench-prebuilt: no report-process.json: the process benchmark crashed or the shard name is unknown" >&2
+        exit 2
+    fi
 
 # A UI probe session runs in the background (docs/design/ui_probe.md): a debug
 # build with the `ui-probe` feature, a temporary HOME and a private probe
