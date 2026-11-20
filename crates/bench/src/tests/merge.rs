@@ -870,6 +870,198 @@ fn report_merge_shards_the_plugin_list_comes_from_the_process_shard() {
     assert!(ids.contains(&"lsp/*/resident".to_owned()));
 }
 
+/// A second `process` shard `q` next to `Shards::new`'s `p`, which owns the
+/// `plugin/*` and `lsp/*` budgets: `q` owns `p/a`, and has the wildcard
+/// entries and `plugin/special/activate` as `sharded`.
+fn second_process_shard(shards: &Shards) -> tempfile::TempDir {
+    write_report(
+        shards.p.path(),
+        true,
+        Target::Process,
+        &[
+            ("p/a", "sharded"),
+            ("plugin/special/activate", "ok"),
+            ("plugin/terminal/activate", "ok"),
+            ("lsp/*/resident", "skipped"),
+        ],
+        json!({
+            "shard": "p",
+            "plugins": ["terminal", "special"],
+            "language_servers": [],
+            "benches": [{ "id": "plugin", "seconds": 4.0, "attempts": 1 }],
+        }),
+    );
+    let q = tempfile::tempdir().unwrap();
+    write_report(
+        q.path(),
+        true,
+        Target::Process,
+        &[
+            ("p/a", "ok"),
+            ("plugin/special/activate", "sharded"),
+            ("plugin/*/activate", "sharded"),
+            ("lsp/*/resident", "sharded"),
+        ],
+        json!({
+            "shard": "q",
+            "benches": [{ "id": "p/a", "seconds": 2.0, "attempts": 1 }],
+        }),
+    );
+    q
+}
+
+#[test]
+fn report_merge_shards_the_lists_come_from_the_shard_that_owns_the_wildcards() {
+    let shards = Shards::new();
+    let q = second_process_shard(&shards);
+    // `q` comes first in the directories, and has no list: the lists are
+    // the one of the shard whose wildcard entries are not `sharded`.
+    let merged = run_dirs(&[shards.a.path(), shards.b.path(), q.path(), shards.p.path()]);
+    assert_eq!(merged.exit, 0, "{}", merged.text);
+    assert_eq!(merged.report["errors"], json!([]));
+    let ids: Vec<String> = statuses(&merged).into_iter().map(|(id, _)| id).collect();
+    for id in [
+        "p/a",
+        "plugin/terminal/activate",
+        "plugin/special/activate",
+        "lsp/*/resident",
+    ] {
+        assert_eq!(ids.iter().filter(|i| *i == id).count(), 1, "{id}");
+    }
+    assert!(!ids.contains(&"plugin/*/activate".to_owned()));
+    let names: Vec<&str> = merged.report["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["a", "b", "q", "p"]);
+}
+
+#[test]
+fn report_merge_shards_a_missing_wildcard_owner_is_an_error() {
+    let shards = Shards::new();
+    let q = second_process_shard(&shards);
+    // Without `p`'s report nothing owns the wildcards: no list, and every
+    // wildcard entry is `sharded` in every report.
+    let merged = run_dirs(&[shards.a.path(), shards.b.path(), q.path()]);
+    assert_eq!(merged.exit, 2);
+    let errors = merged.report["errors"].to_string();
+    assert!(
+        errors.contains("plugin/*/activate 在全部报告里都是 sharded"),
+        "{errors}"
+    );
+    assert!(errors.contains("缺少分片 process 的报告"), "{errors}");
+    assert!(
+        !statuses(&merged)
+            .iter()
+            .any(|(id, _)| id == "plugin/terminal/activate")
+    );
+}
+
+#[test]
+fn report_merge_shards_two_process_shards_ran_the_same_budget() {
+    let shards = Shards::new();
+    let q = second_process_shard(&shards);
+    write_report(
+        shards.p.path(),
+        true,
+        Target::Process,
+        &[
+            ("p/a", "ok"),
+            ("plugin/special/activate", "ok"),
+            ("plugin/terminal/activate", "ok"),
+            ("lsp/*/resident", "skipped"),
+        ],
+        json!({ "shard": "p", "plugins": ["terminal", "special"], "language_servers": [] }),
+    );
+    let merged = run_dirs(&[shards.a.path(), shards.b.path(), q.path(), shards.p.path()]);
+    assert_eq!(merged.exit, 2);
+    let errors = merged.report["errors"].to_string();
+    assert!(errors.contains("p/a 出现了多次"), "{errors}");
+}
+
+/// The real table: each shard of every target writes the report it would
+/// (its budgets live, the others `sharded`; the shard that owns the
+/// wildcards has them expanded over its plugin list), and the merge finds
+/// every budget exactly once. No benchmark runs.
+#[test]
+fn report_merge_shards_the_real_table_lists_every_budget_once() {
+    use crate::budgets::BUDGETS;
+    use crate::merge::expected;
+    use crate::shards::{SHARDS, shard_of};
+    let plugins = ["project".to_owned(), "terminal".to_owned()];
+    let servers: Vec<String> = Vec::new();
+    let dirs: Vec<tempfile::TempDir> = SHARDS
+        .iter()
+        .map(|_| tempfile::tempdir().unwrap())
+        .collect();
+    for (shard, dir) in SHARDS.iter().zip(&dirs) {
+        for target in shard.targets {
+            // The owner of the wildcards has them expanded.
+            let owns_wildcards = *target == Target::Process
+                && BUDGETS.iter().any(|b| {
+                    b.is_wildcard() && shard_of(b).is_some_and(|owner| owner.name == shard.name)
+                });
+            let ids: Vec<(String, &Budget)> = if owns_wildcards {
+                expected(BUDGETS, &plugins, &servers)
+            } else {
+                BUDGETS.iter().map(|b| (b.id.to_owned(), b)).collect()
+            };
+            let results: Vec<(String, &str)> = ids
+                .iter()
+                .filter(|(_, b)| b.target == *target)
+                .map(|(id, b)| {
+                    let status = if shard_of(b).map(|s| s.name) != Some(shard.name) {
+                        "sharded"
+                    } else if matches!(b.state, State::Planned(_)) {
+                        "planned"
+                    } else {
+                        "ok"
+                    };
+                    (id.clone(), status)
+                })
+                .collect();
+            let results: Vec<(&str, &str)> =
+                results.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+            let extra = if owns_wildcards {
+                json!({ "shard": shard.name, "plugins": plugins, "language_servers": servers })
+            } else {
+                json!({ "shard": shard.name })
+            };
+            write_report(dir.path(), true, *target, &results, extra);
+        }
+    }
+    let paths: Vec<&Path> = dirs.iter().map(|d| d.path()).collect();
+    let dirs: Vec<_> = paths.iter().map(|d| d.to_path_buf()).collect();
+    let merged = merge(&dirs, BUDGETS, false, Some("abc".into()));
+    assert_eq!(merged.report["errors"], json!([]), "{}", merged.text);
+    assert_eq!(merged.exit, 0, "{}", merged.text);
+    let ids: Vec<String> = statuses(&merged).into_iter().map(|(id, _)| id).collect();
+    let want: Vec<String> = expected(BUDGETS, &plugins, &servers)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids, want);
+    // Dropping one process shard's report loses exactly its budgets.
+    let lost = SHARDS
+        .iter()
+        .position(|s| s.name == "process-open-file")
+        .unwrap();
+    std::fs::remove_file(dirs[lost].join("report-process.json")).unwrap();
+    let merged = merge(&dirs, BUDGETS, false, Some("abc".into()));
+    assert_eq!(merged.exit, 2);
+    let errors = merged.report["errors"].to_string();
+    assert!(
+        errors.contains("app/open_file 在全部报告里都是 sharded"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("缺少分片 process-open-file 的报告"),
+        "{errors}"
+    );
+}
+
 #[test]
 fn report_merge_shards_a_process_report_that_did_not_run_gives_no_lists() {
     let shards = Shards::new();
@@ -921,8 +1113,13 @@ fn report_merge_shards_subcommand_names_the_targets() {
     use crate::merge::target_names;
     assert_eq!(target_names("code-intel").unwrap(), ["time", "memory"]);
     assert_eq!(target_names("process").unwrap(), ["process"]);
+    assert_eq!(target_names("process-open-file").unwrap(), ["process"]);
+    assert_eq!(target_names("process-app").unwrap(), ["process"]);
     assert_eq!(target_names("git").unwrap(), ["time", "memory"]);
     assert_eq!(target_names("rest").unwrap(), ["time", "memory"]);
     let error = target_names("nope").unwrap_err();
-    assert!(error.contains("code-intel, process, git, rest"), "{error}");
+    assert!(
+        error.contains("code-intel, process, process-open-file, process-app, git, rest"),
+        "{error}"
+    );
 }

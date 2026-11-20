@@ -25,7 +25,8 @@ just bench agents/           # 只运行 ID 含 agents/ 的基准
 just bench worktrees/        # macOS：worktrees/build_1000、worktrees/resident_bytes（进程内，不开窗口）；app/switch_worktree 要窗口，用 just bench app/switch_worktree
 just bench terminal_view/     # macOS：terminal_view/snap_full（进程内，不开窗口；`just bench` 还会构建发布版 lectern 和 empty_window，只想跑这一项时用 cargo bench --locked -p lectern-bench --all-features --bench time -- terminal_view/）；app/terminal_output_frames 要窗口，随 terminal_view 第 3 步加入
 just bench conversation/     # macOS：conversation/stream_apply（进程内，GPUI 测试平台的窗口，不开真实窗口；只想跑这一项时用 cargo bench --locked -p lectern-bench --all-features --bench time -- conversation/，原因同 terminal_view/）
-just bench --shard rest agents/   # macOS：只运行一个分片（code-intel、process、git、rest）里的预算，不合并；CI 的合并任务合并各分片的报告
+just bench --shard rest agents/   # macOS：只运行一个分片（code-intel、process、process-open-file、process-app、git、rest）里的预算，不合并；CI 的合并任务合并各分片的报告
+just bench-build DIR    # macOS：构建 process 目标的三个程序（CI 的构建任务）；just bench-prebuilt <分片> DIR 直接运行 process 分片，不构建
 just bench --measure git/    # Linux 上也按规则采样，只报告、不判定
 LECTERN_BENCH_JUDGE=1 just bench baseline/   # 只在判定机器上：首帧要真正显示的条目也判定（ADR 0052）
 ```
@@ -33,7 +34,7 @@ LECTERN_BENCH_JUDGE=1 just bench baseline/   # 只在判定机器上：首帧要
 - 判定机器的条目（`Budget::judging_machine`：`app/cold_start`、`app/cold_start_purged`、`baseline/*`）在没有 `LECTERN_BENCH_JUDGE=1` 的测量运行里只记录。本机屏幕锁定时首帧的来源是 `handler`，设了这个变量就是错误，不是判定结果（[bench 设计「平台与噪声」](../../docs/design/bench.md#平台与噪声)）。
 
 - 基准目标：`benches/time.rs`（按被测 crate 分模块，在 `benches/time/` 下）、`benches/memory.rs`（注册 `CountingAlloc`）、`benches/process.rs`（只在 macOS 运行；`baseline/*` 启动 `examples/empty_window.rs`，`app/*` 和 `plugin/*` 启动带 `bench-probe` 的 `lectern`；`just bench` 构建这两个程序并设置 `LECTERN_BENCH_BASELINE`、`LECTERN_BENCH_APP`）。新增基准时在预算表里把对应条目改为 `Active`，否则运行器在开始前以 2 退出。
-- 分片表在 `src/shards.rs`（名字、目标、ID 前缀），是数据，按报告里每个基准的耗时调整，不需要新的 ADR（[ADR 0053](../../docs/adr/0053.md)）。每条 `time`、`memory`、`process` 的预算恰好属于一个分片，`process` 目标的全部预算在同一个分片里：新增预算不用改分片表，新增前缀或目标才要改，测试 `shards_*` 会提醒。`--shard` 把别的分片的预算记为 `sharded`；`lectern-bench-report merge` 接受几个目录，每条预算去掉 `sharded` 之后恰好剩一次，合并后的 `report.json` 写进第一个目录。
+- 分片表在 `src/shards.rs`（名字、目标、ID 前缀），是数据，按报告里每个基准的耗时调整，不需要新的 ADR（[ADR 0053](../../docs/adr/0053.md)）。每条 `time`、`memory`、`process` 的预算恰好属于一个分片；`plugin/`、`lsp/` 前缀的预算（含 `plugin/*`、`lsp/*`）在同一个分片，即 `process`，插件列表和语言服务器列表来自它的报告（[ADR 0062](../../docs/adr/0062.md)，`process` 目标另有 `process-open-file`、`process-app` 两个分片，`process-app` 没有前缀，收下其余的 `app/*`）。一个基准的预算不拆到两个分片：前缀要选中它产出的全部预算。新增预算不用改分片表，新增前缀或目标才要改，测试 `shards_*` 会提醒。`--shard` 把别的分片的预算记为 `sharded`；`lectern-bench-report merge` 接受几个目录，每条预算去掉 `sharded` 之后恰好剩一次，合并后的 `report.json` 写进第一个目录。
 - 基准按 ID 前缀对应预算，前缀最长的基准产出那条预算（`plugin` 产出 `plugin/*/activate`、`plugin/*/resident` 和 `plugin/<id>/activate`，`plugin/after_first_frame` 产出自己的）。产出 `plugin/<id>/…` 的基准用 `Ctx::report_plugins` 把插件列表交给报告，合并据此展开 `plugin/*`。
 - 每个目标写自己的 `target/lectern-bench/report-<target>.json`，`lectern-bench-report merge` 合并成 `report.json` 并决定 `just bench` 的退出码。报告列出每项的实测值、预算和出处；CI 的 macOS 任务判定预算，Linux 任务只做冒烟。
 - 进程调度（`src/process.rs`）的测试用脚本化的假 `Launcher` / `ProcessInfo` 和假探针，不启动真实程序（空闲内存、`app/unclassified_children`、`plugin/after_first_frame`、插件的一对启动都在这里，`benches/process.rs` 只把结果变成 `Measured`）；`tests/purge.rs` 把假的 `sudo` 放在这条命令的 `PATH` 最前面。探针（`src/probe.rs`）的测试用真实的 `Kernel` 和测试插件。

@@ -93,10 +93,12 @@ jobs:
   # The performance budgets run in parallel shards on Apple Silicon, in
   # parallel with the job above (docs/design/ci.md「任务」, ADR 0053). A shard
   # runs only its own budgets and uploads its reports; it does not judge, so
-  # it succeeds once the reports are written. The job after this one merges
+  # it succeeds once the reports are written. The job after these merges
   # them. The runner never gives a presentedTime, so the budgets that end at
   # the first frame are only recorded; the judge job below judges them
-  # (ADR 0052).
+  # (ADR 0052). The time and memory shards build their own benchmark
+  # targets; the process shards run from one build (the two jobs after this
+  # one, ADR 0062).
   macos-bench-shard:
     name: Benchmarks shard (${{ matrix.shard }})
     runs-on: macos-15
@@ -105,8 +107,8 @@ jobs:
       # then names what is missing.
       fail-fast: false
       matrix:
-        # The names in crates/bench/src/shards.rs.
-        shard: [code-intel, process, git, rest]
+        # The names in crates/bench/src/shards.rs that are not process shards.
+        shard: [code-intel, git, rest]
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain from rust-toolchain.toml
@@ -153,13 +155,91 @@ jobs:
           path: target/lectern-bench/report-*.json
           if-no-files-found: warn
 
+  # The programs of the process shards, built once (ADR 0062): the process
+  # shards would each spend about 7 minutes on this build, and
+  # `app/open_file` alone is as long as the rest of a shard. rust-cache adds
+  # the job ID to the key, so the first run starts with no cache. When this
+  # job's builds change their dependency features, bump the number. The
+  # artifact name must not match `bench-shard-*`: the merge job downloads
+  # those as reports.
+  macos-bench-build:
+    name: Benchmarks build (process)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Metal toolchain
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: Zig 0.15.2
+        run: |
+          scripts/install_zig.sh "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-process-build-1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Build the process benchmark and its programs
+        run: just bench-build target/lectern-bench/process-build
+      # An artifact does not keep the executable bit: one tar file.
+      - name: Pack the programs
+        run: tar -C target/lectern-bench/process-build -cf target/lectern-bench/process-build.tar .
+      - name: Upload the programs
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-process-build
+          path: target/lectern-bench/process-build.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  # The process shards run the programs of the build job: no toolchain, no
+  # cache. The executable of the process benchmark has the path of its target
+  # directory built in, so the checkout is at the same path as in the build
+  # job (the same repository on the same kind of runner).
+  macos-bench-process:
+    name: Benchmarks shard (${{ matrix.shard }})
+    needs: macos-bench-build
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The process shards in crates/bench/src/shards.rs.
+        shard: [process, process-open-file, process-app]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Download the programs
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-process-build
+          path: target/lectern-bench
+      - name: Unpack the programs
+        run: |
+          mkdir -p target/lectern-bench/process-build
+          tar -C target/lectern-bench/process-build -xf target/lectern-bench/process-build.tar
+      - name: Performance budget benchmarks (shard)
+        run: just bench-prebuilt ${{ matrix.shard }} target/lectern-bench/process-build
+      # The reports are uploaded even when the benchmark crashed.
+      - name: Upload the shard's reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-shard-${{ matrix.shard }}
+          path: target/lectern-bench/report-*.json
+          if-no-files-found: warn
+
   # Merges the shards' reports and judges the budgets. It reads only JSON,
   # so it runs on Linux, and it runs when a shard failed too: the merge says
   # what is missing. Its name stays the required check's name.
   macos-bench:
     name: Benchmarks (macOS arm64)
-    needs: macos-bench-shard
-    # Not always(): a run cancelled by a newer push has nothing to merge.
+    needs: [macos-bench-shard, macos-bench-process]
+    # Not always(): a run cancelled by a newer push has nothing to merge. A
+    # failed build job skips the process shards; the merge then names them.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
