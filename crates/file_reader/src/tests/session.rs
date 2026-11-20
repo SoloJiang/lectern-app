@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use lectern_services::code_intel::{Focus, TextOrigin};
 use lectern_services::project::ProjectKey;
 use lectern_services::reader::{Anchor, OpenOutcome, OpenTicket, Reader, ReaderEvent};
+use lectern_syntax::Canonical;
 use lectern_syntax::{DocState, RowPos, testing};
 
 use super::rig::{Rig, Tree, file, git_snapshot, lock};
@@ -340,6 +341,48 @@ fn session_focus_is_set_once_the_oid_is_known() {
     rig.session.sync();
     rig.session.sync();
     assert_eq!(rig.host.code_intel.calls().len(), 1);
+}
+
+#[test]
+fn session_a_git_file_the_index_does_not_name_waits_for_the_canonical_oid() {
+    let rig = Rig::new();
+    let tree = Tree::new();
+    let (key, wt) = tree.git();
+    // The index names nothing: the raw OID is not the canonical content's
+    // as far as this session can tell.
+    rig.host
+        .projects
+        .set(git_snapshot(&key, &wt, &tree.root, &[]));
+    tree.write("a.ts", b"let a = 1;\n");
+    let mut target = file(&key, "a.ts", Anchor::Start);
+    target.worktree = Some(wt.clone());
+    let snapshot = rig.show(target);
+    let oid = snapshot.oid.expect("the full read gave the OID");
+    assert_eq!(snapshot.canonical, Canonical::NotAsked);
+    // `show` synced once: the canonical OID was asked for, in a task. There
+    // is no repository on disk in this rig, so git has none to give.
+    rig.res.settle();
+    let snapshot = rig.session.sync().unwrap();
+    assert_eq!(snapshot.canonical, Canonical::Unavailable);
+    assert!(
+        rig.host.code_intel.calls().is_empty(),
+        "no focus on a text whose canonical OID is not known: {:?}",
+        rig.host.code_intel.calls()
+    );
+    // Asked once: syncing again starts nothing.
+    rig.session.sync();
+    assert_eq!(rig.res.executor.run_until_idle(), 0);
+
+    // Once the index names the content, the raw OID is the canonical one.
+    rig.host
+        .projects
+        .set(git_snapshot(&key, &wt, &tree.root, &[("a.ts", oid)]));
+    rig.session.sync();
+    let focus = rig.host.code_intel.current();
+    let Some(Focus::Current(Some(text))) = focus.last() else {
+        panic!("a focus: {focus:?}");
+    };
+    assert_eq!((text.oid, &*text.path), (oid, "a.ts"));
 }
 
 #[test]

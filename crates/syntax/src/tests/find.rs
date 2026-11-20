@@ -86,10 +86,11 @@ fn find_in_a_document_replaces_the_last_query() {
     // The rows carry their matches.
     let rows = s.rows(s.anchor, 3, 120);
     for row in rows {
-        let Row::Text { matches, .. } = row else {
+        let Row::Text { matches, found, .. } = row else {
             panic!("in memory");
         };
         assert_eq!(matches.len(), 1);
+        assert_eq!(found.len(), 1);
     }
     doc.clear_find();
     rig.settle();
@@ -116,4 +117,37 @@ fn find_waits_for_the_full_read_and_searches_tier_c_files() {
     let at = (bytes.len() - 18) as u64;
     assert_eq!(found.ranges.len(), 1);
     assert_eq!(found.ranges[0], at..at + 6);
+}
+
+#[test]
+fn find_rows_give_the_matches_in_the_shown_text() {
+    // A tab stays a tab in the shown text, a control character becomes its
+    // symbol (3 bytes for 1), a multibyte letter is as long as it is.
+    let rig = Rig::new();
+    rig.write(
+        "a.txt",
+        "\tcaf\u{e9} \u{1} needle\nplain needle\n".as_bytes(),
+    );
+    let (doc, _) = rig.open_settled(rig.target("a.txt", Anchor::Start));
+    doc.find(FindQuery {
+        text: Arc::from("needle"),
+    });
+    rig.settle();
+    let s = doc.snapshot();
+    let rows = s.rows(s.anchor, 2, 120);
+    let Row::Text { text, found, .. } = &rows[0] else {
+        panic!("in memory");
+    };
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        &text[found[0].start as usize..found[0].end as usize],
+        "needle"
+    );
+    let Row::Text { text, found, .. } = &rows[1] else {
+        panic!("in memory");
+    };
+    assert_eq!(
+        &text[found[0].start as usize..found[0].end as usize],
+        "needle"
+    );
 }

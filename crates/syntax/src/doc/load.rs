@@ -31,7 +31,7 @@ use lectern_services::reader::{Anchor, ReadTarget};
 
 use crate::diag;
 use crate::find::{BLOCK, FindQuery, FindResults, Finder, find_in};
-use crate::git_access::blob_id;
+use crate::git_access::{Tree, blob_id};
 use crate::highlight::{self, Budget, FullParse, Outcome, Source};
 use crate::lang::Rules;
 use crate::limits::{
@@ -1439,4 +1439,75 @@ fn find_file(
         }
     }
     Some(finder.results(true))
+}
+
+/// Asks for the canonical OID of the document's content (`DocHandle::
+/// canonical_oid`): only a worktree file of a git project has one, and only
+/// when the whole content is in memory (a `Text`); a document read in pages
+/// (tier C) has none. One `Background` task per content OID; the answer is
+/// dropped when the content (its OID) or the load has changed since.
+pub(crate) fn canonical(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
+    let target = &doc.target;
+    let (ProjectKey::Git { common_dir }, Some(worktree), TextOrigin::Worktree) =
+        (&target.project, &target.worktree, &target.origin)
+    else {
+        return;
+    };
+    let (load, oid, text) = {
+        let mut st = doc.lock();
+        let Some(oid) = st.oid else {
+            return;
+        };
+        if st.canonical.asked_for == Some(oid) {
+            return;
+        }
+        st.canonical.asked_for = Some(oid);
+        let text = match &st.content {
+            Content::Text(text) => text.clone(),
+            _ => {
+                st.canonical.outcome = Some(None);
+                doc.commit(st);
+                return;
+            }
+        };
+        st.canonical.outcome = None;
+        (st.load, oid, text)
+    };
+    let tree = Tree {
+        common_dir: common_dir.clone(),
+        git_dir: worktree.0.clone(),
+        root: doc.root.clone(),
+    };
+    let (engine2, doc2) = (engine.clone(), doc.clone());
+    let spawned = engine.spawn(Priority::Background, async move {
+        let answer = engine2
+            .git
+            .canonical_oid(&tree, &doc2.target.path, text.as_bytes());
+        let outcome = match answer {
+            Ok(canonical) => canonical,
+            Err(e) => {
+                let (kind, io) = diag::git_error(&e);
+                warn!(
+                    "no canonical content OID for the document; code intel gets no focus on it";
+                    path = diag::path(&doc2.target.path),
+                    error = kind,
+                    io = io,
+                );
+                None
+            }
+        };
+        let mut st = doc2.lock();
+        if doc2.stale(&st, load) || st.oid != Some(oid) || st.canonical.asked_for != Some(oid) {
+            return;
+        }
+        st.canonical.outcome = Some(outcome);
+        doc2.commit(st);
+    });
+    if !spawned {
+        // The engine has not started or the plugin is gone: ask again later.
+        let mut st = doc.lock();
+        if st.canonical.asked_for == Some(oid) && st.canonical.outcome.is_none() {
+            st.canonical.asked_for = None;
+        }
+    }
 }

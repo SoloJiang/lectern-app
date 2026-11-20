@@ -8,11 +8,13 @@ use lectern_agents::{
     AgentRoots, AgentsDeps, ConversationsDeps, SessionFilter, conversations_plugin,
 };
 use lectern_cache::Cache;
+use lectern_code_intel::{CodeIntelDeps, CodeIntelPlugin, NoGrammarPacks};
 use lectern_conversation::{
     LIVE_ID as CONVERSATION_LIVE_ID, PLUGIN_ID as CONVERSATION_ID,
     TERMINAL_ID as CONVERSATION_TERMINAL_ID,
 };
 use lectern_executor::Executor;
+use lectern_file_reader::{FileReaderDeps, FileReaderPlugin, PLUGIN_ID as FILE_READER_ID};
 use lectern_fs_watch::Watcher;
 use lectern_kernel::PluginSet;
 use lectern_logging::{Field, Value};
@@ -23,7 +25,10 @@ use lectern_project_home::{
     WAITING_PLUGIN_ID as PROJECT_HOME_WAITING_ID, WaitingSlot,
 };
 use lectern_review::ReviewDeps;
-use lectern_review_view::{PLUGIN_ID as REVIEW_VIEW_ID, USAGE_ID as REVIEW_VIEW_USAGE_ID};
+use lectern_review_view::{
+    HANDOFF_ID as REVIEW_VIEW_HANDOFF_ID, PLUGIN_ID as REVIEW_VIEW_ID,
+    USAGE_ID as REVIEW_VIEW_USAGE_ID,
+};
 use lectern_terminal::{PLUGIN_ID as TERMINAL_ID, TerminalDeps, TerminalPlugin};
 use lectern_usage::{LocalZone, UsageDeps};
 use lectern_welcome::WelcomeDeps;
@@ -32,6 +37,9 @@ use lectern_worktrees::{
     PLUGIN_ID as WORKTREES_ID, USAGE_PLUGIN_ID as WORKTREES_USAGE_ID, UsageLink, WorktreesDeps,
     WorktreesPlugin, WorktreesUsagePlugin,
 };
+
+/// The ID of "code-intel" in the `PluginSet`.
+const CODE_INTEL_ID: &str = "code-intel";
 
 /// The package version cut to "major.minor", for Welcome's subtitle
 /// (docs/design/welcome.md「对其他 crate 的要求」E).
@@ -96,8 +104,9 @@ impl Profile {
     /// Desktop: `project`, the two session sources, `review`, `usage`,
     /// `workspace`, `welcome`, `welcome-discovery`, `welcome-review`,
     /// `project-home`, `project-home-usage`, `project-home-waiting`,
-    /// `review-view`, `review-view-usage`, `worktrees`, `worktrees-usage`,
-    /// `terminal`, `conversations`, `conversation`, `conversation-live` and
+    /// `code-intel`, `file-reader`, `review-view`, `review-view-handoff`,
+    /// `review-view-usage`, `worktrees`, `worktrees-usage`, `terminal`,
+    /// `conversations`, `conversation`, `conversation-live` and
     /// `conversation-terminal`
     /// (docs/design/app.md「插件与资源」).
     /// Test: none. With the number of plugins, for the log (`PluginSet` does
@@ -186,17 +195,41 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
             PROJECT_HOME_WAITING_ID,
             ProjectHomeWaitingPlugin::new(waiting),
         );
+    // The code navigation and the full-file reader. `code-intel` provides
+    // `dyn CodeIntel` (no language packs until the marketplace: ADR 0018);
+    // `file-reader` provides `dyn Reader` and the reading screen, and
+    // requires `dyn Projects`, `dyn CodeIntel` and `dyn Contributions`
+    // (docs/design/app.md「code_intel 与 file_reader 的装配」). Both only
+    // build their state here: no IO, no thread, no grammar compiled.
+    let set = set
+        .with(
+            CODE_INTEL_ID,
+            CodeIntelPlugin::new(CodeIntelDeps {
+                executor: r.executor.clone(),
+                cache: r.cache.clone(),
+                watcher: r.watcher.clone(),
+                grammars: Arc::new(NoGrammarPacks),
+            }),
+        )
+        .with(
+            FILE_READER_ID,
+            FileReaderPlugin::new(FileReaderDeps {
+                executor: r.executor.clone(),
+                cache: r.cache.clone(),
+                watcher: r.watcher.clone(),
+            }),
+        );
     // The review screen. Its second plugin, "review-view-handoff", requires
-    // `dyn Reader` and `dyn CodeIntel`, which no assembled plugin provides
-    // yet, so it is dropped: the screen works without it and its handoff
-    // buttons stay disabled. The third, "review-view-usage", requires only
-    // `dyn Usage`, which `usage` provides: the brief's usage rows and the
-    // turns' tokens do not wait for the handoff
+    // `dyn Reader` and `dyn CodeIntel`, which `file-reader` and `code-intel`
+    // now provide: the screens hand the open file (⇧⌘O, a hunk) and the
+    // focus for the code navigation over. The third, "review-view-usage",
+    // requires only `dyn Usage`, which `usage` provides
     // (docs/design/app.md「review_view 的装配」).
-    let (review_view, _handoff, review_view_usage) =
+    let (review_view, handoff, review_view_usage) =
         lectern_review_view::plugins(r.executor.clone());
     let set = set
         .with(REVIEW_VIEW_ID, review_view)
+        .with(REVIEW_VIEW_HANDOFF_ID, handoff)
         .with(REVIEW_VIEW_USAGE_ID, review_view_usage);
     // The parallel overview. `dyn Usage` may be absent, so the interest in
     // the worktrees' usage is reconciled in one cell, as for `project-home`
@@ -237,7 +270,7 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
         .with(CONVERSATION_ID, page)
         .with(CONVERSATION_LIVE_ID, live)
         .with(CONVERSATION_TERMINAL_ID, terminal_page);
-    (set, count + 15)
+    (set, count + 18)
 }
 
 /// `usage`'s local time zone: `platform::time::utc_offset`

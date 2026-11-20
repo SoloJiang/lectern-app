@@ -33,6 +33,12 @@ pub(crate) struct FakeGit {
     pub source: Mutex<Option<Arc<FakeSource>>>,
     /// Set: `watch_source` fails with `GitError::Corrupt` of this text.
     pub watch_error: Mutex<Option<String>>,
+    /// The `canonical_oid` calls so far: the path and the length of the raw
+    /// bytes.
+    pub canonical_calls: Mutex<Vec<(String, usize)>>,
+    /// What `canonical_oid` answers: None converts `\r\n` to `\n` and
+    /// hashes the result (git's `core.autocrlf` on the way in).
+    pub canonical: Mutex<Option<Result<Option<BlobId>, String>>>,
 }
 
 impl FakeGit {
@@ -69,6 +75,35 @@ impl GitAccess for FakeGit {
         }
         let source = self.source.lock().unwrap().clone();
         Ok(source.unwrap_or_default())
+    }
+
+    fn canonical_oid(
+        &self,
+        _tree: &Tree,
+        path: &str,
+        raw: &[u8],
+    ) -> Result<Option<BlobId>, GitError> {
+        self.canonical_calls
+            .lock()
+            .unwrap()
+            .push((path.to_owned(), raw.len()));
+        match self.canonical.lock().unwrap().clone() {
+            Some(Ok(answer)) => Ok(answer),
+            Some(Err(text)) => Err(GitError::Corrupt(text)),
+            None => {
+                let mut converted = Vec::with_capacity(raw.len());
+                let mut at = 0;
+                while at < raw.len() {
+                    if raw[at] == b'\r' && raw.get(at + 1) == Some(&b'\n') {
+                        at += 1;
+                        continue;
+                    }
+                    converted.push(raw[at]);
+                    at += 1;
+                }
+                Ok(Some(blob_id(&Oid::for_blob(HashKind::Sha1, &converted))))
+            }
+        }
     }
 
     fn forget(&self, _common_dir: &Path) {}

@@ -3,8 +3,11 @@
 //! `dyn Contributions`, activates after the first frame.
 //!
 //! - `activate` builds the engine (no IO, no grammar, no query compiled),
-//!   provides the service and subscribes to `ProjectEvent`.
-//! - `started` hands the activation's handle to the engine. No task.
+//!   provides the service, subscribes to `ProjectEvent` and hands the
+//!   reader screen and its key bindings to `workspace` (`own_staged`).
+//! - `started` hands the activation's handle to the engine and puts the
+//!   plugin's wake-up in the session (a request that arrives while no view
+//!   lives makes `workspace` push the reader screen). No task.
 //! - Deactivation closes the document (the focus is cleared) and drops the
 //!   engine with the session.
 
@@ -24,7 +27,12 @@ use lectern_services::reader::{Reader, ReaderEvent};
 use lectern_services::workspace::Contributions;
 use lectern_syntax::{Engine, EngineDeps, Languages};
 
+use crate::screen;
 use crate::session::{Host, Session};
+use crate::shared::Shared;
+
+/// The ID of "file-reader" in the `PluginSet`.
+pub const PLUGIN_ID: &str = "file-reader";
 
 /// What `app` creates once and hands to the plugin (ADR 0025).
 #[derive(Clone)]
@@ -89,6 +97,19 @@ impl Plugin for FileReaderPlugin {
             languages: Languages::core(),
         });
         let session = Arc::new(Session::new(engine, host.clone()));
+        let contributions = ctx.service::<dyn Contributions>();
+        let shared = Shared::new(
+            session.clone(),
+            contributions.clone(),
+            ctx.service::<dyn CodeIntel>(),
+        );
+        let Some(admitted) = contributions.get() else {
+            return Err(PluginError::new("the contributions provider is not live"));
+        };
+        for registration in screen::registrations(&shared) {
+            ctx.own_staged(admitted.register(registration, None));
+        }
+        drop(admitted);
         ctx.provide::<dyn Reader>(session.clone())?;
         let listener = session.clone();
         ctx.on::<ProjectEvent>(move |event, _| {
@@ -100,7 +121,11 @@ impl Plugin for FileReaderPlugin {
         {
             *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&session);
         }
-        Ok(Box::new(FileReaderActive { session, host }))
+        Ok(Box::new(FileReaderActive {
+            session,
+            host,
+            shared,
+        }))
     }
 }
 
@@ -108,6 +133,7 @@ impl Plugin for FileReaderPlugin {
 struct FileReaderActive {
     session: Arc<Session>,
     host: Arc<KernelHost>,
+    shared: Arc<Shared>,
 }
 
 impl Active for FileReaderActive {
@@ -118,6 +144,7 @@ impl Active for FileReaderActive {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(handle.clone());
         self.session.start(handle);
+        self.shared.install_push();
     }
 }
 
@@ -125,6 +152,7 @@ impl Drop for FileReaderActive {
     /// Deactivation: the document goes and its focus is cleared while
     /// `code_intel` (deactivated after this plugin) still answers.
     fn drop(&mut self) {
+        self.session.set_waker(None);
         self.session.close();
     }
 }

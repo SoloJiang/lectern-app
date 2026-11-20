@@ -4619,8 +4619,10 @@ dependencies = [
  "lectern-agents",
  "lectern-bench",
  "lectern-cache",
+ "lectern-code-intel",
  "lectern-conversation",
  "lectern-executor",
+ "lectern-file-reader",
  "lectern-fs-watch",
  "lectern-i18n",
  "lectern-kernel",
@@ -4757,13 +4759,18 @@ dependencies = [
 name = "lectern-file-reader"
 version = "0.0.0"
 dependencies = [
+ "futures",
+ "gpui-component",
+ "gpui-pre",
  "lectern-cache",
  "lectern-executor",
  "lectern-fs-watch",
+ "lectern-i18n",
  "lectern-kernel",
  "lectern-logging",
  "lectern-services",
  "lectern-syntax",
+ "lectern-ui",
  "tempfile",
 ]
 

@@ -40,8 +40,8 @@ use super::chain::{self, ChainState};
 use super::content::{Content, PageCache};
 use super::edit::{self, EditSession};
 use super::{
-    DocSnapshot, DocState, Editable, Highlighting, LineCount, NotEditable, RowPos, Tier, Viewport,
-    load, prefetch, watch,
+    Canonical, DocSnapshot, DocState, Editable, Highlighting, LineCount, NotEditable, RowPos, Tier,
+    Viewport, load, prefetch, watch,
 };
 
 /// How many file identities and the OIDs their scans found are kept, so a
@@ -649,6 +649,18 @@ impl DocHandle {
         }
     }
 
+    /// Asks for the canonical-content OID of a worktree file of a git
+    /// project (the OID `code_intel` names the text by when the raw bytes'
+    /// OID is not the index's): a `Background` task runs git's conversions
+    /// over the content once it is all in memory, and the answer comes in
+    /// later snapshots (`DocSnapshot::canonical`). Asking again for the same
+    /// content does nothing; any other kind of document stays `NotAsked`.
+    pub fn canonical_oid(&self) {
+        if let Some(engine) = self.doc.engine.upgrade() {
+            load::canonical(&engine, &self.doc);
+        }
+    }
+
     /// Enters edit mode (only when the snapshot's `editable` is `Yes`): a
     /// session over the full content, or another handle to the one that
     /// lives. Copies the content into the buffer's text on the calling
@@ -742,6 +754,8 @@ pub(crate) struct DocMut {
     /// without checkpoints: the full read moves to the line.
     pub relocate: bool,
     pub find: FindState,
+    /// The canonical-content OID asked for, and what came of it.
+    pub canonical: CanonicalState,
     pub watch: Option<watch::Watches>,
     pub watch_asked: bool,
     pub window_busy: bool,
@@ -750,6 +764,17 @@ pub(crate) struct DocMut {
     /// The edit session, while one lives: fs_watch events go to it instead
     /// of reloading the document.
     pub edit: Option<Weak<edit::Session>>,
+}
+
+/// The canonical OID of the content of one raw OID (`DocHandle::canonical_oid`):
+/// the answer belongs to the OID it was asked for, so content that changes
+/// makes it stale without anyone clearing it.
+#[derive(Default)]
+pub(crate) struct CanonicalState {
+    pub asked_for: Option<BlobId>,
+    /// None while the task runs; `Some(None)` when there is no canonical
+    /// OID.
+    pub outcome: Option<Option<BlobId>>,
 }
 
 #[derive(Default)]
@@ -804,6 +829,7 @@ impl Doc {
             lang: None,
             relocate: false,
             find: FindState::default(),
+            canonical: CanonicalState::default(),
             watch: None,
             watch_asked: false,
             window_busy: false,
@@ -926,8 +952,20 @@ impl DocMut {
             editable: self.editable,
             anchor: self.anchor,
             find: self.find.results.clone(),
+            canonical: self.canonical(),
             content: self.content.clone(),
             spans: spans.into(),
+        }
+    }
+
+    fn canonical(&self) -> Canonical {
+        match (self.oid, self.canonical.asked_for) {
+            (Some(oid), Some(asked)) if oid == asked => match self.canonical.outcome {
+                None => Canonical::Pending,
+                Some(Some(canonical)) => Canonical::Known(canonical),
+                Some(None) => Canonical::Unavailable,
+            },
+            _ => Canonical::NotAsked,
         }
     }
 

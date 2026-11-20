@@ -26,10 +26,10 @@ use lectern_services::reader::{
     Anchor, ObjectShare, OpenOutcome, OpenTicket, ReadTarget, Reader, ReaderEvent,
 };
 use lectern_syntax::limits::PREFETCH_MAX;
-use lectern_syntax::{DocHandle, DocSnapshot, Engine, LineNo, Row, RowPos, Viewport};
+use lectern_syntax::{DocHandle, DocSnapshot, Engine, FindQuery, LineNo, Row, RowPos, Viewport};
 
 use crate::diag;
-use crate::focus::{root_of, text_ref};
+use crate::focus::{Decision, decide, root_of};
 use crate::history::History;
 
 /// What the session needs from the rest of the process: the project
@@ -251,6 +251,27 @@ impl Session {
         }
     }
 
+    /// Finds `query` in the document shown (`None` clears the find). The
+    /// matches come in later snapshots.
+    pub fn find(&self, query: Option<FindQuery>) {
+        if let Some(current) = &lock(&self.reading).current {
+            match query {
+                Some(query) => current.handle.find(query),
+                None => current.handle.clear_find(),
+            }
+        }
+    }
+
+    /// The text `code_intel` was told is current, with its project: what a
+    /// query about a place in the document names (the pointer's prefetch).
+    /// None until the content's OID is known, and where no text is current.
+    pub fn current_text(&self) -> Option<(ProjectKey, TextRef)> {
+        lock(&self.reading)
+            .focus
+            .as_ref()
+            .map(|focus| (focus.project.clone(), focus.text.clone()))
+    }
+
     /// The current snapshot, without touching the focus.
     pub fn snapshot(&self) -> Option<Arc<DocSnapshot>> {
         lock(&self.reading)
@@ -275,11 +296,27 @@ impl Session {
         let desired = match (target, &snapshot) {
             (Some(target), Some(snapshot)) => {
                 let project = self.host.snapshot(&target.project);
-                text_ref(&target, snapshot.oid, project.as_deref()).map(|text| FocusSet {
-                    project: target.project,
-                    worktree: target.worktree,
-                    text,
-                })
+                match decide(
+                    &target,
+                    snapshot.oid,
+                    snapshot.canonical,
+                    project.as_deref(),
+                ) {
+                    Decision::Focus(text) => Some(FocusSet {
+                        project: target.project,
+                        worktree: target.worktree,
+                        text,
+                    }),
+                    Decision::AskCanonical => {
+                        // Queues a `Background` task in `syntax` and returns:
+                        // no lock of this crate is taken by it.
+                        if let Some(current) = &lock(&self.reading).current {
+                            current.handle.canonical_oid();
+                        }
+                        None
+                    }
+                    Decision::None => None,
+                }
             }
             _ => None,
         };
