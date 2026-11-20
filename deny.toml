@@ -78,3 +78,21 @@ unmaintained = "workspace"
 # Unsound code fails anywhere in the graph, not only in direct dependencies.
 unsound = "all"
 yanked = "warn"
+# heapless 0.8.0 comes in only through gix-hash -> faster-hex 0.10.1, which
+# uses nothing but heapless::String and heapless::Vec<u8>. These unsound
+# notices are for code it never reaches (sorted_linked_list, spsc, index_map,
+# deque, the pools, and vec::IntoIter::drop, which needs a panicking Drop: u8
+# has none).
+# 0.8 has no fixed release; heapless 0.9 (through GPUI) is on the fixed 0.9.4.
+# Remove these when gix moves to a faster-hex that drops heapless 0.8.
+ignore = [
+    { id = "RUSTSEC-2026-0574", reason = "heapless 0.8 via faster-hex: FindMutView not used" },
+    { id = "RUSTSEC-2026-0575", reason = "heapless 0.8 via faster-hex: Spsc not used" },
+    { id = "RUSTSEC-2026-0576", reason = "heapless 0.8 via faster-hex: IndexMap not used" },
+    { id = "RUSTSEC-2026-0577", reason = "heapless 0.8 via faster-hex: only Vec<u8>, whose Drop cannot panic" },
+    { id = "RUSTSEC-2026-0578", reason = "heapless 0.8 via faster-hex: SortedLinkedList not used" },
+    { id = "RUSTSEC-2026-0579", reason = "heapless 0.8 via faster-hex: Deque not used" },
+    { id = "RUSTSEC-2026-0580", reason = "heapless 0.8 via faster-hex: pools not used" },
+    { id = "RUSTSEC-2026-0581", reason = "heapless 0.8 via faster-hex: Deque not used" },
+    { id = "RUSTSEC-2026-0582", reason = "heapless 0.8 via faster-hex: IndexMap not used" },
+]

@@ -39,7 +39,7 @@
 | `lectern-executor` | 后台任务 | UI 线程不做 IO |
 | `lectern-fs-watch` | `watch_repo`（reflog 记录与时刻、HEAD 与引用的变化）、`watch_worktree`（stash 恢复和分支切换的窗口）、`watch_dir`（statusline 目录） | fs_watch 设计「对其他 crate 的要求」已写好 `usage` 一方 |
 | `lectern-git` | `Repo::discover`、`worktrees`、`Worktree::head`、`branches`、`remotes`、`default_branch`、`resolve`、`root_commits`、`stash`、`tree_paths`、`tree_changes`、`is_ancestor`、`parse_reflog_line`、`line_diff`、计数用的 `Worktree::changes`、`Worktree::read_file`；前置条件 D 的 `ref_reflog`、`patch_id` | gix 只在 `git` 里使用 |
-| `rusqlite` =0.40.2（`bundled`、`cache`） | 本 crate 自己的数据库 | ADR 0027 选定，工作区依赖 |
+| `rusqlite` =0.43.0（`bundled`、`cache`） | 本 crate 自己的数据库 | ADR 0027 选定，工作区依赖 |
 | `serde`、`serde_json` | statusline JSON、观察里的 JSON 列、`services` 类型 | 工作区已有 |
 | `ruzstd` 0.9 | 冷数据段的压缩与解压（「冷热分层」） | 已是工作区依赖（`agents`、`cache` 在用，[ADR 0026](../adr/0026.md)），纯 Rust，不改 Cargo.lock |
 | `insta`、`tempfile`（dev）；`lectern-git`、`lectern-fs-watch`、`lectern-kernel` 的 `test-support`（dev） | 快照、临时目录、`TestRepo`、`FakeBackend`、`TestKernel` | 工作区统一依赖 |
@@ -931,8 +931,8 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 | ID | 统计量与预算 |
 |---|---|
 | `usage/ingest_append_4k` | 中位数 < 5 ms（活跃会话追加约 4 KiB：`read`、规范化、去重、落盘与提交游标） |
-| `usage/backfill_batch` | 中位数 < 150 ms（一批 8 MiB 的合成会话：读取、入库；补读会话的定稿在读到末尾之后另分批，由 `usage/backfill_large_session` 覆盖） |
-| `usage/backfill_large_session` | 每批最大值 < 300 ms、中位数 < 150 ms（一个 200 MB 的合成会话按 8 MiB 分批补读并定稿）；适配器解析的字节合计 ≤ 文件大小的 1.2 倍（检查没有平方级的重复解析） |
+| `usage/backfill_batch` | 中位数 < 270 ms（[ADR 0061](../adr/0061.md) 从 150 ms 暂时放宽，SQLite 3.54 的语句重新编译，[#386](https://github.com/SoloJiang/lectern-app/issues/386)；一批 8 MiB 的合成会话：读取、入库；补读会话的定稿在读到末尾之后另分批，由 `usage/backfill_large_session` 覆盖） |
+| `usage/backfill_large_session` | 每批最大值 < 900 ms（[ADR 0061](../adr/0061.md) 从 300 ms 暂时放宽，[#386](https://github.com/SoloJiang/lectern-app/issues/386)）、中位数 < 150 ms（一个 200 MB 的合成会话按 8 MiB 分批补读并定稿）；适配器解析的字节合计 ≤ 文件大小的 1.2 倍（检查没有平方级的重复解析） |
 | `usage/finalize_turn_20` | 中位数 < 10 ms（一轮 20 次改动调用、3 个 worktree，`turns_unretained` 命中，`load` 20 次） |
 | `usage/project_30d` | 中位数 < 50 ms（30 个重度日、约 20 万条事实行、40 个片段：一个项目的 30 天快照，后台） |
 | `usage/all_projects_30d` | 中位数 < 80 ms（同一夹具，20 个项目） |

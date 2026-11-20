@@ -1128,11 +1128,7 @@ fn read_segment(
         )
     };
     let mut stmt = tx.prepare_cached(&sql)?;
-    let mut columns: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|c| (*c).to_owned())
-        .collect();
+    let mut columns: Vec<String> = stmt.column_names().map(str::to_owned).collect();
     if values {
         columns.pop();
     }
