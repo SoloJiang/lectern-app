@@ -1061,7 +1061,7 @@ CI：
 6. **分片**（`bench` 和 CI，[#279](https://github.com/SoloJiang/lectern-app/issues/279)，[ADR 0053](../adr/0053.md)）
    - `just test -p lectern-bench` 的 `shards_*`、`runner_shard_*`、`report_merge_shards_*` 通过。
    - 本地 `just bench` 不带 `--shard` 的结果与分片前相同（同一份预算、同样的状态）。
-   - CI 上每个分片任务上传自己的报告，`Benchmarks (macOS arm64)` 合并后每条预算恰好一次；连续两次 PR 运行的分片任务时长和合并任务的结束时间写进「实际验证」，最长的分片 ≤ 12 分钟、从第一个分片开始到合并结束 ≤ 15 分钟。
+   - CI 上每个分片任务上传自己的报告，`Benchmarks (macOS arm64)` 合并后每条预算恰好一次；连续两次 PR 运行的分片任务时长和合并任务的结束时间写进「实际验证」，最长的分片 ≤ 12 分钟、从第一个分片开始到合并结束 ≤ 15 分钟（[ADR 0062](../adr/0062.md) 之后为 ≤ 20 分钟）。
    - `process` 目标再分片（[ADR 0062](../adr/0062.md)）：三个 `process` 分片和一个构建任务在 CI 上运行后，各任务的时长和合并任务的结束时间写进「实际验证」，最长的任务 ≤ 12 分钟、从第一个任务开始到合并结束 ≤ 20 分钟；新的端到端基准（`app/open_file` 等）合并后，三个 `process` 分片的实测时间也写在这里。
 
 ## 实际验证
