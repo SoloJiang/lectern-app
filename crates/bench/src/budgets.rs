@@ -357,7 +357,7 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // The first open of a language in a run: its highlight query is
     // compiled on the first screen's path (ADR 0064). Record only.
-    top("app/open_file_first", RECORD, ADR_0064, ACTIVE, Process),
+    top("app/open_file/first", RECORD, ADR_0064, ACTIVE, Process),
     // From ⌘E to the editor drawn with the focus in it, on a file at the
     // edit limit (ADR 0034). The limit is the longest the interaction spec
     // lets pass before a loading state shows.

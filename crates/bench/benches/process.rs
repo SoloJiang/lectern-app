@@ -439,7 +439,7 @@ fn median(times: &[Duration]) -> Duration {
 /// one at a time. Each opens the fixture project and lets it settle, opens a
 /// small file of the scenario's language (the first use of a language in
 /// the run compiles its highlight query, outside the budget: ADR 0064; its
-/// time is `app/open_file_first`, record only), lets it settle, closes the
+/// time is `app/open_file/first`, record only), lets it settle, closes the
 /// reading view with Esc and lets it settle, then
 /// sends `Open(File)` of the scenario's file (as `Reader::open` takes it,
 /// at the scenario's byte offset): from the request to the
@@ -470,7 +470,7 @@ fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             // The language's first use in the run compiles its highlight
             // query, which the budget does not count (ADR 0064): a small
             // file of the same language is opened first, its time recorded
-            // as `app/open_file_first`. Esc closes the reading view, so the
+            // as `app/open_file/first`. Esc closes the reading view, so the
             // timed open starts from the project as the first one did (the
             // first screen starts when the request arrives).
             first.push(session.open(
@@ -528,7 +528,7 @@ fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![
         Measured::new("app/open_file", Value::Time(Samples(worst)))
             .with_note(Some(format!("the slowest scenario's samples; {note}"))),
-        Measured::new("app/open_file_first", Value::Time(Samples(first))).with_note(Some(format!(
+        Measured::new("app/open_file/first", Value::Time(Samples(first))).with_note(Some(format!(
             "the first open of a language in a run, record only (ADR 0064); {first_note}"
         ))),
     ])
