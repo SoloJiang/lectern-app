@@ -436,7 +436,11 @@ fn median(times: &[Duration]) -> Duration {
 }
 
 /// `app/open_file`: for each scenario of ADR 0034 and ADR 0042, 5 launches,
-/// one at a time. Each opens the fixture project and lets it settle, then
+/// one at a time. Each opens the fixture project and lets it settle, opens a
+/// small file of the scenario's language (the first use of a language in
+/// the run compiles its highlight query, outside the budget: ADR 0064; its
+/// time is `app/open_file_first`, record only), lets it settle, closes the
+/// reading view with Esc and lets it settle, then
 /// sends `Open(File)` of the scenario's file (as `Reader::open` takes it,
 /// at the scenario's byte offset): from the request to the
 /// `FileHighlighted` milestone's frame, the first screen drawn and
@@ -456,11 +460,31 @@ fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let scheduler = scheduler(ctx);
     let launches = ctx.scale(5, 1);
     let mut results: Vec<(String, Vec<Duration>)> = Vec::new();
+    let mut firsts: Vec<(String, Vec<Duration>)> = Vec::new();
     for scenario in &scenarios {
         let mut times = Vec::new();
+        let mut first = Vec::new();
         for _ in 0..launches {
             let mut session =
                 launch_with_project(&scheduler, &program, repo.root(), "app/open_file")?;
+            // The language's first use in the run compiles its highlight
+            // query, which the budget does not count (ADR 0064): a small
+            // file of the same language is opened first, its time recorded
+            // as `app/open_file_first`. Esc closes the reading view, so the
+            // timed open starts from the project as the first one did (the
+            // first screen starts when the request arrives).
+            first.push(session.open(
+                OpenTarget::File {
+                    path: scenario.warm.clone(),
+                    byte: None,
+                    old: None,
+                },
+                Milestone::FileHighlighted,
+                OPEN_LIMIT,
+            )?);
+            settle(&mut session, "app/open_file")?;
+            session.request(OpenTarget::Key("escape".to_owned()))?;
+            settle(&mut session, "app/open_file")?;
             times.push(session.open(
                 OpenTarget::File {
                     path: scenario.path.clone(),
@@ -476,6 +500,7 @@ fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             format!("{} ({} bytes)", scenario.name, scenario.bytes),
             times,
         ));
+        firsts.push((format!("{} warm-up", scenario.name), first));
     }
     // The old side: the review shows the diff of the changes first (it
     // shares both sides' text with the reader), then the hunk's old line is
@@ -498,6 +523,20 @@ fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         session.quit()?;
     }
     results.push((format!("old side ({} bytes)", changed.bytes), times));
+    let (note, worst) = slowest(results)?;
+    let (first_note, first) = slowest(firsts)?;
+    Ok(vec![
+        Measured::new("app/open_file", Value::Time(Samples(worst)))
+            .with_note(Some(format!("the slowest scenario's samples; {note}"))),
+        Measured::new("app/open_file_first", Value::Time(Samples(first))).with_note(Some(format!(
+            "the first open of a language in a run, record only (ADR 0064); {first_note}"
+        ))),
+    ])
+}
+
+/// Each scenario's median in a note, and the samples of the scenario with
+/// the largest median.
+fn slowest(results: Vec<(String, Vec<Duration>)>) -> Result<(String, Vec<Duration>), BenchError> {
     let note = results
         .iter()
         .map(|(name, times)| {
@@ -513,10 +552,7 @@ fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         .into_iter()
         .max_by_key(|(_, times)| median(times))
         .ok_or_else(|| BenchError::new("no scenario"))?;
-    Ok(vec![
-        Measured::new("app/open_file", Value::Time(Samples(worst)))
-            .with_note(Some(format!("the slowest scenario's samples; {note}"))),
-    ])
+    Ok((note, worst))
 }
 
 /// `app/nav_back`: 5 launches, one at a time. Each opens the `cloudprint`

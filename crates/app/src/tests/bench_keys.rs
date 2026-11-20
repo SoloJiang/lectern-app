@@ -428,3 +428,44 @@ fn bench_keys_a_first_open_computes_the_first_screen_before_the_view_is_drawn(
     assert!(rig.errors.0.lock().unwrap().is_empty());
     rig.close();
 }
+
+/// `app/open_file` warms the language with one file, closes the reading view
+/// with Esc and then opens the timed file (ADR 0064): Esc reaches the
+/// reading view and closes it, and the timed open starts its first screen
+/// when the request arrives, as a first open does.
+#[gpui::test]
+fn bench_keys_escape_closes_the_reader_and_the_next_open_starts_early(cx: &mut TestAppContext) {
+    let log = lectern_logging::testing::capture();
+    let rig = Rig::open(cx);
+    rig.open_file(cx, "a.ts");
+    rig.wait(cx, "FileHighlighted", |rig| {
+        rig.count(Milestone::FileHighlighted) == 1
+    });
+    rig.settle(cx);
+    let shows = |nodes: &[String], name: &str| {
+        let key = format!("file-reader.document.item[-:{name}]");
+        nodes.contains(&key)
+    };
+    assert!(shows(&rig.nodes(cx), "a.ts"));
+    rig.key(cx, "escape");
+    rig.settle(cx);
+    let closed = rig.nodes(cx);
+    assert!(
+        !shows(&closed, "a.ts"),
+        "Esc closed the reading view: {closed:?}"
+    );
+    log.clear();
+    rig.forget();
+    rig.open_file(cx, "b.ts");
+    assert!(
+        log.lines()
+            .iter()
+            .any(|line| line.contains(OPEN_QUEUED) && line.contains("\"prestarted\":true")),
+        "the timed open started its first screen early"
+    );
+    rig.wait(cx, "FileHighlighted", |rig| {
+        rig.count(Milestone::FileHighlighted) == 1
+    });
+    assert!(rig.errors.0.lock().unwrap().is_empty());
+    rig.close();
+}

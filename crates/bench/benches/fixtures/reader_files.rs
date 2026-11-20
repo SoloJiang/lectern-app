@@ -29,6 +29,10 @@ pub struct Scenario {
     pub byte: Option<u64>,
     /// The file's size.
     pub bytes: u64,
+    /// A small file of the same language, opened (and closed) before the
+    /// timed open: the first use of a language in a run compiles its
+    /// highlight query, which the budget does not count (ADR 0064).
+    pub warm: PathBuf,
 }
 
 /// The `cloudprint` shape with a few files of its own, in a worktree whose
@@ -54,6 +58,10 @@ impl ReaderRepo {
         let this = ReaderRepo { repo, root };
         this.write("src/module00.rs", &module(0, 0, false));
         this.write("src/module01.rs", &module(1, 0, false));
+        // The small files that warm a language before a timed open.
+        this.write("warm/warm.ts", &testing::ts(8 << 10, 1));
+        this.write("warm/warm.js", &testing::minified_js(8 << 10, 1));
+        this.write("warm/warm.json", &testing::json(8 << 10, 1));
         Ok(this)
     }
 
@@ -66,11 +74,19 @@ impl ReaderRepo {
     }
 
     fn scenario(&self, name: &'static str, rel: &str, bytes: usize, byte: Option<u64>) -> Scenario {
+        let warm = match Path::new(rel).extension().and_then(|e| e.to_str()) {
+            Some("rs") => "src/module01.rs",
+            Some("ts") => "warm/warm.ts",
+            Some("js") => "warm/warm.js",
+            Some("json") => "warm/warm.json",
+            _ => panic!("no warm-up file for {rel}: add one of its language"),
+        };
         Scenario {
             name,
             path: self.root.join(rel),
             byte,
             bytes: bytes as u64,
+            warm: self.root.join(warm),
         }
     }
 

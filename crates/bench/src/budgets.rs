@@ -173,6 +173,7 @@ const ADR_0035_DECISION: &str = "docs/adr/0035.md#决策";
 /// Process-level interactions are judged by the next frame being drawn: a
 /// median below 2.25 frame periods at 60 Hz.
 const ADR_0063: &str = "docs/adr/0063.md";
+const ADR_0064: &str = "docs/adr/0064.md";
 const AGENTS: &str = "docs/design/agents.md#性能";
 const GIT: &str = "docs/design/git.md#性能";
 const CACHE: &str = "docs/design/cache.md#性能";
@@ -354,6 +355,9 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Process,
     ),
+    // The first open of a language in a run: its highlight query is
+    // compiled on the first screen's path (ADR 0064). Record only.
+    top("app/open_file_first", RECORD, ADR_0064, ACTIVE, Process),
     // From ⌘E to the editor drawn with the focus in it, on a file at the
     // edit limit (ADR 0034). The limit is the longest the interaction spec
     // lets pass before a loading state shows.
