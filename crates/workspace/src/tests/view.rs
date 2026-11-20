@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui::{
     AppContext, Context, FocusHandle, InteractiveElement, IntoElement, KeyBinding, Render, Styled,
@@ -18,7 +18,7 @@ use lectern_kernel::{
 use lectern_logging::testing;
 use lectern_services::project::Projects;
 use lectern_services::workspace::{
-    Contribution, ContributionKind, Contributions, LeaveScope, Route, Target, WindowId,
+    Contribution, ContributionKind, Contributions, LeaveScope, Milestone, Route, Target, WindowId,
     WorkspaceCommand, screens,
 };
 use lectern_ui::contrib::KeyBindings;
@@ -997,4 +997,54 @@ fn the_panel_is_420pt_and_narrows_with_the_window() {
     let narrow = SIDEBAR_WIDTH + px(300.0);
     assert_eq!(panel_width(narrow, true), px(300.0) - PANEL_INSET * 2.0);
     assert_eq!(panel_width(px(10.0), false), px(0.0));
+}
+
+/// The frame waits of a milestone: `Window::simulate_next_frame` runs the
+/// next-frame callbacks a test window never runs by itself. A milestone that
+/// reaches `on_milestone` before any frame step has waited for no frame
+/// (its view waited already); one that reaches it after exactly one step has
+/// waited for one.
+#[gpui::test]
+fn a_milestone_a_view_reported_from_a_frame_callback_waits_for_no_second_frame(
+    cx: &mut TestAppContext,
+) {
+    let rig = UiRig::new(cx);
+    for milestone in [Milestone::DiffShown, Milestone::FileHighlighted] {
+        let before = SystemTime::now();
+        rig.host.hub().report_milestone(milestone);
+        let after = SystemTime::now();
+        rig.settle(cx);
+        let reported = rig.received.milestones();
+        let (last, presented) = *reported.last().expect("stamped before any frame");
+        assert_eq!(last, milestone);
+        assert!(
+            before <= presented && presented <= after,
+            "the time is the time of the report"
+        );
+    }
+    assert_eq!(rig.received.milestones().len(), 2);
+    // A frame later nothing is stamped a second time.
+    rig.next_frame(cx);
+    assert_eq!(rig.received.milestones().len(), 2);
+}
+
+#[gpui::test]
+fn a_milestone_reported_while_a_frame_is_drawn_waits_for_exactly_one_frame(
+    cx: &mut TestAppContext,
+) {
+    let rig = UiRig::new(cx);
+    for (done, milestone) in [Milestone::ProjectHome, Milestone::WorktreeSwitched]
+        .into_iter()
+        .enumerate()
+    {
+        rig.host.hub().report_milestone(milestone);
+        rig.settle(cx);
+        assert_eq!(rig.received.milestones().len(), done, "not before a frame");
+        rig.next_frame(cx);
+        let reported = rig.received.milestones();
+        assert_eq!(reported.len(), done + 1, "stamped by the first frame");
+        assert_eq!(reported[done].0, milestone);
+        rig.next_frame(cx);
+        assert_eq!(rig.received.milestones().len(), done + 1, "once");
+    }
 }

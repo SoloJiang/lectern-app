@@ -1,6 +1,8 @@
 //! What the state machine and the driver ask the window to do. The root view
 //! (step 2) runs them on the main thread; the tests read them.
 
+use std::time::SystemTime;
+
 use lectern_services::workspace::{LeaveScope, Milestone, WorkspaceEvent};
 
 use crate::nav::{AskId, GuardId};
@@ -38,9 +40,13 @@ pub enum Effect {
     Notice(Notice),
     /// A `KeyBindings` contribution was applied: bind its keys (`bind_keys`).
     BindKeys(Serial),
-    /// `Contributions::report_milestone`: note the next frame's time and hand
-    /// it to `app`.
-    Milestone(Milestone),
+    /// `Contributions::report_milestone`: hand the time to `app`. `presented`
+    /// is that time when the reporter already waited for the frame;
+    /// `None` means the next frame callback's time.
+    Milestone {
+        milestone: Milestone,
+        presented: Option<SystemTime>,
+    },
 }
 
 /// A one-time notice; the root view picks the Fluent key.
