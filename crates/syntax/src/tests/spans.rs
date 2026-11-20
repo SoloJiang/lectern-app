@@ -171,6 +171,28 @@ fn spans_builder_splits_lines() {
     );
 }
 
+/// `lines_in` finds the lines that can touch a range by binary search: the
+/// line holding the range's start, and the later ones that start before its
+/// end.
+#[test]
+fn spans_lines_in_finds_the_lines_of_a_range() {
+    let text: &[u8] = b"ab\n\ncd\r\nef";
+    let mut builder = SpansBuilder::new(&text, 100);
+    builder.push(&text, 1, 9, TokenKind::Comment);
+    builder.push(&text, 9, 10, TokenKind::Keyword);
+    let spans = builder.finish(true);
+    let starts = |range: std::ops::Range<u64>| -> Vec<u64> {
+        spans.lines_in(range).map(|(start, _)| start).collect()
+    };
+    assert_eq!(starts(100..110), [100, 104, 108]);
+    assert_eq!(starts(100..104), [100]);
+    assert_eq!(starts(102..109), [100, 104, 108]);
+    assert_eq!(starts(105..106), [104]);
+    assert_eq!(starts(110..120), [108]);
+    assert!(starts(0..50).is_empty(), "before the spans");
+    assert!(starts(103..103).len() <= 1);
+}
+
 #[test]
 fn spans_empty_text() {
     let spans = highlight("json", "");

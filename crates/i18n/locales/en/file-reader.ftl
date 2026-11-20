@@ -3,10 +3,32 @@
 # Paths, symbolic link targets, package names and versions are shown as written;
 # they arrive as arguments or as verbatim text, not as part of a message.
 
+file-reader-edit = Edit…
+file-reader-done = Done
+file-reader-save = Save
+file-reader-save-anyway = Save Anyway
 file-reader-back =
     .tooltip = Back (⌘[)
 file-reader-forward =
     .tooltip = Forward (⌘])
+file-reader-back-editing =
+    .tooltip = Finish editing to go back
+# Shown on a disabled Edit… button: why the file can't be edited.
+file-reader-not-editable-not-loaded = Loading the whole file…
+file-reader-not-editable-too-large = Files over 1 MB open read-only
+file-reader-not-editable-long-line = Files with lines over 4 KB open read-only
+file-reader-not-editable-not-text = This file isn't UTF-8 text
+file-reader-not-editable-line-endings = This file mixes line endings
+file-reader-not-editable-read-only = Files from history and dependencies are read-only
+file-reader-not-editable-reloading = The file changed on disk and is reloading
+# The row under the toolbar when the file changed on disk during an edit.
+file-reader-changed-on-disk = This file changed on disk while you were editing.
+file-reader-merge = Merge
+file-reader-discard-mine = Discard My Changes
+file-reader-keep-editing = Keep Editing
+file-reader-unavailable-while-editing = This file is no longer available. Copy your changes or discard them.
+# $name is the file's name, shown as written.
+file-reader-save-failed = Couldn't save { $name }.
 file-reader-find =
     .placeholder = Find
 # $current and $total are positions in the list of matches, counted from 1.

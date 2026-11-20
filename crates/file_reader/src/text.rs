@@ -8,7 +8,7 @@ use std::ops::Range;
 
 use gpui::{FontStyle, HighlightStyle, SharedString, UnderlineStyle, px};
 use lectern_services::project::BlobId;
-use lectern_syntax::Token;
+use lectern_syntax::{Token, TokenKind};
 use lectern_ui::{Palette, SystemColor, code_style};
 
 /// Tab stops every this many cells (`syntax`'s `cells::TAB`).
@@ -64,6 +64,24 @@ pub(crate) fn expand(text: &str) -> Shown {
     }
 }
 
+/// The GPUI style of a token kind: the `ui` code colouring (every colour
+/// from the palette) as a `HighlightStyle`. The reading view's rows and the
+/// edit mode's highlighter both draw with it.
+pub(crate) fn highlight_style(kind: TokenKind, palette: &Palette) -> HighlightStyle {
+    let style = code_style(kind, palette);
+    HighlightStyle {
+        color: Some(style.color),
+        font_weight: (style.weight != gpui::FontWeight::NORMAL).then_some(style.weight),
+        font_style: style.italic.then_some(FontStyle::Italic),
+        underline: style.underline.then(|| UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(style.color),
+            wavy: false,
+        }),
+        ..HighlightStyle::default()
+    }
+}
+
 /// The colour runs of one row: the highlight tokens in the `code_style` of
 /// their kind, the find matches on a tint and the current match on a
 /// stronger one. Ranges are in the row's text (`Row::Text::tokens` and
@@ -91,21 +109,7 @@ pub(crate) fn runs(
         .iter()
         .filter_map(|token| {
             let range = mapped(token.start(), token.end())?;
-            let style = code_style(token.kind(), palette);
-            Some((
-                range,
-                HighlightStyle {
-                    color: Some(style.color),
-                    font_weight: (style.weight != gpui::FontWeight::NORMAL).then_some(style.weight),
-                    font_style: style.italic.then_some(FontStyle::Italic),
-                    underline: style.underline.then(|| UnderlineStyle {
-                        thickness: px(1.0),
-                        color: Some(style.color),
-                        wavy: false,
-                    }),
-                    ..HighlightStyle::default()
-                },
-            ))
+            Some((range, highlight_style(token.kind(), palette)))
         })
         .collect();
     let matches: Vec<Range<usize>> = found

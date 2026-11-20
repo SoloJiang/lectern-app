@@ -17,8 +17,9 @@ plugin = true
 # The reading view: a self-drawn list, the find bar, actions
 # (docs/design/file_reader.md「依赖」).
 gpui.workspace = true
-# `Enter` (the find field's ↵ is taken before the text box's own handler).
-# Without the `tree-sitter` feature: the highlight goes through `syntax`
+# `Enter` (the find field's ↵ is taken before the text box's own handler), the
+# edit mode's code editor (`Editor`, `EditorState`) and its `InputHighlighter`
+# seam. Without the `tree-sitter` feature: the highlight goes through `syntax`
 # (ADR 0034).
 gpui-component.workspace = true
 # The wake-up channel from any thread to the view's foreground task:

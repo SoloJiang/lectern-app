@@ -35,6 +35,9 @@ pub(crate) struct FilesMemory {
 
 pub(crate) struct Shared {
     pub(crate) session: Arc<Session>,
+    /// Whether the views can enter edit mode (`edit::EDIT_REACHABLE`; the
+    /// tests turn it on).
+    edit: bool,
     contributions: ServiceRef<dyn Contributions>,
     code_intel: ServiceRef<dyn CodeIntel>,
     /// The wake-up of no view: asks `workspace` for the reader screen when
@@ -70,6 +73,7 @@ impl Shared {
         session: Arc<Session>,
         contributions: ServiceRef<dyn Contributions>,
         code_intel: ServiceRef<dyn CodeIntel>,
+        edit: bool,
     ) -> Arc<Shared> {
         Arc::new_cyclic(|this: &std::sync::Weak<Shared>| {
             let weak = this.clone();
@@ -83,6 +87,7 @@ impl Shared {
             });
             Shared {
                 session,
+                edit,
                 contributions,
                 code_intel,
                 push,
@@ -93,6 +98,12 @@ impl Shared {
                 files_memory: Mutex::new(FilesMemory::default()),
             }
         })
+    }
+
+    /// Whether edit mode can be entered: the Edit… button, ⌘E and the Edit
+    /// action work only when it can.
+    pub(crate) fn edit_reachable(&self) -> bool {
+        self.edit
     }
 
     /// The plugin's wake-up goes in the session's slot (`started`, and

@@ -13,7 +13,7 @@ use gpui::{
     ScrollWheelEvent, StatefulInteractiveElement, Styled, StyledText, Window, canvas, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::input::Enter;
+use gpui_component::input::{Enter, Escape};
 use lectern_i18n::{Args, Strings, keys};
 use lectern_syntax::{DocSnapshot, DocState, LineNo, Row};
 use lectern_ui::semantic::{Role, Semantic, State, semantic};
@@ -22,7 +22,10 @@ use lectern_ui::{
     colors, loading_phase, mono_metrics,
 };
 
-use crate::actions::{self, Back, Close, Find, FindNext, FindPrevious, Forward};
+use crate::actions::{
+    self, Back, Close, DiscardMine, Edit, Find, FindNext, FindPrevious, Forward, KeepEditing,
+    Merge, Save, SaveAnyway,
+};
 use crate::nodes;
 use crate::text::{expand, runs};
 use crate::view::ReadingView;
@@ -33,6 +36,7 @@ impl Render for ReadingView {
         let mono = mono_metrics(window, cx);
         let strings = lectern_ui::strings(cx);
         self.sync_viewport(&mono);
+        self.flush_edit(&palette);
         self.drawn_ready(window);
         let now = Instant::now();
         let height = self.find.height.tick(now, window);
@@ -69,15 +73,27 @@ impl Render for ReadingView {
                     lectern_syntax::LineCount::Estimated(n) => format!("~{n}"),
                 },
             );
-            spec.attr("mode", "readonly")
+            match &self.edit {
+                Some(edit) => spec
+                    .attr("mode", "editing")
+                    .attr("dirty", edit.dirty().to_string()),
+                None => spec.attr("mode", "readonly"),
+            }
         });
         let column: AnyElement = match document {
             Some(spec) => semantic(spec, column).into_any_element(),
             None => column.into_any_element(),
         };
+        // While editing, the context says so: the history's keys are the
+        // editor's Outdent and Indent then.
+        let context = if self.editing() {
+            "reader editing"
+        } else {
+            actions::READER
+        };
         div()
             .id("file-reader")
-            .key_context(actions::READER)
+            .key_context(context)
             .track_focus(&self.focus)
             .size_full()
             .bg(palette.control_background)
@@ -87,12 +103,42 @@ impl Render for ReadingView {
             .on_action(cx.listener(|this, _: &Back, _, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &Forward, _, cx| this.go_forward(cx)))
             .on_action(cx.listener(|this, _: &Close, window, cx| {
+                if this.editing() {
+                    // The editor did not take it either: what is left is
+                    // leaving edit mode. Never `workspace`'s Esc.
+                    this.leave_edit(window, cx);
+                    return;
+                }
                 // No bar to close: the key goes on to `workspace`, which
                 // goes back to the view that opened the reader.
                 if !this.close_find(window, cx) {
                     cx.propagate();
                 }
             }))
+            // The editor's own Esc (it closes its popups and clears extra
+            // cursors) goes on to the parents when it has nothing to close;
+            // that is "leave edit mode", and it stops here so that
+            // `workspace`'s Esc binding does not pop the screen under a
+            // buffer.
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                if this.editing() {
+                    this.leave_edit(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Edit, window, cx| this.toggle_edit(window, cx)))
+            // ⌘S is the Save button: Save Anyway after Keep Editing.
+            .on_action(cx.listener(|this, _: &Save, _, cx| {
+                let anyway = this.save_anyway();
+                this.save(anyway, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveAnyway, _, cx| this.save(true, cx)))
+            .on_action(cx.listener(|this, _: &Merge, _, cx| this.merge(cx)))
+            .on_action(
+                cx.listener(|this, _: &DiscardMine, window, cx| this.discard_mine(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &KeepEditing, _, cx| this.keep_editing(cx)))
             .child(column)
     }
 }
@@ -121,6 +167,9 @@ impl ReadingView {
         let Some(snapshot) = self.snapshot.clone() else {
             return div().flex_1().into_any_element();
         };
+        if self.editing() {
+            return self.render_editing(palette, mono, strings, window, cx);
+        }
         match &snapshot.state {
             DocState::Ready => self.render_code(&snapshot, palette, mono, window, cx),
             DocState::Opening => self.render_loading(strings, window, cx),
