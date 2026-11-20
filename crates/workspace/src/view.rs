@@ -21,7 +21,7 @@ use lectern_i18n::keys;
 use lectern_kernel::{Name, PluginError, contain};
 use lectern_logging::{debug, error, warn};
 use lectern_services::workspace::{
-    Contributions, Route, Visibility, WorkspaceCommand, WorkspaceEvent,
+    Contributions, Milestone, Route, Visibility, WorkspaceCommand, WorkspaceEvent,
 };
 use lectern_ui::contrib::{InspectorTab, KeyBindings, Overlay, Panel, Screen, SidebarPanel};
 use lectern_ui::motion::{self, Effective, PANEL_CLOSE, PANEL_OPEN, Transition};
@@ -268,19 +268,26 @@ impl Workspace {
                     });
                 }
                 Effect::BindKeys(serial) => self.bind_keys(serial, cx),
-                Effect::Milestone(milestone) => {
+                Effect::Milestone {
+                    milestone,
+                    presented,
+                } => {
                     let on_milestone = self.deps.on_milestone.clone();
-                    self.with_window(window.as_deref_mut(), cx, move |window, _| {
-                        window.on_next_frame(move |_, _| {
-                            let presented = SystemTime::now();
-                            let since_epoch = presented
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_micros())
-                                .unwrap_or(0);
-                            debug!("milestone"; name = milestone_name(&milestone), presented_us = since_epoch);
-                            on_milestone(milestone, presented);
-                        });
-                    });
+                    match presented {
+                        // The view reported from its own frame callback: the
+                        // frame that shows the result is out already. No
+                        // second frame wait.
+                        Some(presented) => stamp_milestone(&on_milestone, milestone, presented),
+                        // Reported while the frame was drawn: the next frame
+                        // callback is the first one after it.
+                        None => {
+                            self.with_window(window.as_deref_mut(), cx, move |window, _| {
+                                window.on_next_frame(move |_, _| {
+                                    stamp_milestone(&on_milestone, milestone, SystemTime::now());
+                                });
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1277,6 +1284,20 @@ fn in_scope<R>(registry: &Registry, kind: Kind, id: &str, f: impl FnOnce() -> R)
     };
     drop(admission);
     result
+}
+
+/// Hands a milestone with its time to `app` (`WorkspaceDeps::on_milestone`).
+fn stamp_milestone(
+    on_milestone: &Arc<dyn Fn(Milestone, SystemTime) + Send + Sync>,
+    milestone: Milestone,
+    presented: SystemTime,
+) {
+    let since_epoch = presented
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    debug!("milestone"; name = milestone_name(&milestone), presented_us = since_epoch);
+    on_milestone(milestone, presented);
 }
 
 /// Checks each frame whether every transition has settled, then ends the

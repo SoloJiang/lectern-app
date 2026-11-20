@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use gpui::{
     AnyWindowHandle, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
@@ -37,7 +38,7 @@ use super::support::{
 pub struct Received {
     pub states: Mutex<Vec<WindowState>>,
     pub frames: Mutex<Vec<FrameRecord>>,
-    pub milestones: Mutex<Vec<Milestone>>,
+    pub milestones: Mutex<Vec<(Milestone, SystemTime)>>,
 }
 
 impl Received {
@@ -49,8 +50,12 @@ impl Received {
             on_state_changed: Arc::new(move |state| {
                 states.states.lock().unwrap().push(state);
             }),
-            on_milestone: Arc::new(move |milestone, _| {
-                milestones.milestones.lock().unwrap().push(milestone);
+            on_milestone: Arc::new(move |milestone, presented| {
+                milestones
+                    .milestones
+                    .lock()
+                    .unwrap()
+                    .push((milestone, presented));
             }),
             on_frames: Arc::new(move |record| {
                 frames.frames.lock().unwrap().push(record);
@@ -64,6 +69,10 @@ impl Received {
 
     pub fn frames(&self) -> Vec<FrameRecord> {
         self.frames.lock().unwrap().clone()
+    }
+
+    pub fn milestones(&self) -> Vec<(Milestone, SystemTime)> {
+        self.milestones.lock().unwrap().clone()
     }
 }
 
@@ -124,6 +133,16 @@ impl UiRig {
         self.kernel
             .activate()
             .expect("the workspace plugin activates");
+        self.settle(cx);
+    }
+
+    /// Delivers one frame: runs the callbacks registered with
+    /// `Window::on_next_frame` (a test window has no frame loop), then lets
+    /// what they queued finish.
+    pub fn next_frame(&self, cx: &mut TestAppContext) {
+        self.window
+            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+            .expect("the window is open");
         self.settle(cx);
     }
 

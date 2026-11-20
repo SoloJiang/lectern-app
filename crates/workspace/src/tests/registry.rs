@@ -5,14 +5,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use lectern_kernel::{Activation, Plugin, service};
 use lectern_services::project::{
     ChangedParts, ProjectEvent, ProjectKey, ProjectSnapshot, Projects,
 };
 use lectern_services::workspace::{
-    Contribution, ContributionKind, Contributions, LeaveScope, Payload, Route, SidebarSection,
-    Target, WorkspaceCommand, WorkspaceEvent, screens,
+    Contribution, ContributionKind, Contributions, LeaveScope, Milestone, Payload, Route,
+    SidebarSection, Target, WorkspaceCommand, WorkspaceEvent, screens,
 };
 
 use super::support::*;
@@ -674,15 +675,50 @@ fn project_events_reach_the_state_machine() {
     assert_eq!(rig.queue.len(), 0, "Changed is not queued");
     rig.emit(closed(&key));
     assert_eq!(rig.driver.nav().nav().base, Base::Welcome);
-    // Milestones pass through as effects.
-    rig.hub
-        .report_milestone(lectern_services::workspace::Milestone::ProjectHome);
+    // Milestones pass through as effects. `ProjectHome` is reported while
+    // the frame is drawn: it still waits for the next frame callback.
+    rig.hub.report_milestone(Milestone::ProjectHome);
     assert_eq!(
         rig.drain(),
-        vec![Effect::Milestone(
-            lectern_services::workspace::Milestone::ProjectHome
-        )]
+        vec![Effect::Milestone {
+            milestone: Milestone::ProjectHome,
+            presented: None,
+        }]
     );
+    // `DiffShown` is reported from a frame callback already: the time is
+    // taken at the call, with no second wait.
+    let before = SystemTime::now();
+    rig.hub.report_milestone(Milestone::DiffShown);
+    let after = SystemTime::now();
+    let effects = rig.drain();
+    let [
+        Effect::Milestone {
+            milestone: Milestone::DiffShown,
+            presented: Some(presented),
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("DiffShown carries its time: {effects:?}");
+    };
+    assert!(before <= *presented && *presented <= after);
+}
+
+#[test]
+fn milestones_wait_for_a_frame_only_when_the_view_did_not() {
+    for (milestone, waited) in [
+        (Milestone::ProjectHome, false),
+        (Milestone::WorktreeSwitched, false),
+        (Milestone::FileHighlighted, true),
+        (Milestone::DiffShown, true),
+    ] {
+        let mut rig = Rig::new();
+        rig.hub.report_milestone(milestone);
+        let effects = rig.drain();
+        let [Effect::Milestone { presented, .. }] = effects.as_slice() else {
+            panic!("one milestone effect: {effects:?}");
+        };
+        assert_eq!(presented.is_some(), waited, "{milestone:?}");
+    }
 }
 
 #[test]

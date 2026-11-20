@@ -517,7 +517,7 @@ impl Kernel {
 
 `app`：`bench-probe` feature，打开 `lectern-bench/probe`；在上面写明的位置调用探针；实现 `Driver`；提供把应用数据目录指到临时目录的方式（运行器每次启动都用新的临时目录，不读写用户的真实数据）。具体写进 `app` 的设计文档。
 
-`workspace`：画出某个里程碑状态的帧显示后、一段滚动或动画结束后，通过一个回调交给 `app`。里程碑的判定条件（「项目主页可用」指侧栏和会话列表画出真实内容而不是骨架）写进 `workspace` 和各视图的设计文档。
+`workspace`：画出某个里程碑状态的帧显示后、一段滚动或动画结束后，通过一个回调交给 `app`。里程碑的判定条件（「项目主页可用」指侧栏和会话列表画出真实内容而不是骨架）写进 `workspace` 和各视图的设计文档。`presented` 是画出结果的那一帧之后的第一个帧回调的时刻，只等一帧：视图已经在帧回调里报告的里程碑（`DiffShown`、`FileHighlighted`）按报告的时刻记，在画这一帧时报告的（`ProjectHome`、`WorktreeSwitched`）在下一帧回调里记（[workspace 设计「与设计的差异」](workspace.md#里程碑只等一帧)）。
 
 被测的领域、基础设施和 kernel 层 crate：见「夹具与 `test-support`」。
 
@@ -1337,6 +1337,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - **`app/idle_monorepo`、`app/idle_100k` 采样时没有暂停后台工作**：设计要「后台工作已暂停」（ADR 0029），但 desktop 的插件集合里还没有可以暂停的后台工作（`code_intel` 没有装配，[#17](https://github.com/SoloJiang/lectern-app/issues/17)）。采样按 `app/idle_empty` 的方式：打开夹具项目、到 `ProjectHome` 里程碑、静止之后。`code_intel` 装配时加上暂停。
 - **`app/open_diff` 的夹具比 `review/open_session_50` 小**：一个 200 个文件的合成仓库（5 个带 `package.json` 的子项目），一个 Claude Code 会话在 20 轮里用 `Write` 改了 50 个约 300 行的文件；没有 2000 个提交和 reflog。会话日志写在临时 `HOME` 的 `.claude/projects/` 下，`app` 像对待真实会话一样发现、归位和归因。夹具在 `benches/fixtures/review_session.rs`，`examples/review_fixture.rs` 用同一个夹具做手动检查。
 - **`Driver::open(Diff)` 的会话键是 `<来源>:<id>`**（如 `session-claude-code:<uuid>`）：设计只写了 `Diff { session }`。`app` 在第一个 `:` 处分开，两边都不能为空。
+- **里程碑的时刻只等一帧**：`workspace` 原来对每个里程碑都在下一帧回调里记时刻，`DiffShown`、`FileHighlighted` 的视图已经在 `on_next_frame` 里报告，等了两帧，读数晚一个帧周期（60 Hz 下最多约 16.7 ms），16 ms 一档的 `app/open_file`、`app/nav_back`、`app/files_open`、`app/files_expand` 因此达不到。现在这两个里程碑按报告的时刻记。`app/open_diff`（`DiffShown`）在 CI 上最多读低一个帧周期；`app/open_project`（`ProjectHome`）与 `app/switch_worktree`（`WorktreeSwitched`）由 `project_home`、`worktrees` 在 `render` 里报告，原来就只等一帧，读数不变。样本起点没有等帧：运行器在发 `Open` 之前取 `SystemTime::now()`，`app` 收到请求后不经帧回调就派发。预算不变。见 [workspace 设计「与设计的差异」](workspace.md#里程碑只等一帧)。
 - **`Session::open` 之后的静止等待从里程碑开始算**：原来从首帧开始算，打开项目之后马上发 `Epoch` 时，等待可能已经过了。`app/open_diff` 先打开项目再打开 Diff，两次都要等静止。
 - **`review_view/scroll_5000` 是 `Process` 目标**：测试 `budgets_belong_to_the_documented_targets` 按前缀把 `review_view/` 归到 `time` 目标，但这一条是测量构建的帧记录，测试加了这个例外。
 - **帧的预算仍是计划中**：`workspace` 的 `on_frames` 记录总是空的，`review_view/scroll_5000` 和 `app/home_frames` 等 `workspace` 记录帧之后再生效。`project_home/resident_bytes` 要在窗口里建两个视图的状态才能测量，也是计划中。

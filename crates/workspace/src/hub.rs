@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use lectern_kernel::{
     ActivationToken, Emitter, KernelControl, Name, PendingGuard, PluginHandle, ServiceRef,
@@ -44,8 +44,14 @@ pub enum Item {
     GuardAnswer { ask: AskId, allowed: bool },
     /// From the `project` plugin.
     Project(ProjectEvent),
-    /// `Contributions::report_milestone`.
-    Milestone(Milestone),
+    /// `Contributions::report_milestone`; `presented` is the time at the
+    /// call when the reporter already waited for the frame
+    /// (`Milestone::reported_after_frame`), otherwise the root view takes it
+    /// in the next frame callback.
+    Milestone {
+        milestone: Milestone,
+        presented: Option<SystemTime>,
+    },
     /// `dyn Projects`, from `WorkspacePlugin::started`; the commands that
     /// waited for it run then.
     Projects(ServiceRef<dyn Projects>),
@@ -88,7 +94,14 @@ impl std::fmt::Debug for Item {
                 .field("allowed", allowed)
                 .finish(),
             Item::Project(event) => f.debug_tuple("Project").field(event).finish(),
-            Item::Milestone(milestone) => f.debug_tuple("Milestone").field(milestone).finish(),
+            Item::Milestone {
+                milestone,
+                presented,
+            } => f
+                .debug_struct("Milestone")
+                .field("milestone", milestone)
+                .field("presented", presented)
+                .finish(),
             Item::Projects(_) => f.write_str("Projects"),
             Item::Started { .. } => f.write_str("Started"),
             Item::Proxy(name) => f.debug_tuple("Proxy").field(name).finish(),
@@ -322,6 +335,12 @@ impl Contributions for Hub {
     }
 
     fn report_milestone(&self, milestone: Milestone) {
-        self.enqueue(Item::Milestone(milestone));
+        // The time is taken here, not when the queue is handled: the queue
+        // runs after the frame callback's draw.
+        let presented = milestone.reported_after_frame().then(SystemTime::now);
+        self.enqueue(Item::Milestone {
+            milestone,
+            presented,
+        });
     }
 }
