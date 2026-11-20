@@ -29,7 +29,7 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `rusqlite` =0.40.2（`default-features = false`，`bundled`、`cache`） | SQLite 连接、事务、预编译语句缓存 | MIT；静态链接自带的 SQLite 3.53.2，约 2 MB；理由与放弃的方案见 [ADR 0027](../adr/0027.md) |
+| `rusqlite` =0.43.0（`default-features = false`，`bundled`、`cache`） | SQLite 连接、事务、预编译语句缓存 | MIT；静态链接自带的 SQLite 3.54.1，约 2 MB；理由与放弃的方案见 [ADR 0027](../adr/0027.md) |
 | `sha2` 0.11 | 由分库对应的路径算出文件名 | 已在 Cargo.lock（gix-hash 依赖同一版本），不新增 crate |
 | `ruzstd` 0.9 | 命名空间选择压缩时的编码与解码 | 已是工作区依赖（[ADR 0026](../adr/0026.md)），纯 Rust |
 | `lectern-logging` | 运行日志（「日志与诊断」） | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；测试用它的 `test-support` feature 捕获记录 |
