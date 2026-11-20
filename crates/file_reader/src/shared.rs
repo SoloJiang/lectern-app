@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use futures::channel::mpsc;
 use lectern_kernel::{Name, ServiceRef};
 use lectern_services::code_intel::{CodeIntel, Query};
 use lectern_services::project::ProjectKey;
@@ -18,6 +19,7 @@ use lectern_services::workspace::{
     Contributions, Milestone, Route, Target, WorkspaceCommand, screens,
 };
 
+use crate::edit::LeaveAsk;
 use crate::session::{Session, Wake};
 
 /// What the Files tree keeps between its views. `workspace` drops the
@@ -52,6 +54,10 @@ pub(crate) struct Shared {
     files_wake: Mutex<Option<(u64, Wake)>>,
     files_built: AtomicU64,
     files_memory: Mutex<FilesMemory>,
+    /// Where the leave guard sends its questions: the view that is editing
+    /// (its number and the sender). None until the user enters edit mode,
+    /// and again once the edit ends; the guard answers "pass" then.
+    asks: Mutex<Option<(u64, mpsc::UnboundedSender<LeaveAsk>)>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -96,6 +102,7 @@ impl Shared {
                 files_wake: Mutex::new(None),
                 files_built: AtomicU64::new(0),
                 files_memory: Mutex::new(FilesMemory::default()),
+                asks: Mutex::new(None),
             }
         })
     }
@@ -175,6 +182,37 @@ impl Shared {
 
     pub(crate) fn keep_files_memory(&self, memory: FilesMemory) {
         *lock(&self.files_memory) = memory;
+    }
+
+    /// The view `id` starts editing: the guard's questions go to it.
+    pub(crate) fn serve_asks(&self, id: u64) -> mpsc::UnboundedReceiver<LeaveAsk> {
+        let (sender, receiver) = mpsc::unbounded();
+        *lock(&self.asks) = Some((id, sender));
+        receiver
+    }
+
+    /// The view `id` stops editing: the guard has nobody to ask, unless a
+    /// newer view took the slot.
+    pub(crate) fn stop_asks(&self, id: u64) {
+        let mut slot = lock(&self.asks);
+        if slot.as_ref().is_some_and(|(held, _)| *held == id) {
+            *slot = None;
+        }
+    }
+
+    /// Whether the guard has a view to ask (tests).
+    #[cfg(test)]
+    pub(crate) fn asks_served(&self) -> bool {
+        lock(&self.asks).is_some()
+    }
+
+    /// The leave guard's question, any thread. Gives it back when nobody is
+    /// editing (or the editing view is gone).
+    pub(crate) fn ask_leave(&self, ask: LeaveAsk) -> Result<(), LeaveAsk> {
+        match lock(&self.asks).as_ref() {
+            Some((_, sender)) => sender.unbounded_send(ask).map_err(|e| e.into_inner()),
+            None => Err(ask),
+        }
     }
 
     pub(crate) fn dispatch(&self, command: WorkspaceCommand) {

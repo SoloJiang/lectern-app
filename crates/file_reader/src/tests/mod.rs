@@ -7,6 +7,7 @@ mod edit;
 mod files;
 mod focus;
 mod history;
+mod leave;
 mod logs;
 mod plugin;
 mod rig;

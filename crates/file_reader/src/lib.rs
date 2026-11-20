@@ -9,9 +9,9 @@
 //! column, the find bar and the history's buttons. [`FilesView`] is the
 //! sidebar panel that lists the active worktree's tracked files from the
 //! directory table. The edit mode (step 8a: the code editor over `syntax`'s
-//! edit session, saving, the disk banner) is in `ReadingView` too, behind
-//! `edit::EDIT_REACHABLE` until the leave guard exists (step 8b). This crate
-//! does no IO and no parsing: documents are `syntax`'s (`Engine`), read
+//! edit session, saving, the disk banner) is in `ReadingView` too, with the
+//! leave guard of step 8b (`edit/leave.rs`) asking before a buffer with
+//! unsaved changes is dropped. This crate does no IO and no parsing: documents are `syntax`'s (`Engine`), read
 //! through snapshots.
 
 pub mod actions;

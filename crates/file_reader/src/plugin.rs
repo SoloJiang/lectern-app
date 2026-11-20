@@ -4,7 +4,8 @@
 //!
 //! - `activate` builds the engine (no IO, no grammar, no query compiled),
 //!   provides the service, subscribes to `ProjectEvent` and hands the
-//!   reader screen and its key bindings to `workspace` (`own_staged`).
+//!   reader screen, its key bindings and the leave guard to `workspace`
+//!   (`own_staged`).
 //! - `started` hands the activation's handle to the engine and puts the
 //!   plugin's wake-up in the session (a request that arrives while no view
 //!   lives makes `workspace` push the reader screen). No task.
@@ -27,7 +28,7 @@ use lectern_services::reader::{Reader, ReaderEvent};
 use lectern_services::workspace::Contributions;
 use lectern_syntax::{Engine, EngineDeps, Languages};
 
-use crate::edit::EDIT_REACHABLE;
+use crate::edit::{EDIT_REACHABLE, LeaveGuard};
 use crate::screen;
 use crate::session::{Host, Session};
 use crate::shared::Shared;
@@ -121,6 +122,11 @@ impl Plugin for FileReaderPlugin {
         for registration in screen::registrations(&shared) {
             ctx.own_staged(admitted.register(registration, None));
         }
+        // One guard for the window: nothing is allocated for it beyond this
+        // handle until the user enters edit mode.
+        ctx.own_staged(
+            admitted.register_leave_guard(Arc::new(LeaveGuard::new(shared.clone())), None),
+        );
         drop(admitted);
         ctx.provide::<dyn Reader>(session.clone())?;
         let listener = session.clone();

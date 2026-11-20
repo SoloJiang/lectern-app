@@ -19,7 +19,6 @@ use gpui::{
     Window, px,
 };
 use lectern_services::code_intel::{Position, Query, QueryKind};
-use lectern_services::reader::OpenOutcome;
 use lectern_services::workspace::{Milestone, WorkspaceCommand};
 use lectern_syntax::{
     DocSnapshot, DocState, FindQuery, FindResults, LineNo, Row, RowPos, Viewport,
@@ -27,7 +26,7 @@ use lectern_syntax::{
 use lectern_ui::motion::Transition;
 use lectern_ui::{MonoMetrics, TextAreaState};
 
-use crate::edit::{Editing, Reenter};
+use crate::edit::{Editing, Leave, Reenter};
 use crate::shared::Shared;
 use crate::text::{digits, identifier_cell};
 
@@ -67,7 +66,7 @@ struct Resting {
 
 pub struct ReadingView {
     pub(crate) shared: Arc<Shared>,
-    id: u64,
+    pub(crate) id: u64,
     pub(crate) focus: FocusHandle,
     pub(crate) snapshot: Option<Arc<DocSnapshot>>,
     /// Bumped each time the session shows another document (open, back,
@@ -125,7 +124,7 @@ impl ReadingView {
             while rx.next().await.is_some() {
                 queued.store(false, Ordering::SeqCst);
                 let alive = this.update_in(cx, |view, window, cx| {
-                    view.pump(cx);
+                    view.pump(window, cx);
                     view.edit_tick(window, cx);
                 });
                 if alive.is_err() {
@@ -174,29 +173,28 @@ impl ReadingView {
         }
     }
 
-    /// Takes what waits in the session: the requests (the leave guard has
-    /// nothing to ask without an edit mode, so each is applied), then the
-    /// snapshot. Runs on the main thread after every wake-up.
-    pub(crate) fn pump(&mut self, cx: &mut Context<Self>) {
+    /// Takes what waits in the session: the requests (each goes through the
+    /// leave guard while a buffer is edited), then the snapshot. Runs on the
+    /// main thread after every wake-up.
+    pub(crate) fn pump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.shared.session.clone();
         let mut asked = false;
-        let mut shown = false;
-        // While a buffer is edited the requests wait: applying one would end
-        // the session (step 8b's leave guard decides what happens to them).
-        while !self.editing()
+        // While a question is open the requests wait for its answer, in
+        // order.
+        while !self.leaving()
             && let Some(request) = session.next_request()
         {
             asked = true;
-            if session.apply(request) == OpenOutcome::Shown {
-                self.serial += 1;
-                shown = true;
+            if self.editing() {
+                // Passes at once when nothing is unsaved; otherwise the user
+                // is asked, and the answer shows or cancels the request.
+                self.begin_leave(Leave::Open(request), window, cx);
+            } else {
+                self.show(request, cx);
             }
         }
-        if shown {
-            self.new_document(cx);
-        }
         let snapshot = session.sync();
-        if snapshot.is_none() && asked {
+        if snapshot.is_none() && asked && !self.leaving() {
             // The only request could not be placed: there is nothing to read
             // here, back to where the reader was opened from.
             self.shared.dispatch(WorkspaceCommand::Pop);
@@ -207,7 +205,7 @@ impl ReadingView {
 
     /// Another document: the scroll position and the pointer's rest are not
     /// the old one's, and a find that is open runs in the new one.
-    fn new_document(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn new_document(&mut self, cx: &mut Context<Self>) {
         self.top = RowPos::default();
         self.offset = px(0.0);
         self.scroll_x = px(0.0);
@@ -390,32 +388,50 @@ impl ReadingView {
     // ----- history ----------------------------------------------------------
 
     /// ⌘[: the previous position; at the start of the history, back to the
-    /// view that opened the reader.
-    pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
-        // Not while editing: the history changes the document.
-        if self.editing() {
-            return;
-        }
+    /// view that opened the reader. While editing the toolbar and the key
+    /// do not get here; by name it goes through the leave guard, since the
+    /// history changes the document.
+    pub(crate) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.shared.session.can_back() {
+            // `workspace` asks the guards before it pops the screen.
             self.shared.dispatch(WorkspaceCommand::Pop);
             return;
         }
-        if self.shared.session.back() {
-            self.serial += 1;
-            self.new_document(cx);
-            self.pump(cx);
+        if self.editing() {
+            self.begin_leave(Leave::Back, window, cx);
+        } else {
+            self.step_back(window, cx);
         }
     }
 
     /// ⌘]: the next position.
-    pub(crate) fn go_forward(&mut self, cx: &mut Context<Self>) {
-        if self.editing() {
+    pub(crate) fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Nothing ahead: nothing to ask about either.
+        if !self.shared.session.can_forward() {
             return;
         }
+        if self.editing() {
+            self.begin_leave(Leave::Forward, window, cx);
+        } else {
+            self.step_forward(window, cx);
+        }
+    }
+
+    /// The previous position, after the leave guard.
+    pub(crate) fn step_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shared.session.back() {
+            self.serial += 1;
+            self.new_document(cx);
+            self.pump(window, cx);
+        }
+    }
+
+    /// The next position, after the leave guard.
+    pub(crate) fn step_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.shared.session.forward() {
             self.serial += 1;
             self.new_document(cx);
-            self.pump(cx);
+            self.pump(window, cx);
         }
     }
 
@@ -680,6 +696,10 @@ impl Drop for ReadingView {
     /// The screen is popped: the document goes with its focus, and the
     /// plugin's wake-up is the session's again.
     fn drop(&mut self) {
+        // A request that waited for the user's answer is over with the view.
+        if let Some(mut edit) = self.edit.take() {
+            edit.abandon(self);
+        }
         self.shared.end_view(self.id);
     }
 }

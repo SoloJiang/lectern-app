@@ -3,6 +3,7 @@
 # 路径、符号链接的目标、包名和版本原样显示，经参数或原文传入，不是消息的一部分。
 
 file-reader-edit = 编辑…
+    .tooltip = 编辑这个文件（⌘E）
 file-reader-done = 完成
 file-reader-save = 保存
 file-reader-save-anyway = 仍然保存
@@ -26,6 +27,13 @@ file-reader-merge = 合并
 file-reader-discard-mine = 放弃我的改动
 file-reader-keep-editing = 继续编辑
 file-reader-unavailable-while-editing = 这个文件已不可用。请复制你的修改，或放弃它们。
+# 有未保存改动的缓冲区将被丢掉之前，系统弹出的确认。
+# $name 是文件名，原样显示。
+file-reader-unsaved-title = 要保存对 { $name } 的修改吗？
+file-reader-unsaved-message = 不保存的话，你的修改会丢失。
+file-reader-unsaved-save = 保存
+file-reader-unsaved-dont-save = 不保存
+file-reader-unsaved-cancel = 取消
 # $name 是文件名，原样显示。
 file-reader-save-failed = 无法保存 { $name }。
 file-reader-find =

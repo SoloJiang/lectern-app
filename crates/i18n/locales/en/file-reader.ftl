@@ -4,6 +4,7 @@
 # they arrive as arguments or as verbatim text, not as part of a message.
 
 file-reader-edit = Edit…
+    .tooltip = Edit this file (⌘E)
 file-reader-done = Done
 file-reader-save = Save
 file-reader-save-anyway = Save Anyway
@@ -27,6 +28,13 @@ file-reader-merge = Merge
 file-reader-discard-mine = Discard My Changes
 file-reader-keep-editing = Keep Editing
 file-reader-unavailable-while-editing = This file is no longer available. Copy your changes or discard them.
+# The system confirmation before something would drop a buffer with unsaved changes.
+# $name is the file's name, shown as written.
+file-reader-unsaved-title = Save changes to { $name }?
+file-reader-unsaved-message = Your changes will be lost if you don't save them.
+file-reader-unsaved-save = Save
+file-reader-unsaved-dont-save = Don't Save
+file-reader-unsaved-cancel = Cancel
 # $name is the file's name, shown as written.
 file-reader-save-failed = Couldn't save { $name }.
 file-reader-find =

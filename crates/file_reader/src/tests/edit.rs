@@ -36,7 +36,7 @@ fn source() -> &'static str {
 
 impl Rig {
     /// Runs `f` on the view with its window, as an action's handler would.
-    fn with_view<R>(
+    pub(super) fn with_view<R>(
         &self,
         cx: &mut TestAppContext,
         f: impl FnOnce(&mut ReadingView, &mut Window, &mut Context<ReadingView>) -> R,
@@ -49,13 +49,13 @@ impl Rig {
     }
 
     /// Opens `rel` and enters edit mode in it.
-    fn start(&self, cx: &mut TestAppContext, rel: &str, text: &str) {
+    pub(super) fn start(&self, cx: &mut TestAppContext, rel: &str, text: &str) {
         self.write(rel, text);
         self.open(cx, rel, Anchor::Start);
         assert!(self.enter(cx), "edit mode starts");
     }
 
-    fn enter(&self, cx: &mut TestAppContext) -> bool {
+    pub(super) fn enter(&self, cx: &mut TestAppContext) -> bool {
         let entered = self.with_view(cx, |view, window, cx| view.enter_edit(window, cx));
         self.after(cx);
         entered
@@ -63,29 +63,29 @@ impl Rig {
 
     /// Lets the tasks finish and draws, twice over (each pass can wake the
     /// next).
-    fn after(&self, cx: &mut TestAppContext) {
+    pub(super) fn after(&self, cx: &mut TestAppContext) {
         self.settle(cx);
         self.draw(cx);
         self.settle(cx);
         self.draw(cx);
     }
 
-    fn editing(&self, cx: &mut TestAppContext) -> bool {
+    pub(super) fn editing(&self, cx: &mut TestAppContext) -> bool {
         self.read(cx, |view| view.edit.is_some())
     }
 
-    fn dirty(&self, cx: &mut TestAppContext) -> bool {
+    pub(super) fn dirty(&self, cx: &mut TestAppContext) -> bool {
         self.read(cx, |view| view.edit.as_ref().is_some_and(|e| e.dirty()))
     }
 
     /// The editor's text.
-    fn buffer(&self, cx: &mut TestAppContext) -> String {
+    pub(super) fn buffer(&self, cx: &mut TestAppContext) -> String {
         let editor = self.read(cx, |view| view.edit.as_ref().unwrap().editor.clone());
         editor.read_with(cx, |editor, _| editor.value().to_string())
     }
 
     /// Types `text` at `offset`, as the user would (the input handler).
-    fn type_at(&self, cx: &mut TestAppContext, offset: usize, text: &str) {
+    pub(super) fn type_at(&self, cx: &mut TestAppContext, offset: usize, text: &str) {
         let editor = self.read(cx, |view| view.edit.as_ref().unwrap().editor.clone());
         self.window
             .update(cx, |_, window, cx| {
@@ -97,12 +97,12 @@ impl Rig {
         self.after(cx);
     }
 
-    fn on_disk(&self, rel: &str) -> String {
+    pub(super) fn on_disk(&self, rel: &str) -> String {
         std::fs::read_to_string(self.tree.root.join(rel)).unwrap()
     }
 
     /// The toolbar's controls, drawn as `workspace` draws them.
-    fn bar(&self, cx: &mut TestAppContext) -> Vec<Record> {
+    pub(super) fn bar(&self, cx: &mut TestAppContext) -> Vec<Record> {
         let screen = self.contributions.screen();
         let window = cx.add_window(|_, _| Bar { screen });
         let mut visual = VisualTestContext::from_window(AnyWindowHandle::from(window), cx);
@@ -115,19 +115,19 @@ impl Rig {
         Recorder::finish()
     }
 
-    fn controls(&self, cx: &mut TestAppContext) -> usize {
+    pub(super) fn controls(&self, cx: &mut TestAppContext) -> usize {
         let screen = self.contributions.screen();
         cx.update(|cx| (screen.toolbar)(cx).controls.len())
     }
 
-    fn dispatch<A: gpui::Action>(&self, cx: &mut TestAppContext, action: A) {
+    pub(super) fn dispatch<A: gpui::Action>(&self, cx: &mut TestAppContext, action: A) {
         let mut visual = self.visual(cx);
         visual.dispatch_action(action);
         self.after(cx);
     }
 
     /// A pending save asked for through the keys.
-    fn save(&self, cx: &mut TestAppContext) {
+    pub(super) fn save(&self, cx: &mut TestAppContext) {
         let mut visual = self.visual(cx);
         visual.simulate_keystrokes("cmd-s");
         self.after(cx);
@@ -135,7 +135,7 @@ impl Rig {
 
     /// Writes `text` to the file as another process would, with another
     /// size so that its identity is another one too.
-    fn change_on_disk(&self, rel: &str, text: &str) {
+    pub(super) fn change_on_disk(&self, rel: &str, text: &str) {
         std::fs::write(self.tree.root.join(rel), text).unwrap();
     }
 }
@@ -152,11 +152,36 @@ fn label_key(records: &[Record], id: &str) -> Option<&'static str> {
     find_node(records, id)?.semantic.label.as_ref()?.key
 }
 
-// ----- the shipped app has no edit mode ----------------------------------------
+// ----- the switch ------------------------------------------------------------------
 
 #[gpui::test]
-fn edit_is_not_reachable_in_the_shipped_configuration(cx: &mut TestAppContext) {
+fn edit_is_reachable_in_the_shipped_configuration(cx: &mut TestAppContext) {
     let rig = Rig::new(cx);
+    rig.write("a.ts", source());
+    rig.open(cx, "a.ts", Anchor::Start);
+    // ⌘E and ⌘S are in the keymap, Edit… is in the toolbar with its tooltip.
+    let keys: Vec<String> = rig.contributions.keys().into_iter().map(|k| k.0).collect();
+    assert!(keys.iter().any(|k| k == "cmd-e"), "{keys:?}");
+    assert!(keys.iter().any(|k| k == "cmd-s"), "{keys:?}");
+    assert_eq!(rig.controls(cx), 3);
+    let records = rig.bar(cx);
+    let edit = find_node(&records, "file-reader.toolbar.edit").expect("Edit…");
+    assert!(!disabled(&records, "file-reader.toolbar.edit"));
+    assert_eq!(
+        attr(edit, "tooltip"),
+        Some(Strings::of(Locale::En).get(keys::file_reader::EDIT_TOOLTIP))
+    );
+    assert_eq!(attr(edit, "reason"), None);
+    // ⌘E enters.
+    let mut visual = rig.visual(cx);
+    visual.simulate_keystrokes("cmd-e");
+    rig.after(cx);
+    assert!(rig.editing(cx));
+}
+
+#[gpui::test]
+fn edit_the_switch_keeps_the_mode_out_of_a_plugin_that_has_it_off(cx: &mut TestAppContext) {
+    let rig = Rig::locked(cx);
     rig.write("a.ts", source());
     rig.open(cx, "a.ts", Anchor::Start);
     // No ⌘E and no ⌘S in the keymap, no Edit… button, and the action does
@@ -529,9 +554,13 @@ fn edit_a_conflict_shows_the_row_and_writes_nothing(cx: &mut TestAppContext) {
         );
     }
     assert!(find_node(&records, "file-reader.disk.failed").is_none());
-    // Done does not drop a buffer with changes (the guard is step 8b).
+    // Done does not drop a buffer with changes: it asks.
     rig.with_view(cx, |view, window, cx| assert!(!view.leave_edit(window, cx)));
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    rig.after(cx);
     assert!(rig.editing(cx));
+    assert!(rig.dirty(cx));
 }
 
 #[gpui::test]
@@ -812,19 +841,17 @@ fn edit_a_failed_save_shows_one_line_and_keeps_the_buffer(cx: &mut TestAppContex
 // ----- the keys, history and requests ------------------------------------------------
 
 #[gpui::test]
-fn edit_back_and_forward_do_nothing_while_editing_and_the_keys_indent(cx: &mut TestAppContext) {
+fn edit_back_and_forward_keys_indent_and_the_toolbar_is_grey_while_editing(
+    cx: &mut TestAppContext,
+) {
     let rig = Rig::editable(cx);
     rig.write("b.ts", "const b = 1;\n");
     rig.open(cx, "b.ts", Anchor::Start);
     rig.start(cx, "a.ts", "line one\nline two\n");
     let history = rig.session.history_len();
-    // The reader's own handlers refuse.
-    rig.with_view(cx, |view, _, cx| {
-        view.go_back(cx);
-        view.go_forward(cx);
-    });
-    assert_eq!(rig.session.history_len(), history);
-    assert!(rig.editing(cx));
+    // The buttons are grey (the back one says why).
+    let records = rig.bar(cx);
+    assert!(disabled(&records, "file-reader.toolbar.back"));
     // ⌘] is the editor's Indent: it changes the buffer, not the history.
     let before = rig.buffer(cx);
     let mut visual = rig.visual(cx);
@@ -834,6 +861,7 @@ fn edit_back_and_forward_do_nothing_while_editing_and_the_keys_indent(cx: &mut T
     assert!(rig.dirty(cx), "an indent is a change");
     assert_eq!(rig.session.history_len(), history);
     assert!(rig.editing(cx));
+    assert!(!cx.has_pending_prompt());
     visual.simulate_keystrokes("cmd-[");
     rig.after(cx);
     assert_eq!(rig.buffer(cx), before, "outdented");
@@ -860,8 +888,11 @@ fn edit_escape_goes_to_the_editor_first_and_never_pops_the_screen(cx: &mut TestA
     rig.type_at(cx, 0, "// mine\n");
     let mut visual = rig.visual(cx);
     // Unsaved: the key has nothing to close in the editor, and the view
-    // does not drop the buffer. It does not reach `workspace` either.
+    // asks before it drops the buffer. It does not reach `workspace` either.
     visual.simulate_keystrokes("escape");
+    rig.after(cx);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
     rig.after(cx);
     assert!(rig.editing(cx));
     assert!(rig.dirty(cx));
@@ -875,25 +906,6 @@ fn edit_escape_goes_to_the_editor_first_and_never_pops_the_screen(cx: &mut TestA
     // Not editing: the key goes on to `workspace`.
     visual.simulate_keystrokes("escape");
     assert_eq!(rig.probe.load(Ordering::SeqCst), 1);
-}
-
-#[gpui::test]
-fn edit_a_request_to_open_another_file_waits_while_editing(cx: &mut TestAppContext) {
-    let rig = Rig::editable(cx);
-    rig.write("b.ts", "const b = 1;\n");
-    rig.start(cx, "a.ts", source());
-    rig.session.open(file(&rig.key, "b.ts", Anchor::Start));
-    rig.after(cx);
-    assert_eq!(rig.session.pending(), 1, "it waits");
-    assert!(rig.editing(cx));
-    let target = rig.session.last_target().unwrap();
-    assert_eq!(&*target.path, "a.ts");
-    // Done (nothing unsaved): the request goes on.
-    rig.dispatch(cx, actions::Edit);
-    rig.after(cx);
-    assert!(!rig.editing(cx));
-    assert_eq!(rig.session.pending(), 0);
-    assert_eq!(&*rig.session.last_target().unwrap().path, "b.ts");
 }
 
 #[gpui::test]
@@ -946,6 +958,12 @@ fn logs_edit_holds_no_buffer_text(cx: &mut TestAppContext) {
     rig.save(cx);
     rig.dispatch(cx, actions::DiscardMine);
     rig.after(cx);
+    // Edit mode starts again on the file read again: Done with unsaved
+    // typing asks, and the user cancels.
+    rig.type_at(cx, 0, &format!("// last {CANARY}\n"));
+    rig.dispatch(cx, actions::Edit);
+    cx.simulate_prompt_answer("Cancel");
+    rig.after(cx);
 
     let lines = log.lines();
     let has = |msg: &str, level: &str| {
@@ -972,5 +990,11 @@ fn logs_edit_holds_no_buffer_text(cx: &mut TestAppContext) {
         .find(|l| l.contains("the buffer was given up for the file on disk"))
         .unwrap();
     assert!(given_up.contains("\"why\":\"discard\""), "{given_up}");
+    let asked = lines
+        .iter()
+        .find(|l| l.contains("a leave was asked about unsaved changes"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert!(asked.contains("\"scope\":\"done\""), "{asked}");
+    assert!(asked.contains("\"outcome\":\"cancel\""), "{asked}");
     log.assert_absent(CANARY);
 }

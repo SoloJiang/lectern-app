@@ -100,8 +100,8 @@ impl Render for ReadingView {
             .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find_next(cx)))
             .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.find_previous(cx)))
-            .on_action(cx.listener(|this, _: &Back, _, cx| this.go_back(cx)))
-            .on_action(cx.listener(|this, _: &Forward, _, cx| this.go_forward(cx)))
+            .on_action(cx.listener(|this, _: &Back, window, cx| this.go_back(window, cx)))
+            .on_action(cx.listener(|this, _: &Forward, window, cx| this.go_forward(window, cx)))
             .on_action(cx.listener(|this, _: &Close, window, cx| {
                 if this.editing() {
                     // The editor did not take it either: what is left is
@@ -133,7 +133,9 @@ impl Render for ReadingView {
                 let anyway = this.save_anyway();
                 this.save(anyway, cx);
             }))
-            .on_action(cx.listener(|this, _: &SaveAnyway, _, cx| this.save(true, cx)))
+            .on_action(cx.listener(|this, _: &SaveAnyway, _, cx| {
+                this.save(true, cx);
+            }))
             .on_action(cx.listener(|this, _: &Merge, _, cx| this.merge(cx)))
             .on_action(
                 cx.listener(|this, _: &DiscardMine, window, cx| this.discard_mine(window, cx)),

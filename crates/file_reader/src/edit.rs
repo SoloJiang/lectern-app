@@ -10,11 +10,11 @@
 //! follow-up to what the disk side reports. The drawing is in
 //! `render_edit.rs`.
 //!
-//! The leave guard is step 8b. Until it exists edit mode is not reachable
-//! in the assembled app (`EDIT_REACHABLE`), requests to open another file
-//! wait while a buffer is being edited, and the ways out that would drop a
-//! buffer with unsaved changes (Done, Esc, ⌘E) refuse; Discard My Changes
-//! is the user's explicit choice and goes through.
+//! The leave guard (step 8b) is in `edit/leave.rs`: every way out of a
+//! buffer with unsaved changes (Done, Esc, ⌘E, a request to open another
+//! file, back and forward by name, and what `workspace` and `app` ask for)
+//! asks the user first. Discard My Changes is the user's explicit choice and
+//! goes through.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -29,21 +29,26 @@ use gpui_component::input::{
     Position, Rope, RopeExt,
 };
 use lectern_logging::{info, warn};
+use lectern_services::reader::OpenOutcome;
 use lectern_syntax::{
     EditSession, Editable, Languages, LineNo, NotEditable, Row, SaveResult, TextEdit, WindowSpans,
 };
 use lectern_ui::{Palette, colors};
 
+mod leave;
+
+pub(crate) use leave::{Leave, LeaveAsk, LeaveGuard, Leaving, Port};
+
 use crate::diag;
+use crate::session::Request;
 use crate::text::highlight_style;
 use crate::view::ReadingView;
 
-/// Whether the assembled app can enter edit mode: no, until the leave guard
-/// (step 8b) asks before anything drops a buffer with unsaved changes. The
-/// tests turn it on for a plugin (`FileReaderPlugin::with_edit`); step 8b
-/// flips this and the ⌘E and ⌘S bindings, the Edit… button and the Edit
-/// action come with it.
-pub(crate) const EDIT_REACHABLE: bool = false;
+/// Whether the assembled app can enter edit mode: yes, now that the leave
+/// guard asks before anything drops a buffer with unsaved changes (step 8b).
+/// The tests turn it off for a plugin (`FileReaderPlugin::with_edit`) to
+/// check the switch itself.
+pub(crate) const EDIT_REACHABLE: bool = true;
 
 /// How long after Discard My Changes (or a silent reload) the view waits for
 /// the document to be read again before it gives up entering edit mode on
@@ -256,6 +261,12 @@ pub(crate) struct Editing {
     /// The last save failed (the line under the toolbar says so).
     pub(crate) failed: bool,
     unavailable_logged: bool,
+    /// The question the user is being asked, or whose save is on its way
+    /// (`edit/leave.rs`), and the guard's questions that wait behind it.
+    pub(crate) leaving: Option<Leaving>,
+    backlog: VecDeque<Leave>,
+    /// Takes the guard's questions while the edit lives.
+    _port: Port,
     _changes: Subscription,
 }
 
@@ -421,6 +432,7 @@ impl ReadingView {
             }
         });
         let state = session.state();
+        let port = Port::open(self, window, cx);
         self.edit = Some(Editing {
             session,
             editor: editor.clone(),
@@ -434,6 +446,9 @@ impl ReadingView {
             keep_editing: false,
             failed: false,
             unavailable_logged: false,
+            leaving: None,
+            backlog: VecDeque::new(),
+            _port: port,
             _changes: changes,
         });
         editor.update(cx, |editor, cx| match line {
@@ -455,43 +470,58 @@ impl ReadingView {
         cx.notify();
     }
 
-    /// Done (⌘E, Esc): leaves edit mode. A buffer with unsaved changes stays
-    /// (step 8b's leave guard asks the user here). True when it left.
+    /// Done (⌘E, Esc): leaves edit mode. A buffer with unsaved changes asks
+    /// the user first (the leave guard); true when it left at once.
     pub(crate) fn leave_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        match &self.edit {
-            None => true,
-            Some(edit) if edit.dirty() => false,
-            Some(_) => {
-                self.finish_edit(window, cx);
-                true
-            }
+        if self.edit.is_none() {
+            return true;
         }
+        self.begin_leave(Leave::Done, window, cx);
+        self.edit.is_none()
     }
 
     /// The session ends (its handle goes; the document is read again when a
     /// save went through or the file changed) and the view reads again.
-    fn finish_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit = None;
-        window.focus(&self.focus, cx);
+    pub(crate) fn finish_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_edit(window, cx);
         // The requests that waited while the buffer was edited.
-        self.pump(cx);
+        self.pump(window, cx);
         cx.notify();
+    }
+
+    /// The edit is gone: the editor, the session and the port of the guard.
+    pub(crate) fn drop_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.edit.take().is_some() {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    /// A request to show another file, after the leave guard passed: the
+    /// document is replaced and the view starts at its position.
+    pub(crate) fn show(&mut self, request: Request, cx: &mut Context<Self>) {
+        if self.shared.session.apply(request) == OpenOutcome::Shown {
+            self.serial += 1;
+            self.new_document(cx);
+        }
     }
 
     /// Save (⌘S, the button): the buffer is written if the file is as it was
     /// read; a file changed on disk is a conflict, not a write. With
     /// `anyway` the file is replaced without the comparison (Save Anyway).
-    pub(crate) fn save(&mut self, anyway: bool, cx: &mut Context<Self>) {
+    ///
+    /// True when a save was asked (there were changes and no merge was on its
+    /// way).
+    pub(crate) fn save(&mut self, anyway: bool, cx: &mut Context<Self>) -> bool {
         // Save Anyway is for a file the user chose to keep editing over; by
         // name (the probe) it must not skip the identity check otherwise.
         if anyway && !self.save_anyway() {
-            return;
+            return false;
         }
         let Some(edit) = self.edit.as_mut() else {
-            return;
+            return false;
         };
         if !edit.dirty() || edit.merging {
-            return;
+            return false;
         }
         edit.flush();
         edit.asked.push_back((edit.link.changes.get(), anyway));
@@ -502,6 +532,7 @@ impl ReadingView {
         }
         edit.failed = false;
         cx.notify();
+        true
     }
 
     /// Merge, in the row under the toolbar: the disk's changes come into the
@@ -540,6 +571,10 @@ impl ReadingView {
         let Some(edit) = self.edit.as_ref() else {
             return;
         };
+        // A question is open: its answer decides what becomes of the buffer.
+        if edit.leaving.is_some() {
+            return;
+        }
         let state = edit.session.state();
         if state.dirty_on_disk || state.unavailable {
             self.restart(Why::Discard, window, cx);
@@ -626,6 +661,8 @@ impl ReadingView {
             edit.keep_editing = false;
         }
         let silent = state.dirty_on_disk && !state.unavailable && !edit.dirty() && !edit.merging;
+        // The save the user chose in the confirmation has its result.
+        self.save_result(window, cx);
         if let Some(merged) = merged {
             self.merged(merged, window, cx);
         } else if silent {
