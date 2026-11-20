@@ -161,6 +161,7 @@ const BENCHES: &[Bench] = &[
     project::PACKAGES_CLOUDPRINT,
     project::OPEN_100K,
     project::SWITCH_WORKTREE,
+    project::SWITCH_WORKTREE_WITH_INDEX,
     project::RESOLVE_PACKAGE,
     project::REFRESH_INDEX,
     project::DIRS_100K,

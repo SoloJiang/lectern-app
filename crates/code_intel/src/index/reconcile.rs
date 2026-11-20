@@ -322,6 +322,7 @@ impl Inner {
     /// installed or consumed something. None when the project is gone.
     fn reconcile_once(self: &Arc<Self>, project: &Arc<Project>) -> Option<bool> {
         let session = self.sync_snapshot(project)?;
+        self.drop_retired(project);
         let mut progress = self.open_root(project, session);
         progress |= self.check_head_index(project, session);
         let rebuilt = self.rebuild_base(project, session);
@@ -370,7 +371,11 @@ impl Inner {
             // Normally ended by the `Changed` event already
             // (`switch_session`); a snapshot the event did not mark.
             drop(st);
-            self.switch_session(project, &snapshot);
+            // This reconcile goes on with the new session: it goes around
+            // once more, as a request would make it.
+            if self.switch_session(project, &snapshot) {
+                lock(&project.state).run.again = true;
+            }
             st = lock(&project.state);
         }
         if let Some(active) = &snapshot.active {
@@ -413,8 +418,11 @@ impl Inner {
     /// one's queries are closed and their semantic requests cancelled, all
     /// under the lock that orders publication, so no query of the old
     /// session publishes after this returns. The queries asked from now on
-    /// wait for the new session's map. The old state is dropped in a task
-    /// (its watches and map). True when it switched.
+    /// wait for the new session's map. The old state (its map and caches;
+    /// its watches are dropped by `end`) is kept in `Project::retired` and
+    /// dropped by the next reconcile. This requests no reconcile: the caller
+    /// does, once the new worktree's file list is ready (an event while it
+    /// is `Pending` does not, 「打开项目与热启动」1).
     pub(crate) fn switch_session(
         &self,
         project: &Arc<Project>,
@@ -458,14 +466,15 @@ impl Inner {
         };
         // Their providers' `cancel`, outside the lock.
         self.finish_ended(ended);
-        // Without an activation the task is dropped unrun, and `old` with it.
-        let _ = self
-            .host
-            .spawn_busy("old session", Priority::Background, move || drop(old));
-        if let Some(me) = self.arc() {
-            me.request_reconcile(project);
-        }
+        lock(&project.retired).push(old);
         true
+    }
+
+    /// Drops the states of the sessions a switch ended, at the start of a
+    /// reconcile pass (outside every lock).
+    fn drop_retired(&self, project: &Arc<Project>) {
+        let retired = std::mem::take(&mut *lock(&project.retired));
+        drop(retired);
     }
 
     /// Opens the worktree root and subscribes to fs_watch, once the file

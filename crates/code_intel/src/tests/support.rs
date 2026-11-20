@@ -15,7 +15,7 @@ use lectern_services::code_intel::{
     CodeIntelEvent, Coverage, Evidence, Focus, Position, Query, QueryKind, QueryResults,
     TextOrigin, TextRef, TierState,
 };
-use lectern_services::project::{BlobId, Package, ProjectKey, WorktreeKey};
+use lectern_services::project::{BlobId, Package, ProjectKey, Scan, WorktreeKey};
 
 use crate::extract::{Deadline, Lang, extract};
 use crate::index::{IndexDeps, Indexer, StatCounts};
@@ -204,6 +204,47 @@ impl Harness {
         let snapshot = self.git.snapshot(self.next_generation(), active, packages);
         let event = self.projects.set(snapshot);
         self.indexer.project_event(&event);
+    }
+
+    /// Publishes a snapshot with `active` as the current worktree whose file
+    /// list and sub-projects are still being read, as `project` does at a
+    /// switch (the `Changed` that precedes the scan), and hands the event to
+    /// the indexer, without running anything.
+    pub(crate) fn publish_pending(&self, active: &str) {
+        let mut snapshot = self
+            .git
+            .snapshot(self.next_generation(), active, Vec::new());
+        if let Some(tree) = &mut snapshot.active {
+            tree.files = Scan::Pending;
+            tree.packages = Scan::Pending;
+        }
+        let event = self.projects.set(snapshot);
+        self.indexer.project_event(&event);
+    }
+
+    /// The scan of `active` is done: its file list and sub-projects are
+    /// published (two `Changed` events, as `project` emits them), without
+    /// running anything.
+    pub(crate) fn publish_scanned(&self, active: &str, packages: Vec<Package>) {
+        let files = self.git.file_list(active);
+        let event = self.projects.set_files(&self.key(), files);
+        self.indexer.project_event(&event);
+        let event = self.projects.set_packages(&self.key(), packages);
+        self.indexer.project_event(&event);
+    }
+
+    /// How many tasks of this kind the indexer has submitted so far
+    /// (`Host::log`).
+    pub(crate) fn submitted(&self, what: &str) -> usize {
+        self.indexer
+            .inner()
+            .host
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(w, _, _)| *w == what)
+            .count()
     }
 
     /// Publishes the index as the new file list (as `project` does after an
