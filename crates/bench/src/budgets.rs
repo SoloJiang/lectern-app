@@ -1923,7 +1923,8 @@ pub static BUDGETS: &[Budget] = &[
     share(
         "usage/backfill_large_session",
         &[
-            max(Limit::TimeBelow(ms(300))),
+            // ADR 0061: 300 ms until #386 removes SQLite 3.54's re-prepares.
+            max(Limit::TimeBelow(ms(900))),
             median(Limit::TimeBelow(ms(150))),
         ],
         USAGE,
