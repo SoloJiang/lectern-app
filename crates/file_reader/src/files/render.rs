@@ -11,6 +11,7 @@ use gpui::{
     Render, Styled, Window, div, px, svg, uniform_list,
 };
 use lectern_i18n::{Strings, keys};
+use lectern_services::workspace::Milestone;
 use lectern_ui::semantic::{Role, Semantic, State, semantic};
 use lectern_ui::{
     Button, Disclosure, Icon, LoadingPhase, Palette, SidebarRow, Skeleton, Text, TextRole,
@@ -41,6 +42,7 @@ impl Render for FilesView {
         let strings = strings(cx);
         let header = self.header(&strings, window, cx);
         let body = self.body(&strings, window, cx);
+        self.report_drawn(window);
         div()
             .id("files")
             .key_context(FILES)
@@ -60,6 +62,27 @@ impl Render for FilesView {
 }
 
 impl FilesView {
+    /// The milestones of this frame: the tree's first rows (`app/files_open`),
+    /// and a directory that was opened (`app/files_expand`). Each is reported
+    /// on the next frame, as the reading view's `FileHighlighted` is.
+    fn report_drawn(&mut self, window: &mut Window) {
+        if !matches!(self.content, Content::Tree(_)) {
+            return;
+        }
+        let milestone = if !self.shown {
+            self.shown = true;
+            self.expanded_pending = false;
+            Milestone::FilesShown
+        } else if self.expanded_pending {
+            self.expanded_pending = false;
+            Milestone::FilesExpanded
+        } else {
+            return;
+        };
+        let shared = self.shared.clone();
+        window.on_next_frame(move |_, _| shared.report_milestone(milestone));
+    }
+
     /// The back arrow and the title. The arrow is the way back to the
     /// project sidebar, as Esc is.
     fn header(&self, strings: &Strings, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

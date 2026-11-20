@@ -33,9 +33,9 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-pub use files::FilesView;
+pub use files::{FilesView, PANEL_ID as FILES_PANEL_ID};
 pub use history::{HISTORY_MAX, History};
-pub use plugin::{FileReaderDeps, FileReaderPlugin, PLUGIN_ID};
+pub use plugin::{FileReaderDeps, FileReaderPlugin, PLUGIN_ID, ReaderSlot};
 pub use screen::LAYOUT;
 pub use session::{Host, Request, Session, Wake};
 pub use view::ReadingView;

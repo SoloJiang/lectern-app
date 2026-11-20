@@ -12,9 +12,7 @@
 //! - Deactivation closes the document (the focus is cleared) and drops the
 //!   engine with the session.
 
-#[cfg(test)]
-use std::sync::Weak;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use lectern_cache::Cache;
 use lectern_executor::Executor;
@@ -44,11 +42,36 @@ pub struct FileReaderDeps {
     pub watcher: Watcher,
 }
 
+/// Where the plugin leaves its `dyn Reader` while it is active, for the
+/// measurement build of `app` (docs/design/bench.md「进程级基准」): the
+/// driver there opens files as `review-view` does, but is not a plugin and
+/// cannot require the service. Holds a `Weak`, so it keeps nothing alive.
+#[derive(Clone, Default)]
+pub struct ReaderSlot(Arc<Mutex<Option<Weak<dyn Reader>>>>);
+
+impl ReaderSlot {
+    /// The reader of the active plugin; None before its activation and after
+    /// its deactivation. Any thread.
+    pub fn get(&self) -> Option<Arc<dyn Reader>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
+    fn set(&self, reader: Weak<dyn Reader>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(reader);
+    }
+}
+
 /// The plugin (ID "file-reader"), put in the `PluginSet` by `app`.
 pub struct FileReaderPlugin {
     deps: FileReaderDeps,
     /// Whether the views can enter edit mode (`edit::EDIT_REACHABLE`).
     edit: bool,
+    /// Where the `dyn Reader` is left, when `app` asked for it.
+    slot: Option<ReaderSlot>,
     /// The latest activation's session (tests). Weak: it never keeps a
     /// deactivated activation alive.
     #[cfg(test)]
@@ -61,9 +84,16 @@ impl FileReaderPlugin {
         FileReaderPlugin {
             deps,
             edit: EDIT_REACHABLE,
+            slot: None,
             #[cfg(test)]
             last: Arc::default(),
         }
+    }
+
+    /// The plugin leaves its `dyn Reader` in `slot` when it activates.
+    pub fn with_reader_slot(mut self, slot: ReaderSlot) -> FileReaderPlugin {
+        self.slot = Some(slot);
+        self
     }
 
     /// The plugin with edit mode reachable or not (tests).
@@ -129,6 +159,10 @@ impl Plugin for FileReaderPlugin {
         );
         drop(admitted);
         ctx.provide::<dyn Reader>(session.clone())?;
+        if let Some(slot) = &self.slot {
+            let reader: Arc<dyn Reader> = session.clone();
+            slot.set(Arc::downgrade(&reader));
+        }
         let listener = session.clone();
         let files = shared.clone();
         ctx.on::<ProjectEvent>(move |event, _| match event {

@@ -123,12 +123,33 @@ pub enum Milestone {
     FileHighlighted,
     DiffShown,
     WorktreeSwitched,
+    FilesShown,
+    FilesExpanded,
+    EditReady,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpenTarget {
     Project(PathBuf),
-    File(PathBuf),
+    /// A file of the open project in the reading view, as `Reader::open`
+    /// shows it: the worktree's file (`old` None), or with `old` the blob
+    /// with this object ID (hex) that the review's diff of the same path
+    /// holds as its old side. `byte` is the offset to open at (a hunk of a
+    /// diff); None opens at the start.
+    File {
+        path: PathBuf,
+        byte: Option<u64>,
+        old: Option<String>,
+    },
+    /// The review of the open git project's worktree changes that no session
+    /// claims (the project home's Outside Any Session): the diff `Open(Diff)`
+    /// shows for a session, without a session.
+    Changes,
+    /// The Files panel in the sidebar, as the Files entry shows it.
+    Files,
+    /// One keystroke (GPUI's syntax, such as `cmd-e` or `right`) into the
+    /// focus, through the dispatch real keyboard input takes.
+    Key(String),
     Diff {
         session: String,
     },
@@ -347,9 +368,21 @@ impl Request {
                     line.text("target", "project");
                     line.path("path", path);
                 }
-                OpenTarget::File(path) => {
+                OpenTarget::File { path, byte, old } => {
                     line.text("target", "file");
                     line.path("path", path);
+                    if let Some(byte) = byte {
+                        line.number("byte", byte);
+                    }
+                    if let Some(old) = old {
+                        line.text("old", old);
+                    }
+                }
+                OpenTarget::Changes => line.text("target", "changes"),
+                OpenTarget::Files => line.text("target", "files"),
+                OpenTarget::Key(key) => {
+                    line.text("target", "key");
+                    line.text("key", key);
                 }
                 OpenTarget::Diff { session } => {
                     line.text("target", "diff");
@@ -380,7 +413,14 @@ impl Request {
             "activate-all" => Request::ActivateAll,
             "open" => Request::Open(match fields.text("target")?.as_str() {
                 "project" => OpenTarget::Project(fields.path("path")?),
-                "file" => OpenTarget::File(fields.path("path")?),
+                "file" => OpenTarget::File {
+                    path: fields.path("path")?,
+                    byte: fields.optional_number("byte")?,
+                    old: fields.optional_text("old")?,
+                },
+                "changes" => OpenTarget::Changes,
+                "files" => OpenTarget::Files,
+                "key" => OpenTarget::Key(fields.text("key")?),
                 "diff" => OpenTarget::Diff {
                     session: fields.text("session")?,
                 },
@@ -438,6 +478,9 @@ impl Milestone {
             Milestone::FileHighlighted => "file_highlighted",
             Milestone::DiffShown => "diff_shown",
             Milestone::WorktreeSwitched => "worktree_switched",
+            Milestone::FilesShown => "files_shown",
+            Milestone::FilesExpanded => "files_expanded",
+            Milestone::EditReady => "edit_ready",
         }
     }
 
@@ -447,6 +490,9 @@ impl Milestone {
             Milestone::FileHighlighted,
             Milestone::DiffShown,
             Milestone::WorktreeSwitched,
+            Milestone::FilesShown,
+            Milestone::FilesExpanded,
+            Milestone::EditReady,
         ]
         .into_iter()
         .find(|m| m.name() == name)
@@ -629,6 +675,14 @@ impl<'a> Fields<'a> {
         let text = self.text(key)?;
         text.parse()
             .map_err(|_| WireError::new(format!("`{key}` is not a number: `{text}`")))
+    }
+
+    fn optional_text(&mut self, key: &str) -> Result<Option<String>, WireError> {
+        if self.values.iter().any(|(k, _)| *k == key) {
+            self.text(key).map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     fn optional_number<T: std::str::FromStr>(&mut self, key: &str) -> Result<Option<T>, WireError> {

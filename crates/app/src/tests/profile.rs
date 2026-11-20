@@ -60,6 +60,7 @@ fn every_profile_graph_validates(cx: &mut TestAppContext) {
         app_cache: dir.path().join("app_cache"),
         app_data: dir.path().join("app_data"),
         git_ceilings: Arc::from([]),
+        reader: lectern_file_reader::ReaderSlot::default(),
     };
     for &profile in Profile::ALL {
         let (set, count) = profile.plugins(&resources);

@@ -363,4 +363,12 @@ pub enum Milestone {
     FileHighlighted,
     DiffShown,
     WorktreeSwitched,
+    /// The Files panel, with its rows, was drawn (`app/files_open`).
+    FilesShown,
+    /// A directory of the Files tree was opened and its rows drawn
+    /// (`app/files_expand`).
+    FilesExpanded,
+    /// The editor was drawn with the focus in it: the user can type
+    /// (`app/enter_edit`).
+    EditReady,
 }

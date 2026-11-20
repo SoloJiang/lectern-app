@@ -14,7 +14,9 @@ use lectern_conversation::{
     TERMINAL_ID as CONVERSATION_TERMINAL_ID,
 };
 use lectern_executor::Executor;
-use lectern_file_reader::{FileReaderDeps, FileReaderPlugin, PLUGIN_ID as FILE_READER_ID};
+use lectern_file_reader::{
+    FileReaderDeps, FileReaderPlugin, PLUGIN_ID as FILE_READER_ID, ReaderSlot,
+};
 use lectern_fs_watch::Watcher;
 use lectern_kernel::PluginSet;
 use lectern_logging::{Field, Value};
@@ -79,6 +81,9 @@ pub struct Resources {
     pub app_data: PathBuf,
     /// `GIT_CEILING_DIRECTORIES`, read once (as `project` reads it).
     pub git_ceilings: Arc<[PathBuf]>,
+    /// Where `file-reader` leaves its `dyn Reader`, for the measurement
+    /// build's driver (`bench.rs`); nothing reads it otherwise.
+    pub reader: ReaderSlot,
 }
 
 impl Profile {
@@ -217,7 +222,8 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
                 executor: r.executor.clone(),
                 cache: r.cache.clone(),
                 watcher: r.watcher.clone(),
-            }),
+            })
+            .with_reader_slot(r.reader.clone()),
         );
     // The review screen. Its second plugin, "review-view-handoff", requires
     // `dyn Reader` and `dyn CodeIntel`, which `file-reader` and `code-intel`

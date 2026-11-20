@@ -530,6 +530,9 @@ fn workspace_scopes_and_milestones_round_trip() {
         Milestone::FileHighlighted,
         Milestone::DiffShown,
         Milestone::WorktreeSwitched,
+        Milestone::FilesShown,
+        Milestone::FilesExpanded,
+        Milestone::EditReady,
     ];
     for milestone in milestones {
         assert_eq!(round_trip(&milestone), milestone);

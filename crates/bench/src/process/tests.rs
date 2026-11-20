@@ -981,6 +981,47 @@ fn process_answers_reach_the_runner() {
     session.quit().unwrap();
 }
 
+#[test]
+fn process_a_request_is_sent_without_waiting_for_a_milestone() {
+    // The untimed steps of a scenario (a key that selects a row, then the
+    // key that is timed): the probe sees them in order, and the milestone of
+    // the timed one is the one the sample ends in.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let fake = Fake::new(move |p| {
+        p.first_frame(start());
+        while let Some(request) = p.request() {
+            match request {
+                Request::Open(OpenTarget::Key(key)) => {
+                    log.lock().unwrap().push(key.clone());
+                    if key == "right" {
+                        p.send(&Report::Milestone {
+                            milestone: Milestone::FilesExpanded,
+                            presented: SystemTime::now(),
+                        });
+                    }
+                }
+                Request::Quit => return 0,
+                _ => {}
+            }
+        }
+        0
+    });
+    let scheduler = fake.scheduler(quick());
+    let mut session = scheduler.session(&program(), None).unwrap();
+    session.request(OpenTarget::Key("down".into())).unwrap();
+    let time = session
+        .open(
+            OpenTarget::Key("right".into()),
+            Milestone::FilesExpanded,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert!(time < Duration::from_secs(2));
+    session.quit().unwrap();
+    assert_eq!(*seen.lock().unwrap(), ["down", "right"]);
+}
+
 // --- process groups and concurrency ---------------------------------------
 
 #[test]

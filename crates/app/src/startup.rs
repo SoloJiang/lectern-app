@@ -163,7 +163,7 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
     let kernel = match &bench {
         Some(probe) => {
             let kernel = probe.start_kernel(assembled.set);
-            crate::bench::attach(probe, kernel.clone(), cx);
+            crate::bench::attach(probe, kernel.clone(), assembled.reader, cx);
             kernel
         }
         None => Kernel::start(assembled.set),
@@ -205,6 +205,10 @@ struct Assembled {
     shell: Option<Shell>,
     /// Where `window.json` is, when the workspace was installed.
     state_dir: Option<PathBuf>,
+    /// Where `file-reader` leaves its `dyn Reader` (the measurement build's
+    /// driver opens files through it).
+    #[cfg(feature = "bench-probe")]
+    reader: lectern_file_reader::ReaderSlot,
 }
 
 impl Assembled {
@@ -215,6 +219,8 @@ impl Assembled {
             watcher: None,
             shell: None,
             state_dir: None,
+            #[cfg(feature = "bench-probe")]
+            reader: lectern_file_reader::ReaderSlot::default(),
         }
     }
 }
@@ -278,6 +284,8 @@ fn assemble(
                 watcher: Some(resources.watcher),
                 shell,
                 state_dir,
+                #[cfg(feature = "bench-probe")]
+                reader: resources.reader,
             }
         }
         Err(missing) => {
@@ -332,6 +340,7 @@ fn resources(
         app_cache,
         app_data,
         git_ceilings: git_ceilings.into(),
+        reader: lectern_file_reader::ReaderSlot::default(),
     })
 }
 

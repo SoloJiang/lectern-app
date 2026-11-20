@@ -235,7 +235,12 @@ impl Event for WorkspaceEvent {}
 pub enum Layer { SidebarPanel(Name), Inspector, Panel(Name), Overlay(Name) }
 
 /// bench 的里程碑（bench 设计 `Milestone` 的同名变体；`app` 做映射，本 crate 不依赖 tool 层）。
-pub enum Milestone { ProjectHome, FileHighlighted, DiffShown, WorktreeSwitched }
+pub enum Milestone {
+    ProjectHome, FileHighlighted, DiffShown, WorktreeSwitched,
+    /// Files 面板的树第一次有行的一帧 / 一个目录打开之后的一帧 / 编辑器第一次画出的一帧：
+    /// `file_reader` 的视图在画出之后的下一帧回调里报告（file_reader 设计「性能」，`app/files_open`、`app/files_expand`、`app/enter_edit`）。
+    FilesShown, FilesExpanded, EditReady,
+}
 ```
 
 调用方：

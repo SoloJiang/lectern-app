@@ -77,6 +77,18 @@ fn reports() -> Vec<Report> {
             milestone: Milestone::WorktreeSwitched,
             presented: at(8),
         },
+        Report::Milestone {
+            milestone: Milestone::FilesShown,
+            presented: at(9),
+        },
+        Report::Milestone {
+            milestone: Milestone::FilesExpanded,
+            presented: at(10),
+        },
+        Report::Milestone {
+            milestone: Milestone::EditReady,
+            presented: at(11),
+        },
         Report::Frames(FrameStats {
             scenario: "scroll".into(),
             refresh: Duration::from_nanos(16_666_667),
@@ -132,7 +144,19 @@ fn requests() -> Vec<Request> {
         Request::Quit,
         Request::ActivateAll,
         Request::Open(OpenTarget::Project(PathBuf::from("/tmp/cloud print"))),
-        Request::Open(OpenTarget::File(odd.clone())),
+        Request::Open(OpenTarget::File {
+            path: odd.clone(),
+            byte: None,
+            old: None,
+        }),
+        Request::Open(OpenTarget::File {
+            path: PathBuf::from("/tmp/a b/package-lock.json"),
+            byte: Some(2_097_152),
+            old: Some("0123456789abcdef0123456789abcdef01234567".into()),
+        }),
+        Request::Open(OpenTarget::Changes),
+        Request::Open(OpenTarget::Files),
+        Request::Open(OpenTarget::Key("cmd-[".into())),
         Request::Open(OpenTarget::Diff {
             session: "abc 100%".into(),
         }),
@@ -245,8 +269,10 @@ fn wire_bad_percent_encoding_is_an_error() {
     // A path may hold any byte.
     assert_eq!(
         Request::decode("open target=file path=%FF"),
-        Ok(Request::Open(OpenTarget::File(PathBuf::from(
-            OsString::from_vec(vec![0xFF])
-        ))))
+        Ok(Request::Open(OpenTarget::File {
+            path: PathBuf::from(OsString::from_vec(vec![0xFF])),
+            byte: None,
+            old: None,
+        }))
     );
 }

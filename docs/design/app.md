@@ -649,15 +649,32 @@ impl Driver for BenchDriver {
     /// 与用户在 Open Folder 对话框里选了文件夹之后同一条路径（`workspace` 的 `view.rs`）。`plugin/project/resident_*`（第 5 步）要它。
     /// 没有 `Shell`（没有装配插件）时发 `probe.error("open project without a workspace")`。
     /// 其余种类发 `probe.error("open <种类> unsupported")`，运行器把这个基准记为 `error`；
-    /// 端到端基准（`File`、`Scroll`、`Animate`、`Input`）随自己的 PR 在这里加上；`Diff` 随 `app/open_diff`，`Worktree` 随 `app/switch_worktree`（「worktrees 的装配」）。
+    /// 端到端基准（`Scroll`、`Animate`、`Input`）随自己的 PR 在这里加上；`Diff` 随 `app/open_diff`，`Worktree` 随 `app/switch_worktree`（「worktrees 的装配」），
+    /// `File`、`Files`、`Changes`、`Key` 随文件阅读与 Files 的基准（下面「文件阅读与 Files 的目标」）。
     fn open(&self, target: OpenTarget);
     /// 发 `BenchRequest::Quit`；主线程的前台任务收到后调用 `quit::quit(cx)`，与 ⌘Q 同一条退出路径。
     fn quit(&self);
 }
 
 /// `release_in` 里调用：开收请求的前台任务，`attach`。主线程，不阻塞。
-pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
+pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &mut App);
 ```
+
+### 文件阅读与 Files 的目标
+
+[file_reader 设计「验收」](file_reader.md#验收)第 8 步的 8c，`Refs #10`。`app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand` 的 `Open` 目标，都在主线程上由 `bench::handle` 处理，走用户操作的同一条路径（[bench 设计「进程级基准」](bench.md#进程级基准)）：
+
+| `OpenTarget` | `BenchRequest` | 处理 |
+|---|---|---|
+| `File { path, byte, old }` | `OpenFile { path, byte, old: Option<BlobId> }` | `Reader::open(ReadTarget)`：在第一个活动树的根是 `path` 前缀的已打开项目里，路径取相对根的部分，`worktree` 是它的活动 worktree；`old` 为 None 时来源是 `TextOrigin::Worktree`、不给 `expect`，有 `old` 时是 `TextOrigin::Object`、`expect` 是这个 blob（审阅视图为 diff 的两侧登记过它）；`byte` 为 None 时 `Anchor::Start`，否则 `Anchor::Byte { byte, line: 0, column: 0 }`（`expect` 与读到的内容一致时按字节，行号不用）。找不到项目时发 `open file not found in a project`（消息里没有路径）；坏的对象 ID 在 `Driver::open` 里就发 `open file with a bad object ID`，不入队 |
+| `Changes` | `OpenChanges` | `Push(Route { screen: REVIEW, target: Review(Outside { project, worktree }) })`，项目主页的 Outside Any Session 一行的命令；没有活动 worktree 的 git 项目时发 `open changes without a git project` |
+| `Files` | `ShowFiles` | `ShowSidebarPanel(Some("files"))`，Files 条目的命令 |
+| `Key(keystroke)` | `Key(Keystroke)` | `Window::dispatch_keystroke`：与平台送来的按键同一个分发路径，到当前焦点；GPUI 解析不了的写法在 `Driver::open` 里发 `open key with a bad keystroke`；没有窗口时发 `open key without a window` |
+
+- `Reader` 来自 `ReaderSlot`：`bench::attach` 收到 `profile::desktop` 里 `FileReaderPlugin::with_reader_slot` 用的同一个槽（`Resources::reader`，经 `Assembled::reader` 在 `bench-probe` 下传来），每个请求在主线程上取一次 `Weak` 的升级；`file-reader` 还没有激活时发 `open file without a reader`。测量构建不是插件，不能 `requires` 服务，kernel 也没有给外部取服务的接口，所以用槽，不改 kernel。发布构建里槽存在、没有人读它（一个 `Arc<Mutex<Option<Weak>>>`，激活时写一次）。
+- `handle` 的参数是 `Targets { workspace, reader, window }`：窗口来自 `WorkspaceHost::window()`。
+- 终点是 `FileHighlighted`（`file_reader`）、`DiffShown`（`review_view`）和新的 `FilesShown`、`FilesExpanded`、`EditReady`（`file_reader` 的视图在画出之后的下一帧回调里报告，`Milestone` 的映射见「里程碑与帧」）。
+- 测试（`src/tests/bench.rs`）：`a_file_is_forwarded_with_its_anchor_and_old_side`、`files_and_keys_are_forwarded`、`changes_are_forwarded`、`a_file_target_is_relative_to_the_active_tree_of_its_project`、`a_file_is_opened_through_the_reader_or_is_an_error_without_the_path`、`the_changes_review_pushes_the_outside_route_of_the_active_worktree`、`files_and_file_requests_take_their_paths`（没有工作区、读者、窗口时各一个错误），`milestones_keep_their_names` 加了三个新里程碑；`open_is_reported_as_unsupported` 只剩 `Scroll`、`Animate`、`Input`。另有 `src/tests/bench_keys.rs`（三个 `#[gpui::test]`，GPUI 的测试平台，没有真实窗口，本机可运行）：窗口的根是真实的 `Workspace`（`install`），插件是 desktop profile 的全部插件（`Profile::Desktop.plugins`，真实的 `Kernel::start`，`project` 打开临时目录里的文件夹，watcher 用 `FakeBackend`），请求经 `bench::handle` 处理，与探针的主线程任务读同样的东西（`ReaderSlot`、`WorkspaceHost::hub()`、`WorkspaceHost::window()`）；帧回调由 `simulate_next_frame` 运行，里程碑经 `WorkspaceDeps::on_milestone` 记下。`bench_keys_cmd_e_enters_the_edit_mode`（`OpenFile`，`FileHighlighted`，`Key("cmd-e")`，`EditReady`，即 `app/enter_edit`）、`bench_keys_cmd_bracket_goes_back_to_the_first_file`（两次 `OpenFile`，`Key("cmd-[")`，`FileHighlighted`，探针节点 `file-reader.document.item[-:a.ts]` 显示回到了第一个文件，即 `app/nav_back`）、`bench_keys_arrows_open_the_first_directory_of_files`（`ShowFiles`，`FilesShown`，`Key("down")`，`Key("right")`，`FilesExpanded`，目录的子项成为行，即 `app/files_expand`）。把键换成别的键，这些测试会在 30 秒的等待上失败（实际改过检查）。夹具是文件夹项目，不是 git 项目；`Changes` 的审阅和 4 MiB 文件的场景没有在测试里覆盖。
 
 - `Startup` 多一个 `#[cfg(feature = "bench-probe")] bench: Option<Arc<Probe>>`，`Started` 不需要它：探针线程自己持有它要的东西，退出时随进程结束（运行器在 `Quit` 之后等进程退出）。
 - `Quit` 走 `quit::quit`：离开守卫、kernel、watcher、executor、cache、日志依次关闭，最后 `cx.quit()`，退出码 0。运行器把非 0 的退出码记为错误，所以退出顺序的回归在基准里也会出现。
@@ -687,7 +704,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
 
 ### 测试
 
-- `src/tests/bench.rs`（`bench-probe`）：`no_frame_autosave_name_with_the_bench_probe`（选名字的纯函数：有探针时骨架窗口和 `window_state` 都得到 None，没有时与 desktop 相同）；`#[gpui::test]` `a_quit_request_takes_the_quit_path`（`BenchDriver::quit` 之后主线程调用 `quit::quit`：用假的 `QuitSteps` 看到 kernel、executor、日志的顺序）；`open_project_takes_the_open_folder_path`（`Open(Project(path))` 之后 `workspace` 的 hub 收到 `OpenProject(path)`）；`open_diff_takes_the_session_row_path`（`OpenDiff(key)` 之后 hub 收到审阅路由的 `Push`；没有 workspace 时是错误）；`open_is_reported_as_unsupported`（`Open(File)`、`Open(Scroll)` 等发出 `Error`，消息以 `open ` 开头）；`open_project_without_a_workspace_is_an_error`。另有 `only_a_project_is_forwarded_and_the_rest_is_an_error`（`BenchDriver` 转发 `Project` 和 `Quit`）、`a_diff_is_forwarded_with_its_session_key`（`<来源>:<ID>` 拆成 `SessionKey`，缺一边是错误）、`milestones_keep_their_names`（四个里程碑按同名映射）、`a_worktree_is_forwarded_with_its_root`、`a_worktree_switch_pushes_the_screen_and_sets_the_worktree`、`a_worktree_switch_that_cannot_happen_is_an_error_without_the_path`、`a_worktree_request_without_a_workspace_or_a_project_is_an_error`（「worktrees 的装配」）。`first_frame_plugins_and_quit` 还发 `Open(Scroll)`，应答是 `Error { message: "open scroll unsupported" }`。
+- `src/tests/bench.rs`（`bench-probe`）：`no_frame_autosave_name_with_the_bench_probe`（选名字的纯函数：有探针时骨架窗口和 `window_state` 都得到 None，没有时与 desktop 相同）；`#[gpui::test]` `a_quit_request_takes_the_quit_path`（`BenchDriver::quit` 之后主线程调用 `quit::quit`：用假的 `QuitSteps` 看到 kernel、executor、日志的顺序）；`open_project_takes_the_open_folder_path`（`Open(Project(path))` 之后 `workspace` 的 hub 收到 `OpenProject(path)`）；`open_diff_takes_the_session_row_path`（`OpenDiff(key)` 之后 hub 收到审阅路由的 `Push`；没有 workspace 时是错误）；`open_is_reported_as_unsupported`（`Open(Scroll)`、`Open(Animate)`、`Open(Input)` 发出 `Error`，消息以 `open ` 开头）；`open_project_without_a_workspace_is_an_error`。另有 `only_a_project_is_forwarded_and_the_rest_is_an_error`（`BenchDriver` 转发 `Project` 和 `Quit`）、`a_diff_is_forwarded_with_its_session_key`（`<来源>:<ID>` 拆成 `SessionKey`，缺一边是错误）、`milestones_keep_their_names`（七个里程碑按同名映射）、`a_worktree_is_forwarded_with_its_root`、`a_worktree_switch_pushes_the_screen_and_sets_the_worktree`、`a_worktree_switch_that_cannot_happen_is_an_error_without_the_path`、`a_worktree_request_without_a_workspace_or_a_project_is_an_error`（「worktrees 的装配」）。`first_frame_plugins_and_quit` 还发 `Open(Scroll)`，应答是 `Error { message: "open scroll unsupported" }`。
 - `tests/bench_probe.rs`（`#![cfg(feature = "bench-probe")]`；真实进程，需要图形会话，与 `tests/startup.rs` 相同；测试自己扮演运行器：在临时目录里 bind 一个 Unix 域 socket，临时 `HOME`，带 `LECTERN_BENCH_SOCKET` 启动 `--features bench-probe` 的调试构建）：
   - `first_frame_plugins_and_quit`：收到 `FirstFrame`，`pid` 是启动的进程，`source` 是 `presented` 或 `handler`；发 `Plugins`，应答是 desktop 的插件（不含 `bench-probe`），以 `PluginsEnd` 结束；发 `Epoch`，应答 `Epoch(..)`；发 `Quit`，进程 10 s 内以 0 退出。
   - `a_trimmed_set_becomes_ready`：`LECTERN_BENCH_PLUGINS=closure+self:project`，收到 `Ready`。

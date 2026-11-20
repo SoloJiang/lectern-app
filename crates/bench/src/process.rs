@@ -1010,6 +1010,15 @@ impl<'a> Session<'a> {
             .map_err(|_| BenchError::new(format!("{milestone:?} 的显示时刻早于请求")))
     }
 
+    /// `Open(target)` without a milestone to wait for: a step of a scenario
+    /// that is not timed, such as a key that selects a row. The next
+    /// [`idle`](Session::idle) waits from now, as after [`open`](Session::open).
+    pub fn request(&mut self, target: OpenTarget) -> Result<(), BenchError> {
+        self.send(&Request::Open(target))?;
+        self.first_frame_at = Instant::now();
+        Ok(())
+    }
+
     /// `Open(target)` for a scroll, animation or input scenario, then its
     /// `Frames` within `limit` (the scenario's length plus 10 s).
     pub fn frames(
