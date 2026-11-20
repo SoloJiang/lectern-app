@@ -174,7 +174,10 @@ fn shaped_all(shape: &Shape) -> (TestRepo, Vec<IndexEntry>, Oid) {
 /// written and backdated, and an index with their stat: clean, like the
 /// main worktree. Returns the repository and the canonical roots of the
 /// linked worktrees (`Worktree::root` in `project`'s snapshot is canonical).
-#[allow(dead_code, reason = "only the process target's app/switch_worktree")]
+#[allow(
+    dead_code,
+    reason = "the process target's app/switch_worktree and the time target's project/switch_worktree_with_index"
+)]
 pub fn shaped_linked(shape: &Shape, linked: usize) -> Result<(TestRepo, Vec<PathBuf>), BenchError> {
     let (t, entries, commit) = shaped_all(shape);
     let hour_ago = SystemTime::now() - Duration::from_secs(3600);

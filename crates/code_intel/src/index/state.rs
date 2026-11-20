@@ -53,6 +53,12 @@ pub(crate) struct Project {
     /// `WALKS_KEPT`: a repeated query on an unchanged index skips the walk.
     /// Locked after, never with, `state`.
     pub walks: std::sync::Mutex<Vec<(crate::query::WalkKey, (i64, i64))>>,
+    /// The states of sessions a worktree switch ended (`Inner::switch_session`):
+    /// their maps and caches are dropped by the reconcile that follows, not in
+    /// the event that ended them (a task queued there would run ahead of the
+    /// other plugins' work for the same event, and the drop is no work the
+    /// switch waits for). Locked after, never with, `state`.
+    pub retired: std::sync::Mutex<Vec<State>>,
 }
 
 impl Project {

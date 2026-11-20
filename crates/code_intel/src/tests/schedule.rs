@@ -8,14 +8,14 @@ use std::time::{Duration, Instant};
 
 use lectern_executor::Priority;
 use lectern_kernel::BackgroundState;
-use lectern_services::code_intel::{Focus, TextOrigin, TextRef, TierState};
-use lectern_services::project::BlobId;
+use lectern_services::code_intel::{Focus, Query, QueryState, TextOrigin, TextRef, TierState};
+use lectern_services::project::{BlobId, Scan};
 
 use crate::extract::ExtractStatus;
 use crate::index::host::Guard;
 use crate::testing::{pathological_js, synthetic};
 
-use super::support::{Gate, Harness, packages, ts};
+use super::support::{Gate, Harness, packages, pos_in, ts};
 use super::warm::fill;
 
 #[test]
@@ -1071,4 +1071,220 @@ fn schedule_tier5_confirmed_set_is_compact() {
         "{} bytes for 100k blobs",
         set.heap_bytes()
     );
+}
+
+/// The indexer's state of the project: its session and the flag that stops
+/// the tasks of the session, and how many ended sessions wait to be dropped.
+fn session_of(h: &Harness) -> (u64, Arc<AtomicBool>, usize) {
+    let project = h
+        .indexer
+        .inner()
+        .project(&h.key())
+        .expect("an open project");
+    let (session, cancel) = {
+        let st = crate::index::lock(&project.state);
+        (st.session, st.cancel.clone())
+    };
+    let retired = crate::index::lock(&project.retired).len();
+    (session, cancel, retired)
+}
+
+/// A switch whose new file list is still being read (#389): the old session
+/// ends at once, but the reconcile is requested by the `Changed` that
+/// reports the list ready, once. Nothing is queued ahead of the other
+/// plugins' reaction to the first event: no reconcile, and no task for the
+/// old state, which the reconcile drops.
+#[test]
+fn schedule_switch_reconciles_when_the_file_list_is_ready() {
+    let h = Harness::new();
+    fill(&h, 12);
+    h.git.add_worktree("feature");
+    let source = ts("only_in_feature");
+    h.git.add("feature", &[("f.ts", &source)]);
+    h.open();
+    let (before, old_cancel, _) = session_of(&h);
+    let reconciles = h.stats().reconciles;
+    h.indexer.inner().host.log.lock().unwrap().clear();
+
+    h.publish_pending("feature");
+    // The old session is over: its tasks stop, nothing of it is published.
+    let (session, cancel, retired) = session_of(&h);
+    assert!(old_cancel.load(Ordering::Acquire), "the old session ended");
+    assert!(!cancel.load(Ordering::Acquire), "the new one is live");
+    assert_ne!(session, before);
+    assert_eq!(retired, 1, "the old state waits for the reconcile");
+    assert_eq!(h.submitted("reconcile"), 0);
+    assert_eq!(h.submitted("old session"), 0);
+    h.settle();
+    assert_eq!(h.stats().reconciles, reconciles, "nothing to reconcile yet");
+    assert!(!h.hinted("f.ts"));
+
+    h.publish_scanned("feature", Vec::new());
+    assert_eq!(h.submitted("reconcile"), 1, "once, for the whole scan");
+    assert_eq!(h.submitted("old session"), 0);
+    h.settle();
+    assert_eq!(session_of(&h).0, session, "the same session");
+    assert_eq!(session_of(&h).2, 0, "the reconcile dropped the old state");
+    assert!(h.hinted("f.ts"));
+    assert_eq!(
+        h.map().effective("f.ts").map(|e| e.oid),
+        Some(h.git.oid(&source))
+    );
+}
+
+/// A snapshot whose list is already `Ready` (or `Unavailable`) when the
+/// event arrives asks for its reconcile at once, as before.
+#[test]
+fn schedule_switch_with_the_list_ready_reconciles_at_once() {
+    use lectern_services::project::ScanError;
+
+    let h = Harness::new();
+    fill(&h, 6);
+    h.git.add_worktree("feature");
+    h.git.add("feature", &[("f.ts", &ts("only_in_feature"))]);
+    h.open();
+    h.indexer.inner().host.log.lock().unwrap().clear();
+    h.publish("feature", Vec::new());
+    assert_eq!(h.submitted("reconcile"), 1);
+    assert_eq!(h.submitted("old session"), 0);
+    h.settle();
+    assert!(h.hinted("f.ts"));
+
+    // Unavailable: nothing to build, but queries must hear why.
+    h.indexer.inner().host.log.lock().unwrap().clear();
+    let mut snapshot = h.git.snapshot(500, "main", Vec::new());
+    if let Some(tree) = &mut snapshot.active {
+        tree.files = Scan::Unavailable(ScanError::RootMissing);
+    }
+    let event = h.projects.set(snapshot);
+    h.indexer.project_event(&event);
+    assert_eq!(h.submitted("reconcile"), 1);
+    h.settle();
+    let project = h.indexer.inner().project(&h.key()).expect("open");
+    assert!(
+        crate::index::lock(&project.state).unavailable.is_some(),
+        "the reason is recorded"
+    );
+}
+
+/// A → B → A before B's list is ready: one reconcile, for A, once A's list
+/// is ready. A query asked in B's window is not left waiting.
+#[test]
+fn schedule_switch_back_before_the_file_list_is_ready() {
+    use lectern_services::code_intel::QueryKind;
+
+    let h = Harness::new();
+    fill(&h, 8);
+    h.git.add_worktree("feature");
+    let source = ts("only_in_feature");
+    h.git.add("feature", &[("f.ts", &source)]);
+    h.open();
+    let reconciles = h.stats().reconciles;
+    h.indexer.inner().host.log.lock().unwrap().clear();
+
+    h.publish_pending("feature");
+    let at = TextRef {
+        worktree: Some(h.git.worktree_key("feature")),
+        path: "f.ts".into(),
+        oid: h.git.oid(&source),
+        origin: TextOrigin::Worktree,
+    };
+    let id = h.indexer.query(Query {
+        project: h.key(),
+        kind: QueryKind::Definition {
+            at,
+            position: pos_in(&source, "only_in_feature", 0),
+        },
+    });
+    h.publish_pending("main");
+    assert_eq!(h.submitted("reconcile"), 0);
+    h.settle();
+    assert_eq!(h.stats().reconciles, reconciles);
+
+    h.publish_scanned("main", Vec::new());
+    assert_eq!(h.submitted("reconcile"), 1);
+    h.settle();
+    assert_eq!(h.submitted("old session"), 0);
+    // The map is main's: the feature worktree's file is not in it.
+    assert!(h.map().effective("f.ts").is_none());
+    assert!(h.map().effective("src/m0/file0.ts").is_some());
+    let r = h.indexer.results(id).expect("the query is kept");
+    assert!(
+        !matches!(r.state, QueryState::Running),
+        "the query in the window ended: {:?}",
+        r.state
+    );
+    let c = h.coverage();
+    assert_eq!([c.focus, c.subproject, c.worktree], [TierState::Done; 3]);
+}
+
+/// The project closes while the new list is being read: nothing is
+/// reconciled, the ended state goes with the project.
+#[test]
+fn schedule_close_while_the_file_list_is_pending() {
+    let h = Harness::new();
+    fill(&h, 4);
+    h.git.add_worktree("feature");
+    h.git.add("feature", &[("f.ts", &ts("only_in_feature"))]);
+    h.open();
+    let reconciles = h.stats().reconciles;
+    h.publish_pending("feature");
+    let event = h.projects.close(&h.key());
+    h.indexer.project_event(&event);
+    h.settle();
+    assert!(h.indexer.inner().project(&h.key()).is_none());
+    assert_eq!(h.stats().reconciles, reconciles);
+}
+
+/// A folder project's list is `Pending` while it is read, then `Ready`: its
+/// reconcile comes with the second event.
+#[test]
+fn schedule_folder_project_reconciles_when_the_file_list_is_ready() {
+    use lectern_services::project::{
+        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
+    };
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical");
+    std::fs::write(root.join("a.ts"), ts("in_a_folder")).expect("write");
+    let key = ProjectKey::Folder {
+        root: Arc::from(root.as_path()),
+    };
+    let h = Harness::new();
+    let mut files = FileList::builder();
+    files.push("a.ts", FileKind::File);
+    let files = Arc::new(files.build());
+    let snapshot = |files: Scan<Arc<FileList>>, generation| ProjectSnapshot {
+        key: key.clone(),
+        generation,
+        name: "folder".into(),
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: Arc::from(root.as_path()),
+            worktree: None,
+            opened_at: "".into(),
+            files,
+            packages: Scan::Pending,
+            dirs: Scan::Pending,
+        }),
+    };
+    let event = h.projects.set(snapshot(Scan::Pending, 1));
+    h.indexer.project_event(&event);
+    let event = h.projects.set(snapshot(Scan::Pending, 2));
+    h.indexer.project_event(&event);
+    h.indexer.inner().host.log.lock().unwrap().clear();
+    h.settle();
+    assert!(
+        h.indexer
+            .map(&key)
+            .is_none_or(|m| m.effective("a.ts").is_none())
+    );
+    h.indexer.inner().host.log.lock().unwrap().clear();
+
+    let event = h.projects.set_files(&key, files);
+    h.indexer.project_event(&event);
+    assert_eq!(h.submitted("reconcile"), 1);
+    h.settle();
+    let map = h.indexer.map(&key).expect("open");
+    assert!(map.effective("a.ts").is_some());
 }

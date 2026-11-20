@@ -12,18 +12,23 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use lectern_bench::{Bench, BenchError, Ctx, Measured, Samples, Value};
-use lectern_executor::Executor;
+use lectern_bench::{Bench, BenchError, Ctx, Measured, SampleConfig, Samples, Value};
+use lectern_code_intel::{CodeIntelDeps, CodeIntelPlugin, NoGrammarPacks};
+use lectern_executor::{Executor, Priority};
 use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
 use lectern_fs_watch::{Config, Flags, Watcher};
-use lectern_kernel::WorkspaceFacts;
-use lectern_project::FileKind;
+use lectern_kernel::{
+    Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginSet, ServiceRef,
+    WorkspaceFacts, service,
+};
 use lectern_project::testing::{Driven, Logged, Shape};
+use lectern_project::{FileKind, ProjectDeps, ProjectPlugin};
+use lectern_services::code_intel::CodeIntel;
 use lectern_services::project::{
-    FileList, PackageMatch, ProjectEvent, ProjectKey, ProjectSnapshot, Scan, WorktreeKey,
+    FileList, PackageMatch, ProjectEvent, ProjectKey, ProjectSnapshot, Projects, Scan, WorktreeKey,
 };
 
 use crate::project_repo::{self, ProjectRepo};
@@ -715,4 +720,364 @@ fn contains(
         return Err(BenchError::new(format!("contains({pattern:?}) was wrong")));
     }
     Ok(time)
+}
+
+/// `set_active_worktree` to the first task a screen of the app queues on the
+/// switch's `Changed` has run, with the real `project` and `code-intel`
+/// plugins on a real executor of the app's smallest size (2 workers, so one
+/// general worker serves every `Background` task; 1 batch thread), over the
+/// `cloudprint` shape written to disk (11 worktrees, every file there and
+/// stat'ed). The screen is a stand-in subscribed after `code-intel` (it also
+/// requires `dyn CodeIntel`, so it activates later) that queues one
+/// `Background` task on `Changed`, as `worktrees`' hub does; its task is the
+/// compose that ends in `Milestone::WorktreeSwitched`. The batch work is
+/// finished before each sample and paused during it (as the process
+/// benchmarks do after `settle`); the index of the new worktree finishes
+/// outside the clock. Record only: the executor's threads make it noisier
+/// than `project/switch_worktree`, which `app/switch_worktree` bounds.
+pub const SWITCH_WORKTREE_WITH_INDEX: Bench = Bench {
+    id: "project/switch_worktree_with_index",
+    run: switch_worktree_with_index,
+};
+
+/// What the stand-in screen composed.
+#[derive(Default)]
+struct Composed {
+    state: Mutex<ComposeState>,
+    done: Condvar,
+}
+
+#[derive(Default)]
+struct ComposeState {
+    /// A task is queued or running: the next `Changed` only marks it dirty.
+    building: bool,
+    composed: usize,
+}
+
+impl Composed {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ComposeState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn reset(&self) {
+        self.lock().composed = 0;
+    }
+
+    /// Waits for the first compose since `reset`.
+    fn wait(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock();
+        while state.composed == 0 {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            state = self
+                .done
+                .wait_timeout(state, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        true
+    }
+}
+
+type Held<T> = Arc<Mutex<Option<ServiceRef<T>>>>;
+
+/// The screen: requires `dyn Projects` (kept for the benchmark) and
+/// `dyn CodeIntel` (to activate after it, as `file_reader`'s screens do),
+/// and queues a `Background` task on every `Changed`.
+struct Screen {
+    executor: Executor,
+    composed: Arc<Composed>,
+    projects: Held<dyn Projects>,
+    index: Held<dyn CodeIntel>,
+}
+
+impl Plugin for Screen {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            provides: Vec::new(),
+            requires: vec![service::<dyn Projects>(), service::<dyn CodeIntel>()],
+            activation: vec![Activation::AfterFirstFrame],
+        }
+    }
+
+    fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        *self.projects.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(ctx.service::<dyn Projects>());
+        *self.index.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(ctx.service::<dyn CodeIntel>());
+        let executor = self.executor.clone();
+        let composed = self.composed.clone();
+        ctx.on::<ProjectEvent>(move |event, handle| {
+            if !matches!(event, ProjectEvent::Changed { .. }) {
+                return;
+            }
+            {
+                let mut state = composed.lock();
+                if state.building {
+                    return;
+                }
+                state.building = true;
+            }
+            let Some(busy) = handle.busy() else {
+                composed.lock().building = false;
+                return;
+            };
+            let (executor, task) = (executor.clone(), composed.clone());
+            let accepted = handle.own_with(move |gate| {
+                executor.run_gated(&gate, Priority::Background, move || {
+                    let _busy = busy;
+                    let mut state = task.lock();
+                    state.building = false;
+                    state.composed += 1;
+                    task.done.notify_all();
+                })
+            });
+            if !accepted {
+                composed.lock().building = false;
+            }
+        });
+        Ok(Box::new(()))
+    }
+}
+
+/// Waits until the kernel has nothing busy and no batch work is left, twice
+/// in a row with nothing changed in between. The manual fs_watch runs here
+/// (its batches hold busy guards until they are delivered), outside the
+/// clock.
+fn wait_idle(kernel: &Kernel, watch: &Watch) -> Result<(), BenchError> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        watch.driver.run_until_idle();
+        watch.driver.advance(LONG);
+        watch.driver.run_until_idle();
+        let look = || (kernel.quiescent_epoch(), kernel.background());
+        let first = look();
+        if first.0.is_some() && first.1.count == 0 {
+            std::thread::sleep(Duration::from_millis(2));
+            if look() == first {
+                return Ok(());
+            }
+        }
+        if Instant::now() > deadline {
+            return Err(BenchError::new(format!(
+                "the kernel did not come to rest: {:?} {:?} {:?}",
+                kernel.quiescent_epoch(),
+                kernel.background(),
+                kernel
+                    .status()
+                    .iter()
+                    .map(|s| (s.id.clone(), s.state.clone()))
+                    .collect::<Vec<_>>()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn switch_worktree_with_index(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let shape = Shape::cloudprint();
+    let (t, _) = crate::git_worktree::shaped_linked(&shape, CLOUDPRINT_WORKTREES - 1)?;
+    let watch = Watch::new();
+    let executor = Executor::new(lectern_executor::Config {
+        workers: 2,
+        batch_workers: 1,
+        on_thread_start: None,
+    });
+    let cache_dir = tempfile::tempdir_in(ctx.scratch())?;
+    let cache = lectern_cache::Cache::new(lectern_cache::Config {
+        root: cache_dir.path().to_path_buf(),
+        budgets: lectern_cache::Budgets::default(),
+        ui_thread: None,
+    });
+    let composed = Arc::new(Composed::default());
+    let projects: Held<dyn Projects> = Held::default();
+    let index: Held<dyn CodeIntel> = Held::default();
+    let set = PluginSet::new()
+        .with(
+            "project",
+            ProjectPlugin::with_repository_config_only(ProjectDeps {
+                executor: executor.clone(),
+                watcher: watch.watcher.clone(),
+                home: t.base().join("home"),
+            }),
+        )
+        .with(
+            "code-intel",
+            CodeIntelPlugin::with_repository_config_only(CodeIntelDeps {
+                executor: executor.clone(),
+                cache,
+                watcher: watch.watcher.clone(),
+                grammars: Arc::new(NoGrammarPacks),
+            })
+            .with_batch_tasks(1),
+        )
+        .with(
+            "screen",
+            Screen {
+                executor: executor.clone(),
+                composed: composed.clone(),
+                projects: projects.clone(),
+                index: index.clone(),
+            },
+        );
+    let kernel = Kernel::start(set);
+    kernel.barrier();
+    let result = switch_rounds(
+        ctx,
+        &Rig {
+            kernel: &kernel,
+            watch: &watch,
+            composed: &composed,
+            projects: &projects,
+            index: &index,
+        },
+        &t,
+        &shape,
+    );
+    drop(projects.lock().unwrap_or_else(|e| e.into_inner()).take());
+    drop(index.lock().unwrap_or_else(|e| e.into_inner()).take());
+    kernel.resume();
+    let (done, wait) = std::sync::mpsc::channel();
+    kernel.shutdown(move || {
+        let _ = done.send(());
+    });
+    let _ = wait.recv_timeout(Duration::from_secs(10));
+    let _ = executor.shutdown(Duration::from_secs(5));
+    result
+}
+
+/// What the rounds run against.
+struct Rig<'a> {
+    kernel: &'a Kernel,
+    watch: &'a Watch,
+    composed: &'a Composed,
+    projects: &'a Held<dyn Projects>,
+    index: &'a Held<dyn CodeIntel>,
+}
+
+fn switch_rounds(
+    ctx: &mut Ctx,
+    rig: &Rig<'_>,
+    t: &lectern_git::testing::TestRepo,
+    shape: &Shape,
+) -> Result<Vec<Measured>, BenchError> {
+    let Rig {
+        kernel,
+        watch,
+        composed,
+        projects,
+        index,
+    } = *rig;
+    // `ServiceRef::get` holds the provider busy until the handle is dropped:
+    // each use takes one and drops it, never across a wait.
+    let service = projects
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| BenchError::new("the screen is not active"))?;
+    let intel = index
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| BenchError::new("the screen is not active"))?;
+    let projects = || {
+        service
+            .get()
+            .ok_or_else(|| BenchError::new("no Projects provider"))
+    };
+    let check_indexed = |key: &ProjectKey| {
+        let intel = intel
+            .get()
+            .ok_or_else(|| BenchError::new("no CodeIntel provider"))?;
+        indexed(&*intel, key)
+    };
+    projects()?.open(t.root());
+    wait_idle(kernel, watch)?;
+    let key = projects()?
+        .open_projects()
+        .pop()
+        .ok_or_else(|| BenchError::new("the project did not open"))?;
+    let snapshot = projects()?
+        .snapshot(&key)
+        .ok_or_else(|| BenchError::new("no snapshot"))?;
+    let worktrees: Vec<WorktreeKey> = snapshot.worktrees.iter().map(|w| w.key.clone()).collect();
+    if worktrees.len() != CLOUDPRINT_WORKTREES {
+        return Err(BenchError::new(format!("{} worktrees", worktrees.len())));
+    }
+    ready(&projects()?.snapshot(&key), shape)?;
+    check_indexed(&key)?;
+
+    ctx.config(SampleConfig {
+        max_wall: Duration::from_secs(60),
+        max_samples: 30,
+        ..SampleConfig::default()
+    });
+    let next = RefCell::new(0usize);
+    let failure: RefCell<Option<String>> = RefCell::new(None);
+    let time = ctx.time_with_setup(
+        || {
+            kernel.resume();
+            if let Err(e) = wait_idle(kernel, watch) {
+                *failure.borrow_mut() = Some(format!("{e:?}"));
+            }
+            composed.reset();
+            kernel.pause();
+            let mut n = next.borrow_mut();
+            *n = (*n + 1) % worktrees.len();
+            worktrees[*n].clone()
+        },
+        |target| {
+            match projects() {
+                Ok(projects) => projects.set_active_worktree(&key, &target),
+                Err(e) => *failure.borrow_mut() = Some(format!("{e:?}")),
+            }
+            if !composed.wait(Duration::from_secs(30)) {
+                *failure.borrow_mut() = Some("the screen composed nothing".into());
+            }
+            target
+        },
+    );
+    kernel.resume();
+    wait_idle(kernel, watch)?;
+    if let Some(message) = failure.take() {
+        return Err(BenchError::new(message));
+    }
+    // The last switch, checked: the new worktree is current, its files are
+    // ready, and `code-intel` indexed it (its reconcile ran).
+    let snapshot = projects()?.snapshot(&key);
+    let active = snapshot
+        .as_ref()
+        .and_then(|s| s.active.as_ref())
+        .and_then(|a| a.worktree.as_ref());
+    if active != Some(&worktrees[*next.borrow()]) {
+        return Err(BenchError::new("the switch did not happen"));
+    }
+    ready(&snapshot, shape)?;
+    check_indexed(&key)?;
+    Ok(vec![Measured::new(
+        "project/switch_worktree_with_index",
+        Value::Time(time),
+    )])
+}
+
+/// The active tree's file list and sub-projects are ready.
+fn ready(snapshot: &Option<Arc<ProjectSnapshot>>, shape: &Shape) -> Result<(), BenchError> {
+    let snapshot = snapshot
+        .as_ref()
+        .ok_or_else(|| BenchError::new("no snapshot"))?;
+    check_ready(snapshot, shape.paths.len(), shape.packages).map_err(BenchError::new)
+}
+
+/// Every tier the current worktree's index has is done.
+fn indexed(intel: &dyn CodeIntel, key: &ProjectKey) -> Result<(), BenchError> {
+    use lectern_services::code_intel::TierState;
+    let c = intel
+        .coverage(key)
+        .ok_or_else(|| BenchError::new("code-intel does not have the project"))?;
+    if [c.focus, c.subproject, c.worktree, c.other_worktrees] != [TierState::Done; 4] {
+        return Err(BenchError::new(format!("the index is not done: {c:?}")));
+    }
+    Ok(())
 }

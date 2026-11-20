@@ -1503,7 +1503,7 @@ enum WorktreeState {
 - 映射和语言表是快照自己的副本（`Arc`），查询读的是它们，不是共享状态，所以运行中的查询不因新映射、新语言表失效：结果与旧视图一致（位置带旧 OID，打开前核对）。查询手里由映射推出的数据（第 1–3 步的结果）必须与快照同一份映射：复用预取要求会话、映射、淘汰、满额、语言表都与查询任务自己取的快照相同（`View::same_basis`；`query` 在调用方线程上的比较只决定交不交给任务，`query` 返回到任务取快照之间发布的新映射会让它作废、重做第 1–3 步）；`check_view` 也先比较数据的视图与快照的映射和语言表，不同按淘汰处理（重做一次）。
 - 比较点：跳转在第 1–3 步（含复用的预取）之后、限时搜索的范围读完提示之后、搜索结束算完计数之后；查引用在 `ci_ref` 那一遍之后、范围之后、搜索之后；`Named` 在计数之后。每次发布结果（`publish_in`）还在决定发布顺序的锁（`publishing`）下检查会话。
 - 变化的处理：只多了提示（`Grew`），就再查一次索引，把新出现的候选追加进结果：读提示之前已置位的提示，它的写入在第二次查索引之前已经提交，所以不会再漏；有淘汰（`Evicted`），还没发布结果时用新快照重做一次（跳转的第 1–3 步，`Named` 整个），已经发布了或重做时又变了，查询以 `Failed(Stale)` 结束，已发布的结果留下，消费方再问一次；查引用从第一个文件就交出结果，所以有淘汰就以 `Stale` 结束；会话结束（`Ended`），查询已随会话关闭，不再发布任何结果。任何变化之后都不报 `Complete`。
-- 会话在触发它的事件里同步结束：`Changed` 带来新的当前 worktree 时（`switch_session`）、`Closed` 时，在 `publishing` 锁下结束旧会话、关闭它的查询（语义请求的 `cancel` 在放开这把锁之后调用，查询持有的映射和预取的结果交给 `Background` 任务释放：关闭查询可能在 UI 线程上）；之后不会再发布旧会话的结果，也不会用旧映射回答新 worktree 的文本；新会话发布快照之前，查询等它（不再用空映射或只有基础部分的映射回答、报 `Complete`）。
+- 会话在触发它的事件里同步结束：`Changed` 带来新的当前 worktree 时（`switch_session`）、`Closed` 时，在 `publishing` 锁下结束旧会话、关闭它的查询（语义请求的 `cancel` 在放开这把锁之后调用，查询持有的映射和预取的结果交给 `Background` 任务释放：关闭查询可能在 UI 线程上）；之后不会再发布旧会话的结果，也不会用旧映射回答新 worktree 的文本；新会话发布快照之前，查询等它（不再用空映射或只有基础部分的映射回答、报 `Complete`）。旧会话的状态（映射、缓存；它的 fs_watch 订阅在结束时就已经 drop）不在这个事件里释放，也不单独排一个任务：它放在项目的 `retired` 里，由之后的核对任务在开头释放。事件在 `project` 的 `Background` 线程上发出，同一个事件的其他订阅者（`worktrees` 的 hub）也要在 `Background` 队列里排任务，本 crate 排在前面的任务会推迟它们（#389）。
 - 查询读的、不来自发布对象的输入，逐项：会话、淘汰、提示置位次数（视图的成员，按上面比较）；提示本身（映射里共享的 `IndexedHints`，增长由置位次数覆盖）；在途抽取的键（取快照时读，计入 `unsearched`，只会让结果更保守）；会话的根（发布对象里的，发布时还没打开时用同一会话的根，路径相同）；当前文本的语言（映射里这个路径的语言；映射没有这个路径时按扩展名在快照的表里找，只决定怎么解析当前文本）；审阅集合（取快照时读的焦点，只影响排序和分层，不影响完整性）；解析扩展点的实现（每次激活注册一次）；名字表（查询不读，`Named` 直接查存储）；语义导航的提供者集合（只影响 `semantic` 一栏，不影响 `state` 的完整性；查询开始时选定要问的提供者）；`coverage`（查询不读）。
 
 ### 名字表
@@ -1588,7 +1588,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ### 打开项目与热启动
 
-1. 收到 `ProjectEvent::Opened` 或 `Changed` 后，按快照让对应的输入代数加一（见「增量更新」）。当前 worktree 的文件列表为 `Ready` 时打开工作区根的 `SafeRoot`、订阅 `fs_watch`（第一次时）；基础映射、工作区比较、覆盖部分由核对任务按「输入代数与派生状态」算出。文件夹项目没有订阅和工作区比较。第一次发布快照之后提交依赖的身份任务（读 lockfile、算直接依赖的身份，与 `code_intel.deps` 里的路径表对照，「依赖层」）。
+1. 收到 `ProjectEvent::Opened` 或 `Changed` 后，按快照让对应的输入代数加一（见「增量更新」）。当前 worktree 的文件列表为 `Ready` 时打开工作区根的 `SafeRoot`、订阅 `fs_watch`（第一次时）。切换当前 worktree 时 `project` 先发一个文件列表为 `Pending` 的 `Changed`，列表读完再发一个 `Ready`（或 `Unavailable`）的：前一个事件结束旧会话、记下输入，但不请求核对任务（没有文件列表，核对任务没有东西可建），后一个事件请求它；一个文件列表已是 `Ready` 或 `Unavailable` 的事件、没有当前 worktree 的事件仍立即请求（`Unavailable` 的原因要由核对任务记下，等着的查询才会以 `Failed` 结束）；基础映射、工作区比较、覆盖部分由核对任务按「输入代数与派生状态」算出。文件夹项目没有订阅和工作区比较。第一次发布快照之后提交依赖的身份任务（读 lockfile、算直接依赖的身份，与 `code_intel.deps` 里的路径表对照，「依赖层」）。
 2. 第 1、2 层的路径随焦点到达；第 3–5 层的游标就位，批量任务开始。
 3. 热启动只抽取缺的键：映射里每个 OID 先做存在检查，缓存里已有的不读文件、不解析。10 万文件全部命中时约 200 次存在检查，估算几百毫秒，在批量线程上进行（`code_intel/warm_100k`）。命中的单元之后再标记访问，不在这段时间里（`code_intel/warm_100k_touch`，只记录）。
 4. 文件夹项目没有 index 的 OID，热启动要读每个文件求 OID，命中的不解析；上限是文件夹遍历的 20 000 个条目。
@@ -1903,6 +1903,7 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 | 空闲内存：monorepo < 100 MB，10 万文件的仓库 < 120 MB（后台暂停时和全部完成后；后者的份额加总见 [ADR 0035](../adr/0035.md)） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、依赖映射（≤ 1 MB，ADR 0033，按字节数封顶，上限处由 `deps_map_bytes` 单独测）与就绪路径表的表头（行在缓存里，不常驻；`resident_cloudprint` 的夹具含 21 个直接依赖、252 个声明文件的 `node_modules`，`resident_100k` 的没有依赖）、第 5 层本次会话已确认的 blob 集合（每个 8 字节的键，10 万个约 1.2 MB，项目关闭或换会话时释放）、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s（一遍 `ci_ext`，再按 `ci_def_name` 的顺序分页读索引，每条语句 4096 项，见「名字表」）；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
+| 切换 worktree 时不推迟其他插件（`app/switch_worktree` < 100 ms 的份额） | 本 crate 在 `project` 发出的事件里只做 `switch_session` 的锁内部分（结束会话、关闭查询），不排任何任务；核对任务在文件列表 `Ready` 的那个事件里才请求，排在同一事件其他订阅者的任务后面（#389）。cloudprint 形状、2 个工作线程时，从 `set_active_worktree` 到第一个排在事件上的 `Background` 任务运行 < 20 ms（扫描本身约 2–3 ms，原来核对任务排在它前面时 40–90 ms） | `project/switch_worktree_with_index` |
 | 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）。`git` 的工作区比较（`GitAccess::changed_paths`）期间的临时内存不在这 40 MB 里：比较不用 `TrackedPaths`，自己解析 index，10 万文件时一次比较的峰值 65.8 MB（`git/compare_100k/peak_bytes` ≤ 72 MB，`git` 的份额，[ADR 0035](../adr/0035.md)），单独就超过 40 MB；`code_intel/batch_peak` 的夹具用 `FakeGit`，不含它。最坏情况下，打开项目时首页的计数比较和本 crate 的核对比较各在一个新 `Worktree` 上同时做冷比较，加上批量层，进程的临时峰值可达约 2 × 66 + 40 ≈ 170 MB（git 的比较之间没有串行化，这是已知的最坏情况，不设顶层预算，同 ADR 0029 的临时内存）。降低的办法是 ADR 0035 的「比较与 `tracked` 共用一次解析」；比较是否与超过 256 KiB 的文件的抽取错开，由本 crate 的下一步决定 | `code_intel/batch_peak` |
 | 磁盘 | `code_intel.tags` 配额 224 MiB、`code_intel.deps` 配额 32 MiB，合计 256 MiB（[ADR 0033](../adr/0033.md)）；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，超过 224 MiB 的配额，见「存储表」的「规模」和配额一条）；一个 TS 项目的依赖约 5 MiB 源码，单元约 5–10 MiB | `code_intel/disk_100k`（只记录） |
 | 依赖层（ADR 0033） | 依赖层每个项目每次会话读 ≤ 64 MiB、写 ≤ 32 MiB；21 个直接依赖、约 5 MiB 声明闭包的 TS 项目，从空缓存到依赖层完成单线程约 1.3 s（4 MB/s 的抽取吞吐；按 [ADR 0054](../adr/0054.md) 暂时放宽的 3 MB/s 约 1.7 s），在批量层上、排在第 4 层之后，不推迟 `app/index_100k` 的里程碑；身份不变时打开项目只读 lockfile、每个直接依赖的链接和清单的 stat，再对路径表里的 OID 做存在检查（约 250 个文件一条语句）：≤ 50 ms（4 MiB 的 `package-lock.json`，按 1 MiB 的区间流式扫描）；依赖映射上限 20 000 个文件、≤ 1 MB，计入下面的常驻份额 | `code_intel/deps_ts_project`（只记录：合成的 21 个直接依赖，从空缓存到 `coverage.deps` 为 `Done`）、`code_intel/deps_identity` ≤ 50 ms（同上的项目、缓存里已有全部路径表和单元，重新打开时身份任务自身的耗时：每次从开始到结束，求和，不含项目本身的打开和第 3、4 层）、`code_intel/deps_map_bytes` ≤ 1 MB（上限处的依赖映射：给出 2 万个文件，包内路径约 48 字节、SHA-256，`Memory`） |
@@ -2557,6 +2558,14 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
   `extract_throughput` 在两边都有低于 4 MB/s 的轮次（改动前 6 次里 4 次，改动后 6 次里 4 次，包括负载 13 的那次），六次的中位数改动前 3.80 MB/s、改动后 3.82 MB/s；它经过的代码里，改动只在失败分支上（解析器不接受 grammar、遍历意外停下、tree-sitter-tags 出错），成功路径没有新加的代码。`references_*` 两边在噪声之内。改动后第一轮的 `goto_cold_parse`、`references_full/first`、`deps_identity`、`names_100k` 和 `yield_stop` 偏高发生在负载 13 的那一轮，之后两轮回到改动前的范围。
 - 没有验证的：没有在 macOS 上运行（macOS CI 上 `extract_throughput` 和 `references_*` 曾经敏感，看 CI 的结果）；记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步），这里只经 `testing::capture()` 检查编码后的行。
 
+切换 worktree 时核对任务排在 worktrees 屏幕前面（[#389](https://github.com/SoloJiang/lectern-app/issues/389)）：
+
+- 原因：`project` 在切换时先发文件列表为 `Pending` 的 `Changed`，扫描之后再发 `Ready` 的。本 crate 比 `worktrees` 先激活，所以它的监听先运行，原来在这个事件里排了「旧会话」和「核对」两个 `Background` 任务，`worktrees` 的合成任务排在它们后面；`executor-0` 只跑 `Interactive`，3 个核的机器上只有一个通用工作线程，里程碑要等整个核对任务（打开根、订阅 fs_watch、HEAD 与 index、重建映射、工作区比较、重新读取）。CI 上 `app/switch_worktree` 从 50–79 ms 升到 80–153 ms，`open_diff` 从 97.6 升到 164 ms。
+- 修改：`Changed` 带来的快照里当前 worktree 的文件列表是 `Pending` 时只结束旧会话、记下输入，不请求核对任务；列表 `Ready`（或 `Unavailable`）的 `Changed` 请求。旧会话的状态不再排任务释放，放在 `Project::retired`，由之后的核对任务在开头释放。
+- 新测试（`schedule_*`，5 个）：`Pending` 的事件结束旧会话（旧会话的取消标志置位、会话号变化）、不排「核对」和「旧会话」任务，之后 `Ready` 的事件恰好排一个核对任务，核对之后 `retired` 为空、映射是新 worktree 的；列表已经 `Ready`、或 `Unavailable` 的事件立即排一个，`Unavailable` 的原因记下；A → B → A（都在 `Pending`）只在 A 的列表 `Ready` 时排一个核对任务，映射是 A 的，B 的窗口里问的查询结束；`Pending` 时项目关闭不核对；文件夹项目的 `Pending` 事件不核对，`Ready` 的事件排一个。去掉 `Pending` 的判断，其中三个失败。
+- 基准 `project/switch_worktree_with_index`（`cargo bench -p lectern-bench --all-features --bench time -- project/switch`，与修改前的二进制交替运行各 6 次，机器的负载 17–48，15 个核）：修改前中位数 88.9、43.2、49.4、46.3、45.1、39.5 ms，修改后 2.04、2.36、3.00、2.59、1.85、2.00 ms。每次运行之后都核对了：新 worktree 是当前的、文件列表和子项目 `Ready`、`coverage` 四层都是 `Done`（核对任务确实在之后运行了）。
+- 没有验证的：macOS CI 上 `app/switch_worktree` 与 `app/open_diff` 的实测值（要窗口，本机不运行）；真实 hub 的合成任务比替身长，里程碑还要一帧，本基准只证明核对任务不再排在前面。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2880,3 +2889,11 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 原来每行带语言名、路径和错误的 `Display` 文字。错误文字不再写出：tree-sitter 的查询错误和 tree-sitter-tags 的 `InvalidCapture` 引用查询原文，`GitError::Corrupt` 带任意文字，`io::Error` 的消息由系统给出，原来「语言包名」和 `ProjectKey` 的 `Debug` 也在行里。改为错误的种类、查询错误的行列、`Value::io`，语言只写核心语言名（语言包写 null，由 `grammar` 区分），项目写成路径。为此 `Compiled::new`、`SiteQuery::new` / `jump` 和 `classify` 返回 `diag::CompileError`（种类和行列），不再是 `String`；遍历器的 `kind`、`anon`、`field` 和各语言的 `new` 返回 `walk::Missing`（缺的是哪一类、遍历器里写的名字，都是字面量）。
 - 转换失败原来在失败分支上先把 `GitError` 格式化成 `String`（`canonical.rs` 的 `check`、第 5 层读另一个 worktree），级别关闭时也分配；现在只在写出时取种类，失败分支上不分配。
 - 「工作区比较失败」的消息文字带 `comparison failed`，金丝雀测试因此不检查 `FakeGit` 的 `Corrupt("comparison failed")` 文字，只检查 `conversion failed`（转换失败的 `Corrupt` 文字）；两者经同一个 `diag::git_error`。
+
+切换 worktree 时的核对任务（[#389](https://github.com/SoloJiang/lectern-app/issues/389)）：
+
+- 设计写「收到 `Opened` 或 `Changed` 后……请求核对任务」，没有区分文件列表的状态。实现：新的当前 worktree 的文件列表是 `Pending` 时，`Changed` 只结束旧会话（同步，`switch_session`）、记下输入，不请求核对任务；`project` 会再发一个文件列表 `Ready` 或 `Unavailable` 的 `Changed`（或在项目关闭时发 `Closed`），那时才请求。原因是 `Pending` 的快照没有东西可建映射，核对任务在那时只会打开不了根，却排在同一事件其他订阅者的任务前面。`Opened` 触发的第一次请求（`touch`）不变。
+- 设计写旧会话的状态「在任务里释放」。实现放在 `Project::retired`，由之后的核对任务在每一遍的开头释放（`sync_snapshot` 在核对任务里切换时同一遍就释放）；项目关闭时随 `Project` 释放。不在事件里内联释放：映射和缓存的释放耗时随文件数增长，事件在 `project` 的扫描线程上发出，内联会推迟扫描；排成任务又会排在其他订阅者的任务前面。fs_watch 的订阅和 fs_watch 守卫本来就由 `State::end` 在会话结束时释放，不受这条影响。
+- `switch_session` 不再自己请求核对任务，由调用者决定：`Changed` 的处理按上面的规则；`sync_snapshot` 里切换时仍让正在运行的核对任务多走一遍。
+- A → B → A 都在 `Pending` 时，第二次切换不结束会话（新会话的 `snapshot` 还是空，`switch_session` 照旧返回 false）：B 的窗口里新会话没有地图，问来的查询排在 `waiting`，之后在 A 的映射上开始；它们问的是 B 的文本，读文件时按映射核对内容，对不上的文件计入 `unsearched`，不会报 `Complete`（`schedule_switch_back_before_the_file_list_is_ready` 检查查询已结束）。核对任务排队之后、运行之前再切换的竞争原来就有同样的窗口，现在窗口是整个扫描期间。
+- `CodeIntelPlugin::with_repository_config_only`（`test-support`）：与 `ProjectPlugin::with_repository_config_only` 相同，只读各仓库自己的 git 配置，给 `project/switch_worktree_with_index` 用；`test-support` 因此打开 `lectern-git/test-support`。

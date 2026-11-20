@@ -759,6 +759,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `project/packages_cloudprint` | 中位数 < 15 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/open_100k/files`、`project/open_100k/packages` | 中位数 < 80 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/switch_worktree` | 中位数 < 30 ms | [project](project.md#性能) | `project` 第 5 步 |
+| `project/switch_worktree_with_index` | 中位数 < 20 ms（真实的 `project` 和 `code-intel` 插件在 2 个工作线程、1 个批量线程的 executor 上，cloudprint 形状写成真实文件的 11 个 worktree（`git_worktree::shaped_linked`）；一个替身屏幕订阅在 `code-intel` 之后，在 `Changed` 上排一个 `Background` 任务，与 `worktrees` 的 hub 相同；从 `set_active_worktree` 到这个任务运行。每个样本之前批量层完成、样本期间暂停，不计时：新 worktree 的索引在样本之后完成并核对） | [code_intel](code_intel.md#性能) | `code_intel` 的 #389 修复 |
 | `project/resolve_package/hit`、`…/miss_cloudprint`、`…/miss_100k` | 中位数 < 1 ms / < 20 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/refresh_index/cloudprint`、`…/100k` | 中位数 < 15 ms / < 60 ms（只计模型那一轮；新 index 的解析是 fs_watch 重建过滤器时 `git` 的工作，在批次交付之前完成，不计入） | [project](project.md#性能) | `project` 第 5 步 |
 | `project/facts_contains/name`、`…/path` | 中位数 < 1 µs / < 5 ms（未缓存：模式的结果还没有缓存，每组新 facts 上每个模式各问一次） | [project](project.md#性能) | `project` 第 5 步 |
