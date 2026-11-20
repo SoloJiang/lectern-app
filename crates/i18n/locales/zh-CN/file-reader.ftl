@@ -21,3 +21,7 @@ file-reader-symlink = 指向 { $target } 的符号链接
 file-reader-from-history = 来自 { $source } 的版本
 # 打开文件超过一秒时显示。
 file-reader-loading = 正在载入…
+# 侧栏里文件树的标题，也是项目侧栏里它的入口的名字。
+file-reader-files-title = 文件
+file-reader-files-empty = 没有受跟踪的文件
+file-reader-files-unavailable = Lectern 无法读取这个 worktree 的 index。

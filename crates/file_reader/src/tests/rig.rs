@@ -24,11 +24,11 @@ use lectern_services::project::{
 use lectern_services::reader::{Anchor, ReadTarget, ReaderEvent};
 use lectern_services::workspace::{
     CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone,
-    Registration, Route, SidebarEntry, WindowId, WorkspaceCommand,
+    Registration, Route, SidebarEntry, SidebarSection, WindowId, WorkspaceCommand,
 };
 use lectern_syntax::testing::{TestHost, host};
 use lectern_syntax::{DocSnapshot, Engine, EngineDeps, Languages};
-use lectern_ui::contrib::{KeyBindings, Screen};
+use lectern_ui::contrib::{KeyBindings, Screen, SidebarItem, SidebarPanel};
 
 use crate::{Host, Session};
 
@@ -157,6 +157,8 @@ pub(crate) struct FakeContributions {
     pub(crate) registered: AtomicUsize,
     kinds: Mutex<Vec<String>>,
     screen: Mutex<Option<Screen>>,
+    panel: Mutex<Option<SidebarPanel>>,
+    entries: Mutex<Vec<(String, SidebarSection, u16, SidebarItem)>>,
     bindings: Mutex<Option<KeyBindings>>,
     keys: Mutex<Vec<(String, String, Option<String>)>>,
     dispatched: Mutex<Vec<WorkspaceCommand>>,
@@ -173,12 +175,26 @@ impl FakeContributions {
     /// payloads (and what they hold) are dropped.
     pub(crate) fn forget(&self) {
         *lock(&self.screen) = None;
+        *lock(&self.panel) = None;
+        lock(&self.entries).clear();
         *lock(&self.bindings) = None;
     }
 
     /// `kind:id` of each registered contribution.
     pub(crate) fn kinds(&self) -> Vec<String> {
         lock(&self.kinds).clone()
+    }
+
+    /// The registered sidebar panel (the Files tree).
+    pub(crate) fn panel(&self) -> SidebarPanel {
+        lock(&self.panel)
+            .clone()
+            .expect("a sidebar panel was registered")
+    }
+
+    /// The registered sidebar entries: id, section, order, item.
+    pub(crate) fn entries(&self) -> Vec<(String, SidebarSection, u16, SidebarItem)> {
+        lock(&self.entries).clone()
     }
 
     pub(crate) fn screen(&self) -> Screen {
@@ -231,10 +247,33 @@ impl Contributions for FakeContributions {
         let kind = match contribution.kind {
             ContributionKind::Screen(_) => "screen",
             ContributionKind::KeyBindings => "key-bindings",
+            ContributionKind::SidebarPanel => "sidebar-panel",
+            ContributionKind::SidebarEntry { .. } => "sidebar-entry",
             _ => "other",
         };
         lock(&self.kinds).push(format!("{kind}:{}", contribution.id));
         let payload: Box<dyn std::any::Any + Send> = contribution.payload.0;
+        let payload = match payload.downcast::<SidebarPanel>() {
+            Ok(panel) => {
+                *lock(&self.panel) = Some(*panel);
+                return self.registration();
+            }
+            Err(payload) => payload,
+        };
+        let payload = match payload.downcast::<SidebarItem>() {
+            Ok(item) => {
+                if let ContributionKind::SidebarEntry { section } = contribution.kind {
+                    lock(&self.entries).push((
+                        contribution.id.to_string(),
+                        section,
+                        contribution.order,
+                        *item,
+                    ));
+                }
+                return self.registration();
+            }
+            Err(payload) => payload,
+        };
         let payload = match payload.downcast::<Screen>() {
             Ok(screen) => {
                 *lock(&self.screen) = Some(*screen);
@@ -307,6 +346,10 @@ impl FakeHost {
 impl Host for FakeHost {
     fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
         self.projects.snapshot(project)
+    }
+
+    fn open_projects(&self) -> Vec<ProjectKey> {
+        self.projects.open_projects()
     }
 
     fn set_focus(&self, project: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus) {

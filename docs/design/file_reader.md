@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`，本 PR）已实现，Files 尚未实现；第 8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`）已实现；第 7 步的 Files（侧栏的文件树：`FilesView`、Fluent 键与探针节点、Files 条目与面板的登记，本 PR）已实现，`app/files_open`、`app/files_expand` 仍是计划中；第 8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -667,6 +667,7 @@ pub struct Session { /* Engine、Host、请求队列、唤醒回调、当前文�
 /// 会话需要的外部：项目快照、`code_intel` 的焦点、事件总线。插件用 kernel 的服务实现，测试用替身。
 pub trait Host: Send + Sync {
     fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>>;
+    fn open_projects(&self) -> Vec<ProjectKey>;      // Files 取窗口里的项目：最后打开的那个
     fn set_focus(&self, project: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus);
     fn emit(&self, event: ReaderEvent);
 }
@@ -691,6 +692,10 @@ impl Session {
     pub fn snapshot(&self) -> Option<Arc<DocSnapshot>>;     // 不碰焦点
     pub fn sync(&self) -> Option<Arc<DocSnapshot>>;         // 取快照并把 `set_focus` 对齐：每次唤醒之后调
     pub fn close(&self);                            // 关闭阅读视图：文档放掉、焦点清除，历史留着
+    // Files 一侧（主线程）
+    pub fn open_project(&self) -> Option<ProjectKey>;                         // `Host::open_projects` 的最后一个
+    pub fn project_snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>>;
+    pub fn last_target(&self) -> Option<ReadTarget>;                         // 最后显示过的目标，`close` 之后还在
 }
 // Reader::open、prefetch、share_object 由 Session 实现；`open` 只把请求排进队列并调唤醒回调。
 ```
@@ -948,7 +953,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | `file_reader.disk.banner`、`.merge`、`.discard`、`.keep` | 提示行与按钮 | — |
 | `file_reader.unsaved.save`、`.dont_save`、`.cancel` | 离开守卫的对话框按钮 | 触发的范围（`LeaveScope`） |
 | `files.tree` | 文件树 | 展开的目录数 |
-| `files.tree.row[<路径>]` | 目录或文件行 | 展开、选中、是否折叠的目录链 |
+| `files.tree.row[<路径>]` | 目录或文件行 | 展开、选中、是否折叠的目录链（实际写法见「与设计的差异」第 7 步的 Files） |
 
 ### Action 与快捷键
 
@@ -987,7 +992,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 ## 日志与诊断
 
-`syntax` 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `syntax`，字段值的写法集中在 `crates/syntax/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。`file_reader` 的记录（target 为 `file_reader`）：第 6 步的在本节下面；第 7 步的阅读视图没有新增记录（视图只读快照、发命令，没有失败路径要记：请求作废的记录在 `Session` 里，已有）；第 8 步的随编辑写进本节。
+`syntax` 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `syntax`，字段值的写法集中在 `crates/syntax/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。`file_reader` 的记录（target 为 `file_reader`）：第 6 步的在本节下面；第 7 步的阅读视图和 Files 没有新增记录（视图只读快照、发命令，没有失败路径要记：请求作废的记录在 `Session` 里，已有）；第 8 步的随编辑写进本节。
 
 - 默认记录：
 
@@ -1305,6 +1310,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 视图的测试：只排版视图内的行（5000 行的文件排了不到 120 行，探针里是这些行的字节偏移键）；滚轮移动位置、历史带着滚动位置回来、两端不留像素偏移；⌘F 打开、设字段文字、「1 of 50」、⌘G / ⇧⌘G 及回绕、当前匹配在视图内、Esc 先关查找栏再原样交给 `workspace`（`ProbeEscape`）；⌘[ / ⌘] 与工具栏按钮的可用状态（探针节点）；缺失、不是普通文件的状态；指针停留 150 ms 的预取（前后、取消、不是标识符、同一处不重复）；视图结束时放掉文档、清除焦点并换回插件的推入回调；两种语言的字符串；`FileHighlighted` 里程碑只报一次。
 - 没有验证的：真实窗口里的显示（SF Mono 的度量、行高、滚动手感、查找栏的展开动画、悬停）、`app/*` 的任何基准、`tests/startup.rs` 与 `tests/bench_probe.rs` 的新插件数（24，需要图形会话，CI 运行）。`code_intel`、`file-reader` 装配后的启动开销（`plugin/*/activate` < 1 ms、`plugin/after_first_frame` < 5 ms、`app/open_project`、`app/idle_100k`、`app/idle_monorepo`，索引现在会随项目打开而开始）只能由 macOS CI 判定。
 
+第 7 步的 7b（Files），在 macOS（arm64）上运行，没有打开真实窗口：
+
+- `just check` 通过（格式、架构检查、文档链接、整个工作区的 `cargo clippy --all-targets --all-features -- -D warnings`）。
+- `just test -p lectern-file-reader -p lectern-app -p lectern-i18n`：195 个测试通过（默认跳过打开真实窗口的二进制）；其中 `lectern-file-reader` 82 个（`files_*` 25，`view_*` 12、`session_*` 21、`focus_*` 8、`plugin_*` 5、`history_*` 6、`logs_*` 1，另有 `text_*`）。`python3 scripts/check_architecture.py` 通过；`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src --glob '!**/tests*'` 没有结果。
+- `files_*`：行（目录在前、Finder 顺序、`file2` 在 `file10` 之前）、展开与折叠只插入或删除这一段（`Splice`，2,000 个子项的目录一次插入 2,000 行）且里面的目录保持状态、单子目录的目录链折成一行并把链上每个目录记进展开集、子模块是不展开的文件行、`reveal` 展开文件之上的每个目录、新表（目录链断开、目录消失）按路径保留展开；面板在测试窗口里：条目与面板的登记、5000 个文件的目录展开后只建视图内的行、↑ ↓ → ← ↵ 的选择与展开（到头不回绕）、↵ 与点击文件时 `Session` 的队列里是 `TextOrigin::Worktree`、`Anchor::Start`、活动 worktree 的目标、先发 `ShowSidebarPanel(None)`、点击目录展开或折叠、返回箭头发 `ShowSidebarPanel(None)`、打开时展开并选中阅读视图最后显示的文件、`file_reader::RevealCurrent` 按名字触发、别的 worktree 的目标不定位、视图被丢弃再建时展开与选中保留、换了项目重新开始、新一代目录表保留展开与选中、新文件列表的表还在建时旧行保留、加载 / 不可用 / 没有文件三种状态与它们的探针节点、换了活动 worktree 而新表还在建时不留旧行（↵ 不会把旧树的路径配上新 worktree）、5000 个文件的列表里最后显示的文件滚到视图内（建出的行里有它）、文件夹项目同样列出文件并打开（`worktree` 为 None）。
+- 没有验证的：真实窗口里的显示（行高、缩进、图标颜色、悬停、选中色、返回箭头的位置、侧栏里键盘焦点的落点）、真实 `workspace` 里的整条流程（Files 条目点击 → 面板 → ↵ → 阅读视图 → Esc 回到项目侧栏；测试里 `workspace` 是替身）、`app/files_open`、`app/files_expand`（见「与设计的差异」）、10 万文件的目录表上的打开与展开耗时（没有测量；构造只做与可见行成正比的工作，但没有基准）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1451,3 +1463,22 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - **`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src` 的检查排除测试。** 第 6 步的测试夹具 `tests/rig.rs` 在临时目录里写文件（`std::fs`），原来的命令就有两处命中；「验收」第 7 步的命令按 `syntax` 同类检查的写法加了 `--glob '!**/tests*'`。非测试代码没有命中。
 - **本 crate 不再是 GPUI-free。** 第 6 步的测试曾在 Linux 上运行；现在 `lectern-file-reader` 依赖 `gpui`，Linux 的 `just` 命令按依赖图排除它（`crates/file_reader/AGENTS.md` 已改），测试以 macOS CI 为准。
 - **第 7 步的 bench 条目保持计划中。** `app/open_file`、`app/scroll_frames`、`app/nav_back` 是进程级基准，需要 `app` 的测量构建支持 `OpenTarget::File`、`OpenTarget::Scroll`，运行器侧的场景（cloudprint 形状的普通文件、4 MiB 与 64 MiB 的合成源码、压缩成一行的 JS、对象库内容的 hunk）和夹具生成，这些都还没有；里程碑（`FileHighlighted`）视图已经报告，`app` 的映射也已有。没有这些就改成生效会让 CI 的预算无法判定，所以按设计的要求留给后续，不猜。`app/scroll_frames_indexing` 另外要交互让路开关，也没有接（app 设计「code_intel 与 file_reader 的装配」）。`app/files_open`、`app/files_expand` 是 7b。
+
+第 7 步的 Files（7b）：
+
+- **面板的视图每次被丢弃，状态放在 `Shared` 里。** `workspace` 在侧栏隐藏时丢掉面板的视图，阅读视图的布局隐藏侧栏，所以从 Files 打开一个文件就会丢掉整棵树。展开的目录（按路径）和选中的行（按路径）在视图 drop 时交给 `Shared`（`FilesMemory`，带项目键，换了项目就重新开始），下一个视图取回；项目、快照在建视图时直接读（`Session::open_project`、`project_snapshot`），不等事件。「Files：打开时定位并展开到当前在看的文件」因此要「最后显示过的目标」：`Session::last_target()`，在 `switch` 里记下、`close` 不清；Files 出现时就是阅读视图刚刚离开的文件，设计里「当前在看的文件」在侧栏可见时从来没有文档（阅读视图把侧栏藏起来）。只在目标的项目和 worktree 与活动 worktree 相同、来源不是依赖时定位；表还没有时等表到了再做。`Host` 多一个 `open_projects`（窗口的项目取最后打开的一个，一个窗口同时只显示一个项目）。
+- **打开文件时先关面板。** ↵ 或点击文件发 `ShowSidebarPanel(None)`，再 `Reader::open`。`workspace` 的 Esc 先关侧栏面板再弹屏幕，而 `Push` 不清面板：不先关的话，阅读视图里的第一个 Esc 只会关掉看不见的 Files，第二个才弹出。这是 `workspace` 的 `Escape` 顺序（`nav.rs`）与「阅读视图隐藏侧栏」之间的缺口：Esc 应该只在侧栏可见时把面板当作一层。没有改 `workspace`（它的测试和设计把这个顺序写成了固定的），在这里绕开，记在这里等 `workspace` 一侧决定。后果：从 Files 打开文件、Esc 回来之后看到的是项目侧栏，不是 Files（再点 Files 条目，展开与选中、最后的文件都在）。
+- **Files 条目的 `order` 是 10。** Worktrees 是 0，`Views` 区按 `order`、`id` 排，同为 0 时 `files` 会排在 `worktrees` 前面。设计的顺序是 Worktrees、Files、Merge Requests，所以 Files 用 10，等 Merge Requests（#25）登记时取更大的值。
+- **没有 `ShowFiles` Action。** 设计的 Action 表有 `file_reader::ShowFiles`（侧栏的 Files 条目）；条目的 `on_select` 是 `WorkspaceCommand::ShowSidebarPanel(Some("files"))`（`SidebarItem` 只能带命令，不带 Action），除它以外没有东西显示面板，面板显示之前也没有视图可以接 Action，所以没有声明这个 Action。探针点条目的节点即可。`RevealCurrent` 有：面板的 Action，没有快捷键，面板出现时自己做一次。Action 另有 `FilesNext`、`FilesPrevious`、`FilesExpand`、`FilesCollapse`、`FilesOpen`（↓ ↑ → ← ↵），键绑定的上下文是 `Sidebar > files`（侧栏区域加面板根元素的键上下文 `files`，面板建好时拿到焦点）；Esc 不绑定，`workspace` 的 Esc 关面板，返回箭头发同一个命令。
+- **键的行为。** ↓ ↑ 到头不回绕，没有选中时从第一行开始；→ 展开关着的目录，已展开时选中它的第一行；← 折叠展开的目录，已折叠或是文件时选中上一级目录；↵ 和点击对文件是打开、对目录是展开或折叠（设计只写了「↵ 打开文件」）。点击整行，不单独点箭头。
+- **目录链的展开状态。** 一行折叠的目录链代表链上的最后一个目录，展开集里存目录路径，行在最后一个目录在集里时是展开的；展开一行把链上每个目录都放进集里，折叠把它们都拿掉，这样新的目录表里链断开时（`src` 有了自己的文件）每一段还保持原来的状态。根不折叠，它的子项是第一批行。折叠一个目录时它下面的目录仍留在集里，再展开时按原样展开。
+- **行的节点 ID。** 与第 7 步（阅读视图）相同的原因：`files.tree.item[<路径>]`（`NodeId` 只能写 `item[…]`，不是 `row[…]`），是 `ui::SidebarRow` 自己的节点，只有 `selected`；设计要的展开、是否折叠的目录链在它里面的 `….facts` 节点上（`Group`，`State::expanded`，`kind`：`dir` / `file`、`chain`：`yes` / `no`、`depth`），与 `project_home` 的写法相同，没有改 `ui`。目录行的路径是链上最后一个目录。键里的 `].` 和换行换掉（`pages/[id].tsx` 会触发 `NodeId` 的格式检查），阅读视图的 `nodes::keyed` 同样改成经过这一步。`files.tree` 的属性是 `rows`、`expanded`（展开集的大小，一条链算它的每个目录）、`visible`（上一帧建的行数）；状态行是 `files.tree.empty`、`.unavailable`、`.loading`（`phase`）。头部是 `files.header`（`.back`、`.title`）。
+- **图标是 `ui` 的 Lucide 图标，不是 SF Symbols。** `ui` 现有的图标集是 gpui-component 的 Lucide（16 个），目录用 `Icon::Folder`（强调色）、文件用 `Icon::Files`（次要色）；与设计写的 SF Symbols 不同，等 `ui` 的图标集换掉时一起换。展开箭头是 `ui::Disclosure`，只取 0 或 1，没有转动的动画：每行一个 `Transition` 要放进每行的状态里，而行是虚拟的（`uniform_list`）；交互规范「动效」没有列出文件树的展开箭头，设计也没有要求。
+- **返回箭头的名字用 `workspace-back`（Back）。** 设计的 Fluent 表里没有这个按钮的文案；`ui::Button::icon_only` 的文字只是无障碍名字，沿用 `workspace` 的 `Back`，没有加键。「文件列表还没就绪、目录表还没建好」按 100 ms 规则显示骨架，超过 1 s 显示 `file-reader-loading`（阅读视图已有的键）。
+- **换了 worktree 或项目时不留旧行。** 视图记着树是为哪个项目和 worktree 建的；活动 worktree 变了而新表还没到时，先回到加载状态（旧行的展开与选中按路径留着），表到了再建。不这样做的话，`Scan::Pending` 时保留的旧行配上新的 worktree 键，↵ 会打开别的树的文件。
+- **加载与新一代表。** `project` 在新的文件列表发布时先把 `dirs` 置为 `Pending` 再建新表（`keep_dirs`）：这时已有一棵树就保留旧行，不闪回骨架；表到了按路径保留展开和选中（路径没有了就不选中）。`dirs` 是 `Unavailable`（`ScanError` 的任何一种）显示 `file-reader-files-unavailable`，文件列表为空或没有活动 worktree 显示 `file-reader-files-empty`；状态之间切换时展开和选中记在视图里，树回来时恢复。表相同（`Arc::ptr_eq`）时什么都不做。
+- **文件夹项目有目录表。** `project` 对文件夹项目同样建 `files` 和 `dirs`（`scan_folder`），Files 照常列出；目标的 `worktree` 是 None。
+- **`ProjectEvent` 的监听。** `ProjectEvent::Changed` 带 `dirs`、`files` 或 `active` 时、`Opened` 和 `Closed` 时叫醒 Files 的视图（一个槽、至多一条排队的唤醒，与阅读视图相同），视图在主线程上重新读快照；没有视图时什么都不做。
+- **`app/files_open`、`app/files_expand` 保持计划中。** 它们是进程级基准：要 bench 的 `Milestone` 有「Files 展开完成」、探针的 `OpenTarget` 能打开 Files 并展开一个目录（`BenchDriver` 现在没有 Files 的目标，`Milestone` 只有 `ProjectHome`、`FileHighlighted`、`DiffShown`、`WorktreeSwitched`），运行器侧要有 10 万文件的项目和一个有 2,000 个子项的目录。这些都还没有，改成生效会让预算无法判定，所以留给后续。行的构造按设计只与可见的行数成正比：打开时 `Tree::new` 是展开状态下全部可见行（O(可见行数)，不是整个目录表）、展开是一次 `splice`；没有测量过 10 万文件上的耗时。
+- **没有改动圆点。** 设计推迟到 `review` 经 `services` 给出改动路径之后（[#15](https://github.com/SoloJiang/lectern-app/issues/15)）。
+- **侧栏里的键盘焦点。** 面板建好时 `window.focus` 把焦点给它，↑ ↓ → ← ↵ 才到得了；面板被丢弃后焦点回到 `workspace` 的根（它自己检查 `window.focused`），项目主页的屏幕视图不会自动重新拿到焦点，没有改它。

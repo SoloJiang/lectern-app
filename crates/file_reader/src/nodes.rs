@@ -13,7 +13,31 @@ pub(crate) fn plain(area: &'static str) -> NodeId {
 }
 
 pub(crate) fn keyed(area: &'static str, key: &str) -> NodeId {
-    NodeId::new(VIEW, area, Some(key))
+    NodeId::new(VIEW, area, Some(&safe(key)))
+}
+
+/// A business key that `NodeId::item` accepts: a path can hold a newline or
+/// a closing bracket followed by a dot (`pages/[id].tsx`), which the ID
+/// format does not allow in a key.
+pub(crate) fn safe(key: &str) -> String {
+    key.replace('\n', " ").replace("].", "]_")
+}
+
+/// The Files tree is its own view in the probe: `files.tree` and
+/// `files.tree.item[<path>]`.
+const FILES: &str = "files";
+
+pub(crate) fn files_tree() -> NodeId {
+    NodeId::new(FILES, "tree", None)
+}
+
+/// A directory (a folded chain by its last directory) or a file of the tree.
+pub(crate) fn files_row(path: &str) -> NodeId {
+    files_tree().item(&safe(path))
+}
+
+pub(crate) fn files_header() -> NodeId {
+    NodeId::new(FILES, "header", None)
 }
 
 /// `<worktree>:<path>`: the worktree by its directory's name (the key is

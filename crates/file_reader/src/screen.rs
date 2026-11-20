@@ -13,12 +13,14 @@ use lectern_kernel::Name;
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::reader::ReadTarget;
 use lectern_services::workspace::{
-    Contribution, ContributionKind, ScreenLayout, Target, Visibility, screens,
+    Contribution, ContributionKind, ScreenLayout, SidebarSection, Target, Visibility,
+    WorkspaceCommand, screens,
 };
-use lectern_ui::contrib::{KeyBindings, Screen, ToolbarItems};
+use lectern_ui::contrib::{KeyBindings, Screen, SidebarItem, SidebarPanel, ToolbarItems};
 use lectern_ui::{Button, Icon, Text};
 
 use crate::actions;
+use crate::files;
 use crate::nodes;
 use crate::shared::Shared;
 use crate::text::{dependency_label, file_name, short_oid};
@@ -42,7 +44,13 @@ struct Current(WeakEntity<ReadingView>);
 
 impl Global for Current {}
 
-/// The two contributions of the reader: the screen and its key bindings.
+/// Where the Files entry stands among the project sidebar's `Views`
+/// entries: after Worktrees (order 0), before Merge Requests.
+const FILES_ENTRY_ORDER: u16 = 10;
+
+/// The contributions of this crate: the reader screen and its key bindings
+/// (the Files tree's keys too), the Files panel and its entry in the
+/// project sidebar.
 pub(crate) fn registrations(shared: &Arc<Shared>) -> Vec<Contribution> {
     let build_shared = shared.clone();
     let screen = Screen {
@@ -51,7 +59,32 @@ pub(crate) fn registrations(shared: &Arc<Shared>) -> Vec<Contribution> {
         }),
         toolbar: Arc::new(toolbar),
     };
+    let files_shared = shared.clone();
+    let panel = SidebarPanel {
+        build: Arc::new(move |_: &(), window: &mut Window, cx: &mut App| {
+            files::build(&files_shared, window, cx)
+        }),
+    };
+    let entry = SidebarItem {
+        label: keys::file_reader::FILES_TITLE,
+        icon: Some(Icon::Files),
+        on_select: WorkspaceCommand::ShowSidebarPanel(Some(Name::Borrowed(files::PANEL_ID))),
+    };
     vec![
+        Contribution {
+            kind: ContributionKind::SidebarPanel,
+            id: Name::Borrowed(files::PANEL_ID),
+            order: 0,
+            payload: panel.into_payload(),
+        },
+        Contribution {
+            kind: ContributionKind::SidebarEntry {
+                section: SidebarSection::Views,
+            },
+            id: Name::Borrowed(files::PANEL_ID),
+            order: FILES_ENTRY_ORDER,
+            payload: entry.into_payload(),
+        },
         Contribution {
             kind: ContributionKind::Screen(LAYOUT),
             id: Name::Borrowed(screens::READER),

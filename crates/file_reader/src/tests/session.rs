@@ -541,6 +541,9 @@ fn session_events_may_reenter_open() {
         ) -> Option<Arc<lectern_services::project::ProjectSnapshot>> {
             self.inner.snapshot(p)
         }
+        fn open_projects(&self) -> Vec<ProjectKey> {
+            self.inner.open_projects()
+        }
         fn set_focus(
             &self,
             p: &ProjectKey,
