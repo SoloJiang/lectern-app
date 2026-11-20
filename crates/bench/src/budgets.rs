@@ -170,6 +170,9 @@ const ADR_0018_IMPACT: &str = "docs/adr/0018.md#影响";
 const ADR_0029_DECISION: &str = "docs/adr/0029.md#决策";
 const ADR_0034_DECISION: &str = "docs/adr/0034.md#决策";
 const ADR_0035_DECISION: &str = "docs/adr/0035.md#决策";
+/// Process-level interactions are judged by the next frame being drawn: a
+/// median below 2.25 frame periods at 60 Hz.
+const ADR_0063: &str = "docs/adr/0063.md";
 const AGENTS: &str = "docs/design/agents.md#性能";
 const GIT: &str = "docs/design/git.md#性能";
 const CACHE: &str = "docs/design/cache.md#性能";
@@ -346,8 +349,8 @@ pub static BUDGETS: &[Budget] = &[
     // The slowest of the scenarios' medians (docs/design/bench.md「预算表」).
     top(
         "app/open_file",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         ACTIVE,
         Process,
     ),
@@ -380,16 +383,17 @@ pub static BUDGETS: &[Budget] = &[
     // ---- code navigation (ADR 0030) ----
     top(
         "app/palette_open",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         State::Planned("#102"),
         Process,
     ),
     top(
-        // The ≤ 16 ms tier covers up to 200k paths: measured at its upper bound.
+        // The 200k tier of the process-level interactions (ADR 0063): measured
+        // at its upper bound.
         "app/palette_key_200k",
-        &[median(Limit::TimeAtMost(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         State::Planned("#102"),
         Process,
     ),
@@ -402,22 +406,22 @@ pub static BUDGETS: &[Budget] = &[
     ),
     top(
         "app/files_open",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         ACTIVE,
         Process,
     ),
     top(
         "app/files_expand",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         ACTIVE,
         Process,
     ),
     top(
         "app/nav_back",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         ACTIVE,
         Process,
     ),

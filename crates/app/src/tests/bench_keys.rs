@@ -359,3 +359,72 @@ fn bench_keys_arrows_open_the_first_directory_of_files(cx: &mut TestAppContext) 
     assert!(rig.errors.0.lock().unwrap().is_empty());
     rig.close();
 }
+
+/// The records of the verbose log so far whose message holds `text`.
+fn logged(text: &str) -> usize {
+    lectern_logging::testing::capture()
+        .lines()
+        .iter()
+        .filter(|line| line.contains(text))
+        .count()
+}
+
+const OPEN_QUEUED: &str = "a request to open a file was queued";
+const VIEW_BUILT: &str = "the reading view was built";
+const FIRST_SCREEN: &str = "the first screen of an opened file was computed";
+const DRAWN: &str = "the first screen is drawn; the milestone is reported";
+
+/// `app/open_file` is drawn in the next frame (ADR 0063): the first screen
+/// of a first open is computed before any frame ran, so no frame waits for
+/// it. The reading view does not exist when `Reader::open` returns: its
+/// document's task has started all the same, and the view's first frame
+/// takes a document that is ready.
+///
+/// Frames are counted with the engine settled between them (as if the first
+/// screen took no time): 2 before the first screen was started by the open,
+/// 1 after.
+#[gpui::test]
+fn bench_keys_a_first_open_computes_the_first_screen_before_the_view_is_drawn(
+    cx: &mut TestAppContext,
+) {
+    let log = lectern_logging::testing::capture();
+    let rig = Rig::open(cx);
+    log.clear();
+    rig.forget();
+    rig.open_file(cx, "a.ts");
+    assert_eq!(logged(OPEN_QUEUED), 1);
+    assert!(
+        log.lines()
+            .iter()
+            .any(|line| line.contains(OPEN_QUEUED) && line.contains("\"prestarted\":true")),
+        "the first screen was started by the open"
+    );
+    // No frame has run. The first screen is computed all the same.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while logged(FIRST_SCREEN) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the first screen was not computed"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(logged(VIEW_BUILT), 0, "no view yet: nothing drew");
+    assert_eq!(logged(FIRST_SCREEN), 1);
+
+    let mut frames = 0;
+    while rig.count(Milestone::FileHighlighted) == 0 {
+        frames += 1;
+        assert!(frames <= 6, "the milestone did not come");
+        rig.frame(cx);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(logged(VIEW_BUILT), 1);
+    assert_eq!(logged(DRAWN), 1);
+    assert_eq!(logged(FIRST_SCREEN), 1, "one first screen, one document");
+    // The first snapshot the view took already showed the first screen (it
+    // used to be `opening`, the highlighted one came a frame later).
+    assert_eq!(logged("\"state\":\"opening\""), 0);
+    assert_eq!(frames, 1, "the view's first frame takes a ready document");
+    assert!(rig.errors.0.lock().unwrap().is_empty());
+    rig.close();
+}

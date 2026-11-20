@@ -707,14 +707,14 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `app/idle_monorepo_indexed` | 中位数 < 100 MB（后台工作全部完成后） | [ADR 0029](../adr/0029.md#决策) | `code_intel`（[#17](https://github.com/SoloJiang/lectern-app/issues/17)） |
 | `app/idle_100k`、`app/idle_100k_indexed` | 中位数 < 120 MB（[project 设计「性能」](project.md#性能)的 10 万文件形状、17 个 worktree；采样同 `app/idle_monorepo` 与 `app/idle_monorepo_indexed`，后者在 `app/index_100k` 的启动里、索引全部完成并静止后采样；份额的分配见 ADR 0035） | [ADR 0035](../adr/0035.md#决策) | `project_home` / `code_intel`（#17） |
 | `app/open_project` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `project_home` |
-| `app/open_file` | 中位数 < 16 ms（每个场景都成立，结果取最慢场景的样本，见「进程级基准」）；场景：cloudprint 形状的普通文件，另有 4 MiB 与 64 MiB 的合成源码、压缩成一行的 4 MiB JS、从 diff 打开 4 MiB `package-lock.json` 中部的一个 hunk（按字节偏移定位）、从 diff 的旧一侧打开 4 MiB blob 中部的一个 hunk（对象库内容已由审阅视图登记），预算相同（[ADR 0034](../adr/0034.md)、[ADR 0042](../adr/0042.md)） | [性能预算](tech-research.md#性能预算) | `file_reader` 第 8 步（8c） |
+| `app/open_file` | 中位数 < 37.5 ms（下一帧画出，2.25 个 60 Hz 帧周期，ADR 0063；每个场景都成立，结果取最慢场景的样本，见「进程级基准」）；场景：cloudprint 形状的普通文件，另有 4 MiB 与 64 MiB 的合成源码、压缩成一行的 4 MiB JS、从 diff 打开 4 MiB `package-lock.json` 中部的一个 hunk（按字节偏移定位）、从 diff 的旧一侧打开 4 MiB blob 中部的一个 hunk（对象库内容已由审阅视图登记），预算相同（[ADR 0034](../adr/0034.md)、[ADR 0042](../adr/0042.md)） | [ADR 0063](../adr/0063.md) | `file_reader` 第 8 步（8c） |
 | `app/enter_edit` | 中位数 ≤ 100 ms（1 MiB、没有超过 4 KiB 的行的文件从 ⌘E 到可以输入；超标时降低编辑上限，[ADR 0034](../adr/0034.md)） | [ADR 0034](../adr/0034.md#决策)（交互规范「状态与异常」：100 ms 内不显示加载态） | `file_reader` 第 8 步（8c） |
 | `app/open_diff` | 中位数 < 260 ms（[ADR 0057](../adr/0057.md)、[ADR 0059](../adr/0059.md) 从 50 ms 放宽；50 ms 仍是目标） | [性能预算](tech-research.md#性能预算) | `review_view` |
 | `app/switch_worktree` | 中位数 < 100 ms（cloudprint 形状、11 个 worktree 的夹具 `git_worktree::shaped_linked`，打开项目并静止之后发 `Open(Worktree(<第一个 linked worktree 的规范根路径>))`，终点 `Milestone::WorktreeSwitched`；5 次启动） | [性能预算](tech-research.md#性能预算) | `worktrees` 第 3 步 |
-| `app/palette_open` | 中位数 < 16 ms（面板和空查询列表） | [性能预算](tech-research.md#性能预算)（[ADR 0030](../adr/0030.md)，下同） | ⌘K（[#102](https://github.com/SoloJiang/lectern-app/issues/102)） |
-| `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
-| `app/files_open`、`app/files_expand` | 中位数 < 16 ms（目录表已建好；展开 2,000 个子项以内的目录） | [性能预算](tech-research.md#性能预算) | `file_reader` 第 8 步（8c，[#10](https://github.com/SoloJiang/lectern-app/issues/10)） |
-| `app/nav_back` | 中位数 < 16 ms（回到最近访问的位置） | [性能预算](tech-research.md#性能预算) | `file_reader` 第 8 步（8c，#10） |
+| `app/palette_open` | 中位数 < 37.5 ms（面板和空查询列表） | [ADR 0063](../adr/0063.md)（[ADR 0030](../adr/0030.md)的交互，下同） | ⌘K（[#102](https://github.com/SoloJiang/lectern-app/issues/102)） |
+| `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 < 37.5 ms（ADR 0063）/ ≤ 50 ms（ADR 0030）（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [ADR 0063](../adr/0063.md)（`_200k`）；[性能预算](tech-research.md#性能预算)（`_1m`） | ⌘K（#102） |
+| `app/files_open`、`app/files_expand` | 中位数 < 37.5 ms（目录表已建好；展开 2,000 个子项以内的目录） | [ADR 0063](../adr/0063.md) | `file_reader` 第 8 步（8c，[#10](https://github.com/SoloJiang/lectern-app/issues/10)） |
+| `app/nav_back` | 中位数 < 37.5 ms（回到最近访问的位置） | [ADR 0063](../adr/0063.md) | `file_reader` 第 8 步（8c，#10） |
 | `app/goto_candidates`、`app/goto_single` | 中位数 ≤ 50 ms（候选列表，96 KiB 以内的当前文本；96–128 KiB 的在解析保留之后，[ADR 0037](../adr/0037.md)）/ ≤ 100 ms（唯一候选的目标文件首屏高亮） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed` | 第一批结果中位数 ≤ 300 ms | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed_done` | 从请求到限时搜索结束（找完或到时停止）、最后一批结果画出，最大值 ≤ 1.1 s（1 s 限时加 0.1 s 取消与绘制的余量）；夹具里未索引的文件要多到 1 s 内搜不完 | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |

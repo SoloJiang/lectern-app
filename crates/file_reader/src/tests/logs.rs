@@ -77,5 +77,25 @@ fn logs_hold_no_file_contents() {
             .iter()
             .any(|l| l.contains("\"origin\":\"worktree\"") && l.contains("\"ticket\":")),
     );
+    // The verbose record of a queued open: the ticket and two counts.
+    let queued = records("a request to open a file was queued");
+    assert!(
+        queued.iter().any(|l| l.contains("\"lv\":\"debug\"")
+            && l.contains("\"tg\":\"file_reader\"")
+            && l.contains("\"ticket\":")
+            && l.contains("\"prestarted\":")
+            && l.contains("\"pending\":")),
+        "{queued:#?}"
+    );
+    // The syntax crate's record of the first screen.
+    let computed = records("the first screen of an opened file was computed");
+    assert!(
+        computed.iter().any(|l| l.contains("\"lv\":\"debug\"")
+            && l.contains("\"tg\":\"syntax\"")
+            && l.contains("\"prepare_us\":")
+            && l.contains("\"window_us\":")
+            && l.contains("\"outcome\":")),
+        "{computed:#?}"
+    );
     log.assert_absent(CANARY);
 }

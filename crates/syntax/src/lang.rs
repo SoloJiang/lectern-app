@@ -2,6 +2,9 @@
 //! grammars and highlight queries (docs/design/file_reader.md「语言与区间」).
 
 use std::fmt;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use lectern_logging::warn;
@@ -307,6 +310,12 @@ pub struct Lang {
     /// it does not compile, which shows the language as plain text for this
     /// run.
     compiled: OnceLock<Option<Arc<Compiled>>>,
+    /// A warm-up task was queued for this language
+    /// ([`Engine::warm`](crate::Engine::warm)): one per language and run.
+    warming: AtomicBool,
+    /// How many times the query was compiled (tests: once per language).
+    #[cfg(any(test, feature = "test-support"))]
+    compiles: AtomicUsize,
 }
 
 impl Lang {
@@ -318,6 +327,9 @@ impl Lang {
             grammar_version: core_grammar_version(spec),
             query_version: query_version(spec.query),
             compiled: OnceLock::new(),
+            warming: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            compiles: AtomicUsize::new(0),
         }
     }
 
@@ -352,6 +364,31 @@ impl Lang {
         self.compiled().is_some()
     }
 
+    /// Whether the query was compiled (or failed to compile) already. Never
+    /// blocks.
+    pub(crate) fn is_prepared(&self) -> bool {
+        self.compiled.get().is_some()
+    }
+
+    /// True once per language and run, and only while the query is not
+    /// compiled: the caller then queues the warm-up. False: it is compiled,
+    /// or a warm-up is queued already.
+    pub(crate) fn claim_warm_up(&self) -> bool {
+        !self.is_prepared() && !self.warming.swap(true, Ordering::AcqRel)
+    }
+
+    /// Gives the claim back (the warm-up could not be queued).
+    pub(crate) fn release_warm_up(&self) {
+        self.warming.store(false, Ordering::Release);
+    }
+
+    /// How many times the query was compiled: 1 after the first use, however
+    /// many callers asked at once (`test-support`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn compile_count(&self) -> usize {
+        self.compiles.load(Ordering::SeqCst)
+    }
+
     /// [`Lang::name`], for keys that outlive the borrow of the table.
     pub(crate) fn static_name(&self) -> &'static str {
         self.spec.name
@@ -380,7 +417,10 @@ impl Lang {
 
     pub(crate) fn compiled(&self) -> Option<&Arc<Compiled>> {
         self.compiled
-            .get_or_init(|| match Compiled::new(self.spec, &self.language) {
+            .get_or_init(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                self.compiles.fetch_add(1, Ordering::SeqCst);
+                match Compiled::new(self.spec, &self.language) {
                 Ok(compiled) => Some(Arc::new(compiled)),
                 Err(e) => {
                     // The message quotes the query; the kind and position
@@ -393,6 +433,7 @@ impl Lang {
                         column = e.column,
                     );
                     None
+                }
                 }
             })
             .as_ref()

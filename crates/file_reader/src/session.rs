@@ -1,11 +1,14 @@
 //! The window's reading state, without the view (docs/design/file_reader.md
 //! 「本 crate 的公开项」「数据流与线程」).
 //!
-//! `Reader::open` may come from any thread: it only queues the request and
-//! calls the wake-up the view installed. The view (step 7) takes the
-//! requests on the main thread, asks the leave guard, and then either
-//! [`apply`](Session::apply)s the request or [`cancel`](Session::cancel)s
-//! it; the document it shows is the [`Session`]'s, read through
+//! `Reader::open` may come from any thread: it queues the request, calls
+//! the wake-up the view installed, and, while nothing is shown, starts the
+//! request's first screen (an early start, ADR 0063: the document waits in
+//! a slot, shown by nothing). The view (step 7) takes the requests on the
+//! main thread, asks the leave guard, and then either
+//! [`apply`](Session::apply)s the request (it adopts the document started
+//! for it, or opens one) or [`cancel`](Session::cancel)s it (the document
+//! is dropped); the document it shows is the [`Session`]'s, read through
 //! [`snapshot`](Session::snapshot). Nothing here blocks or does IO: opening
 //! is `Engine::open`, which queues its tasks.
 //!
@@ -19,7 +22,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use lectern_logging::warn;
+use lectern_logging::{debug, warn};
 use lectern_services::code_intel::{Focus, TextRef};
 use lectern_services::project::{BlobId, ProjectKey, ProjectSnapshot, WorktreeKey};
 use lectern_services::reader::{
@@ -109,6 +112,23 @@ struct Reading {
     focus: Option<FocusSet>,
 }
 
+/// The first screen of a request, started when `Reader::open` was called
+/// (docs/design/file_reader.md「数据流与线程」): the document, not yet shown.
+/// `apply` adopts it, `cancel` drops it.
+struct Prestart {
+    ticket: OpenTicket,
+    root: Arc<Path>,
+    handle: DocHandle,
+}
+
+/// The one speculative document of the session.
+enum Speculative {
+    None,
+    /// Someone is opening it (the lock is not held across `Engine::open`).
+    Claimed,
+    Ready(Prestart),
+}
+
 enum Via {
     Open,
     Back,
@@ -124,6 +144,9 @@ pub struct Session {
     pending: Mutex<VecDeque<Request>>,
     wake: Arc<WakeSlot>,
     reading: Mutex<Reading>,
+    /// At most one: for the first request of a session that shows nothing
+    /// yet.
+    prestart: Mutex<Speculative>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -145,6 +168,7 @@ impl Session {
                 viewport: FIRST_VIEWPORT,
                 focus: None,
             }),
+            prestart: Mutex::new(Speculative::None),
         }
     }
 
@@ -210,6 +234,8 @@ impl Session {
     /// The leave guard said no: the document shown and the history stay,
     /// and `ReaderEvent::Open { Cancelled }` follows.
     pub fn cancel(&self, request: Request) {
+        // The document its first screen was started for is not shown.
+        drop(self.take_prestart(request.ticket));
         self.host.emit(ReaderEvent::Open {
             ticket: request.ticket,
             outcome: OpenOutcome::Cancelled,
@@ -381,6 +407,9 @@ impl Session {
     /// Shows `target` instead of the current document. False when it
     /// cannot be placed: nothing changed.
     fn switch(&self, target: ReadTarget, via: Via, ticket: Option<OpenTicket>) -> bool {
+        // Taken first: a request that is not shown (no root) must not leave
+        // its early-started document in the slot.
+        let started = ticket.and_then(|ticket| self.take_prestart(ticket));
         let Some(root) = self.root(&target) else {
             warn!(
                 "a request to show a file is dropped; its project or worktree has no root";
@@ -395,13 +424,15 @@ impl Session {
             return false;
         };
         let viewport = lock(&self.reading).viewport;
-        let slot = self.wake.clone();
-        let handle = self.engine.open(
-            target.clone(),
-            root,
-            viewport,
-            Arc::new(move || slot.call()),
-        );
+        let handle = match started.filter(|started| started.root == root) {
+            // Its first screen was started for this request (the viewport
+            // may have changed since).
+            Some(started) => {
+                started.handle.set_viewport(viewport);
+                started.handle
+            }
+            None => self.open_document(target.clone(), root, viewport),
+        };
         let left = {
             let mut reading = lock(&self.reading);
             let cols = reading.viewport.cols;
@@ -425,6 +456,67 @@ impl Session {
         // The new document's OID is not known yet: the old focus goes.
         self.sync();
         true
+    }
+
+    /// `Engine::open` with the wake-up slot as the document's `notify`.
+    fn open_document(&self, target: ReadTarget, root: Arc<Path>, viewport: Viewport) -> DocHandle {
+        let slot = self.wake.clone();
+        self.engine
+            .open(target, root, viewport, Arc::new(move || slot.call()))
+    }
+
+    /// Starts the first screen of `target` before the view exists, when
+    /// nothing is shown, nothing waits and nothing is started (so no edit
+    /// is open, and no leave guard has a question): the result is ready when
+    /// the view has been built. True when it was started. Nothing the
+    /// session shows changes until `apply`.
+    fn start_early(&self, ticket: OpenTicket, target: &ReadTarget) -> bool {
+        if !self.engine.started() {
+            return false;
+        }
+        {
+            let mut slot = lock(&self.prestart);
+            if !matches!(*slot, Speculative::None)
+                || !lock(&self.pending).is_empty()
+                || lock(&self.reading).current.is_some()
+            {
+                return false;
+            }
+            *slot = Speculative::Claimed;
+        }
+        let Some(root) = self.root(target) else {
+            *lock(&self.prestart) = Speculative::None;
+            return false;
+        };
+        let viewport = lock(&self.reading).viewport;
+        let handle = self.open_document(target.clone(), root.clone(), viewport);
+        *lock(&self.prestart) = Speculative::Ready(Prestart {
+            ticket,
+            root,
+            handle,
+        });
+        true
+    }
+
+    /// The document started for `ticket`, if there is one.
+    fn take_prestart(&self, ticket: OpenTicket) -> Option<Prestart> {
+        let mut slot = lock(&self.prestart);
+        match &*slot {
+            Speculative::Ready(started) if started.ticket == ticket => {
+                match std::mem::replace(&mut *slot, Speculative::None) {
+                    Speculative::Ready(started) => Some(started),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a first screen was started for `ticket` and not yet adopted
+    /// or dropped (tests).
+    #[cfg(test)]
+    pub(crate) fn prestarted(&self, ticket: OpenTicket) -> bool {
+        matches!(&*lock(&self.prestart), Speculative::Ready(s) if s.ticket == ticket)
     }
 
     fn set_focus(&self, desired: Option<FocusSet>) {
@@ -483,7 +575,21 @@ fn position(current: &Current, cols: u32) -> ReadTarget {
 impl Reader for Session {
     fn open(&self, target: ReadTarget) -> OpenTicket {
         let ticket = OpenTicket(self.next_ticket.fetch_add(1, Ordering::Relaxed));
-        lock(&self.pending).push_back(Request { ticket, target });
+        // The language's query compiles beside the first screen's reading,
+        // not after it (about 5–18 ms the first time in a process).
+        self.engine.warm(&target.path);
+        let prestarted = self.start_early(ticket, &target);
+        let pending = {
+            let mut queue = lock(&self.pending);
+            queue.push_back(Request { ticket, target });
+            queue.len()
+        };
+        debug!(
+            "a request to open a file was queued";
+            ticket = ticket.0,
+            prestarted = prestarted,
+            pending = pending,
+        );
         self.wake.call();
         ticket
     }

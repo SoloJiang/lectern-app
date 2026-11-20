@@ -235,6 +235,42 @@ impl Engine {
         DocHandle { doc }
     }
 
+    /// Starts compiling the highlight query of `path`'s language, in an
+    /// `Interactive` task, so that the first screen of a file the user is
+    /// about to open does not compile it on its own thread (about 5–18 ms
+    /// the first time a language is opened in a process). Returns at once;
+    /// any thread. Does nothing when the path has no language, the query is
+    /// compiled already, or a warm-up of the language is queued: at most one
+    /// task per language and run. A first screen that asks for the query
+    /// meanwhile waits for this compile (`OnceLock`), so it is never
+    /// compiled twice. Nothing is done at startup or by itself: the caller is
+    /// a user's open (ADR 0017).
+    pub fn warm(&self, path: &str) {
+        let langs = self.inner.languages.clone();
+        let Some(lang) = langs.for_path(path) else {
+            return;
+        };
+        if !lang.claim_warm_up() {
+            return;
+        }
+        let path: Box<str> = path.into();
+        let langs2 = langs.clone();
+        let spawned = self.inner.spawn(Priority::Interactive, async move {
+            if let Some(lang) = langs2.for_path(&path) {
+                lang.prepare();
+            }
+        });
+        if !spawned {
+            lang.release_warm_up();
+        }
+    }
+
+    /// Whether the engine has started (`start` was called): documents opened
+    /// before it stay empty.
+    pub fn started(&self) -> bool {
+        self.inner.handle().is_some()
+    }
+
     /// Prefetch while interaction is quiet (`Reader::prefetch`, ADR 0033):
     /// the first [`PREFETCH_MAX`](crate::limits::PREFETCH_MAX) targets, each
     /// with its root, replace those of the last request not started yet.

@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`）已实现；第 7 步的 Files（侧栏的文件树：`FilesView`、Fluent 键与探针节点、Files 条目与面板的登记）已实现，`app/files_open`、`app/files_expand` 随 8c 生效；第 8 步的 8a（编辑模式：代码编辑器、`InputHighlighter` 适配器、保存、磁盘上的提示行与合并）已实现；8b（离开守卫与它的确认对话框、打开编辑模式：⌘E、⌘S、工具栏的 Edit…，[#392](https://github.com/SoloJiang/lectern-app/pull/392)）已实现，`workspace` 与 `app` 一侧的接线早已有，没有改；8c（`BenchDriver` 的文件目标与 `app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand` 的进程级基准，新的里程碑 `FilesShown`、`FilesExpanded`、`EditReady`，`ReaderSlot`，`Refs #10`，本 PR）已实现，数字要等 macOS CI 的运行；帧基准（`app/scroll_frames`、`app/scroll_frames_indexing`，含编辑模式的场景）要 `workspace` 的帧记录（`platform::frame::record` 的接线），移到单独的 PR，`Closes #10` 随那个 PR。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`）已实现；第 7 步的 Files（侧栏的文件树：`FilesView`、Fluent 键与探针节点、Files 条目与面板的登记）已实现，`app/files_open`、`app/files_expand` 随 8c 生效；第 8 步的 8a（编辑模式：代码编辑器、`InputHighlighter` 适配器、保存、磁盘上的提示行与合并）已实现；8b（离开守卫与它的确认对话框、打开编辑模式：⌘E、⌘S、工具栏的 Edit…，[#392](https://github.com/SoloJiang/lectern-app/pull/392)）已实现，`workspace` 与 `app` 一侧的接线早已有，没有改；8c（`BenchDriver` 的文件目标与 `app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand` 的进程级基准，新的里程碑 `FilesShown`、`FilesExpanded`、`EditReady`，`ReaderSlot`，`Refs #10`，本 PR）已实现，数字要等 macOS CI 的运行；「下一帧画出」（[ADR 0063](../adr/0063.md)：`Reader::open` 先预热查询、预启动首屏，五条详细记录，`app/open_file` 等六条进程级预算改为中位数 < 37.5 ms，见「与设计的差异」末一条）已实现，数字要等 macOS CI 的运行；帧基准（`app/scroll_frames`、`app/scroll_frames_indexing`，含编辑模式的场景）要 `workspace` 的帧记录（`platform::frame::record` 的接线），移到单独的 PR，`Closes #10` 随那个 PR。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -422,6 +422,13 @@ impl Engine {
     /// （任意线程；视图在里面只安排一次重绘）。`root` 是 worktree 根或文件夹根（来自项目快照）。
     pub fn open(&self, target: ReadTarget, root: Arc<Path>, viewport: Viewport,
                 notify: Arc<dyn Fn() + Send + Sync>) -> DocHandle;
+    /// 开始编译 `path` 这种语言的高亮查询：一个 `Interactive` 任务调 `Lang::prepare`，立即返回，任意线程。
+    /// 没有语言、查询已编译、这种语言的预热已排队时什么都不做（每种语言每次运行至多一个任务）；首屏任务
+    /// 同时要查询时在 `OnceLock` 上等这次编译，查询不会编译两次。只由用户的打开调用（`Session::open`），
+    /// 不在启动或项目打开时调。引擎未启动时不排任务。
+    pub fn warm(&self, path: &str);
+    /// `start` 是否已调用（`Session::open` 在引擎启动之前不提前启动首屏）。
+    pub fn started(&self) -> bool;
     /// 预取（`Reader::prefetch` 转到这里）：只取前 4 个，替换上一次请求里还没开始的目标；结果只进 LRU。立即返回。
     pub fn prefetch(&self, targets: Vec<(ReadTarget, Arc<Path>)>);
     /// `Reader::share_object` 转到这里：登记表在 `Engine` 里，`open` 查它。立即返回。
@@ -704,7 +711,8 @@ impl Session {
     pub fn project_snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>>;
     pub fn last_target(&self) -> Option<ReadTarget>;                         // 最后显示过的目标，`close` 之后还在
 }
-// Reader::open、prefetch、share_object 由 Session 实现；`open` 只把请求排进队列并调唤醒回调。
+// Reader::open、prefetch、share_object 由 Session 实现；`open` 把请求排进队列并调唤醒回调，之前先 `Engine::warm`，
+// 并在没有文档、没有排队的请求、没有预启动的文档时为这个请求预启动首屏（「数据流与线程」）。
 ```
 
 历史是 `History`（公开项，与 `HISTORY_MAX = 100` 一起导出）：两个 `ReadTarget` 列表（路径、来源、读到的内容的 OID `expect`、位置 `Anchor::Byte`），不含内容，前进和后退各最多 100 个。
@@ -776,7 +784,9 @@ impl Session {
 ## 数据流与线程
 
 ```
-dyn Reader::open ─▶ [主线程] 阅读视图 ─▶ Engine::open
+dyn Reader::open ─▶ Engine::warm（[Interactive] 编译这种语言的查询，每种语言一次）
+   ─▶ 没有文档、没有排队的请求、没有预启动的文档时：Engine::open（预启动，文档暂不显示）
+   ─▶ 请求入队、唤醒 ─▶ [主线程] 阅读视图取出请求、过守卫 ─▶ Session::apply（接过预启动的文档；没有预启动的才 Engine::open）
    ─▶ [Interactive + BusyGuard] SafeRoot::open_file → read_ranges → window::plan → highlight::window（8 ms）─▶ 快照（首屏）
    ─▶ [Background + BusyGuard] read_all / 流式扫描：BlobHasher、行索引、行检查点 → syntax.lines ─▶ 快照（完整、OID）
    ─▶ 档位 A：[Interactive + BusyGuard] FullParse 8 ms 一片 ─▶ 快照（整文件区间）
@@ -797,7 +807,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | 编辑：增量解析、保存、三方合并 | `BusyGuard` | `Interactive` |
 | `fs_watch` 事件：stat 比较、触发重新打开 | `BusyGuard`（`Sink::busy`） | `Background` |
 
-- UI 线程只调用 `Engine::open`、`DocHandle` 的命令和 `snapshot`、`EditSession::changed` / `spans`：入队、取锁复制 `Arc`，不做 IO、解析和 git 操作（AGENTS.md「禁止事项」）。`DocSnapshot::rows` 只做与请求行数成正比的工作：分块里取字节、按区间切片、长行用格数检查点。
+- **首屏在视图建好之前开始**（[ADR 0063](../adr/0063.md)：进程级交互在下一帧画出）。视图在一次绘制里建（`Workspace::render` → `sync_views` → `build_screen`），请求要到那次绘制之后才由视图取出；首屏任务如果等到那时才开始，第一次打开要三次显示回调（建视图、取出请求并开始首屏、画出首屏），再加首屏的计算时间。所以 `Session::open`（`Reader::open`）先调 `Engine::warm`，再在满足下面条件时调 `Engine::open`，把文档放在 `Session` 的预启动槽里，之后才把请求排队、唤醒：
+  - 条件：`Session` 没有显示的文档（`current` 为 None：没有文档就没有编辑，离开守卫没有问题可问）、队列里没有请求、槽是空的、引擎已启动、请求的目标现在有根。槽至多一个文档，所以连续的请求（或 400 个线程同时 `open`）最多多算一个首屏。条件不满足时（已有文档在显示，可能正在编辑）一切照旧：请求排队，守卫通过后 `apply` 才开始首屏。
+  - 预启动只算文档，不改变任何显示的东西：`current`、历史、`last`、焦点、`ReaderEvent` 都在 `apply` 里才变，和原来一样。`apply` 按票号取槽里的文档，根与应用时的根相同才用（不同则丢弃、照旧 `Engine::open`），视口交给文档（`set_viewport`，与预启动时相同时是空操作）；`cancel`（守卫说不）按票号丢掉它，文档的任务随之取消，什么都没有显示过。没有人取走的请求（视图一直没有建出来）让槽一直占着，不会再有第二个预启动。
+  - 预启动文档的 `notify` 是会话的唤醒槽：请求还在队列里时槽里是插件自己的回调，它推入阅读屏幕（路由相同，`workspace` 忽略重复的推入）；视图建好后是视图的回调。
+  - 预热和预启动都只由用户的打开触发，不在首帧之前、不在启动和项目打开时做（AGENTS.md「产品原则」、ADR 0017）；预启动文档的内存与原来打开一个文档相同，只是早几毫秒；没有新增常驻内存。
+  - 视图一侧原来就在绘制里同步取请求：`workspace` 的 `render` → `sync_views` → `screen::build` 建视图后立即 `pump`，请求在那次绘制（A）里 `apply`。所以以前首屏任务在绘制 A 里才开始，首屏的计算（含第一次编译查询）在绘制 A 之后，要绘制 B 才画出，之后下一帧的回调才报告里程碑（三次显示回调）；现在首屏在 `open` 时已经开始，绘制 A 的 `apply` 接过的文档通常已经就绪，绘制 A 画出首屏，下一帧的回调报告里程碑（两次）。首屏在绘制 A 之前还没算完时（查询的编译还没结束、读文件慢）仍然是 `Opening` 的快照，要等到后面的一次绘制：这一段只能由 CI 的详细记录（`state` 为 `opening` 的快照出现在 `ready` 之前）判断。
+- UI 线程只调用 `Engine::open`、`Engine::warm`、`DocHandle` 的命令和 `snapshot`、`EditSession::changed` / `spans`：入队、取锁复制 `Arc`，不做 IO、解析和 git 操作（AGENTS.md「禁止事项」）。`DocSnapshot::rows` 只做与请求行数成正比的工作：分块里取字节、按区间切片、长行用格数检查点。
 - 档位 B、C 的批量窗口满足 ADR 0033「两类只存内存的批量工作」：持有让路的 `BackgroundGuard`、只在批量线程上、结果只进 LRU，暂停、取消或退出最多丢掉在途的一个窗口。解析的进度回调读 `yield_requested()`，`ChainWindow::step` 返回 `Yielded`、保留解析器的状态（大文件调研第 3 节「分片解析与恢复」），任务在 `proceed_item` 上等，下一次从停下处继续。
 - grammar 的卡死检测：每次 `step`、`window` 调用在进入 tree-sitter 之前 `health::global().enter`，返回之前 drop 守卫；`Yielded`、`TimedOut` 之后等待保活时段或下一片时不在表里，续做时以剩余预算重新登记。登记得到 None（这个 grammar 版本已停用）时这个文档改为纯文本。
 - `OpenFile` 的持有时间（platform 设计「对其他 crate 的影响」）：≤ 16 MiB 的在完整读取之后 drop；> 16 MiB 的到文档关闭或收到这个路径的事件为止，收到事件时重新打开。完整读取的身份与首屏的不同时，首屏结果作废，按完整内容重新定位到同一行号。
@@ -865,11 +881,11 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | 预算 | 本设计的份额 | 基准 |
 |---|---|---|
 | 冷启动 20 ms | 首帧之前不做任何事；插件激活只建 `Engine`、登记界面 | `plugin/file-reader/activate`（kernel 的 < 1 ms） |
-| 打开文件到首屏高亮 < 16 ms（ADR 0034 的条件：字节偏移、或有检查点、或文件开头） | `syntax` 的首屏（`open_file`、首屏读取、`plan`、窗口解析、可见行的查询）中位数 ≤ 8 ms，最大值由 8 ms 截止时间约束（超时先画文本）；其中首屏读取 < 0.2 ms（`platform/safe_read_range`），`plan` < 0.1 ms。排版和绘制可见的约 60 行 ≤ 6 ms，事件送到 UI 线程 ≤ 2 ms | `syntax/first_screen`（合成 TS、Rust、JSON 1–64 MiB 和压缩成一行的 4 MiB JS，各 40 个随机偏移）、`syntax/first_screen/minified` 只记录；对象库：`syntax/first_screen/object_shared`（4 MiB 的 blob 已经 `share_object`，中部的偏移）判定同样 ≤ 8 ms，`syntax/first_screen/object_1mib`（没有人持有、首屏路径上解压 1 MiB 的 blob）≤ 8 ms，`syntax/first_screen/object_cold`（4 MiB、没有人持有，ADR 0042 的例外）只记录；端到端 `app/open_file`（全部场景，含从 diff 的旧一侧打开 4 MiB blob 中部的一个 hunk） |
+| 打开文件到首屏高亮 < 16 ms（ADR 0034 的条件：字节偏移、或有检查点、或文件开头；进程级的 `app/open_file` 按 ADR 0063 判中位数 < 37.5 ms，即下一帧画出：首屏在视图建好之前开始、查询提前编译，见「数据流与线程」） | `syntax` 的首屏（`open_file`、首屏读取、`plan`、窗口解析、可见行的查询）中位数 ≤ 8 ms，最大值由 8 ms 截止时间约束（超时先画文本）；其中首屏读取 < 0.2 ms（`platform/safe_read_range`），`plan` < 0.1 ms。排版和绘制可见的约 60 行 ≤ 6 ms，事件送到 UI 线程 ≤ 2 ms | `syntax/first_screen`（合成 TS、Rust、JSON 1–64 MiB 和压缩成一行的 4 MiB JS，各 40 个随机偏移）、`syntax/first_screen/minified` 只记录；对象库：`syntax/first_screen/object_shared`（4 MiB 的 blob 已经 `share_object`，中部的偏移）判定同样 ≤ 8 ms，`syntax/first_screen/object_1mib`（没有人持有、首屏路径上解压 1 MiB 的 blob）≤ 8 ms，`syntax/first_screen/object_cold`（4 MiB、没有人持有，ADR 0042 的例外）只记录；端到端 `app/open_file`（全部场景，含从 diff 的旧一侧打开 4 MiB blob 中部的一个 hunk） |
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 目标带 `Location::byte`，首屏同上 | `app/goto_single`（`code_intel` 第 5 步） |
 | 滚动与输入 120 fps | 渲染只做与可见行数成正比的工作；每行排版按（OID 或文档代数、行首字节、显示行、列宽）的哈希用 `shape_line_by_hash`，本 crate 另留约 4 倍可见行数的最近行缓存；档位 B、C 的窗口在后台算好 | `app/scroll_frames`（含 64 MiB、压缩成一行、编辑模式 1 MiB 的场景）、`app/scroll_frames_indexing` |
-| 后退、前进 < 16 ms | 历史记下 OID、身份和字节偏移；回到 ≤ 1 MiB 的文件时 stat 比较身份相同就用 LRU 里的文本和区间，不读文件；更大的文件按字节偏移走首屏。没有人持有的、超过 1 MiB 的对象库内容是 ADR 0042 的例外 | `app/nav_back` |
-| 打开 Files、展开目录 < 16 ms | 目录表已建好时，打开只取快照、按展开状态算可见行；展开 2,000 个子项的目录是一次插入 | `app/files_open`、`app/files_expand` |
+| 后退、前进 < 16 ms（进程级的 `app/nav_back` 按 ADR 0063 判中位数 < 37.5 ms） | 历史记下 OID、身份和字节偏移；回到 ≤ 1 MiB 的文件时 stat 比较身份相同就用 LRU 里的文本和区间，不读文件；更大的文件按字节偏移走首屏。没有人持有的、超过 1 MiB 的对象库内容是 ADR 0042 的例外 | `app/nav_back` |
+| 打开 Files、展开目录 < 16 ms（进程级的 `app/files_open`、`app/files_expand` 按 ADR 0063 判中位数 < 37.5 ms） | 目录表已建好时，打开只取快照、按展开状态算可见行；展开 2,000 个子项的目录是一次插入 | `app/files_open`、`app/files_expand` |
 | 进入编辑 ≤ 100 ms | 1 MiB、没有长行的文件：`InputState::set_value` 与换行信息在 UI 线程上约 3 ms（ADR 0034），首次整文件解析在后台，不等它 | `app/enter_edit` |
 | 空闲内存（采样状态：没有打开文件） | 插件常驻 ≤ 0.5 MB：`Engine`、空的 LRU、语言表（未编译的查询）；LRU ≤ 8 MiB、编译过的查询、打开的文档只因阅读才有，不在采样状态里（ADR 0035） | `plugin/file-reader/resident`；`syntax/lru_bytes` |
 | 阅读时的内存（不设顶层预算） | 打开的文档：≤ 16 MiB 的文本，或 ≤ 8 MiB 的页；行索引每 1024 行 8 字节加长行的格数检查点；窗口计算的临时内存（一个窗口和它的树）≤ 8 MiB；编辑模式的语法树 ≤ 41 MiB，退出即释放 | `syntax/window_peak` ≤ 8 MiB、`syntax/edit_tree_bytes` ≤ 41 MiB |
@@ -1026,7 +1042,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   |---|---|---|---|
   | 一个打开请求（打开、后退、前进）的项目已关闭，或没有这个 worktree，请求作废 | warn | `a request to show a file is dropped; its project or worktree has no root` | `via`（`open`、`back`、`forward`）、`origin`（`worktree`、`object`、`dependency`）、`ticket`（`open` 的票号，后退、前进为 null） |
 
-  不记路径、位置和内容；同一个调用点的限流同上。`Reader::open` 本身（热路径、任何线程）和预取不按次记录。金丝雀测试 `logs_hold_no_file_contents`（`file_reader`，`testing::capture()`）：金丝雀放在路径和文件内容里，经打开、后退、前进、预取、项目已关闭的请求，检查记录的级别和字段，之后 `assert_absent`。
+  不记路径、位置和内容；同一个调用点的限流同上。`Reader::open` 本身（任何线程）没有默认记录，预取不按次记录；`Reader::open` 的 debug 记录见下面「详细记录」。金丝雀测试 `logs_hold_no_file_contents`（`file_reader`，`testing::capture()`）：金丝雀放在路径和文件内容里，经打开、后退、前进、预取、项目已关闭的请求，检查记录的级别和字段，之后 `assert_absent`。
 - `file_reader` 第 8 步（8a）的默认记录，都在视图里、主线程上，只记种类和个数：
 
   | 事件 | 级别 | `msg` | 字段 |
@@ -1045,7 +1061,18 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   | 一次离开被问到之后有了结果 | info | `a leave was asked about unsaved changes` | `scope`（守卫的 `view`、`project`、`worktree`、`window`、`app`；视图自己的出口 `done`、`open`、`back`、`forward`）、`outcome`（`saved`、`dont_save`、`cancel`、`conflict`、`failed`） |
 
   不记文件名、路径、缓冲区的文字和保存失败的错误文字；没有未保存的改动或范围碰不到文档时不弹出，也不记录。保存失败时 8a 的 `a save failed; the buffer stays unsaved` 照常写，这一条之外再记结果。金丝雀：`logs_edit_holds_no_buffer_text` 增加了一次 Done 被取消的步骤，`logs_leave_guard_holds_the_scope_and_the_outcome_only` 经取消、冲突、不保存、保存四种结果，之后 `assert_absent`。
-- 详细级别：不另加 debug、trace 记录。首屏、解析的每一片、高亮查询、`rows` 和查找是热路径，按次记录会占去 8 ms 首屏预算和滚动预算的可观部分；解析和查询的进度由 `test-support` 的 `Trace` 给测试和基准。上表的调用点都在失败路径上，级别关闭时只做一次级别比较，字段不求值、不分配、不格式化。
+- 详细记录（debug，用户或 CI 开启详细日志时才写；[ADR 0063](../adr/0063.md) 要判定「下一帧画出」，CI 靠它们把一次打开的时间分到各个环节）。只有一次打开经过的五个点，每次打开各一条，没有一条在逐片、逐行的热路径上；字段都是计数、微秒数和固定的词，不记路径、位置和内容：
+
+  | 事件 | target | `msg` | 字段 |
+  |---|---|---|---|
+  | 一个打开请求入队（`Reader::open`，任何线程） | `file_reader` | `a request to open a file was queued` | `ticket`、`prestarted`（这次打开是否已提前开始首屏）、`pending`（入队后排队的请求数） |
+  | 阅读视图建好（`ReadingView::new`，在一次绘制里） | `file_reader` | `the reading view was built` | `view`（视图的序号）、`pending` |
+  | 打开的文件的首屏算完（`Interactive` 任务里；预取不记） | `syntax` | `the first screen of an opened file was computed` | `prepare_us`（等高亮查询编译的时间：预热已编译时接近 0）、`window_us`（窗口解析的时间）、`outcome`（`done`、`timed_out`、`yielded`、`cancelled`、`unavailable`，LRU 里已有区间是 `cached`，没有语言或不是文本是 `plain`，没有可解析的窗口是 `none`） |
+  | 视图取到一份新快照（每个（序号、代）一条） | `file_reader` | `the reading view took a snapshot` | `serial`（视图显示过的文档数）、`generation`、`state`（`opening`、`ready`、`symlink`、`unsupported`、`missing`、`unreadable`）、`highlight`（`pending`、`on`、`plain`） |
+  | 首屏画出，下一帧的回调里报告 `FileHighlighted` | `file_reader` | `the first screen is drawn; the milestone is reported` | 无 |
+
+  把这五条的时间戳排起来：入队到首屏算完是首屏任务的耗时（`prestarted` 为 true 时它与视图的建立重叠）；首屏算完到第一份 `ready` 的快照是等主线程的时间；`state` 为 `opening` 的快照出现在 `ready` 之前，说明首屏在视图取到请求之后才算完。金丝雀：`logs_hold_no_file_contents` 与视图的 `view_a_first_open_logs_each_step_and_holds_no_content` 检查它们写出、级别与字段正确，之后 `assert_absent`。**进程级基准目前不开详细日志**：运行器启动被测程序时清掉 `LECTERN_LOG`（`process.rs` 的 `REMOVED`，防止开发者的过滤带进来），详细文件写在临时 `HOME` 的 `Library/Logs/Lectern` 里；`benches/process.rs` 的 `logged` 已经在 `quit_reading_home` 里读默认级别的记录（`app/open_project`、`app/open_diff` 的 note）。技术上在 `Session::start` 里 `REMOVED` 之后给 `Launch.env` 加一个 `LECTERN_LOG` 并把它从 `Scheduler::session` 一路传下来就能读到这五条，但写盘线程和详细文件会落在被测的那几十毫秒里，改变中位数，所以没有对判定用的启动这样做；要归因时，加一次不计入样本的单独启动更合适，留给 CI 看到超标之后做。手动归因：`LECTERN_LOG=file_reader=debug,syntax=debug` 运行 `lectern` 读这五条。
+- 其他热路径（解析的每一片、高亮查询、`rows` 和查找）不另加 debug、trace 记录：按次记录会占去 8 ms 首屏预算和滚动预算的可观部分；解析和查询的进度由 `test-support` 的 `Trace` 给测试和基准。默认记录的调用点都在失败路径上，级别关闭时只做一次级别比较，字段不求值、不分配、不格式化；详细记录的调用点同样只在级别打开时求值（首屏的几次 `Instant::now()` 总是做，纳秒级）。
 - 关联 ID：本 crate 不设作用域。文档的任务经插件句柄的 `own_with` 提交，记录带 executor 的 `task` 和使用方插件（`file-reader`）的 `plugin`、`act`；`health` 的记录带调用它的线程上的作用域（`code_intel` 的任务也调用它）；`open`、`close_project` 在调用方的线程上记录，带调用方的作用域。
 - 不记录：文件内容（工作区文件、对象库的 blob、依赖根里的文件、编辑缓冲区、保存和合并的文本）、高亮区间和捕获到的标识符、查找的查询文字和结果、高亮查询的文字和 tree-sitter 错误的消息（它引用查询原文）、`GitError::Corrupt` 等错误的文字、`io::Error` 的消息。用路径、语言名、grammar 版本、偏移、字节数和错误种类代替。
 - 金丝雀测试：`logs_hold_no_file_contents`（`testing::capture()`，trace 级别）：金丝雀放在 TypeScript 文件的注释、字符串、模板字符串和标识符里，经首屏、完整读取、整文件解析与高亮、查找（查询就是金丝雀）、同一内容的对象库 blob、编辑会话（输入金丝雀、保存、增量解析）；再让文件所在的目录换成符号链接，引出事件后检查和合并的两条记录，并让 git 替身的 `watch_source` 返回含金丝雀的 `Corrupt`、在没启动的引擎上打开文档、编译一个含金丝雀的坏查询、让一次解析在测试时钟上卡住。检查这些记录都写出了、级别和字段正确，之后 `assert_absent`。
@@ -1201,6 +1228,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 ## 已知限制
 
+- 预启动的文档在请求没有人取走时一直占着：窗口没有项目时 `workspace` 忽略 `Push`（`nav.rs`），请求留在队列里，首屏已经算好的文档留在预启动槽里，直到有视图取走或 `cancel`；一个文档的内存（≤ 16 MiB 的文本，或 ≤ 8 MiB 的页），不增长，槽至多一个。
 - 首屏窗口的起点是启发式的，落在多行注释或模板字符串里时首屏高亮可能出错，直到整文件或窗口链的区间到达（ADR 0034）。
 - 需要规范化转换的工作区文件（CRLF、`working-tree-encoding`、`ident`）：`Byte` 目标先按规范内容的偏移打开，完整读取后按行号重新定位一次；行检查点查不到，只给行号的首屏退回文件开头。
 - 外部 scanner 卡住时，那个 executor 线程一直被占用，直到 scanner 返回；之后同一 grammar 版本本次运行只显示纯文本（ADR 0041）。
@@ -1369,6 +1397,12 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `just test -p lectern-app`：66 个通过，含 `bench_keys_*` 三个（测试平台里真实的 `Workspace` 和 desktop profile 的插件，经 `bench::handle`：⌘E → `EditReady`，⌘[ → 回到第一个文件的 `FileHighlighted`，`↓`、`→` → `FilesExpanded`；换成别的键就失败）（`bench-probe` 下 `src/tests/bench.rs` 的 `BenchDriver` 与 `handle` 的文件目标，见 [app 设计「文件阅读与 Files 的目标」](app.md#文件阅读与-files-的目标)）；`just test -p lectern-bench`：182 个通过（预算表、`wire_*` 的新目标与里程碑、`process_a_request_is_sent_without_waiting_for_a_milestone`）；`cargo bench -p lectern-bench --all-features --bench process --no-run` 编译通过。
 - **没有在本机运行：** `app/open_file`（六个场景）、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand`。它们要启动带探针的 `lectern` 并打开窗口，按仓库的规则不在这台机器上运行；数字来自 macOS CI（托管的 `macos-15` runner，`process` 分片），合并前在 PR 里记下 CI 的值。运行不出数字的情形（真实窗口里按键没有到焦点、`Outside` 审阅没有画出接近 4 MiB 的文件的 diff、旧一侧的内容没有登记）会让基准以里程碑超时记为 `error`，不会给出错的数字。
 - 本步没有验证的：`app/scroll_frames`、`app/scroll_frames_indexing` 与编辑模式的滚动（要 `workspace` 的帧记录，不在 8c）；这些基准里 `scroll_frames_indexing` 要的让路开关（`Kernel::set_yield`）没有接，CI 里超标时再接并校准。
+
+「下一帧画出」（ADR 0063），在 macOS 上运行（本机，没有打开真实窗口）：
+
+- `just check`：格式、架构规则、clippy 通过；文档链接检查要 `docs/adr/0063.md` 在仓库里（本提交里没有它，由 ADR 0063 的 PR 带来；本地放一个占位文件并 `git add -N` 之后通过，占位文件没有提交）。
+- `just test -p lectern-file-reader -p lectern-syntax -p lectern-app -p lectern-workspace -p lectern-bench`：666 个测试通过（`lectern-bench` 的 `budgets_sources_exist_and_their_anchors_are_headings` 同样要 `docs/adr/0063.md` 存在）；`cargo nextest run -p lectern-app --features bench-probe bench_keys`：4 个通过，新增的一个重复 6 次、`file_reader`、`syntax` 的新测试 `--stress-count 5` 通过。`just doctest` 通过。
+- 没有运行 `app/open_file` 等进程级基准（会打开真实窗口）：改动前后的中位数、`prepare_us`、`opening` 的快照在 `ready` 之前出现的次数，都要等 macOS CI 的详细记录或手动运行。`tech-research.md「性能预算」`里这六条还写着 16 ms，由 ADR 0063 的 PR 一起改。
 
 ## 与设计的差异
 
@@ -1575,3 +1609,12 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - **4 MiB `package-lock.json` 的场景没有先打开 diff：** 打开路径是同一个（`ReadTarget` 带字节偏移，来源是 `Worktree`，`expect` 空），只差调用方。压缩成一行的 4 MiB 文件从头打开（ADR 0034 的三个条件之一），不是按字节偏移。
 - **`app/open_file` 的结果是中位数最大的场景的样本**（一条预算、六个场景、一个基准只给一个值），`note` 给每个场景的中位数；见 [bench 设计「进程级基准」](bench.md#进程级基准)。
 - **没有加编辑上限的变更：** `app/enter_edit` 的夹具是 `MIB - 16 KiB` 的合成 TypeScript（没有长行，在 `TIER_A_MAX` 之下），不是正好 1 MiB；超标时再按 ADR 0034 降低 `TIER_A_MAX`。
+
+第 8 步之后的「下一帧画出」（[ADR 0063](../adr/0063.md)，`app/open_file` 与另外五条进程级预算从 16 ms 改为中位数 < 37.5 ms）：
+
+- **`Reader::open` 不再只排队。** 设计与第 6 步的「数据流与线程」写「`open` 只把请求排进队列并调唤醒回调」，`session_open_queues_and_wakes_and_changes_nothing` 的最后一句断言「也没有任务」。现在 `open` 先 `Engine::warm`，没有文档显示、没有排队的请求、预启动槽空着时再 `Engine::open`，把还没显示的文档放进槽里（「数据流与线程」第一条）。测试里「什么都不改」的意思没变：显示的文档、历史、`last`、焦点、`ReaderEvent` 在 `apply` 之前一概不变，所以只把「没有任务」改为「任务可以在跑，但快照仍是 None、没有事件、历史为空」。新增的测试固定顺序：预启动的文档在 `apply` 时被接过、之后没有新的任务（`session_open_starts_the_first_screen_before_the_view_exists`）；`cancel` 丢掉它；只有第一个等待的请求预启动；已有文档显示时一切照旧（可能在编辑，请求要先过守卫）；项目已关闭时不预启动。
+- **选这个设计的原因。** 备选一是在建视图之后再取请求、再 `sync`：视图一侧已经是这样（`screen::build` 里同步 `pump`），问题不在取请求的时机，而在首屏任务到 `apply` 才开始，所以省不掉那一次显示回调。备选二是任何时候都给每个请求预启动：编辑有未保存改动时每个排队的请求都会白算一个文档，400 个线程同时 `open` 的测试会有 400 个文档，请求被离开守卫取消时还要丢弃。选用的条件「没有显示的文档」天然排除了编辑（编辑要有文档），槽至多一个，不碰历史、不碰守卫，`apply` 与 `cancel` 的语义不变。代价：已有文档在显示时（比如从阅读视图里再打开另一个文件）仍然等泵取出请求之后才开始首屏，那一次没有省；`app/open_file` 测的是从项目页打开第一个文件，这条路径省了。
+- **`Engine::warm` 和 `Engine::started` 是 `syntax` 的新公开项**（「`syntax` 的公开项」已补）。预热只排一个任务：每种语言有一个「已排队」标记（`Lang::claim_warm_up`），已编译或已排队就不再排，排不出去（引擎未启动）时把标记还回去。第一次打开一种语言要在首屏上编译查询，TypeScript 约 10–18 ms、Rust 9–15 ms、JavaScript 5–10 ms、JSON 近 0（CI 上的实测）；`Lang::compiled` 的 `OnceLock` 让首屏任务与预热任务同时要时一个编译、一个等，不会编译两次（`Lang::compile_count`，`test-support`，测试断言为 1）。预热和预启动都由用户的打开触发，不在首帧之前、不在启动和项目打开时做。
+- **顺序的测试。** `Session` 的 `session_open_starts_the_first_screen_before_the_view_exists`（`open` 之后、`apply` 之前首屏已经算完，`apply` 不再排任务）；视图的 `view_a_new_view_has_the_document_for_its_first_draw`（`screen::build` 返回时快照已经是 `Ready`、高亮已开，没有跑过任何前台任务：不预启动时这里是 `Opening`）；`app` 的 `bench_keys_a_first_open_computes_the_first_screen_before_the_view_is_drawn`（真实的插件集合：没有任何一帧时首屏已经算完、视图还没建，之后一帧里程碑出现；改动之前这一步会超时）。「帧」是 `bench_keys` 的 `Rig::frame` 一次（测试平台的一次绘制加下一帧的回调，里面的 `run_until_parked` 还会让前台任务各跑一遍），引擎在两帧之间视为算完时：改动之前 2 次，现在 1 次；它不是真实显示回调的个数。事件顺序（日志，TypeScript 小文件，调试构建）：改动之前是入队、建视图、取到 `opening` 的快照、首屏算完（`prepare_us` 约 10 ms）、取到 `ready` 的快照、画出；现在是入队（`prestarted` 为 true）、首屏算完、建视图、取到 `ready` 的快照、画出。
+- **详细记录**：五条 debug（「日志与诊断」的「详细记录」），让 CI 把时间分到入队、建视图、首屏的准备与窗口、快照状态、画出。运行器不开详细日志（同一节说明理由）。
+
