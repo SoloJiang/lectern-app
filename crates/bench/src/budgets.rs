@@ -1116,6 +1116,17 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // The switch with the real `code-intel` on the executor's two workers,
+    // to the first task a screen queues on the switch's `Changed`
+    // (code_intel.md「性能」, #389): the scan alone is about 2.5 ms, a
+    // reconcile queued ahead of the screen's task made it 40-90 ms.
+    share(
+        "project/switch_worktree_with_index",
+        &[median(Limit::TimeBelow(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     share(
         "project/resolve_package/hit",
         &[median(Limit::TimeBelow(ms(1)))],

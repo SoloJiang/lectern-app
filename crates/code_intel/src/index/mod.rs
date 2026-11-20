@@ -28,7 +28,7 @@ use lectern_services::code_intel::{
     CodeIntel, Coverage, Focus, Names, NavigationProvider, ProviderRegistration, Query, QueryId,
     QueryResults, TierState,
 };
-use lectern_services::project::{ProjectEvent, ProjectKey, Projects, WorktreeKey};
+use lectern_services::project::{ProjectEvent, ProjectKey, Projects, Scan, WorktreeKey};
 
 use crate::LangName;
 use crate::extract::{Deadline, Extraction, Lang, LanguageTable, extract};
@@ -799,6 +799,7 @@ impl Inner {
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
                         names: Mutex::new(crate::names::NameState::default()),
                         walks: Mutex::new(Vec::new()),
+                        retired: Mutex::new(Vec::new()),
                     });
                     open.push(p.clone());
                     (p, true)
@@ -825,14 +826,15 @@ impl Inner {
             ProjectEvent::Opened { result: Err(_), .. } => {}
             ProjectEvent::Changed { project, parts, .. } => {
                 let p = self.project(project).unwrap_or_else(|| self.touch(project));
+                let snapshot = self.projects.snapshot(project);
                 // A new current worktree ends the old session here, not in
                 // the reconcile: from now on no query reads the new
                 // worktree's files against the old map, and nothing of the
                 // old session is published.
                 if parts.active
-                    && let Some(snapshot) = self.projects.snapshot(project)
+                    && let Some(snapshot) = &snapshot
                 {
-                    self.switch_session(&p, &snapshot);
+                    self.switch_session(&p, snapshot);
                 }
                 {
                     let mut st = lock(&p.state);
@@ -854,7 +856,20 @@ impl Inner {
                         st.root_tried = false;
                     }
                 }
-                if let Some(me) = self.arc() {
+                // The current worktree's file list is still being read: the
+                // reconcile has nothing to build the map from, and `project`
+                // publishes another `Changed` when the list is ready or
+                // unavailable (and `Closed` if the project goes away
+                // first). Queuing it now would only put its work ahead of
+                // the other plugins' reaction to this event in the
+                // executor's `Background` queue (#389). A list that is
+                // `Ready` or `Unavailable`, and no current worktree,
+                // request one as before.
+                let files_pending = snapshot
+                    .as_ref()
+                    .and_then(|s| s.active.as_ref())
+                    .is_some_and(|a| matches!(a.files, Scan::Pending));
+                if !files_pending && let Some(me) = self.arc() {
                     me.request_reconcile(&p);
                 }
             }
