@@ -26,7 +26,10 @@ use lectern_services::reader::{
     Anchor, ObjectShare, OpenOutcome, OpenTicket, ReadTarget, Reader, ReaderEvent,
 };
 use lectern_syntax::limits::PREFETCH_MAX;
-use lectern_syntax::{DocHandle, DocSnapshot, Engine, FindQuery, LineNo, Row, RowPos, Viewport};
+use lectern_syntax::{
+    DocHandle, DocSnapshot, EditSession, Engine, FindQuery, LineNo, NotEditable, Row, RowPos,
+    Viewport,
+};
 
 use crate::diag;
 use crate::focus::{Decision, decide, root_of};
@@ -294,6 +297,17 @@ impl Session {
     /// `Projects::snapshot` of `project`.
     pub fn project_snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
         self.host.snapshot(project)
+    }
+
+    /// Enters edit mode in the document shown (docs/design/file_reader.md
+    /// 「编辑」): the session over its content, or why there is none. The
+    /// view holds the session while it edits; the last handle's drop ends
+    /// it. Copies the content into the buffer's text on this thread.
+    pub fn edit(&self) -> Result<EditSession, NotEditable> {
+        match &lock(&self.reading).current {
+            Some(current) => current.handle.edit(),
+            None => Err(NotEditable::NotLoaded),
+        }
     }
 
     /// The current snapshot, without touching the focus.

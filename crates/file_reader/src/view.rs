@@ -27,6 +27,7 @@ use lectern_syntax::{
 use lectern_ui::motion::Transition;
 use lectern_ui::{MonoMetrics, TextAreaState};
 
+use crate::edit::{Editing, Reenter};
 use crate::shared::Shared;
 use crate::text::{digits, identifier_cell};
 
@@ -95,6 +96,11 @@ pub struct ReadingView {
     hover: Option<Task<()>>,
     /// The prefetches made, for the tests.
     pub(crate) prefetched: u32,
+    /// The edit mode's state: None until the user enters edit mode (nothing
+    /// of it exists before).
+    pub(crate) edit: Option<Editing>,
+    /// Edit mode starts again when the document has been read again.
+    pub(crate) reenter: Option<Reenter>,
     _listen: Task<()>,
 }
 
@@ -115,10 +121,14 @@ impl ReadingView {
                 let _ = tx.unbounded_send(());
             }
         }));
-        let listen = cx.spawn(async move |this, cx| {
+        let listen = cx.spawn_in(window, async move |this, cx| {
             while rx.next().await.is_some() {
                 queued.store(false, Ordering::SeqCst);
-                if this.update(cx, |view, cx| view.pump(cx)).is_err() {
+                let alive = this.update_in(cx, |view, window, cx| {
+                    view.pump(cx);
+                    view.edit_tick(window, cx);
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -158,6 +168,8 @@ impl ReadingView {
             resting: None,
             hover: None,
             prefetched: 0,
+            edit: None,
+            reenter: None,
             _listen: listen,
         }
     }
@@ -169,7 +181,11 @@ impl ReadingView {
         let session = self.shared.session.clone();
         let mut asked = false;
         let mut shown = false;
-        while let Some(request) = session.next_request() {
+        // While a buffer is edited the requests wait: applying one would end
+        // the session (step 8b's leave guard decides what happens to them).
+        while !self.editing()
+            && let Some(request) = session.next_request()
+        {
             asked = true;
             if session.apply(request) == OpenOutcome::Shown {
                 self.serial += 1;
@@ -376,6 +392,10 @@ impl ReadingView {
     /// ⌘[: the previous position; at the start of the history, back to the
     /// view that opened the reader.
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
+        // Not while editing: the history changes the document.
+        if self.editing() {
+            return;
+        }
         if !self.shared.session.can_back() {
             self.shared.dispatch(WorkspaceCommand::Pop);
             return;
@@ -389,6 +409,9 @@ impl ReadingView {
 
     /// ⌘]: the next position.
     pub(crate) fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if self.editing() {
+            return;
+        }
         if self.shared.session.forward() {
             self.serial += 1;
             self.new_document(cx);
@@ -404,6 +427,10 @@ impl ReadingView {
 
     /// ⌘F: the bar opens and the cursor goes to its field.
     pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The editor has its own search while editing.
+        if self.editing() {
+            return;
+        }
         if !self.find.open {
             self.find.open = true;
             let now = Instant::now();

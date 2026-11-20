@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`）已实现；第 7 步的 Files（侧栏的文件树：`FilesView`、Fluent 键与探针节点、Files 条目与面板的登记，本 PR）已实现，`app/files_open`、`app/files_expand` 仍是计划中；第 8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`）已实现；第 7 步的 Files（侧栏的文件树：`FilesView`、Fluent 键与探针节点、Files 条目与面板的登记）已实现，`app/files_open`、`app/files_expand` 仍是计划中；第 8 步的 8a（编辑模式：代码编辑器、`InputHighlighter` 适配器、保存、磁盘上的提示行与合并，本 PR）已实现，但编辑模式在装配好的 app 里还进不去（没有离开守卫，见「与设计的差异」第 8 步）；8b（离开守卫、`workspace` 与 `app` 一侧的接线、打开编辑模式）尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -889,7 +889,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 ### 编辑模式
 
-- gpui-component 的 `InputState` 代码模式，不开软换行，代码补全关闭；高亮经适配器（`edit::Highlighter`，实现 `InputHighlighter`）读 `EditSession::spans()`。
+- gpui-component 的代码编辑器（锁定的 0.7.0 里叫 `EditorState`，配 `Editor` 元素；`InputState` 是单行的，见「与设计的差异」第 8 步），不开软换行，代码补全关闭；高亮经适配器（`edit::Highlighter`，实现 `InputHighlighter`）读 `EditSession::spans()`。
 - 不能编辑时 Edit… 置灰，悬停显示原因（[大文件调研「决定」](../research/large-files-rendering.md#决定)第 4 条）。
 
 ### Files
@@ -992,7 +992,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 ## 日志与诊断
 
-`syntax` 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `syntax`，字段值的写法集中在 `crates/syntax/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。`file_reader` 的记录（target 为 `file_reader`）：第 6 步的在本节下面；第 7 步的阅读视图和 Files 没有新增记录（视图只读快照、发命令，没有失败路径要记：请求作废的记录在 `Session` 里，已有）；第 8 步的随编辑写进本节。
+`syntax` 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `syntax`，字段值的写法集中在 `crates/syntax/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。`file_reader` 的记录（target 为 `file_reader`）：第 6 步的在本节下面；第 7 步的阅读视图和 Files 没有新增记录（视图只读快照、发命令，没有失败路径要记：请求作废的记录在 `Session` 里，已有）；第 8 步的编辑模式（8a）的记录在「`file_reader` 第 8 步的默认记录」下面，离开守卫（8b）的随它写进本节。
 
 - 默认记录：
 
@@ -1020,6 +1020,17 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   | 一个打开请求（打开、后退、前进）的项目已关闭，或没有这个 worktree，请求作废 | warn | `a request to show a file is dropped; its project or worktree has no root` | `via`（`open`、`back`、`forward`）、`origin`（`worktree`、`object`、`dependency`）、`ticket`（`open` 的票号，后退、前进为 null） |
 
   不记路径、位置和内容；同一个调用点的限流同上。`Reader::open` 本身（热路径、任何线程）和预取不按次记录。金丝雀测试 `logs_hold_no_file_contents`（`file_reader`，`testing::capture()`）：金丝雀放在路径和文件内容里，经打开、后退、前进、预取、项目已关闭的请求，检查记录的级别和字段，之后 `assert_absent`。
+- `file_reader` 第 8 步（8a）的默认记录，都在视图里、主线程上，只记种类和个数：
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | 进入编辑时文档已不可编辑（按钮刚才还可用：文档正在重新读取） | info | `edit mode could not start; the document is not editable now` | `reason`（`not_loaded`、`too_large`、`long_line`、`not_text`、`mixed_line_endings`、`read_only_source`、`reloading`） |
+  | 保存失败（权限、磁盘满；缓冲区保持未保存） | warn | `a save failed; the buffer stays unsaved` | `forced`（是否 Save Anyway） |
+  | 编辑的文件读不成缓冲区的文本（删了、不是普通文件、不是 UTF-8） | warn | `the edited file is no longer available; only copying or discarding the buffer is left` | 无 |
+  | 合并把冲突标记写进了缓冲区 | info | `a merge left conflict markers in the buffer` | `conflicts`（冲突个数） |
+  | 缓冲区被放弃、改读磁盘上的文件（Discard My Changes，或缓冲区没有改动时磁盘上的文件变了） | info | `the buffer was given up for the file on disk` | `why`（`discard`、`clean`）、`unavailable` |
+
+  不记路径、文件名、缓冲区的文字、保存失败的错误文字（`SaveResult::Failed` 的字符串来自系统）和光标位置；同一个调用点的限流同上。保存、合并本身的记录（读不出文件）在 `syntax` 里，已有。金丝雀测试 `logs_edit_holds_no_buffer_text`（`file_reader`，`testing::capture()`）：金丝雀放在文件名、文件内容、键入的缓冲区文字和磁盘上改过的内容里，经键入、保存、冲突、合并留下冲突标记、保存失败、Discard My Changes，检查上表的记录写出、级别与字段正确，之后 `assert_absent`。
 - 详细级别：不另加 debug、trace 记录。首屏、解析的每一片、高亮查询、`rows` 和查找是热路径，按次记录会占去 8 ms 首屏预算和滚动预算的可观部分；解析和查询的进度由 `test-support` 的 `Trace` 给测试和基准。上表的调用点都在失败路径上，级别关闭时只做一次级别比较，字段不求值、不分配、不格式化。
 - 关联 ID：本 crate 不设作用域。文档的任务经插件句柄的 `own_with` 提交，记录带 executor 的 `task` 和使用方插件（`file-reader`）的 `plugin`、`act`；`health` 的记录带调用它的线程上的作用域（`code_intel` 的任务也调用它）；`open`、`close_project` 在调用方的线程上记录，带调用方的作用域。
 - 不记录：文件内容（工作区文件、对象库的 blob、依赖根里的文件、编辑缓冲区、保存和合并的文本）、高亮区间和捕获到的标识符、查找的查询文字和结果、高亮查询的文字和 tree-sitter 错误的消息（它引用查询原文）、`GitError::Corrupt` 等错误的文字、`io::Error` 的消息。用路径、语言名、grammar 版本、偏移、字节数和错误种类代替。
@@ -1057,6 +1068,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 `file_reader`（依赖 GPUI，只在 macOS 上，第 7 步起）：
 
 - `#[gpui::test]`：元素只为可见的显示行排版（计数的排版钩子）；64 MiB 文件的滚动位置在 `RowPos` 与像素之间换算、拖动滚动条到末尾；长行折行与改变宽度后的重新折行；⌘F 的结果跳转；⌘[ / ⌘] 的历史；进入编辑、改动后 Esc 弹出确认、保存冲突时出现提示行；`leave_guard_*`：有未保存改动时 `Reader::open`、后退前进（探针触发）、`LeaveScope::Worktree` / `Project` / `Window` / `App` 都先弹出确认，取消后文档和缓冲区不变、`ReaderEvent::Open` 为 `Cancelled`，保存冲突时不通过，不保存时通过，没有改动时不弹出；编辑时 ⌘[ / ⌘] 改变缩进、不触发后退；Files 的展开、折叠、目录链、定位当前文件、Finder 顺序。测试直接构造 `DocSnapshot` 和 `DirTable`，不做文件 IO。
+- 第 8 步的 8a（`tests/edit.rs`，前缀 `edit_*`，探针节点与 `Rig::editable`，没有真实窗口）：装配好的 app 里编辑模式进不去（按键、按钮、按名字触发的 Action 都不行）；进入编辑之前没有编辑器、会话和等待；进入、键入、适配器把编辑交给会话、高亮的颜色来自 `ui` 的代码配色；`set_value` 换掉缓冲区之后适配器照常工作；缓冲区的每一种改法（键入、缩进、撤销、重做）都算未保存；Edit… 置灰的各种原因；保存与保存时在途的改动；冲突提示行与三个按钮、Merge（无冲突、有冲突标记并移到第一个冲突）、Discard My Changes、Keep Editing 与 Save Anyway、缓冲区没有改动时静默重新载入、文件被删、保存失败的一行；磁盘上的文件没变时按名字触发的 Save Anyway、Discard My Changes、Merge 不起作用；编辑时 ⌘[ / ⌘] 是缩进、不动历史；Esc 先给编辑器、不弹出屏幕；打开别的文件的请求在编辑时等待；`logs_edit_*` 的金丝雀。
 - UI 探针完成后（[#6](https://github.com/SoloJiang/lectern-app/issues/6)），阅读视图、编辑模式、Files 的语义树用 insta 快照验收；减弱动态效果时查找栏的展开没有位移。
 
 `services`（目录表的构建在 `DirTable::new` 里）：`dirs_*`（目录表与朴素构造对照、Finder 顺序、折叠链、子模块、空列表）、`dir_table_*`（序列化形式、反序列化乱序和错误的 `dirs`）；`finder_cmp` 的表驱动测试（`file2` < `file10`、`A` 与 `a`、数字前导零）。`project`：文件列表换代后目录表单独一代发布（`ChangedParts::dirs`），`dirs` 只在 `files` 就绪之后就绪、与它来自同一份列表。`platform`：`replace_file_*`（见「对其他 crate 的要求」）。`git`：`merge3_*`。
@@ -1162,7 +1174,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 7. **阅读视图与 Files**（前置 B、E）：自绘元素、查找栏、前进后退、Files 面板、Fluent 资源、探针节点。
    - macOS 上 `just test -p lectern-file-reader` 的 `#[gpui::test]` 通过；`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src --glob '!**/tests*'` 没有结果（视图不做 IO；测试的夹具要在临时目录里写文件，与 `syntax` 的同类检查一样不算）。
    - `app/open_file`（全部场景）、`app/scroll_frames`（64 MiB、压缩成一行）、`app/scroll_frames_indexing`、`app/nav_back`、`app/files_open`、`app/files_expand` 在 macOS CI 上改为生效并在预算内。
-8. **编辑模式**（前置 C、D、E 的离开守卫与退出钩子，第 5 步）：`InputState`、`InputHighlighter` 适配器、离开守卫、提示行与确认对话框。写 `Closes #10`。
+8. **编辑模式**（前置 C、D、E 的离开守卫与退出钩子，第 5 步）：编辑器（`EditorState`）、`InputHighlighter` 适配器、离开守卫、提示行与确认对话框。写 `Closes #10`。分两个 PR：8a 是编辑模式本身（编辑器、适配器、保存、冲突提示行与合并、Fluent 键、探针节点、日志），没有离开守卫，所以用一个 crate 私有的常量 `edit::EDIT_REACHABLE`（false）把它关在装配好的 app 之外（不绑 ⌘E 与 ⌘S，工具栏没有 Edit…，`enter_edit` 不进入），测试经 `FileReaderPlugin::with_edit` 打开；8b 是离开守卫与它的对话框、`workspace` 与 `app` 一侧的接线，并把常量改为 `true`。8a 写 `Refs #10`，8b 写 `Closes #10`。
    - `#[gpui::test]` 的编辑场景和 `leave_guard_*`（「测试」列出的每一种触发）通过；`rg -n 'features.*tree-sitter' Cargo.toml crates/file_reader/Cargo.toml` 没有 gpui-component 的 `tree-sitter` feature。
    - `app/enter_edit` ≤ 100 ms、编辑模式的 `app/scroll_frames` 在预算内；超标时按 ADR 0034 降低 `TIER_A_MAX`，在本文「接口」改常量。
 
@@ -1186,6 +1198,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 保存时比较身份与 `renameat` 之间有一个很短的窗口，这期间别的进程写入的内容会被覆盖；原子替换会断开硬链接、不保留扩展属性。
 - 编辑模式里，有语法错误的文本经过一次超过 8 ms、分片停下又续做的解析时，树（和高亮）可能与不停下的解析不同，直到之后的编辑让那一段重新解析。
 - 文件夹项目的文件在阅读时不自动刷新（`project` 不监听文件夹项目）。
+- 编辑模式里放弃缓冲区或静默重新载入之后，视图等文档读到「另一个内容」再进入编辑（比较内容的 OID）。agent 在这期间把文件恢复成结束编辑时文档持有的内容（例如保存之后 `git checkout`）时，文档读到的内容与之前相同，视图留在阅读视图里，不自动进入；Edit… 照常可用。
 - 查找只对 ASCII 字母不区分大小写，最多 10,000 个结果。
 - 高亮查询里的 `#is-not? local` 不求值（没有 locals 查询）：JavaScript 的 `console`、`require` 等内置名，同名的局部变量也按内置名着色。
 
@@ -1316,6 +1329,14 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `just test -p lectern-file-reader -p lectern-app -p lectern-i18n`：195 个测试通过（默认跳过打开真实窗口的二进制）；其中 `lectern-file-reader` 82 个（`files_*` 25，`view_*` 12、`session_*` 21、`focus_*` 8、`plugin_*` 5、`history_*` 6、`logs_*` 1，另有 `text_*`）。`python3 scripts/check_architecture.py` 通过；`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src --glob '!**/tests*'` 没有结果。
 - `files_*`：行（目录在前、Finder 顺序、`file2` 在 `file10` 之前）、展开与折叠只插入或删除这一段（`Splice`，2,000 个子项的目录一次插入 2,000 行）且里面的目录保持状态、单子目录的目录链折成一行并把链上每个目录记进展开集、子模块是不展开的文件行、`reveal` 展开文件之上的每个目录、新表（目录链断开、目录消失）按路径保留展开；面板在测试窗口里：条目与面板的登记、5000 个文件的目录展开后只建视图内的行、↑ ↓ → ← ↵ 的选择与展开（到头不回绕）、↵ 与点击文件时 `Session` 的队列里是 `TextOrigin::Worktree`、`Anchor::Start`、活动 worktree 的目标、先发 `ShowSidebarPanel(None)`、点击目录展开或折叠、返回箭头发 `ShowSidebarPanel(None)`、打开时展开并选中阅读视图最后显示的文件、`file_reader::RevealCurrent` 按名字触发、别的 worktree 的目标不定位、视图被丢弃再建时展开与选中保留、换了项目重新开始、新一代目录表保留展开与选中、新文件列表的表还在建时旧行保留、加载 / 不可用 / 没有文件三种状态与它们的探针节点、换了活动 worktree 而新表还在建时不留旧行（↵ 不会把旧树的路径配上新 worktree）、5000 个文件的列表里最后显示的文件滚到视图内（建出的行里有它）、文件夹项目同样列出文件并打开（`worktree` 为 None）。
 - 没有验证的：真实窗口里的显示（行高、缩进、图标颜色、悬停、选中色、返回箭头的位置、侧栏里键盘焦点的落点）、真实 `workspace` 里的整条流程（Files 条目点击 → 面板 → ↵ → 阅读视图 → Esc 回到项目侧栏；测试里 `workspace` 是替身）、`app/files_open`、`app/files_expand`（见「与设计的差异」）、10 万文件的目录表上的打开与展开耗时（没有测量；构造只做与可见行成正比的工作，但没有基准）。
+
+第 8 步的 8a（编辑模式），在 macOS（arm64）上运行，没有打开真实窗口：
+
+- `just check` 通过（格式、架构检查、文档链接、整个工作区的 `cargo clippy --all-targets --all-features -- -D warnings`）；`cargo check -p lectern-app` 通过。
+- `just test -p lectern-file-reader -p lectern-syntax -p lectern-i18n`：342 个测试通过；其中 `lectern-file-reader` 108 个（新增 `edit_*` 26，含 `logs_edit_holds_no_buffer_text`；`files_*` 25、`session_*` 21、`view_*` 12、`focus_*` 8、`history_*` 6、`plugin_*` 5、`logs_*` 1，另有 `text_*` 4），`lectern-syntax` 177 个（新增 `spans_lines_in_finds_the_lines_of_a_range`），`lectern-i18n` 57 个（新键在 en 与 zh-CN 里一致，由编译期校验）。
+- `rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src --glob '!**/tests*'` 没有结果；`cargo tree -e features -i gpui-component` 里没有 `tree-sitter`；`rg -n 'features.*tree-sitter' Cargo.toml crates/file_reader/Cargo.toml` 没有结果；`python3 scripts/check_architecture.py` 通过。
+- `edit_*` 的内容见「测试」第 8 步的 8a 一条。两处用变异检验过测试不是空的：去掉根元素上的 `Escape` 处理之后 `edit_escape_goes_to_the_editor_first_and_never_pops_the_screen` 失败（编辑器没有可关的东西时 Esc 会继续走到 `workspace` 的 Esc 绑定，弹出屏幕）；去掉 `pump` 里「编辑时请求等待」的条件之后 `edit_a_request_to_open_another_file_waits_while_editing` 失败。
+- 没有验证的：真实窗口里的显示（编辑器的行高、行号栏、选区与光标的颜色、提示行与工具栏的样子）、`app/enter_edit` 与编辑模式的 `app/scroll_frames`（进程级基准，`app` 的测量构建还没有编辑的场景；编辑模式在装配好的 app 里还进不去）、编辑模式的启动与空闲内存（进入编辑之前什么都不分配：`edit_nothing_exists_before_the_user_enters`，ReadingView 只多两个 `Option`）、设计的 `leave_guard_*`（8b）。
 
 ## 与设计的差异
 
@@ -1482,3 +1503,19 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - **`app/files_open`、`app/files_expand` 保持计划中。** 它们是进程级基准：要 bench 的 `Milestone` 有「Files 展开完成」、探针的 `OpenTarget` 能打开 Files 并展开一个目录（`BenchDriver` 现在没有 Files 的目标，`Milestone` 只有 `ProjectHome`、`FileHighlighted`、`DiffShown`、`WorktreeSwitched`），运行器侧要有 10 万文件的项目和一个有 2,000 个子项的目录。这些都还没有，改成生效会让预算无法判定，所以留给后续。行的构造按设计只与可见的行数成正比：打开时 `Tree::new` 是展开状态下全部可见行（O(可见行数)，不是整个目录表）、展开是一次 `splice`；没有测量过 10 万文件上的耗时。
 - **没有改动圆点。** 设计推迟到 `review` 经 `services` 给出改动路径之后（[#15](https://github.com/SoloJiang/lectern-app/issues/15)）。
 - **侧栏里的键盘焦点。** 面板建好时 `window.focus` 把焦点给它，↑ ↓ → ← ↵ 才到得了；面板被丢弃后焦点回到 `workspace` 的根（它自己检查 `window.focused`），项目主页的屏幕视图不会自动重新拿到焦点，没有改它。
+
+第 8 步的 8a（编辑模式）：
+
+- **编辑器是 `EditorState`，不是 `InputState`。** 锁定的 gpui-base 0.7.0 把输入分成三种：`InputState` 是单行的，`TextareaState` 是多行文本，代码模式是 `EditorState`（`InputBaseState<EditorMode>`，gpui-component 的 `Editor` 元素，都经 `gpui_component::input` 重新导出，没有新增依赖）。设计写的「`InputState` 代码模式」就是它。适配器经 `set_highlighter_factory` 安装：`Input::render` 只在没有工厂时装一个什么都不返回的（没有 `tree-sitter` feature）。「界面 / 编辑模式」已改。
+- **没有离开守卫，所以编辑模式在装配好的 app 里进不去（产品安全规则）。** 守卫（`register_leave_guard`、`workspace` 在弹出屏幕、切 worktree、关项目、关窗口之前问）是 8b；没有它，丢弃未保存的缓冲区没有人问过用户。`edit::EDIT_REACHABLE`（crate 私有的常量，`false`）经插件、`Shared` 到视图：⌘E 与 ⌘S 不在键表里（`actions::key_bindings(edit)`），工具栏没有 Edit…，`enter_edit` 不进入（探针按名字派发 `Edit` Action 也不行：`edit_is_not_reachable_in_the_shipped_configuration`）。测试经 `FileReaderPlugin::with_edit(true)`（`cfg(test)`）打开。8b 把常量改为 `true`。为了在没有守卫时编辑模式本身也不丢缓冲区，还有三条临时的规矩，8b 用守卫的确认取代前两条：有未保存改动时 Done、Esc、⌘E 不退出（Discard My Changes 是用户明确的选择，照常放弃）；打开别的文件的请求在编辑时留在队列里（`pump` 不取），退出编辑后才应用；后退、前进在编辑时不动（`go_back`、`go_forward` 直接返回，工具栏按钮置灰，⌘[ 与 ⌘] 在编辑时的键上下文里不绑定，归编辑器的 Outdent 与 Indent）。关闭阅读视图（`workspace` 弹出屏幕）、切 worktree、关项目、关窗口仍会丢掉缓冲区：这几条在 8b 里经 `workspace` 问守卫。
+- **工具栏：编辑时是 back（置灰）、Done、Save，没有 forward。** `workspace` 只显示 `ToolbarItems::controls` 的前三个（`take(3)`），第 7 步的 back 与 forward 已经占两个，再加 Done 与 Save 会把 Save 挤掉。编辑时 forward 不在工具栏里；back 置灰，它的无障碍名字是 `file-reader-back-editing.tooltip`。阅读时 Edit… 是第三个控件（只在编辑模式可达时）。`edit_enter_puts_the_text_in_the_editor_and_marks_the_document` 断言至多三个。Save 在缓冲区没有改动时置灰；Keep Editing 之后它的文字是 Save Anyway，⌘S 与它一致（`Save` Action 取按钮现在的行为，不另绑 Save Anyway）。
+- **Edit… 置灰的原因写在探针节点的属性里。** `ui::Button` 没有悬停提示，它的文字就是无障碍名字：Edit… 的名字是「Edit…」，不能同时是原因。置灰时节点带 `reason`（`file-reader-not-editable-*` 的消息 ID，语言无关）和 `tooltip`（该语言的文字），悬停提示等 `ui` 的按钮支持之后再接。`file-reader-edit.tooltip`（「Edit this file (⌘E)」）没有加：⌘E 在 8b 才绑定。`file-reader-unsaved-*` 是 8b 的对话框。
+- **适配器是共享状态上的薄壳。** 编辑器每次换掉整个文本（`set_value`）都会丢掉它的高亮器、再经工厂造一个，所以待传的编辑、最后的 `Rope` 和调色板放在视图与高亮器共享的 `Link` 里，高亮器只持有会话的弱引用（会话由视图的 `Rc<EditSession>` 保活，最后一个句柄 drop 才结束会话）。`update` / `update_batch` 把 `InputEdit` 记成 `TextEdit` 放进 `Link`，视图每帧渲染前一次性把缓冲区复制成 `Arc<str>` 连同累计的编辑交给 `EditSession::changed`；第一次的空编辑（编辑器对给它的文本做的第一次更新，起点、旧终点、新终点相同）跳过。`styles` 没有 `Rope` 也没有 `Context`：区间从 `spans()` 取，颜色是视图每帧放进 `Link` 的调色板经 `ui` 的 `code_style` 得到（与阅读视图同一个函数 `text::highlight_style`），区间之间补默认样式。折叠不用（`folding(false)`，`fold_ranges` 为空）。`syntax` 的 `WindowSpans` 增加 `lines_in(range)`（二分查找，按范围取有 token 的行，代价与取到的行成正比，不是与全部行成正比），测试 `spans_lines_in_finds_the_lines_of_a_range`。
+- **合并的结果用 `set_value` 写回，合并期间编辑器只读。** 合并之后磁盘上的内容是合并基准：如果结果能被撤销回合并之前的文本，再保存就会覆盖磁盘上的改动而且没有冲突。所以写回清掉撤销栈；合并在途的几毫秒里编辑器只读，否则合并结果会盖掉这段时间键入的字。有冲突时光标移到第一个冲突标记的行（`set_cursor_position`，编辑器随之滚到那里）。
+- **放弃与静默重新载入：结束会话，等文档重新读取，再进入。** 设计写「结束会话，等文档重新读取，再进入编辑」，没有写等什么。`Session::edit` 之后立即再 `edit` 会在旧内容上开始（会话没有保存时快照一直是 `Yes`），关闭时的检查又会让新会话再次 `dirty_on_disk`。视图记下结束时文档的内容 OID 和光标的行号（`Reenter`），文档 `editable == Yes`、内容读完且 OID 不同时才再进入，光标按行号放回（文件变短时放在最后一行），5 秒内等不到就放弃，文档换了（`serial` 变了）也放弃。文件已不可用时 Discard 只结束编辑，不等。缓冲区没有改动（视图记的「载入或保存之后改过」，`Editing::dirty`）而磁盘上的文件变了时走同一条路，不显示提示行；缓冲区的改动用计数跟踪，计数放在编辑器每次改文本都会经过的地方，也就是它驱动高亮器的 `update` / `update_batch`（键入、输入法、粘贴、缩进、撤销、重做和写回的合并都经过，不靠 `InputEvent::Change`，它不覆盖所有路径：`edit_every_way_the_buffer_changes_counts_as_unsaved`），保存结果按「要求保存时的计数」设为干净，所以保存之后又键入的字仍是未保存的；撤销回到原文不会让缓冲区变回干净（计数不减），多问一次比丢一次好。
+- **提示行与探针节点。** 提示行在编辑器上方（`render_edit.rs`）：`file-reader.disk.banner`（`kind`：`changed`、`unavailable`）、`.merge`、`.discard`、`.keep`；保存失败的一行是设计没有的 `file-reader.disk.failed`（`file-reader-save-failed`，带文件名，缓冲区保持未保存，再次保存成功后消失）。文件已不可用时提示行只有 `file-reader-unavailable-while-editing` 和 Discard My Changes（设计只写了那句话）。`file-reader.toolbar.edit`、`.done`、`.save`；文档节点的 `mode` 是 `editing`，另有 `dirty`。
+- **按名字触发的 Action 也受条件限制。** 提示行的按钮之外，探针可以按名字派发这些 Action：`SaveAnyway` 只在 Save 按钮现在就是 Save Anyway（Keep Editing 之后、文件仍在磁盘上改着）时保存，否则会绕过保存时的身份比较；`DiscardMine` 只在磁盘上的文件改了或不可用时放弃（否则它会丢掉没有改动的文件的缓冲区，是守卫不会问的一条出路）；`Merge` 只在磁盘上的文件改了时合并（`edit_save_anyway_and_discard_by_name_need_a_file_changed_on_disk`）。
+- **查找栏编辑时不用。** 编辑器有自己的查找（⌘F 在编辑器的键上下文里先被它取走）；进入编辑时关掉阅读视图的查找栏，`Find` Action 在编辑时什么都不做。
+- **Esc 的路径。** 编辑器的 Esc 没有可关的东西时 `cx.propagate()`，继续走到 `workspace` 的 Esc 绑定（弹出屏幕）。视图的根元素在编辑时接住 `gpui_component::input::Escape`：没有未保存的改动就退出编辑，否则什么都不做，两种情况都不再往上传。进入编辑时光标放在阅读视图第一行（行号精确时）。
+- **没有改 `ui`、`workspace`、`app`。** 键、Action、按钮和提示行都在本 crate；`FileReaderPlugin::new` 的签名不变。
+- **8a 没有的**（8b）：离开守卫与它的确认对话框（`file-reader-unsaved-*`、`file-reader.unsaved.*` 节点）、`register_leave_guard`、`LeaveScope`、窗口关闭与退出的接线、`leave_guard_*` 测试、把 `EDIT_REACHABLE` 改为 `true`、`app/enter_edit` 与编辑模式的 `app/scroll_frames`。

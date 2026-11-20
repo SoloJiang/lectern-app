@@ -3,6 +3,7 @@
 //! services and real files in temporary folders; the views run in a test
 //! window.
 
+mod edit;
 mod files;
 mod focus;
 mod history;

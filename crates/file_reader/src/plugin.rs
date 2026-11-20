@@ -27,6 +27,7 @@ use lectern_services::reader::{Reader, ReaderEvent};
 use lectern_services::workspace::Contributions;
 use lectern_syntax::{Engine, EngineDeps, Languages};
 
+use crate::edit::EDIT_REACHABLE;
 use crate::screen;
 use crate::session::{Host, Session};
 use crate::shared::Shared;
@@ -45,6 +46,8 @@ pub struct FileReaderDeps {
 /// The plugin (ID "file-reader"), put in the `PluginSet` by `app`.
 pub struct FileReaderPlugin {
     deps: FileReaderDeps,
+    /// Whether the views can enter edit mode (`edit::EDIT_REACHABLE`).
+    edit: bool,
     /// The latest activation's session (tests). Weak: it never keeps a
     /// deactivated activation alive.
     #[cfg(test)]
@@ -56,9 +59,17 @@ impl FileReaderPlugin {
     pub fn new(deps: FileReaderDeps) -> FileReaderPlugin {
         FileReaderPlugin {
             deps,
+            edit: EDIT_REACHABLE,
             #[cfg(test)]
             last: Arc::default(),
         }
+    }
+
+    /// The plugin with edit mode reachable or not (tests).
+    #[cfg(test)]
+    pub(crate) fn with_edit(mut self, edit: bool) -> FileReaderPlugin {
+        self.edit = edit;
+        self
     }
 
     /// Where every activation of this plugin leaves its session, kept after
@@ -102,6 +113,7 @@ impl Plugin for FileReaderPlugin {
             session.clone(),
             contributions.clone(),
             ctx.service::<dyn CodeIntel>(),
+            self.edit,
         );
         let Some(admitted) = contributions.get() else {
             return Err(PluginError::new("the contributions provider is not live"));

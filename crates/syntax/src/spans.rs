@@ -165,6 +165,28 @@ impl WindowSpans {
         })
     }
 
+    /// The lines with tokens that can touch `range` (absolute bytes): the
+    /// line holding `range.start` and every later one that starts before
+    /// `range.end`. Found by binary search, so the cost follows the lines
+    /// returned, not the lines stored (the edit mode's highlighter asks for
+    /// the visible lines every frame).
+    pub fn lines_in(&self, range: Range<u64>) -> impl Iterator<Item = (u64, &[Token])> + '_ {
+        let relative = |byte: u64| byte.saturating_sub(self.start);
+        let first = self
+            .line_starts
+            .partition_point(|&line| u64::from(line) <= relative(range.start))
+            .saturating_sub(1);
+        let last = self
+            .line_starts
+            .partition_point(|&line| u64::from(line) < relative(range.end));
+        (first..last.max(first)).map(move |i| {
+            (
+                self.start + u64::from(self.line_starts[i]),
+                &self.tokens[self.offsets[i] as usize..self.offsets[i + 1] as usize],
+            )
+        })
+    }
+
     /// True when the range's start was confirmed by the syntax tree (whole
     /// files, windows of a chain cut by the tree); false for the first
     /// screen's heuristic window, which is replaced later.

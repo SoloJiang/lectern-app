@@ -4,8 +4,10 @@
 //! contribution. The key context of the reading view's root element is
 //! `reader`; the predicates name the region of `workspace` above it.
 //!
-//! Edit, Save and the other actions of the edit mode are the edit mode's
-//! (step 8). The Files tree's actions are the ones named `Files…` and
+//! The edit mode's actions are `Edit`, `Save` and the four of the row under
+//! the toolbar. ⌘E and ⌘S are bound only where the edit mode is reachable
+//! (`edit::EDIT_REACHABLE`): the leave guard is step 8b. The Files tree's
+//! actions are the ones named `Files…` and
 //! `RevealCurrent`: its key context is `files`, in the sidebar's region.
 //! `ShowFiles` of the design is the Files entry's `WorkspaceCommand`
 //! (`ShowSidebarPanel`), not an action: nothing but the entry shows the
@@ -29,7 +31,21 @@ actions!(
         Forward,
         /// Esc: the find bar first; with none open the key goes on to
         /// `workspace`, which goes back to the view that opened the reader.
+        /// While editing the editor has the key first, and what is left is
+        /// "leave edit mode".
         Close,
+        /// ⌘E: enters edit mode, or leaves it.
+        Edit,
+        /// ⌘S: saves the buffer (only while editing).
+        Save,
+        /// The row's button: the disk's changes come into the buffer.
+        Merge,
+        /// The row's button: the buffer goes, the file is read again.
+        DiscardMine,
+        /// The row's button: keep the buffer, the file stays changed.
+        KeepEditing,
+        /// Save Anyway, after Keep Editing: replaces the file as it is.
+        SaveAnyway,
         /// ↓ in Files: the next row; stops at the end.
         FilesNext,
         /// ↑ in Files: the previous row; stops at the start.
@@ -63,6 +79,9 @@ const IN_FILES: &str = "Sidebar > files";
 /// The keys of the view work from the find field as well: the field is a
 /// single line, and it has no use for them.
 const IN_READER_OR_FIELD: &str = "Content > reader";
+/// ⌘[ and ⌘] are the editor's Outdent and Indent while editing: the reader's
+/// history keys are not bound then (the root element's context has `editing`).
+const IN_READER_NOT_EDITING: &str = "(Content > reader) && !editing";
 /// Esc is the field's own while the focus is in it (it closes the find bar
 /// itself, before the key gets here).
 const IN_READER: &str = "(Content > reader) && !Input";
@@ -72,8 +91,10 @@ pub const KEY_BINDINGS_ID: &str = "file-reader";
 
 /// Keystrokes (GPUI key names, not interface text), the action and the
 /// context predicate.
-pub fn key_bindings() -> Vec<(&'static str, Box<dyn Action>, Option<&'static str>)> {
-    vec![
+///
+/// `edit` is whether the edit mode is reachable: ⌘E and ⌘S exist only then.
+pub fn key_bindings(edit: bool) -> Vec<(&'static str, Box<dyn Action>, Option<&'static str>)> {
+    let mut bindings: Vec<(&'static str, Box<dyn Action>, Option<&'static str>)> = vec![
         ("cmd-f", Box::new(Find), Some(IN_READER_OR_FIELD)),
         ("cmd-g", Box::new(FindNext), Some(IN_READER_OR_FIELD)),
         (
@@ -81,13 +102,18 @@ pub fn key_bindings() -> Vec<(&'static str, Box<dyn Action>, Option<&'static str
             Box::new(FindPrevious),
             Some(IN_READER_OR_FIELD),
         ),
-        ("cmd-[", Box::new(Back), Some(IN_READER_OR_FIELD)),
-        ("cmd-]", Box::new(Forward), Some(IN_READER_OR_FIELD)),
+        ("cmd-[", Box::new(Back), Some(IN_READER_NOT_EDITING)),
+        ("cmd-]", Box::new(Forward), Some(IN_READER_NOT_EDITING)),
         ("escape", Box::new(Close), Some(IN_READER)),
         ("down", Box::new(FilesNext), Some(IN_FILES)),
         ("up", Box::new(FilesPrevious), Some(IN_FILES)),
         ("right", Box::new(FilesExpand), Some(IN_FILES)),
         ("left", Box::new(FilesCollapse), Some(IN_FILES)),
         ("enter", Box::new(FilesOpen), Some(IN_FILES)),
-    ]
+    ];
+    if edit {
+        bindings.push(("cmd-e", Box::new(Edit), Some(IN_READER_OR_FIELD)));
+        bindings.push(("cmd-s", Box::new(Save), Some(IN_READER_OR_FIELD)));
+    }
+    bindings
 }

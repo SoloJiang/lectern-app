@@ -16,10 +16,12 @@ use lectern_services::workspace::{
     Contribution, ContributionKind, ScreenLayout, SidebarSection, Target, Visibility,
     WorkspaceCommand, screens,
 };
+use lectern_syntax::NotEditable;
 use lectern_ui::contrib::{KeyBindings, Screen, SidebarItem, SidebarPanel, ToolbarItems};
-use lectern_ui::{Button, Icon, Text};
+use lectern_ui::{Button, ButtonKind, ButtonSize, Icon, Text};
 
 use crate::actions;
+use crate::edit::reason_key;
 use crate::files;
 use crate::nodes;
 use crate::shared::Shared;
@@ -95,7 +97,7 @@ pub(crate) fn registrations(shared: &Arc<Shared>) -> Vec<Contribution> {
             kind: ContributionKind::KeyBindings,
             id: Name::Borrowed(actions::KEY_BINDINGS_ID),
             order: 0,
-            payload: KeyBindings(actions::key_bindings()).into_payload(),
+            payload: KeyBindings(actions::key_bindings(shared.edit_reachable())).into_payload(),
         },
     ]
 }
@@ -118,7 +120,10 @@ fn current(cx: &App) -> Option<Entity<ReadingView>> {
 }
 
 /// The toolbar (`Screen::toolbar`): the file's name, its path, and the
-/// history's back and forward buttons.
+/// history's back and forward buttons; Edit… where the edit mode is
+/// reachable, and Done and Save while editing. `workspace` shows at most
+/// three controls, so while editing the history has only the back button
+/// (greyed): the forward one would push Save out.
 fn toolbar(cx: &mut App) -> ToolbarItems {
     let strings = lectern_ui::strings(cx);
     let Some(view) = current(cx) else {
@@ -128,7 +133,7 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
             controls: Vec::new(),
         };
     };
-    let (title, subtitle, forward) = {
+    let (title, subtitle, forward, edit) = {
         let view = view.read(cx);
         let target = view
             .snapshot
@@ -138,6 +143,13 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
             target.as_ref().map(title_of),
             target.as_ref().map(|t| subtitle_of(t, &strings)),
             view.can_forward(),
+            EditFacts {
+                reachable: view.shared.edit_reachable(),
+                editing: view.editing(),
+                reason: view.not_editable(),
+                dirty: view.edit.as_ref().is_some_and(|edit| edit.dirty()),
+                anyway: view.save_anyway(),
+            },
         )
     };
     let weak = view.downgrade();
@@ -146,26 +158,109 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
         Button::icon_only(
             nodes::plain("toolbar").child("back"),
             Icon::Back,
-            Text::key(&strings, keys::file_reader::BACK_TOOLTIP),
+            Text::key(
+                &strings,
+                if edit.editing {
+                    keys::file_reader::BACK_EDITING_TOOLTIP
+                } else {
+                    keys::file_reader::BACK_TOOLTIP
+                },
+            ),
         )
+        .disabled(edit.editing)
         .on_click(move |_, cx| {
             let _ = weak.update(cx, |view, cx| view.go_back(cx));
         })
     };
-    let forward = Button::icon_only(
-        nodes::plain("toolbar").child("forward"),
-        Icon::Forward,
-        Text::key(&strings, keys::file_reader::FORWARD_TOOLTIP),
-    )
-    .disabled(!forward)
-    .on_click(move |_, cx| {
-        let _ = weak.update(cx, |view, cx| view.go_forward(cx));
-    });
+    let mut controls = vec![back.into_any_element()];
+    if edit.editing {
+        let done = {
+            let weak = weak.clone();
+            Button::new(
+                nodes::plain("toolbar").child("done"),
+                Text::key(&strings, keys::file_reader::DONE),
+            )
+            .kind(ButtonKind::Secondary)
+            .size(ButtonSize::Toolbar)
+            .on_click(move |window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    view.leave_edit(window, cx);
+                });
+            })
+        };
+        let anyway = edit.anyway;
+        let save = Button::new(
+            nodes::plain("toolbar").child("save"),
+            Text::key(
+                &strings,
+                if anyway {
+                    keys::file_reader::SAVE_ANYWAY
+                } else {
+                    keys::file_reader::SAVE
+                },
+            ),
+        )
+        .kind(ButtonKind::Primary)
+        .size(ButtonSize::Toolbar)
+        .disabled(!edit.dirty)
+        .on_click(move |_, cx| {
+            let _ = weak.update(cx, |view, cx| view.save(anyway, cx));
+        });
+        controls.push(done.into_any_element());
+        controls.push(save.into_any_element());
+    } else {
+        let forward = {
+            let weak = weak.clone();
+            Button::icon_only(
+                nodes::plain("toolbar").child("forward"),
+                Icon::Forward,
+                Text::key(&strings, keys::file_reader::FORWARD_TOOLTIP),
+            )
+            .disabled(!forward)
+            .on_click(move |_, cx| {
+                let _ = weak.update(cx, |view, cx| view.go_forward(cx));
+            })
+        };
+        controls.push(forward.into_any_element());
+        if edit.reachable {
+            // A reason for a grey button goes in the probe node: `ui`'s
+            // button has no tooltip (the reason is what the tooltip says).
+            let mut button = Button::new(
+                nodes::plain("toolbar").child("edit"),
+                Text::key(&strings, keys::file_reader::EDIT),
+            )
+            .kind(ButtonKind::Secondary)
+            .size(ButtonSize::Toolbar)
+            .disabled(edit.reason.is_some())
+            .on_click(move |window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    view.enter_edit(window, cx);
+                });
+            });
+            if let Some(reason) = edit.reason {
+                let key = reason_key(reason);
+                button = button
+                    .attr("reason", key.name())
+                    .attr("tooltip", Text::key(&strings, key).shared());
+            }
+            controls.push(button.into_any_element());
+        }
+    }
     ToolbarItems {
         title: title.unwrap_or_else(|| Text::verbatim(String::new())),
         subtitle,
-        controls: vec![back.into_any_element(), forward.into_any_element()],
+        controls,
     }
+}
+
+/// What the toolbar needs to know of the edit mode.
+struct EditFacts {
+    reachable: bool,
+    editing: bool,
+    /// Why the document cannot be edited now.
+    reason: Option<NotEditable>,
+    dirty: bool,
+    anyway: bool,
 }
 
 /// The file's name.

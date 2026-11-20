@@ -32,7 +32,7 @@ actions!(file_reader_test, [ProbeEscape]);
 
 /// The content region `workspace` gives the screen: the `Content` key
 /// context the bindings name, and a stand-in for `workspace`'s Esc.
-struct Host {
+pub(super) struct Host {
     child: Option<gpui::AnyView>,
     probe: Arc<AtomicUsize>,
 }
@@ -53,21 +53,22 @@ impl Render for Host {
 
 /// The plugin in a kernel with the mocked services, a project folder with
 /// files, and the reading view in a window.
-struct Rig {
-    res: Resources,
-    kernel: TestKernel,
-    session: Arc<Session>,
-    code_intel: Arc<FakeCodeIntel>,
-    contributions: Arc<FakeContributions>,
-    tree: Tree,
-    key: ProjectKey,
-    window: WindowHandle<Host>,
-    view: Entity<ReadingView>,
-    probe: Arc<AtomicUsize>,
+pub(super) struct Rig {
+    pub(super) res: Resources,
+    pub(super) kernel: TestKernel,
+    pub(super) session: Arc<Session>,
+    pub(super) projects: Arc<FakeProjects>,
+    pub(super) code_intel: Arc<FakeCodeIntel>,
+    pub(super) contributions: Arc<FakeContributions>,
+    pub(super) tree: Tree,
+    pub(super) key: ProjectKey,
+    pub(super) window: WindowHandle<Host>,
+    pub(super) view: Entity<ReadingView>,
+    pub(super) probe: Arc<AtomicUsize>,
 }
 
 /// `lines` lines of `line <n>` and some words to find.
-fn numbered(lines: usize) -> String {
+pub(super) fn numbered(lines: usize) -> String {
     let mut text = String::new();
     for n in 0..lines {
         if n % 10 == 3 {
@@ -80,13 +81,23 @@ fn numbered(lines: usize) -> String {
 }
 
 impl Rig {
-    fn new(cx: &mut TestAppContext) -> Rig {
+    /// The shipped configuration: edit mode is not reachable.
+    pub(super) fn new(cx: &mut TestAppContext) -> Rig {
+        Rig::build(cx, false)
+    }
+
+    /// A plugin whose views can enter edit mode.
+    pub(super) fn editable(cx: &mut TestAppContext) -> Rig {
+        Rig::build(cx, true)
+    }
+
+    fn build(cx: &mut TestAppContext, edit: bool) -> Rig {
         // The kernel thread wakes the foreground task; the test scheduler
         // accepts a wake from another thread only with parking allowed.
         cx.executor().allow_parking();
         cx.update(|cx| init_fixed(cx, Strings::of(Locale::En), Appearance::Light, false));
         let res = Resources::new();
-        let plugin = FileReaderPlugin::new(res.deps());
+        let plugin = FileReaderPlugin::new(res.deps()).with_edit(edit);
         let sessions = plugin.sessions();
         let projects = Arc::new(FakeProjects::default());
         let code_intel = Arc::new(FakeCodeIntel::default());
@@ -122,6 +133,7 @@ impl Rig {
             res,
             kernel,
             session,
+            projects,
             code_intel,
             contributions,
             tree,
@@ -132,13 +144,13 @@ impl Rig {
         }
     }
 
-    fn visual(&self, cx: &mut TestAppContext) -> VisualTestContext {
+    pub(super) fn visual(&self, cx: &mut TestAppContext) -> VisualTestContext {
         VisualTestContext::from_window(AnyWindowHandle::from(self.window), cx)
     }
 
     /// Lets the kernel, the executor and the main-thread tasks finish, until
     /// nothing is left (each pass can wake the next).
-    fn settle(&self, cx: &mut TestAppContext) {
+    pub(super) fn settle(&self, cx: &mut TestAppContext) {
         for _ in 0..4 {
             self.kernel.inner().expect("the kernel").barrier();
             self.res.settle();
@@ -148,7 +160,7 @@ impl Rig {
 
     /// One frame, twice (the view reads what the element measured on its
     /// next render).
-    fn draw(&self, cx: &mut TestAppContext) {
+    pub(super) fn draw(&self, cx: &mut TestAppContext) {
         let mut visual = self.visual(cx);
         for _ in 0..2 {
             visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -156,12 +168,12 @@ impl Rig {
         }
     }
 
-    fn write(&self, rel: &str, text: &str) {
+    pub(super) fn write(&self, rel: &str, text: &str) {
         self.tree.write(rel, text.as_bytes());
     }
 
     /// `Reader::open` of a file of the project, as the review screen does it.
-    fn open(&self, cx: &mut TestAppContext, rel: &str, at: Anchor) {
+    pub(super) fn open(&self, cx: &mut TestAppContext, rel: &str, at: Anchor) {
         self.session.open(file(&self.key, rel, at));
         self.settle(cx);
         self.draw(cx);
@@ -169,12 +181,12 @@ impl Rig {
         self.draw(cx);
     }
 
-    fn read<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&ReadingView) -> R) -> R {
+    pub(super) fn read<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&ReadingView) -> R) -> R {
         self.view.read_with(cx, |view, _| f(view))
     }
 
     /// One frame with the recorder armed: the semantic records.
-    fn record(&self, cx: &mut TestAppContext) -> Vec<Record> {
+    pub(super) fn record(&self, cx: &mut TestAppContext) -> Vec<Record> {
         self.draw(cx);
         let mut visual = self.visual(cx);
         let id = visual.update(|window, _| window.window_handle().window_id());
@@ -183,7 +195,7 @@ impl Rig {
         Recorder::finish()
     }
 
-    fn scroll(&self, cx: &mut TestAppContext, rows: f32) {
+    pub(super) fn scroll(&self, cx: &mut TestAppContext, rows: f32) {
         let mut visual = self.visual(cx);
         let line = self.read(cx, |view| view.metrics.expect("drawn").line_height);
         visual.simulate_event(ScrollWheelEvent {
@@ -194,7 +206,7 @@ impl Rig {
         visual.run_until_parked();
     }
 
-    fn type_in_find(&self, cx: &mut TestAppContext, text: &str) {
+    pub(super) fn type_in_find(&self, cx: &mut TestAppContext, text: &str) {
         let field = self.read(cx, |view| view.find.field.clone());
         let mut visual = self.visual(cx);
         visual.update(|window, cx| {
@@ -205,7 +217,7 @@ impl Rig {
     }
 }
 
-fn attr<'a>(record: &'a Record, key: &str) -> Option<&'a str> {
+pub(super) fn attr<'a>(record: &'a Record, key: &str) -> Option<&'a str> {
     record
         .semantic
         .attrs
@@ -214,7 +226,7 @@ fn attr<'a>(record: &'a Record, key: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_ref())
 }
 
-fn find_node<'a>(records: &'a [Record], id: &str) -> Option<&'a Record> {
+pub(super) fn find_node<'a>(records: &'a [Record], id: &str) -> Option<&'a Record> {
     records.iter().find(|r| r.semantic.id.as_str() == id)
 }
 
@@ -247,7 +259,7 @@ fn view_registers_the_screen_and_its_keys(cx: &mut TestAppContext) {
             "enter"
         ]
     );
-    assert_eq!(key_bindings().len(), keys.len());
+    assert_eq!(key_bindings(false).len(), keys.len());
     // Esc is the only key that leaves a text box alone, and the reader's
     // only: the Files tree has none (`workspace`'s Esc closes the panel).
     let all = rig.contributions.keys();
@@ -570,8 +582,8 @@ fn view_history_buttons_follow_the_history(cx: &mut TestAppContext) {
 }
 
 /// The toolbar's controls, drawn the way `workspace` draws them.
-struct Bar {
-    screen: lectern_ui::contrib::Screen,
+pub(super) struct Bar {
+    pub(super) screen: lectern_ui::contrib::Screen,
 }
 
 impl Render for Bar {

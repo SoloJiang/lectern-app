@@ -8,17 +8,22 @@
 //! a self-drawn fixed-row-height list of display rows, the line number
 //! column, the find bar and the history's buttons. [`FilesView`] is the
 //! sidebar panel that lists the active worktree's tracked files from the
-//! directory table. Step 8 adds the edit mode. This crate does no IO and no
-//! parsing: documents are `syntax`'s (`Engine`), read through snapshots.
+//! directory table. The edit mode (step 8a: the code editor over `syntax`'s
+//! edit session, saving, the disk banner) is in `ReadingView` too, behind
+//! `edit::EDIT_REACHABLE` until the leave guard exists (step 8b). This crate
+//! does no IO and no parsing: documents are `syntax`'s (`Engine`), read
+//! through snapshots.
 
 pub mod actions;
 mod diag;
+mod edit;
 mod files;
 mod focus;
 mod history;
 mod nodes;
 mod plugin;
 mod render;
+mod render_edit;
 mod screen;
 mod session;
 mod shared;
