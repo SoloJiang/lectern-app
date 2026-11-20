@@ -9,6 +9,39 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
+# The "file-reader" plugin (docs/design/file_reader.md「依赖」, ADR 0025): it
+# requires services only and is depended on by `app`.
+plugin = true
+
+[dependencies]
+# `Cache`, handed to the engine (`syntax.lines`).
+lectern-cache = { path = "../cache" }
+# `Executor`, handed to the engine; the plugin submits no task of its own.
+lectern-executor = { path = "../executor" }
+# `Watcher`, handed to the engine.
+lectern-fs-watch = { path = "../fs_watch" }
+# `Plugin`, `Active`, `Context`, `PluginHandle`, `ServiceRef`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging (docs/design/file_reader.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Reader`, `dyn Projects`, `dyn CodeIntel`, `dyn Contributions` and their
+# data types.
+lectern-services = { path = "../services" }
+# `Engine`, `DocHandle`, `DocSnapshot`: the documents are `syntax`'s; this
+# crate only reads their snapshots (architecture rule 4).
+lectern-syntax = { path = "../syntax" }
+
+[dev-dependencies]
+lectern-cache = { path = "../cache", features = ["test-support"] }
+lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
+# `testing::host`, `testing::ts`: a plugin handle for the engine and
+# synthetic sources.
+lectern-syntax = { path = "../syntax", features = ["test-support"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

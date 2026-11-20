@@ -4756,6 +4756,16 @@ dependencies = [
 [[package]]
 name = "lectern-file-reader"
 version = "0.0.0"
+dependencies = [
+ "lectern-cache",
+ "lectern-executor",
+ "lectern-fs-watch",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-syntax",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-forge"
