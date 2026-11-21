@@ -106,6 +106,9 @@ pub(crate) fn milestone_name(milestone: &Milestone) -> &'static str {
         Milestone::FileHighlighted => "file_highlighted",
         Milestone::DiffShown => "diff_shown",
         Milestone::WorktreeSwitched => "worktree_switched",
+        Milestone::FilesShown => "files_shown",
+        Milestone::FilesExpanded => "files_expanded",
+        Milestone::EditReady => "edit_ready",
     }
 }
 

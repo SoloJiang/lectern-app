@@ -25,6 +25,8 @@ use lectern_project::testing::Shape;
 #[allow(dead_code, reason = "each target uses its own subset of the fixtures")]
 #[path = "fixtures/git_worktree.rs"]
 mod git_worktree;
+#[path = "fixtures/reader_files.rs"]
+mod reader_files;
 #[path = "fixtures/review_session.rs"]
 mod review_session;
 
@@ -59,6 +61,26 @@ const BENCHES: &[Bench] = &[
     Bench {
         id: "app/open_diff",
         run: app_open_diff,
+    },
+    Bench {
+        id: "app/open_file",
+        run: app_open_file,
+    },
+    Bench {
+        id: "app/nav_back",
+        run: app_nav_back,
+    },
+    Bench {
+        id: "app/enter_edit",
+        run: app_enter_edit,
+    },
+    Bench {
+        id: "app/files_open",
+        run: app_files_open,
+    },
+    Bench {
+        id: "app/files_expand",
+        run: app_files_expand,
     },
     Bench {
         id: "app/switch_worktree",
@@ -382,6 +404,303 @@ fn app_switch_worktree(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     );
     Ok(vec![
         Measured::new("app/switch_worktree", Value::Time(Samples(times))).with_note(Some(note)),
+    ])
+}
+
+/// A launch of the whole profile that has opened `root` and settled: the
+/// state every end-to-end file benchmark starts from (the empty window
+/// settles first, as in `app/open_diff`).
+fn launch_with_project<'a>(
+    scheduler: &'a Scheduler<'a>,
+    program: &Path,
+    root: &Path,
+    id: &str,
+) -> Result<Session<'a>, BenchError> {
+    let mut session = scheduler.session(program, None)?;
+    settle(&mut session, id)?;
+    session.open(
+        OpenTarget::Project(root.to_owned()),
+        Milestone::ProjectHome,
+        OPEN_LIMIT,
+    )?;
+    settle(&mut session, id)?;
+    Ok(session)
+}
+
+/// The middle sample of `times` (the larger of the two in the middle for an
+/// even count), as the runner's median.
+fn median(times: &[Duration]) -> Duration {
+    let mut sorted = times.to_vec();
+    sorted.sort();
+    sorted.get(sorted.len() / 2).copied().unwrap_or_default()
+}
+
+/// `app/open_file`: for each scenario of ADR 0034 and ADR 0042, 5 launches,
+/// one at a time. Each opens the fixture project and lets it settle, opens a
+/// small file of the scenario's language (the first use of a language in
+/// the run compiles its highlight query, outside the budget: ADR 0064; its
+/// time is `app/open_file/first`, record only), lets it settle, closes the
+/// reading view with Esc and lets it settle, then
+/// sends `Open(File)` of the scenario's file (as `Reader::open` takes it,
+/// at the scenario's byte offset): from the request to the
+/// `FileHighlighted` milestone's frame, the first screen drawn and
+/// highlighted. The scenarios are an ordinary file of the `cloudprint`
+/// shape, 4 MiB and 64 MiB of TypeScript and the middle of a 4 MiB
+/// `package-lock.json` at a byte offset, 4 MiB of JavaScript in one line,
+/// and the old side of a 4 MiB file the review's diff of the worktree's
+/// changes shows (its blob shared by the review, opened at the changed line).
+/// The budget applies to every scenario but the minified one, so the result
+/// is the samples of the one with the largest median; the note gives each
+/// scenario's median. The minified file is `app/open_file/minified`, record
+/// only (ADR 0065).
+fn app_open_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let program = app(ctx)?;
+    let repo = reader_files::ReaderRepo::cloudprint()?;
+    let scenarios = repo.large(ctx);
+    let changed =
+        reader_files::Changed::new(ctx.scale(reader_files::CHANGED_LEN, reader_files::MIB))?;
+    let scheduler = scheduler(ctx);
+    let launches = ctx.scale(5, 1);
+    let mut results: Vec<(String, Vec<Duration>)> = Vec::new();
+    let mut firsts: Vec<(String, Vec<Duration>)> = Vec::new();
+    for scenario in &scenarios {
+        let mut times = Vec::new();
+        let mut first = Vec::new();
+        for _ in 0..launches {
+            let mut session =
+                launch_with_project(&scheduler, &program, repo.root(), "app/open_file")?;
+            // The language's first use in the run compiles its highlight
+            // query, which the budget does not count (ADR 0064): a small
+            // file of the same language is opened first, its time recorded
+            // as `app/open_file/first`. Esc closes the reading view, so the
+            // timed open starts from the project as the first one did (the
+            // first screen starts when the request arrives).
+            first.push(session.open(
+                OpenTarget::File {
+                    path: scenario.warm.clone(),
+                    byte: None,
+                    old: None,
+                },
+                Milestone::FileHighlighted,
+                OPEN_LIMIT,
+            )?);
+            settle(&mut session, "app/open_file")?;
+            session.request(OpenTarget::Key("escape".to_owned()))?;
+            settle(&mut session, "app/open_file")?;
+            times.push(session.open(
+                OpenTarget::File {
+                    path: scenario.path.clone(),
+                    byte: scenario.byte,
+                    old: None,
+                },
+                Milestone::FileHighlighted,
+                OPEN_LIMIT,
+            )?);
+            session.quit()?;
+        }
+        results.push((
+            format!("{} ({} bytes)", scenario.name, scenario.bytes),
+            times,
+        ));
+        firsts.push((format!("{} warm-up", scenario.name), first));
+    }
+    // The old side: the review shows the diff of the changes first (it
+    // shares both sides' text with the reader), then the hunk's old line is
+    // opened by its blob and byte offset.
+    let mut times = Vec::new();
+    for _ in 0..launches {
+        let mut session =
+            launch_with_project(&scheduler, &program, changed.root(), "app/open_file")?;
+        session.open(OpenTarget::Changes, Milestone::DiffShown, OPEN_LIMIT)?;
+        settle(&mut session, "app/open_file")?;
+        times.push(session.open(
+            OpenTarget::File {
+                path: changed.path(),
+                byte: Some(changed.byte),
+                old: Some(changed.oid.clone()),
+            },
+            Milestone::FileHighlighted,
+            OPEN_LIMIT,
+        )?);
+        session.quit()?;
+    }
+    results.push((format!("old side ({} bytes)", changed.bytes), times));
+    // The file minified into one line is recorded on its own, not judged
+    // (ADR 0065).
+    let at = results
+        .iter()
+        .position(|(name, _)| name.starts_with(reader_files::MINIFIED))
+        .ok_or_else(|| BenchError::new("no minified scenario"))?;
+    let (minified_name, minified) = results.remove(at);
+    let (note, worst) = slowest(results)?;
+    let (first_note, first) = slowest(firsts)?;
+    Ok(vec![
+        Measured::new("app/open_file", Value::Time(Samples(worst)))
+            .with_note(Some(format!("the slowest scenario's samples; {note}"))),
+        Measured::new("app/open_file/minified", Value::Time(Samples(minified)))
+            .with_note(Some(format!("{minified_name}, record only (ADR 0065)"))),
+        Measured::new("app/open_file/first", Value::Time(Samples(first))).with_note(Some(format!(
+            "the first open of a language in a run, record only (ADR 0064); {first_note}"
+        ))),
+    ])
+}
+
+/// Each scenario's median in a note, and the samples of the scenario with
+/// the largest median.
+fn slowest(results: Vec<(String, Vec<Duration>)>) -> Result<(String, Vec<Duration>), BenchError> {
+    let note = results
+        .iter()
+        .map(|(name, times)| {
+            format!(
+                "{name} median {:.1} µs, times {}",
+                median(times).as_secs_f64() * 1e6,
+                microseconds(times)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let (_, worst) = results
+        .into_iter()
+        .max_by_key(|(_, times)| median(times))
+        .ok_or_else(|| BenchError::new("no scenario"))?;
+    Ok((note, worst))
+}
+
+/// `app/nav_back`: 5 launches, one at a time. Each opens the `cloudprint`
+/// shape and lets it settle, opens one ordinary file and then another
+/// (each settles), and sends the key ⌘[ to the focus: from the request to
+/// the `FileHighlighted` milestone's frame, the first file shown again from
+/// the history (a file of 1 MiB or less: from the LRU, without reading it).
+fn app_nav_back(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let program = app(ctx)?;
+    let repo = reader_files::ReaderRepo::cloudprint()?;
+    let (first, second) = repo.pair();
+    let scheduler = scheduler(ctx);
+    let mut times = Vec::new();
+    for _ in 0..ctx.scale(5, 1) {
+        let mut session = launch_with_project(&scheduler, &program, repo.root(), "app/nav_back")?;
+        for scenario in [&first, &second] {
+            session.open(
+                OpenTarget::File {
+                    path: scenario.path.clone(),
+                    byte: scenario.byte,
+                    old: None,
+                },
+                Milestone::FileHighlighted,
+                OPEN_LIMIT,
+            )?;
+            settle(&mut session, "app/nav_back")?;
+        }
+        times.push(session.open(
+            OpenTarget::Key("cmd-[".to_owned()),
+            Milestone::FileHighlighted,
+            OPEN_LIMIT,
+        )?);
+        session.quit()?;
+    }
+    let note = format!(
+        "two files of {} bytes; times {}",
+        first.bytes,
+        microseconds(&times)
+    );
+    Ok(vec![
+        Measured::new("app/nav_back", Value::Time(Samples(times))).with_note(Some(note)),
+    ])
+}
+
+/// `app/enter_edit`: 5 launches, one at a time. Each opens the `cloudprint`
+/// shape, opens a TypeScript file at the edit limit (1 MiB, no long line,
+/// ADR 0034) and lets it settle (the whole file is read, so Edit is
+/// available), and sends the key ⌘E to the focus: from the request to the
+/// `EditReady` milestone's frame, the editor drawn with the focus in it.
+fn app_enter_edit(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let program = app(ctx)?;
+    let repo = reader_files::ReaderRepo::cloudprint()?;
+    let file = repo.editable();
+    let scheduler = scheduler(ctx);
+    let mut times = Vec::new();
+    for _ in 0..ctx.scale(5, 1) {
+        let mut session = launch_with_project(&scheduler, &program, repo.root(), "app/enter_edit")?;
+        session.open(
+            OpenTarget::File {
+                path: file.path.clone(),
+                byte: None,
+                old: None,
+            },
+            Milestone::FileHighlighted,
+            OPEN_LIMIT,
+        )?;
+        settle(&mut session, "app/enter_edit")?;
+        times.push(session.open(
+            OpenTarget::Key("cmd-e".to_owned()),
+            Milestone::EditReady,
+            OPEN_LIMIT,
+        )?);
+        session.quit()?;
+    }
+    let note = format!(
+        "a file of {} bytes; times {}",
+        file.bytes,
+        microseconds(&times)
+    );
+    Ok(vec![
+        Measured::new("app/enter_edit", Value::Time(Samples(times))).with_note(Some(note)),
+    ])
+}
+
+/// `app/files_open`: 5 launches, one at a time. Each opens the large
+/// repository (the 100 000-file shape of `app/idle_100k`) and lets it
+/// settle, so the directory table is built, and sends `Open(Files)`: from
+/// the request to the `FilesShown` milestone's frame, the panel with the
+/// tree's first rows drawn.
+fn app_files_open(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let program = app(ctx)?;
+    let repo = reader_files::Wide::new(ctx)?;
+    let scheduler = scheduler(ctx);
+    let mut times = Vec::new();
+    for _ in 0..ctx.scale(5, 1) {
+        let mut session = launch_with_project(&scheduler, &program, repo.root(), "app/files_open")?;
+        times.push(session.open(OpenTarget::Files, Milestone::FilesShown, OPEN_LIMIT)?);
+        session.quit()?;
+    }
+    let note = format!("{} files; times {}", repo.files, microseconds(&times));
+    Ok(vec![
+        Measured::new("app/files_open", Value::Time(Samples(times))).with_note(Some(note)),
+    ])
+}
+
+/// `app/files_expand`: 5 launches, one at a time. Each opens the large
+/// repository, shows Files (untimed) and selects the first row, the
+/// directory of 2 000 files, with the key ↓, lets it settle, and sends the
+/// key →: from the request to the `FilesExpanded` milestone's frame, the
+/// directory's rows inserted and drawn.
+fn app_files_expand(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let program = app(ctx)?;
+    let repo = reader_files::Wide::new(ctx)?;
+    let scheduler = scheduler(ctx);
+    let mut times = Vec::new();
+    for _ in 0..ctx.scale(5, 1) {
+        let mut session =
+            launch_with_project(&scheduler, &program, repo.root(), "app/files_expand")?;
+        session.open(OpenTarget::Files, Milestone::FilesShown, OPEN_LIMIT)?;
+        settle(&mut session, "app/files_expand")?;
+        session.request(OpenTarget::Key("down".to_owned()))?;
+        settle(&mut session, "app/files_expand")?;
+        times.push(session.open(
+            OpenTarget::Key("right".to_owned()),
+            Milestone::FilesExpanded,
+            OPEN_LIMIT,
+        )?);
+        session.quit()?;
+    }
+    let note = format!(
+        "{} files, a directory of {}; times {}",
+        repo.files,
+        repo.children,
+        microseconds(&times)
+    );
+    Ok(vec![
+        Measured::new("app/files_expand", Value::Time(Samples(times))).with_note(Some(note)),
     ])
 }
 

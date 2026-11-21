@@ -16,7 +16,7 @@ use lectern_logging::testing;
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::BlobId;
 use lectern_services::reader::{Anchor, Reader};
-use lectern_services::workspace::WorkspaceCommand;
+use lectern_services::workspace::{Milestone, WorkspaceCommand};
 use lectern_syntax::NotEditable;
 use lectern_ui::code_style;
 use lectern_ui::semantic::{Record, Recorder};
@@ -266,6 +266,40 @@ fn edit_enter_puts_the_text_in_the_editor_and_marks_the_document(cx: &mut TestAp
     assert!(!disabled(&bar, "file-reader.toolbar.done"));
     assert!(disabled(&bar, "file-reader.toolbar.save"));
     assert!(find_node(&bar, "file-reader.toolbar.edit").is_none());
+}
+
+#[gpui::test]
+fn edit_the_milestone_is_the_editors_first_frame_once_per_edit_mode(cx: &mut TestAppContext) {
+    let rig = Rig::editable(cx);
+    rig.write("a.ts", source());
+    rig.open(cx, "a.ts", Anchor::Start);
+    // The document's own milestone is the only one before the edit mode.
+    let before = rig.contributions.milestones();
+    assert!(!before.contains(&Milestone::EditReady));
+    assert!(rig.enter(cx));
+    let frame = |rig: &Rig, cx: &mut TestAppContext| {
+        let mut visual = rig.visual(cx);
+        visual.update(|window, cx| window.simulate_next_frame(cx));
+        visual.run_until_parked();
+    };
+    frame(&rig, cx);
+    let ready = |rig: &Rig| {
+        rig.contributions
+            .milestones()
+            .iter()
+            .filter(|m| **m == Milestone::EditReady)
+            .count()
+    };
+    assert_eq!(ready(&rig), 1);
+    // Drawing again reports nothing; a second edit mode reports its own.
+    rig.draw(cx);
+    frame(&rig, cx);
+    assert_eq!(ready(&rig), 1);
+    rig.with_view(cx, |view, window, cx| view.leave_edit(window, cx));
+    rig.after(cx);
+    assert!(rig.enter(cx));
+    frame(&rig, cx);
+    assert_eq!(ready(&rig), 2);
 }
 
 #[gpui::test]

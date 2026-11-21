@@ -82,7 +82,7 @@ pub trait Contributions: Send + Sync {
 
     /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：本 crate 记下时刻并转给 `app`，
     /// 从画出结果的那一帧到记时刻只等一帧。`Milestone::reported_after_frame()` 为 `true` 的（`DiffShown`、
-    /// `FileHighlighted`），视图在 `Window::on_next_frame` 的回调里报告，那一帧已经显示，本 crate 按调用的时刻记
+    /// `FileHighlighted`、`FilesShown`、`FilesExpanded`、`EditReady`），视图在 `Window::on_next_frame` 的回调里报告，那一帧已经显示，本 crate 按调用的时刻记
     /// （`Hub` 在调用线程上取 `SystemTime::now()`，不等队列）；为 `false` 的（`ProjectHome`、`WorktreeSwitched`），
     /// 视图在画这一帧时报告，本 crate 在下一帧回调里记。任何线程。
     fn report_milestone(&self, milestone: Milestone);
@@ -238,7 +238,12 @@ impl Event for WorkspaceEvent {}
 pub enum Layer { SidebarPanel(Name), Inspector, Panel(Name), Overlay(Name) }
 
 /// bench 的里程碑（bench 设计 `Milestone` 的同名变体；`app` 做映射，本 crate 不依赖 tool 层）。
-pub enum Milestone { ProjectHome, FileHighlighted, DiffShown, WorktreeSwitched }
+pub enum Milestone {
+    ProjectHome, FileHighlighted, DiffShown, WorktreeSwitched,
+    /// Files 面板的树第一次有行的一帧 / 一个目录打开之后的一帧 / 编辑器第一次画出的一帧：
+    /// `file_reader` 的视图在画出之后的下一帧回调里报告（file_reader 设计「性能」，`app/files_open`、`app/files_expand`、`app/enter_edit`）。
+    FilesShown, FilesExpanded, EditReady,
+}
 ```
 
 调用方：

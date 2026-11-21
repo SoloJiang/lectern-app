@@ -61,6 +61,11 @@ pub struct FilesView {
     want_reveal: bool,
     /// How many rows the last frame built.
     pub(crate) built: Cell<usize>,
+    /// The tree's first frame was reported as `Milestone::FilesShown`.
+    pub(crate) shown: bool,
+    /// A directory was opened and its rows are not reported yet
+    /// (`Milestone::FilesExpanded`, on the next frame).
+    pub(crate) expanded_pending: bool,
     _listen: Task<()>,
 }
 
@@ -102,6 +107,8 @@ impl FilesView {
             selected: None,
             want_reveal: true,
             built: Cell::new(0),
+            shown: false,
+            expanded_pending: false,
             _listen: listen,
         };
         view.refresh(cx);
@@ -261,6 +268,7 @@ impl FilesView {
         match tree.open_at(index) {
             Some(false) => {
                 tree.expand(index);
+                self.expanded_pending = true;
                 cx.notify();
             }
             Some(true) => {
@@ -317,6 +325,7 @@ impl FilesView {
                     tree.collapse(index);
                 } else {
                     tree.expand(index);
+                    self.expanded_pending = true;
                 }
                 self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
                 cx.notify();

@@ -316,6 +316,97 @@ fn view_a_request_without_a_view_asks_workspace_for_the_screen(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn view_a_new_view_has_the_document_for_its_first_draw(cx: &mut TestAppContext) {
+    // ADR 0063: the screen's factory runs in a draw of `workspace` and takes
+    // the request that pushed the screen (`screen::build`). The draw then
+    // shows the first screen that `Reader::open` started, not an empty view
+    // that waits for the next frame: the document is `Ready` when the factory
+    // returns, before any foreground task ran. (Without the early start the
+    // snapshot is `opening` here.)
+    let rig = Rig::new(cx);
+    rig.write("a.rs", &numbered(50));
+    // The screen is not there (a popped screen's view is dropped); the
+    // request waits, its first screen is computed meanwhile.
+    rig.window
+        .update(cx, |host, _, cx| {
+            host.child = None;
+            cx.notify();
+        })
+        .unwrap();
+    rig.settle(cx);
+    let ticket = rig.session.open(file(&rig.key, "a.rs", Anchor::Start));
+    assert_eq!(rig.session.pending(), 1);
+    rig.res.settle();
+    let screen = rig.contributions.screen();
+    let snapshot = rig
+        .window
+        .update(cx, |host, window, cx| {
+            let view = (screen.build)(&Target::None, window, cx);
+            host.child = Some(view.clone());
+            let view = view.downcast::<ReadingView>().expect("a reading view");
+            // Nothing ran between the factory and this read: no
+            // `run_until_parked`, no foreground task.
+            view.read(cx).snapshot.clone()
+        })
+        .unwrap();
+    let snapshot = snapshot.expect("the view holds a snapshot already");
+    assert_eq!(snapshot.state, DocState::Ready);
+    assert_eq!(snapshot.highlight, lectern_syntax::Highlighting::On);
+    assert_eq!(rig.session.pending(), 0, "the request was taken");
+    assert!(
+        rig.session.history_len().eq(&(0, 0)),
+        "{ticket:?} was shown, nothing left behind"
+    );
+}
+
+#[gpui::test]
+fn view_a_first_open_logs_each_step_and_holds_no_content(cx: &mut TestAppContext) {
+    // docs/design/file_reader.md「日志与诊断」: the verbose records that
+    // attribute the time of `app/open_file`, with typed fields only.
+    const CANARY: &str = "canary7h3k9w2x4c";
+    let log = lectern_logging::testing::capture();
+    let rig = Rig::new(cx);
+    rig.write("a.rs", &format!("// {CANARY}\nfn {CANARY}() {{}}\n"));
+    rig.open(cx, "a.rs", Anchor::Start);
+    let record = |msg: &str| {
+        let found: Vec<String> = log
+            .lines()
+            .into_iter()
+            .filter(|line| line.contains(&format!("\"msg\":\"{msg}\"")))
+            .collect();
+        assert!(!found.is_empty(), "no record {msg:?}: {:#?}", log.lines());
+        found
+    };
+    let queued = record("a request to open a file was queued");
+    assert!(queued.iter().all(|l| l.contains("\"lv\":\"debug\"")
+        && l.contains("\"tg\":\"file_reader\"")
+        && l.contains("\"prestarted\":true")
+        && l.contains("\"pending\":1")
+        && l.contains("\"ticket\":")));
+    let built = record("the reading view was built");
+    assert!(built.iter().all(|l| l.contains("\"view\":")));
+    let computed = record("the first screen of an opened file was computed");
+    assert!(computed.iter().all(|l| l.contains("\"tg\":\"syntax\"")
+        && l.contains("\"prepare_us\":")
+        && l.contains("\"window_us\":")
+        && l.contains("\"outcome\":\"done\"")));
+    let taken = record("the reading view took a snapshot");
+    assert!(
+        taken
+            .iter()
+            .any(|l| l.contains("\"state\":\"ready\"") && l.contains("\"highlight\":\"on\"")),
+        "{taken:#?}"
+    );
+    assert!(
+        taken.iter().all(|l| !l.contains("\"state\":\"opening\"")),
+        "the first snapshot of the document already had its first screen"
+    );
+    // The drawn-ready record needs a next-frame callback: `app`'s
+    // `bench_keys` test checks it.
+    log.assert_absent(CANARY);
+}
+
+#[gpui::test]
 fn view_open_lays_out_only_the_rows_in_view(cx: &mut TestAppContext) {
     let rig = Rig::new(cx);
     rig.write("a.rs", &numbered(5_000));

@@ -19,11 +19,11 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lectern_executor::Priority;
 use lectern_git::{BlobHasher, GitError, Oid};
-use lectern_logging::{Value, error, warn};
+use lectern_logging::{Value, debug, error, warn};
 use lectern_platform::{FileIdentity, FullRead, OpenFile, Opened, RelPath, SafeError, SafeRoot};
 use lectern_services::code_intel::{DEPENDENCY_EXTENSIONS, DepRoot, TextOrigin};
 use lectern_services::project::{BlobId, ProjectKey};
@@ -304,6 +304,14 @@ pub(crate) fn first_screen(
     let (mut window, mut whole, mut highlight) = (None, None, Highlighting::Pending);
     let mut whole_from = None;
     let mut yielded = false;
+    // What the debug record of the first screen reports (never content).
+    let mut prepare = Duration::ZERO;
+    let mut parsing = Duration::ZERO;
+    let mut how = match lang {
+        None => "plain",
+        Some(_) if plan.encoding == Encoding::NotText => "plain",
+        Some(_) => "none",
+    };
     match lang {
         None => highlight = Highlighting::Plain,
         Some(_) if plan.encoding == Encoding::NotText => highlight = Highlighting::Plain,
@@ -322,20 +330,35 @@ pub(crate) fn first_screen(
                 whole = Some(spans);
                 whole_from = verified;
                 highlight = Highlighting::On;
+                how = "cached";
             } else if let Some(spans) = screen() {
                 window = Some(spans);
                 highlight = Highlighting::On;
+                how = "cached";
             } else if let Some(w) = plan.window.clone() {
-                // Compiling the query on first use is outside the budget.
+                // Compiling the query on first use is outside the budget
+                // (`Engine::warm` has usually done it by now).
+                let began = Instant::now();
                 lang.prepare();
-                match highlight::window(
+                prepare = began.elapsed();
+                let began = Instant::now();
+                let outcome = highlight::window(
                     lang,
                     &*pieces,
                     w,
                     &plan.json_pad,
                     plan.visible.clone(),
                     budget,
-                ) {
+                );
+                parsing = began.elapsed();
+                how = match &outcome {
+                    Outcome::Done(_) => "done",
+                    Outcome::Unavailable => "unavailable",
+                    Outcome::Yielded => "yielded",
+                    Outcome::TimedOut => "timed_out",
+                    Outcome::Cancelled => "cancelled",
+                };
+                match outcome {
                     Outcome::Done(spans) => {
                         window = Some(Arc::new(spans));
                         highlight = Highlighting::On;
@@ -351,6 +374,14 @@ pub(crate) fn first_screen(
         TextOrigin::Object => target.expect,
         TextOrigin::Worktree | TextOrigin::Dependency(_) => None,
     };
+    if class == Class::Opened {
+        debug!(
+            "the first screen of an opened file was computed";
+            prepare_us = prepare,
+            window_us = parsing,
+            outcome = how,
+        );
+    }
     First::Shown(Box::new(Shown {
         size,
         identity,

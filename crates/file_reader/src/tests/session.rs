@@ -10,7 +10,7 @@ use lectern_services::code_intel::{Focus, TextOrigin};
 use lectern_services::project::ProjectKey;
 use lectern_services::reader::{Anchor, OpenOutcome, OpenTicket, Reader, ReaderEvent};
 use lectern_syntax::Canonical;
-use lectern_syntax::{DocState, RowPos, testing};
+use lectern_syntax::{DocState, Highlighting, RowPos, testing};
 
 use super::rig::{Rig, Tree, file, git_snapshot, lock};
 use crate::HISTORY_MAX;
@@ -49,7 +49,12 @@ fn session_open_queues_and_wakes_and_changes_nothing() {
         rig.host.events().is_empty(),
         "no event before the view acts"
     );
-    assert_eq!(rig.res.executor.run_until_idle(), 0, "no task either");
+    // The first screen is computed meanwhile (the next tests), but nothing
+    // is shown, told or put in the history until the view acts.
+    rig.res.settle();
+    assert!(rig.session.snapshot().is_none(), "still nothing shown");
+    assert!(rig.host.events().is_empty());
+    assert_eq!(rig.session.history_len(), (0, 0));
     let request = rig.session.next_request().expect("the request");
     assert_eq!(request.ticket, ticket);
     assert_eq!(&*request.target.path, "a.ts");
@@ -587,4 +592,194 @@ fn session_events_may_reenter_open() {
     let request = session.next_request().unwrap();
     assert_eq!(session.apply(request), OpenOutcome::Shown);
     assert_eq!(session.pending(), 1, "the listener's own request is queued");
+}
+
+/// A snapshot with the first screen in it: state `Ready`, highlighted.
+fn first_screen_is_in(rig: &Rig) -> bool {
+    rig.session
+        .snapshot()
+        .is_some_and(|s| s.state == DocState::Ready && s.highlight == Highlighting::On)
+}
+
+#[test]
+fn session_open_starts_the_first_screen_before_the_view_exists() {
+    // ADR 0063: the view is built in a draw, which is too late to start the
+    // first screen. `Reader::open` starts it; `apply` adopts that document.
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", &testing::ts(4 << 10, 0));
+    let ticket = rig.session.open(file(&key, "a.ts", Anchor::Start));
+    assert!(rig.session.prestarted(ticket));
+    // The warm-up and the first screen are queued: nothing waits for a view.
+    assert_eq!(rig.session.engine().tasks_in_flight(), 2);
+    rig.res.settle();
+    assert_eq!(rig.session.engine().tasks_in_flight(), 0);
+    assert!(rig.session.snapshot().is_none(), "computed, not shown");
+
+    let request = rig.session.next_request().unwrap();
+    assert_eq!(request.ticket, ticket);
+    assert_eq!(rig.session.apply(request), OpenOutcome::Shown);
+    assert!(!rig.session.prestarted(ticket), "adopted");
+    // No task ran or is queued for the shown document's first screen: the
+    // snapshot already has it.
+    assert_eq!(rig.session.engine().tasks_in_flight(), 0);
+    assert!(first_screen_is_in(&rig));
+    assert_eq!(rig.host.events(), vec![shown(ticket)]);
+    assert_eq!(rig.session.history_len(), (0, 0));
+    assert_eq!(path_of(&rig), "a.ts");
+}
+
+#[test]
+fn session_a_request_taken_late_still_adopts_the_document() {
+    // The view's wake-up is not installed yet (the view is not built): the
+    // document's snapshots wake the slot's plugin callback, and the request
+    // waits as before.
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", &testing::ts(4 << 10, 0));
+    let ticket = rig.session.open(file(&key, "a.ts", Anchor::Start));
+    let before = rig.woken.load(Ordering::SeqCst);
+    rig.res.settle();
+    assert!(rig.woken.load(Ordering::SeqCst) > before);
+    assert_eq!(rig.session.pending(), 1);
+    let request = rig.session.next_request().unwrap();
+    assert_eq!(rig.session.apply(request), OpenOutcome::Shown);
+    assert_eq!(rig.host.events(), vec![shown(ticket)]);
+}
+
+#[test]
+fn session_cancel_drops_the_document_started_for_the_request() {
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", &testing::ts(4 << 10, 0));
+    tree.write("b.ts", &testing::ts(4 << 10, 1));
+    let first = rig.session.open(file(&key, "a.ts", Anchor::Start));
+    assert!(rig.session.prestarted(first));
+    let request = rig.session.next_request().unwrap();
+    rig.session.cancel(request);
+    assert!(!rig.session.prestarted(first));
+    rig.res.settle();
+    assert!(rig.session.snapshot().is_none(), "nothing was shown");
+    assert_eq!(rig.session.history_len(), (0, 0));
+    assert_eq!(rig.host.events(), vec![cancelled(first)]);
+    // The next request may start its own.
+    let second = rig.session.open(file(&key, "b.ts", Anchor::Start));
+    assert!(rig.session.prestarted(second));
+}
+
+#[test]
+fn session_only_the_first_waiting_request_starts_early() {
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", &testing::ts(4 << 10, 0));
+    tree.write("b.ts", &testing::ts(4 << 10, 1));
+    let a = rig.session.open(file(&key, "a.ts", Anchor::Start));
+    let b = rig.session.open(file(&key, "b.ts", Anchor::Start));
+    assert!(rig.session.prestarted(a));
+    assert!(!rig.session.prestarted(b), "a bounded amount of early work");
+    rig.res.settle();
+    // In order, as the view takes them: a is shown, then b replaces it and
+    // a goes to the history, as when nothing was started early.
+    let request = rig.session.next_request().unwrap();
+    rig.session.apply(request);
+    let request = rig.session.next_request().unwrap();
+    rig.session.apply(request);
+    rig.res.settle();
+    assert_eq!(path_of(&rig), "b.ts");
+    assert_eq!(rig.session.history_len(), (1, 0));
+    assert_eq!(rig.host.events(), vec![shown(a), shown(b)]);
+}
+
+#[test]
+fn session_no_early_start_while_a_document_is_shown() {
+    // A document shown may be edited: the request goes through the view's
+    // leave guard first, and nothing is started for it until then.
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", &testing::ts(4 << 10, 0));
+    tree.write("b.ts", &testing::ts(4 << 10, 1));
+    rig.show(file(&key, "a.ts", Anchor::Start));
+    let ticket = rig.session.open(file(&key, "b.ts", Anchor::Start));
+    assert!(!rig.session.prestarted(ticket));
+    assert_eq!(rig.session.engine().tasks_in_flight(), 0);
+    assert_eq!(path_of(&rig), "a.ts");
+    let request = rig.session.next_request().unwrap();
+    assert_eq!(rig.session.apply(request), OpenOutcome::Shown);
+    rig.res.settle();
+    assert_eq!(path_of(&rig), "b.ts");
+}
+
+#[test]
+fn session_no_early_start_for_a_project_that_is_closed() {
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", b"let a = 1;\n");
+    rig.host.projects.remove(&key);
+    let ticket = rig.session.open(file(&key, "a.ts", Anchor::Start));
+    assert!(!rig.session.prestarted(ticket));
+    // The warm-up is the only task: it needs no root.
+    assert_eq!(rig.session.engine().tasks_in_flight(), 1);
+    let request = rig.session.next_request().unwrap();
+    assert_eq!(rig.session.apply(request), OpenOutcome::Cancelled);
+}
+
+#[test]
+fn session_the_query_is_compiled_once_by_the_warm_up() {
+    // The warm-up is the first compile; the first screen of the file and of
+    // later files of the language finds it done (or waits for it).
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", &testing::ts(4 << 10, 0));
+    tree.write("b.ts", &testing::ts(4 << 10, 1));
+    tree.write("notes.txt", b"plain\n");
+    let langs = lectern_syntax::Languages::core();
+    let ts = langs.get("ts").expect("the ts language");
+    assert_eq!(ts.compile_count(), 0, "nothing compiled before an open");
+    rig.session.open(file(&key, "a.ts", Anchor::Start));
+    rig.res.settle();
+    assert_eq!(ts.compile_count(), 1);
+    let request = rig.session.next_request().unwrap();
+    rig.session.apply(request);
+    rig.res.settle();
+    assert!(first_screen_is_in(&rig));
+    // Another ts file: no warm-up task, no second compile.
+    rig.session.open(file(&key, "b.ts", Anchor::Start));
+    assert_eq!(rig.session.engine().tasks_in_flight(), 0);
+    let request = rig.session.next_request().unwrap();
+    rig.session.apply(request);
+    rig.res.settle();
+    assert_eq!(ts.compile_count(), 1);
+    // A path without a language queues no warm-up either.
+    rig.session.close();
+    rig.res.settle();
+    rig.session.open(file(&key, "notes.txt", Anchor::Start));
+    assert_eq!(
+        rig.session.engine().tasks_in_flight(),
+        1,
+        "the first screen only"
+    );
+}
+
+#[test]
+fn session_a_project_closed_after_the_early_start_frees_the_slot() {
+    // The request is not shown (no root at `apply`): the document started
+    // for it is dropped, and the next request may start its own.
+    let rig = Rig::new();
+    let (tree, key) = rig.folder();
+    tree.write("a.ts", &testing::ts(4 << 10, 0));
+    tree.write("b.ts", &testing::ts(4 << 10, 1));
+    let ticket = rig.session.open(file(&key, "a.ts", Anchor::Start));
+    assert!(rig.session.prestarted(ticket));
+    rig.res.settle();
+    rig.host.projects.remove(&key);
+    let request = rig.session.next_request().unwrap();
+    assert_eq!(rig.session.apply(request), OpenOutcome::Cancelled);
+    assert!(!rig.session.prestarted(ticket));
+    assert_eq!(rig.host.events(), vec![cancelled(ticket)]);
+    assert!(rig.session.snapshot().is_none());
+    // The project is back: a later open starts early again.
+    let (tree2, key2) = rig.folder();
+    tree2.write("c.ts", &testing::ts(4 << 10, 2));
+    let next = rig.session.open(file(&key2, "c.ts", Anchor::Start));
+    assert!(rig.session.prestarted(next));
 }

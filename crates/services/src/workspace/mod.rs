@@ -366,17 +366,29 @@ pub enum Milestone {
     FileHighlighted,
     DiffShown,
     WorktreeSwitched,
+    /// The Files panel, with its rows, was drawn (`app/files_open`).
+    FilesShown,
+    /// A directory of the Files tree was opened and its rows drawn
+    /// (`app/files_expand`).
+    FilesExpanded,
+    /// The editor was drawn with the focus in it: the user can type
+    /// (`app/enter_edit`).
+    EditReady,
 }
 
 impl Milestone {
     /// 报告它的视图是否已经等过一帧：`true` 表示视图在 `Window::on_next_frame`
-    /// 的回调里报告（`DiffShown`、`FileHighlighted`），回调运行时画出结果的那一帧
+    /// 的回调里报告（`DiffShown`、`FileHighlighted`、`FilesShown`、`FilesExpanded`、`EditReady`），回调运行时画出结果的那一帧
     /// 已经显示，`workspace` 在收到报告的那一刻记时刻，不再等一帧；`false` 表示视图
     /// 在画这一帧时报告（`ProjectHome`、`WorktreeSwitched`），`workspace` 在下一帧
     /// 回调里记时刻。新增变体时必须在这里决定，匹配没有通配分支。
     pub const fn reported_after_frame(self) -> bool {
         match self {
-            Milestone::FileHighlighted | Milestone::DiffShown => true,
+            Milestone::FileHighlighted
+            | Milestone::DiffShown
+            | Milestone::FilesShown
+            | Milestone::FilesExpanded
+            | Milestone::EditReady => true,
             Milestone::ProjectHome | Milestone::WorktreeSwitched => false,
         }
     }

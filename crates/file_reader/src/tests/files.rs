@@ -18,7 +18,7 @@ use lectern_services::project::{
     ProjectSnapshot, Projects, Scan, ScanError, Worktree, WorktreeKey,
 };
 use lectern_services::reader::{Anchor, ReadTarget, Reader};
-use lectern_services::workspace::{Contributions, SidebarSection, WorkspaceCommand};
+use lectern_services::workspace::{Contributions, Milestone, SidebarSection, WorkspaceCommand};
 use lectern_ui::semantic::{Record, Recorder};
 use lectern_ui::{Appearance, Icon, init_fixed};
 
@@ -427,6 +427,13 @@ impl Rig {
         }
     }
 
+    /// The next frame's callbacks run (where the milestones are reported).
+    fn frame(&self, cx: &mut TestAppContext) {
+        let mut visual = self.visual(cx);
+        visual.update(|window, cx| window.simulate_next_frame(cx));
+        visual.run_until_parked();
+    }
+
     fn draw(&self, cx: &mut TestAppContext) {
         let mut visual = self.visual(cx);
         for _ in 0..2 {
@@ -583,6 +590,40 @@ fn files_only_the_rows_in_view_are_built(cx: &mut TestAppContext) {
     assert_eq!(rig.rows(cx).len(), 5_001);
     let built = rig.view().read_with(cx, |view, _| view.built.get());
     assert!(built > 5 && built < 80, "{built} rows built of 5001");
+}
+
+#[gpui::test]
+fn files_milestones_are_the_first_rows_and_each_opened_directory(cx: &mut TestAppContext) {
+    let mut rig = Rig::new(cx, &SAMPLE);
+    assert!(rig.contributions.milestones().is_empty());
+    rig.show(cx);
+    rig.frame(cx);
+    assert_eq!(rig.contributions.milestones(), [Milestone::FilesShown]);
+    // Moving the selection draws again and reports nothing.
+    rig.press(cx, "down");
+    rig.frame(cx);
+    assert_eq!(rig.contributions.milestones(), [Milestone::FilesShown]);
+    // → opens the directory: its rows are drawn, one milestone.
+    rig.press(cx, "right");
+    rig.frame(cx);
+    assert_eq!(
+        rig.contributions.milestones(),
+        [Milestone::FilesShown, Milestone::FilesExpanded]
+    );
+    // Closing it reports nothing; ↵ opens it again, and that does.
+    rig.press(cx, "left");
+    rig.frame(cx);
+    assert_eq!(rig.contributions.milestones().len(), 2);
+    rig.press(cx, "enter");
+    rig.frame(cx);
+    assert_eq!(
+        rig.contributions.milestones(),
+        [
+            Milestone::FilesShown,
+            Milestone::FilesExpanded,
+            Milestone::FilesExpanded
+        ]
+    );
 }
 
 #[gpui::test]

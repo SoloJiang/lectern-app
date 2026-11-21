@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_component::input::Editor;
 use lectern_i18n::{Args, Strings, keys};
+use lectern_services::workspace::Milestone;
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
     Button, ButtonKind, ButtonSize, MonoMetrics, Palette, Text, TextRole, TextRoleExt,
@@ -57,6 +58,15 @@ impl ReadingView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The milestone `app/enter_edit` ends in: the editor drawn, with the
+        // focus in it. Once per edit mode.
+        if let Some(edit) = self.edit.as_mut()
+            && !edit.ready
+        {
+            edit.ready = true;
+            let shared = self.shared.clone();
+            window.on_next_frame(move |_, _| shared.report_milestone(Milestone::EditReady));
+        }
         let Some(edit) = &self.edit else {
             return div().flex_1().into_any_element();
         };

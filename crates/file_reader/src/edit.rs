@@ -265,6 +265,8 @@ pub(crate) struct Editing {
     /// (`edit/leave.rs`), and the guard's questions that wait behind it.
     pub(crate) leaving: Option<Leaving>,
     backlog: VecDeque<Leave>,
+    /// The editor's first frame was reported as `Milestone::EditReady`.
+    pub(crate) ready: bool,
     /// Takes the guard's questions while the edit lives.
     _port: Port,
     _changes: Subscription,
@@ -448,6 +450,7 @@ impl ReadingView {
             unavailable_logged: false,
             leaving: None,
             backlog: VecDeque::new(),
+            ready: false,
             _port: port,
             _changes: changes,
         });

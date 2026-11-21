@@ -16,7 +16,7 @@ use lectern_syntax::{DocState, testing};
 use super::rig::{
     FakeCodeIntel, FakeContributions, FakeProjects, Resources, Tree, file, folder_snapshot,
 };
-use crate::{FileReaderPlugin, Session};
+use crate::{FileReaderPlugin, ReaderSlot, Session};
 
 /// The plugin in a kernel with the mocked services, and what the mocks saw.
 struct Fixture {
@@ -90,6 +90,26 @@ fn plugin_activation_provides_the_service_and_submits_no_task() {
     assert_eq!(session.pending(), 0);
     assert!(session.snapshot().is_none());
     assert!(f.code_intel.calls().is_empty());
+}
+
+#[test]
+fn plugin_the_reader_slot_holds_the_active_reader_weakly() {
+    let res = Resources::new();
+    let slot = ReaderSlot::default();
+    let plugin = FileReaderPlugin::new(res.deps()).with_reader_slot(slot.clone());
+    let sessions = plugin.sessions();
+    let kernel = TestKernel::new(plugin)
+        .mock::<dyn Projects>(Arc::new(FakeProjects::default()))
+        .mock::<dyn CodeIntel>(Arc::new(FakeCodeIntel::default()))
+        .mock::<dyn Contributions>(Arc::new(FakeContributions::default()));
+    assert!(slot.get().is_none(), "nothing before the activation");
+    kernel.activate().expect("the plugin activates");
+    let reader = slot.get().expect("the reader after it");
+    let session = sessions.lock().unwrap().upgrade().expect("a session");
+    assert!(std::ptr::addr_eq(
+        Arc::as_ptr(&reader),
+        Arc::as_ptr(&session)
+    ));
 }
 
 #[test]

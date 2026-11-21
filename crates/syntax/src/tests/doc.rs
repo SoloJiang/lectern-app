@@ -751,3 +751,72 @@ fn doc_tier_c_chain_windows_are_read_from_the_file() {
         assert_eq!(a, b, "the window from {start}");
     }
 }
+
+#[test]
+fn doc_warm_compiles_the_query_once_before_the_first_screen_needs_it() {
+    // `Engine::warm`: one `Interactive` task per language, whatever the
+    // number of calls, and the first screen that follows (or races it) never
+    // compiles the query again. The tests run one process each (nextest), so
+    // the table's counter starts at 0.
+    let rig = Rig::new();
+    rig.write("a.ts", &testing::ts(4 << 10, 0));
+    let langs = crate::Languages::core();
+    let ts = langs.get("ts").expect("ts");
+    assert_eq!(ts.compile_count(), 0);
+
+    rig.engine.warm("src/a.ts");
+    rig.engine.warm("other/b.ts");
+    rig.engine.warm("c.mts");
+    assert_eq!(
+        rig.engine.tasks_in_flight(),
+        1,
+        "one warm-up for the language"
+    );
+    // No language, no task.
+    rig.engine.warm("notes.txt");
+    rig.engine.warm("");
+    assert_eq!(rig.engine.tasks_in_flight(), 1);
+    // The first screen is queued behind it; both run.
+    let (_doc, snapshot) = rig.open_settled(rig.target("a.ts", Anchor::Start));
+    assert_eq!(snapshot.highlight, Highlighting::On);
+    assert_eq!(ts.compile_count(), 1);
+
+    // Compiled: a later call queues nothing.
+    rig.engine.warm("a.ts");
+    assert_eq!(rig.engine.tasks_in_flight(), 0);
+    assert_eq!(ts.compile_count(), 1);
+    // Another language is its own.
+    rig.engine.warm("lib.rs");
+    assert_eq!(rig.engine.tasks_in_flight(), 1);
+    rig.settle();
+    assert_eq!(langs.get("rust").expect("rust").compile_count(), 1);
+    assert_eq!(ts.compile_count(), 1);
+}
+
+#[test]
+fn doc_warm_does_not_run_before_the_engine_started() {
+    // The claim is given back when the task cannot be queued: a later call
+    // (after `start`) still warms.
+    let rig = Rig::new();
+    let unstarted = {
+        // An engine of the same parts that was never started.
+        let executor = lectern_executor::Executor::manual();
+        let (watcher, _driver) = lectern_fs_watch::testing::manual(
+            lectern_fs_watch::testing::FakeBackend::new(),
+            executor.clone(),
+            lectern_fs_watch::Config::default(),
+        );
+        crate::Engine::new(crate::EngineDeps {
+            executor,
+            cache: rig.engine.inner().cache.clone(),
+            watcher,
+            languages: crate::Languages::core(),
+        })
+    };
+    assert!(!unstarted.started());
+    unstarted.warm("a.ts");
+    assert_eq!(unstarted.tasks_in_flight(), 0);
+    assert!(rig.engine.started());
+    rig.engine.warm("a.ts");
+    assert_eq!(rig.engine.tasks_in_flight(), 1, "the claim was not kept");
+}

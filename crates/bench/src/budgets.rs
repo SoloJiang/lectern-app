@@ -168,7 +168,13 @@ const ADR_0017_IMPACT: &str = "docs/adr/0017.md#影响";
 const ADR_0018_DECISION: &str = "docs/adr/0018.md#决策";
 const ADR_0018_IMPACT: &str = "docs/adr/0018.md#影响";
 const ADR_0029_DECISION: &str = "docs/adr/0029.md#决策";
+const ADR_0034_DECISION: &str = "docs/adr/0034.md#决策";
 const ADR_0035_DECISION: &str = "docs/adr/0035.md#决策";
+/// Process-level interactions are judged by the next frame being drawn: a
+/// median below 2.25 frame periods at 60 Hz.
+const ADR_0063: &str = "docs/adr/0063.md";
+const ADR_0064: &str = "docs/adr/0064.md";
+const ADR_0065: &str = "docs/adr/0065.md";
 const AGENTS: &str = "docs/design/agents.md#性能";
 const GIT: &str = "docs/design/git.md#性能";
 const CACHE: &str = "docs/design/cache.md#性能";
@@ -342,11 +348,28 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Process,
     ),
+    // The slowest of the scenarios' medians (docs/design/bench.md「预算表」).
     top(
         "app/open_file",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
-        State::Planned("file_reader"),
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
+        ACTIVE,
+        Process,
+    ),
+    // The first open of a language in a run: its highlight query is
+    // compiled on the first screen's path (ADR 0064). Record only.
+    top("app/open_file/first", RECORD, ADR_0064, ACTIVE, Process),
+    // The file minified into one line, end to end: about a frame late, the
+    // cause not located yet (#399). Record only (ADR 0065).
+    top("app/open_file/minified", RECORD, ADR_0065, ACTIVE, Process),
+    // From ⌘E to the editor drawn with the focus in it, on a file at the
+    // edit limit (ADR 0034). The limit is the longest the interaction spec
+    // lets pass before a loading state shows.
+    top(
+        "app/enter_edit",
+        &[median(Limit::TimeAtMost(ms(100)))],
+        ADR_0034_DECISION,
+        ACTIVE,
         Process,
     ),
     top(
@@ -368,16 +391,17 @@ pub static BUDGETS: &[Budget] = &[
     // ---- code navigation (ADR 0030) ----
     top(
         "app/palette_open",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         State::Planned("#102"),
         Process,
     ),
     top(
-        // The ≤ 16 ms tier covers up to 200k paths: measured at its upper bound.
+        // The 200k tier of the process-level interactions (ADR 0063): measured
+        // at its upper bound.
         "app/palette_key_200k",
-        &[median(Limit::TimeAtMost(ms(16)))],
-        TECH,
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
         State::Planned("#102"),
         Process,
     ),
@@ -390,23 +414,23 @@ pub static BUDGETS: &[Budget] = &[
     ),
     top(
         "app/files_open",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
-        State::Planned("#10"),
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
+        ACTIVE,
         Process,
     ),
     top(
         "app/files_expand",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
-        State::Planned("#10"),
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
+        ACTIVE,
         Process,
     ),
     top(
         "app/nav_back",
-        &[median(Limit::TimeBelow(ms(16)))],
-        TECH,
-        State::Planned("#10"),
+        &[median(Limit::TimeBelow(us(37_500)))],
+        ADR_0063,
+        ACTIVE,
         Process,
     ),
     top(
@@ -477,11 +501,15 @@ pub static BUDGETS: &[Budget] = &[
         Process,
     ),
     // ---- end code navigation ----
+    // The reader's scenarios (64 MiB, one line, the edit mode) and the same
+    // with the batch layer at work (ADR 0034, ADR 0033): `workspace` does
+    // not record frames yet.
+    top("app/scroll_frames", FRAMES, TECH, FRAMES_RECORDED, Process),
     top(
-        "app/scroll_frames",
+        "app/scroll_frames_indexing",
         FRAMES,
         TECH,
-        State::Planned("file_reader"),
+        FRAMES_RECORDED,
         Process,
     ),
     top(

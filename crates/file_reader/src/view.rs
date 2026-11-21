@@ -18,6 +18,7 @@ use gpui::{
     AppContext, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, Point, Subscription, Task,
     Window, px,
 };
+use lectern_logging::debug;
 use lectern_services::code_intel::{Position, Query, QueryKind};
 use lectern_services::workspace::{Milestone, WorkspaceCommand};
 use lectern_syntax::{
@@ -26,6 +27,7 @@ use lectern_syntax::{
 use lectern_ui::motion::Transition;
 use lectern_ui::{MonoMetrics, TextAreaState};
 
+use crate::diag;
 use crate::edit::{Editing, Leave, Reenter};
 use crate::shared::Shared;
 use crate::text::{digits, identifier_cell};
@@ -120,6 +122,11 @@ impl ReadingView {
                 let _ = tx.unbounded_send(());
             }
         }));
+        debug!(
+            "the reading view was built";
+            view = id,
+            pending = shared.session.pending(),
+        );
         let listen = cx.spawn_in(window, async move |this, cx| {
             while rx.next().await.is_some() {
                 queued.store(false, Ordering::SeqCst);
@@ -228,6 +235,13 @@ impl ReadingView {
             let now = (self.serial, snapshot.generation);
             if self.applied != Some(now) {
                 self.applied = Some(now);
+                debug!(
+                    "the reading view took a snapshot";
+                    serial = self.serial,
+                    generation = snapshot.generation,
+                    state = diag::state(&snapshot.state),
+                    highlight = diag::highlighting(snapshot.highlight),
+                );
                 self.top = snapshot.anchor;
                 self.offset = px(0.0);
                 self.scroll_x = px(0.0);
@@ -301,7 +315,10 @@ impl ReadingView {
         }
         self.reported = Some(self.serial);
         let shared = self.shared.clone();
-        window.on_next_frame(move |_, _| shared.report_milestone(Milestone::FileHighlighted));
+        window.on_next_frame(move |_, _| {
+            debug!("the first screen is drawn; the milestone is reported");
+            shared.report_milestone(Milestone::FileHighlighted);
+        });
     }
 
     // ----- scrolling ------------------------------------------------------

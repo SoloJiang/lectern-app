@@ -530,18 +530,27 @@ fn workspace_scopes_and_milestones_round_trip() {
         Milestone::FileHighlighted,
         Milestone::DiffShown,
         Milestone::WorktreeSwitched,
+        Milestone::FilesShown,
+        Milestone::FilesExpanded,
+        Milestone::EditReady,
     ];
     for milestone in milestones {
         assert_eq!(round_trip(&milestone), milestone);
     }
-    // The two milestones that views report from a frame callback.
+    // The milestones that views report from a frame callback.
     let after_frame: Vec<Milestone> = milestones
         .into_iter()
         .filter(|milestone| milestone.reported_after_frame())
         .collect();
     assert_eq!(
         after_frame,
-        [Milestone::FileHighlighted, Milestone::DiffShown]
+        [
+            Milestone::FileHighlighted,
+            Milestone::DiffShown,
+            Milestone::FilesShown,
+            Milestone::FilesExpanded,
+            Milestone::EditReady,
+        ]
     );
     for id in [WindowId(0), WindowId(u32::MAX)] {
         assert_eq!(round_trip(&id), id);

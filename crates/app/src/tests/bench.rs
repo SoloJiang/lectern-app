@@ -8,15 +8,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::unbounded;
-use gpui::TestAppContext;
+use gpui::{Keystroke, TestAppContext};
 use lectern_bench::probe::Driver;
 use lectern_bench::wire::{self, OpenTarget};
 use lectern_i18n::{Locale, Strings};
 use lectern_kernel::Name;
 use lectern_logging::EarlyConfig;
+use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{
-    ActiveTree, FileList, Head, ProjectKey, ProjectSnapshot, Scan, Worktree, WorktreeKey,
+    ActiveTree, BlobId, FileList, Head, ProjectKey, ProjectSnapshot, Scan, Worktree, WorktreeKey,
 };
+use lectern_services::reader::{Anchor, ObjectShare, OpenTicket, ReadTarget, Reader};
 use lectern_services::review::ReviewTarget;
 use lectern_services::session::{SessionKey, SourceId};
 use lectern_services::workspace::{
@@ -26,7 +28,10 @@ use lectern_ui::Appearance;
 use lectern_workspace::registry::Payloads;
 use lectern_workspace::{Hub, Item, Queued};
 
-use crate::bench::{BenchDriver, BenchRequest, Reporter, handle, switch_worktree, wire_milestone};
+use crate::bench::{
+    BenchDriver, BenchRequest, Reporter, Targets, handle, open_changes, open_file, read_target,
+    switch_worktree, wire_milestone,
+};
 use crate::profile::Profile;
 use crate::quit;
 use crate::startup::Startup;
@@ -46,6 +51,15 @@ impl Recorder {
 impl Reporter for Recorder {
     fn error(&self, message: &str) {
         self.0.lock().unwrap().push(message.to_owned());
+    }
+}
+
+/// What a request acts on when only the workspace is there.
+fn at(workspace: Option<&Hub>) -> Targets<'_> {
+    Targets {
+        workspace,
+        reader: None,
+        window: None,
     }
 }
 
@@ -97,7 +111,6 @@ fn open_is_reported_as_unsupported() {
     let recorder = Arc::new(Recorder::default());
     let driver = BenchDriver::new(requests, recorder.clone());
     for target in [
-        OpenTarget::File(PathBuf::from("/f")),
         OpenTarget::Scroll,
         OpenTarget::Animate,
         OpenTarget::Input {
@@ -110,7 +123,6 @@ fn open_is_reported_as_unsupported() {
     assert_eq!(
         recorder.errors(),
         [
-            "open file unsupported",
             "open scroll unsupported",
             "open animate unsupported",
             "open input unsupported",
@@ -169,6 +181,9 @@ fn milestones_keep_their_names() {
             Milestone::WorktreeSwitched,
             wire::Milestone::WorktreeSwitched,
         ),
+        (Milestone::FilesShown, wire::Milestone::FilesShown),
+        (Milestone::FilesExpanded, wire::Milestone::FilesExpanded),
+        (Milestone::EditReady, wire::Milestone::EditReady),
     ] {
         assert_eq!(wire_milestone(milestone), wire);
     }
@@ -190,11 +205,16 @@ fn open_diff_takes_the_session_row_path(cx: &mut TestAppContext) {
     cx.update(|cx| {
         handle(
             BenchRequest::OpenDiff(key.clone()),
-            Some(&*hub),
+            &at(Some(&*hub)),
             &recorder,
             cx,
         );
-        handle(BenchRequest::OpenDiff(key.clone()), None, &recorder, cx);
+        handle(
+            BenchRequest::OpenDiff(key.clone()),
+            &at(None),
+            &recorder,
+            cx,
+        );
     });
     // The command ↵ on the session's row makes.
     let queued = queued.lock().unwrap();
@@ -271,6 +291,220 @@ fn commands(queued: &Mutex<Vec<Queued>>) -> Vec<WorkspaceCommand> {
         .collect()
 }
 
+/// A reader that records what it was asked to open.
+#[derive(Default)]
+struct Opened(Mutex<Vec<ReadTarget>>);
+
+impl Reader for Opened {
+    fn open(&self, target: ReadTarget) -> OpenTicket {
+        self.0.lock().unwrap().push(target);
+        OpenTicket(0)
+    }
+
+    fn prefetch(&self, _: Vec<ReadTarget>) {}
+
+    fn share_object(&self, _: BlobId, _: Arc<[u8]>) -> ObjectShare {
+        ObjectShare::new(|| {})
+    }
+}
+
+#[test]
+fn the_changes_review_pushes_the_outside_route_of_the_active_worktree() {
+    let (hub, queued) = queue_hub();
+    let recorder = Recorder::default();
+    let open = [project()];
+    open_changes(&*hub, &open, &recorder);
+    assert_eq!(
+        commands(&queued),
+        [WorkspaceCommand::Push(Route {
+            screen: Name::Borrowed(screens::REVIEW),
+            target: Target::Review(ReviewTarget::Outside {
+                project: open[0].key.clone(),
+                worktree: open[0].active.as_ref().unwrap().worktree.clone().unwrap(),
+            }),
+        })]
+    );
+    assert!(recorder.errors().is_empty());
+    // No project, or a folder project (no worktree, no base): an error.
+    open_changes(&*hub, &[], &recorder);
+    let mut folder = (*open[0]).clone();
+    folder.active.as_mut().unwrap().worktree = None;
+    open_changes(&*hub, &[Arc::new(folder)], &recorder);
+    assert_eq!(recorder.errors(), ["open changes without a git project"; 2]);
+    assert_eq!(commands(&queued).len(), 1);
+}
+
+#[test]
+fn changes_are_forwarded() {
+    let (requests, mut incoming) = unbounded();
+    let recorder = Arc::new(Recorder::default());
+    BenchDriver::new(requests, recorder.clone()).open(OpenTarget::Changes);
+    assert_eq!(incoming.try_recv().unwrap(), BenchRequest::OpenChanges);
+    assert!(recorder.errors().is_empty());
+}
+
+#[test]
+fn a_file_is_forwarded_with_its_anchor_and_old_side() {
+    let (requests, mut incoming) = unbounded();
+    let recorder = Arc::new(Recorder::default());
+    let driver = BenchDriver::new(requests, recorder.clone());
+    driver.open(OpenTarget::File {
+        path: PathBuf::from("/repos/a-main/src/lib.rs"),
+        byte: Some(12),
+        old: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+    });
+    assert_eq!(
+        incoming.try_recv().unwrap(),
+        BenchRequest::OpenFile {
+            path: PathBuf::from("/repos/a-main/src/lib.rs"),
+            byte: Some(12),
+            old: BlobId::from_hex("0123456789abcdef0123456789abcdef01234567"),
+        }
+    );
+    // An object ID that is not hex is an error, and nothing is sent.
+    driver.open(OpenTarget::File {
+        path: PathBuf::from("/f"),
+        byte: None,
+        old: Some("not hex".to_owned()),
+    });
+    assert!(incoming.try_recv().is_err());
+    assert_eq!(recorder.errors(), ["open file with a bad object ID"]);
+}
+
+#[test]
+fn files_and_keys_are_forwarded() {
+    let (requests, mut incoming) = unbounded();
+    let recorder = Arc::new(Recorder::default());
+    let driver = BenchDriver::new(requests, recorder.clone());
+    driver.open(OpenTarget::Files);
+    driver.open(OpenTarget::Key("cmd-[".to_owned()));
+    driver.open(OpenTarget::Key("right".to_owned()));
+    assert_eq!(incoming.try_recv().unwrap(), BenchRequest::ShowFiles);
+    assert_eq!(
+        incoming.try_recv().unwrap(),
+        BenchRequest::Key(Keystroke::parse("cmd-[").unwrap())
+    );
+    assert_eq!(
+        incoming.try_recv().unwrap(),
+        BenchRequest::Key(Keystroke::parse("right").unwrap())
+    );
+    assert!(recorder.errors().is_empty());
+    // A keystroke GPUI cannot parse is an error and is not sent.
+    driver.open(OpenTarget::Key("a-b".to_owned()));
+    assert!(incoming.try_recv().is_err());
+    assert_eq!(recorder.errors(), ["open key with a bad keystroke"]);
+}
+
+#[test]
+fn a_file_target_is_relative_to_the_active_tree_of_its_project() {
+    let open = [project()];
+    let oid = BlobId::from_hex("0123456789abcdef0123456789abcdef01234567");
+    let target = |path: &str, byte, old| read_target(&open, Path::new(path), byte, old);
+    let main = open[0].active.as_ref().unwrap().worktree.clone();
+    // The worktree's file from its start.
+    let start = target("/repos/a-main/packages/p00/src/lib.rs", None, None).unwrap();
+    assert_eq!(start.project, open[0].key);
+    assert_eq!(start.worktree, main);
+    assert_eq!(&*start.path, "packages/p00/src/lib.rs");
+    assert_eq!(start.origin, TextOrigin::Worktree);
+    assert_eq!((start.expect, start.at), (None, Anchor::Start));
+    // At a byte offset (a hunk of a diff of the worktree's file).
+    let middle = target("/repos/a-main/package-lock.json", Some(2_097_152), None).unwrap();
+    assert_eq!(middle.origin, TextOrigin::Worktree);
+    assert_eq!(
+        middle.at,
+        Anchor::Byte {
+            byte: 2_097_152,
+            line: 0,
+            column: 0
+        }
+    );
+    // The old side: the blob, which the open diff shared.
+    let old = target("/repos/a-main/package-lock.json", Some(7), oid).unwrap();
+    assert_eq!((old.origin, old.expect), (TextOrigin::Object, oid));
+    // A path outside every open project's active tree is not opened.
+    assert!(target("/repos/a-w1/src/lib.rs", None, None).is_none());
+    assert!(target("/elsewhere/lib.rs", None, None).is_none());
+    assert!(read_target(&[], Path::new("/repos/a-main/x"), None, None).is_none());
+}
+
+#[test]
+fn a_file_is_opened_through_the_reader_or_is_an_error_without_the_path() {
+    let reader = Opened::default();
+    let recorder = Recorder::default();
+    let open = [project()];
+    open_file(
+        &reader,
+        &open,
+        Path::new("/repos/a-main/src/lib.rs"),
+        None,
+        None,
+        &recorder,
+    );
+    open_file(
+        &reader,
+        &open,
+        Path::new("/repos/a-nobody/src/lib.rs"),
+        None,
+        None,
+        &recorder,
+    );
+    let asked = reader.0.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(&*asked[0].path, "src/lib.rs");
+    assert_eq!(recorder.errors(), ["open file not found in a project"]);
+}
+
+#[gpui::test]
+fn files_and_file_requests_take_their_paths(cx: &mut TestAppContext) {
+    let (hub, queued) = queue_hub();
+    let recorder = Recorder::default();
+    let reader = Opened::default();
+    cx.update(|cx| {
+        // The Files entry's command.
+        handle(BenchRequest::ShowFiles, &at(Some(&*hub)), &recorder, cx);
+        handle(BenchRequest::ShowFiles, &at(None), &recorder, cx);
+        // A workspace whose `dyn Projects` has not started has no project.
+        let targets = Targets {
+            workspace: Some(&*hub),
+            reader: Some(&reader),
+            window: None,
+        };
+        let file = || BenchRequest::OpenFile {
+            path: PathBuf::from("/repos/a-main/src/lib.rs"),
+            byte: None,
+            old: None,
+        };
+        handle(file(), &targets, &recorder, cx);
+        handle(file(), &at(Some(&*hub)), &recorder, cx);
+        handle(file(), &at(None), &recorder, cx);
+        // A key needs the window.
+        handle(
+            BenchRequest::Key(Keystroke::parse("cmd-e").unwrap()),
+            &at(Some(&*hub)),
+            &recorder,
+            cx,
+        );
+    });
+    assert_eq!(
+        commands(&queued),
+        [WorkspaceCommand::ShowSidebarPanel(Some(Name::Borrowed(
+            "files"
+        )))]
+    );
+    assert!(reader.0.lock().unwrap().is_empty());
+    assert_eq!(
+        recorder.errors(),
+        [
+            "open files without a workspace",
+            "open file not found in a project",
+            "open file without a reader",
+            "open file without a workspace",
+            "open key without a window",
+        ]
+    );
+}
+
 /// The Worktrees screen's button: the screen is pushed, then the worktree
 /// with that root becomes the current one.
 #[test]
@@ -321,11 +555,11 @@ fn a_worktree_request_without_a_workspace_or_a_project_is_an_error(cx: &mut Test
     let recorder = Recorder::default();
     cx.update(|cx| {
         let root = || PathBuf::from("/repos/a-w1");
-        handle(BenchRequest::OpenWorktree(root()), None, &recorder, cx);
+        handle(BenchRequest::OpenWorktree(root()), &at(None), &recorder, cx);
         // A workspace whose `dyn Projects` has not started has no project.
         handle(
             BenchRequest::OpenWorktree(root()),
-            Some(&*hub),
+            &at(Some(&*hub)),
             &recorder,
             cx,
         );
@@ -352,7 +586,7 @@ fn open_project_takes_the_open_folder_path(cx: &mut TestAppContext) {
     cx.update(|cx| {
         handle(
             BenchRequest::Open(PathBuf::from("/repos/a")),
-            Some(&*hub),
+            &at(Some(&*hub)),
             &recorder,
             cx,
         );
@@ -377,7 +611,7 @@ fn open_project_without_a_workspace_is_an_error(cx: &mut TestAppContext) {
     cx.update(|cx| {
         handle(
             BenchRequest::Open(PathBuf::from("/repos/a")),
-            None,
+            &at(None),
             &recorder,
             cx,
         );
@@ -402,7 +636,7 @@ fn a_quit_request_takes_the_quit_path(cx: &mut TestAppContext) {
         // The test profile releases the barrier once the window exists.
         window::open(cx);
         assert!(!quit::is_quitting(cx));
-        handle(BenchRequest::Quit, None, &Recorder::default(), cx);
+        handle(BenchRequest::Quit, &at(None), &Recorder::default(), cx);
         assert!(quit::is_quitting(cx));
     });
     let start = Instant::now();
