@@ -734,9 +734,8 @@ fn scrolled(
     Ok(stats)
 }
 
-/// `app/scroll_frames`: for each scenario of ADR 0034, 3 launches, one at a
-/// time (not 5: a launch is about 20 s with its three settles, and the
-/// scenarios are three). Each opens the fixture project and lets it settle, opens the
+/// `app/scroll_frames`: for each scenario of ADR 0034, 5 launches, one at a
+/// time. Each opens the fixture project and lets it settle, opens the
 /// scenario's file and lets it settle (for the edit mode, then ⌘E and
 /// `EditReady`, and settle again), and sends `Open(Scroll)`: the window's
 /// frames are recorded while the reading view (or the editor) is scrolled
@@ -753,7 +752,7 @@ fn app_scroll_frames(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let scenarios = repo.scrolling(ctx);
     let edit = repo.editable();
     let scheduler = scheduler(ctx);
-    let launches = ctx.scale(3, 1);
+    let launches = ctx.scale(5, 1);
     let mut recordings = Vec::new();
     let mut notes = Vec::new();
     for scenario in &scenarios {
@@ -816,7 +815,7 @@ fn app_scroll_frames(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     ])
 }
 
-/// `app/scroll_frames_indexing`: 3 launches, one at a time, of the large
+/// `app/scroll_frames_indexing`: 5 launches, one at a time, of the large
 /// repository (`app/idle_100k`'s 100 000 files) with a 4 MiB TypeScript
 /// file in it. Each opens the project and the file at its middle and, with
 /// no wait for quiescence, sends `Open(Scroll)`: the scroll of
@@ -838,7 +837,7 @@ fn app_scroll_frames_indexing(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError
     let scheduler = scheduler(ctx);
     let mut recordings = Vec::new();
     let mut background = Vec::new();
-    for _ in 0..ctx.scale(3, 1) {
+    for _ in 0..ctx.scale(5, 1) {
         let mut session = scheduler.session(&program, None)?;
         settle(&mut session, ID)?;
         session.open(
