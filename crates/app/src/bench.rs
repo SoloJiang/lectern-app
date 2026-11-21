@@ -295,6 +295,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
     let (requests, mut incoming) = unbounded();
     let reporter: Arc<dyn Reporter> = probe.clone();
     let errors = reporter.clone();
+    let for_requests = reporter.clone();
     let kernel_handle = kernel.clone();
     cx.spawn(async move |cx| {
         while let Some(request) = incoming.next().await {
@@ -315,6 +316,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
                         window,
                         host: host.as_ref(),
                         kernel: Some(&kernel_handle),
+                        reporter: Some(for_requests.clone()),
                     },
                     &*errors,
                     cx,
@@ -328,8 +330,9 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
 }
 
 /// What a request acts on: the workspace of the window, the reader, the
-/// window, the workspace's handle (to record frames) and the kernel (the
-/// yield switch). Each is None while it is not there yet.
+/// window, the workspace's handle (to record frames), the kernel (the
+/// yield switch) and the probe's error channel (for what happens after the
+/// request returns). Each is None while it is not there yet.
 #[derive(Default)]
 pub(crate) struct Targets<'a> {
     pub workspace: Option<&'a Hub>,
@@ -337,6 +340,7 @@ pub(crate) struct Targets<'a> {
     pub window: Option<AnyWindowHandle>,
     pub host: Option<&'a WorkspaceHost>,
     pub kernel: Option<&'a Arc<Kernel>>,
+    pub reporter: Option<Arc<dyn Reporter>>,
 }
 
 /// One request, on the main thread. `Open` goes into `workspace`'s queue as
@@ -412,7 +416,17 @@ pub(crate) fn handle(
                         }
                     }
                 }
-                if scroll(host, window, targets.kernel.cloned(), cx).is_err() {
+                let Some(reporter) = targets.reporter.clone() else {
+                    errors.error("open scroll without a reporter");
+                    return;
+                };
+                let run = ScrollRun {
+                    host: host.clone(),
+                    kernel: targets.kernel.cloned(),
+                    reporter,
+                    yielding,
+                };
+                if scroll(run, window, cx).is_err() {
                     errors.error("open scroll without a window");
                 }
             }
@@ -423,62 +437,107 @@ pub(crate) fn handle(
     }
 }
 
-/// The scroll scenario (docs/design/bench.md「进程级基准」): the window
-/// becomes the active one (an inactive window is drawn at about 30 fps,
-/// which no frame budget survives: platform design「帧的时刻」), `workspace`
-/// records the window's frames until the end, and in each frame handled a
-/// wheel event arrives at the window's centre, where the reading view (or
-/// its editor) is: [`SCROLL_DOWN_EVENTS`] events scroll down by
-/// [`SCROLL_STEP_PX`] pixels, the remaining ones of the [`SCROLL_EVENTS`] back
-/// up, the events are those the platform sends, through
-/// `Window::dispatch_event`. [`SCROLL_TAIL_FRAMES`] frames after the last
-/// one the recording stops and goes to `on_frames`; the log says how much
-/// background work the kernel still had then (`app/scroll_frames_indexing`
-/// checks it). Main thread.
-pub(crate) fn scroll(
-    host: &WorkspaceHost,
-    window: AnyWindowHandle,
+/// What the frames of a scroll need, passed from one frame callback to the
+/// next.
+pub(crate) struct ScrollRun {
+    host: WorkspaceHost,
     kernel: Option<Arc<Kernel>>,
-    cx: &mut App,
-) -> gpui::Result<()> {
-    window.update(cx, |_, window, _| {
-        window.activate_window();
-        scroll_frame(host.clone(), kernel, window, 0);
-    })?;
-    host.record_frames(Name::Borrowed("scroll"), RecordStop::Manual);
-    Ok(())
+    reporter: Arc<dyn Reporter>,
+    /// The yield switch was turned on for this scroll and goes off at its
+    /// end (also when it does not start).
+    yielding: bool,
 }
 
-/// The callback of frame `step` of the scroll: its wheel event, or the end.
-fn scroll_frame(host: WorkspaceHost, kernel: Option<Arc<Kernel>>, window: &mut Window, step: u32) {
-    window.on_next_frame(move |window, cx| {
-        if step < SCROLL_EVENTS {
-            let down = step < SCROLL_DOWN_EVENTS;
-            let size = window.viewport_size();
-            window.dispatch_event(
-                PlatformInput::ScrollWheel(ScrollWheelEvent {
-                    position: point(size.width / 2.0, size.height / 2.0),
-                    delta: ScrollDelta::Pixels(point(
-                        px(0.0),
-                        px(if down {
-                            -SCROLL_STEP_PX
-                        } else {
-                            SCROLL_STEP_PX
-                        }),
-                    )),
-                    touch_phase: TouchPhase::Moved,
-                    ..ScrollWheelEvent::default()
-                }),
-                cx,
-            );
-        } else if step >= SCROLL_EVENTS + SCROLL_TAIL_FRAMES {
-            if let Some(kernel) = &kernel {
-                info!("bench scroll ended"; background_items = kernel.background().count);
-            }
-            host.stop_recording();
-            return;
+impl ScrollRun {
+    /// The scroll is over: the yield switch goes back off.
+    fn yield_off(&self) {
+        if let (true, Some(kernel)) = (self.yielding, &self.kernel) {
+            kernel.set_yield(false);
         }
-        scroll_frame(host, kernel, window, step + 1);
+    }
+}
+
+/// How many frames the scroll waits for the window to be the active one
+/// before it gives up: the activation answers from the platform a little
+/// after `activate_window` (and an inactive window with pending frame
+/// callbacks is drawn at about 30 fps). 120 frames is 4 s at that rate.
+pub(crate) const ACTIVATION_FRAMES: u32 = 120;
+
+/// Where a scroll is: waiting for the window to become the active one (the
+/// frames waited so far), or sending the wheel event of a step.
+#[derive(Clone, Copy)]
+enum ScrollPhase {
+    Activating(u32),
+    Events(u32),
+}
+
+/// The scroll scenario (docs/design/bench.md「进程级基准」): the window is
+/// made the active one (an inactive window is drawn at about 30 fps, which
+/// no frame budget survives: platform design「帧的时刻」), and the scenario
+/// starts only in the frame in which it is: the platform tells the window
+/// after `activate_window` returns, so an immediate start would record
+/// 33 ms frames. A window that is not active after [`ACTIVATION_FRAMES`]
+/// frames is an `Error`, not a slow recording. Then `workspace` records the
+/// window's frames until the end, and in each frame handled a wheel event
+/// arrives at the window's centre, where the reading view (or its editor)
+/// is: [`SCROLL_DOWN_EVENTS`] events scroll down by [`SCROLL_STEP_PX`]
+/// pixels, the remaining ones of the [`SCROLL_EVENTS`] back up; the events
+/// are those the platform sends, through `Window::dispatch_event`.
+/// [`SCROLL_TAIL_FRAMES`] frames after the last one the recording stops and
+/// goes to `on_frames`; the log says how much background work the kernel
+/// still had then (`app/scroll_frames_indexing` checks it). Main thread.
+pub(crate) fn scroll(run: ScrollRun, window: AnyWindowHandle, cx: &mut App) -> gpui::Result<()> {
+    window.update(cx, |_, window, _| {
+        window.activate_window();
+        scroll_frame(run, window, ScrollPhase::Activating(0));
+    })
+}
+
+/// The callback of one frame of the scroll.
+fn scroll_frame(run: ScrollRun, window: &mut Window, phase: ScrollPhase) {
+    window.on_next_frame(move |window, cx| match phase {
+        ScrollPhase::Activating(waited) => {
+            if window.is_window_active() {
+                run.host
+                    .record_frames(Name::Borrowed("scroll"), RecordStop::Manual);
+                scroll_frame(run, window, ScrollPhase::Events(0));
+            } else if waited >= ACTIVATION_FRAMES {
+                run.yield_off();
+                run.reporter.error("open scroll window not active");
+            } else {
+                scroll_frame(run, window, ScrollPhase::Activating(waited + 1));
+            }
+        }
+        ScrollPhase::Events(step) => {
+            if step < SCROLL_EVENTS {
+                let down = step < SCROLL_DOWN_EVENTS;
+                let size = window.viewport_size();
+                window.dispatch_event(
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position: point(size.width / 2.0, size.height / 2.0),
+                        delta: ScrollDelta::Pixels(point(
+                            px(0.0),
+                            px(if down {
+                                -SCROLL_STEP_PX
+                            } else {
+                                SCROLL_STEP_PX
+                            }),
+                        )),
+                        touch_phase: TouchPhase::Moved,
+                        ..ScrollWheelEvent::default()
+                    }),
+                    cx,
+                );
+            } else if step >= SCROLL_EVENTS + SCROLL_TAIL_FRAMES {
+                if let Some(kernel) = &run.kernel {
+                    info!("bench scroll ended"; background_items = kernel.background().count);
+                }
+                run.yield_off();
+                run.host.stop_recording();
+                return;
+            }
+            scroll_frame(run, window, ScrollPhase::Events(step + 1));
+        }
     });
 }
 

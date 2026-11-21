@@ -104,6 +104,33 @@ impl Rig {
     /// the window, the folder opened and its file list and directory table
     /// ready.
     fn open(cx: &mut TestAppContext) -> Rig {
+        let rig = Rig::start(cx);
+        rig.request(cx, BenchRequest::Open(rig.root.clone()));
+        rig.wait(cx, "the project's directory table", |rig| {
+            rig.host.hub().open_snapshots().iter().any(|project| {
+                project
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| matches!(active.dirs, Scan::Ready(_)))
+            })
+        });
+        rig
+    }
+
+    /// The same up to the project's home: the folder is opened and only the
+    /// `ProjectHome` milestone is waited for, as the runner of
+    /// `app/scroll_frames_indexing` does (it does not wait for quiescence).
+    fn open_at_the_home(cx: &mut TestAppContext) -> Rig {
+        let rig = Rig::start(cx);
+        rig.request(cx, BenchRequest::Open(rig.root.clone()));
+        rig.wait(cx, "ProjectHome", |rig| {
+            rig.count(Milestone::ProjectHome) == 1
+        });
+        rig
+    }
+
+    /// The plugins started and `file-reader` active.
+    fn start(cx: &mut TestAppContext) -> Rig {
         // The kernel and executor threads wake the foreground tasks.
         cx.executor().allow_parking();
         cx.update(|cx| {
@@ -160,22 +187,13 @@ impl Rig {
             reader,
             milestones,
             errors,
-            root: root.clone(),
+            root,
             _executor: executor,
             _dir: dir,
         };
         // `file-reader` has activated once the slot holds its reader.
         rig.wait(cx, "the file-reader plugin", |rig| {
             rig.reader.get().is_some()
-        });
-        rig.request(cx, BenchRequest::Open(root));
-        rig.wait(cx, "the project's directory table", |rig| {
-            rig.host.hub().open_snapshots().iter().any(|project| {
-                project
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| matches!(active.dirs, Scan::Ready(_)))
-            })
         });
         rig
     }
@@ -195,6 +213,7 @@ impl Rig {
                     window,
                     host: Some(&self.host),
                     kernel: Some(&self.kernel),
+                    reporter: Some(self.errors.clone()),
                 },
                 &*self.errors,
                 cx,
@@ -511,6 +530,18 @@ fn bench_keys_escape_closes_the_reader_and_the_next_open_starts_early(cx: &mut T
 /// `Error`, never `Frames`.
 #[gpui::test]
 fn bench_keys_scroll_moves_the_reading_view_and_ends_the_recording(cx: &mut TestAppContext) {
+    scroll_and_end(cx, false);
+}
+
+/// The same with the kernel's yield switch on for the scroll (the
+/// calibration of `app/scroll_frames_indexing`): the scroll and the
+/// shutdown of the kernel behind it are not disturbed.
+#[gpui::test]
+fn bench_keys_scroll_with_the_yield_switch_ends_and_quits(cx: &mut TestAppContext) {
+    scroll_and_end(cx, true);
+}
+
+fn scroll_and_end(cx: &mut TestAppContext, yielding: bool) {
     let log = lectern_logging::testing::capture();
     let rig = Rig::open(cx);
     rig.open_file(cx, "long.ts");
@@ -520,7 +551,7 @@ fn bench_keys_scroll_moves_the_reading_view_and_ends_the_recording(cx: &mut Test
     rig.settle(cx);
     let before = rig.lines_top(cx).expect("the reading view's list");
     assert_eq!(before, "0.0", "the file is shown from its start");
-    rig.request(cx, BenchRequest::Scroll { yielding: false });
+    rig.request(cx, BenchRequest::Scroll { yielding });
     assert!(rig.errors.0.lock().unwrap().is_empty());
     // One event in each frame, then the tail; the recording ends after that.
     let mut frames = 0;
@@ -555,5 +586,20 @@ fn bench_keys_scroll_moves_the_reading_view_and_ends_the_recording(cx: &mut Test
     // A second frame does not report again.
     rig.settle(cx);
     assert_eq!(rig.errors.0.lock().unwrap().len(), 1);
+    rig.close();
+}
+
+/// `app/scroll_frames_indexing` opens the file right after the project's
+/// home, with no wait for the project's directory table or for quiescence
+/// (no other benchmark does that): the request finds the project and the
+/// file is shown.
+#[gpui::test]
+fn bench_keys_a_file_opens_right_after_the_project_home(cx: &mut TestAppContext) {
+    let rig = Rig::open_at_the_home(cx);
+    rig.open_file(cx, "long.ts");
+    rig.wait(cx, "FileHighlighted", |rig| {
+        rig.count(Milestone::FileHighlighted) == 1
+    });
+    assert!(rig.errors.0.lock().unwrap().is_empty());
     rig.close();
 }

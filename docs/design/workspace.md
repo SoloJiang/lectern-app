@@ -775,7 +775,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - **`FrameRecord` 只派生 `Debug`。** `result` 里的 `HookError::Os` 带 `io::Error`，不是 `Clone`、`PartialEq`；测试的辅助函数（`Received::frames`）改为给出场景名和错误种类。设计里的类型本来就没有写派生。
 - **一次记录一个编号。** `Recording` 带 `id`，每帧的 `on_next_frame` 回调带着自己记录的 `id`：回调发现当前记录不是它的（已结束，或已被新的一次取代）就不再调用 `frame_started`、也不再排下一帧的回调。没有这个编号，在记录结束又开始之间还挂着的回调会对新的记录多调一次 `frame_started`，`requested` 与 `started` 就重合，排队时间被悄悄记成 0。设计只写了「每一次回调先调用 `frame_started`」。
 - **`record` 失败时没有逐帧的回调。** 设计写「照常按 `stop` 的条件结束，交回这个错误」：`After` 的计时、`AnimationsSettled` 的检查照常运行，没有 `FrameRecorder` 就不排每帧的回调。`stop_recording` 在这时当场调用 `on_frames`（没有后台等待）。记 debug `frame recording not started`（只有错误种类）。
-- **`stop` 在 `stop_recording` 里直接调用，不等帧边界。** 条件满足时可能在一次帧处理的中间（`settle_check` 在回调里；`After` 的计时在帧之间）：这一次帧处理的 drawable 在 `stop` 之后才取，不在记录里，`platform` 把它当作没有 drawable 的帧处理，不计入 `unmatched`（platform 设计「逐帧记录」的配对规则）。
+- **`stop` 在 `stop_recording` 里直接调用，不等帧边界。** 条件满足时可能在一次帧处理的中间（`settle_check` 在回调里；`After` 的计时在帧之间）：这一次帧处理的 drawable 在 `stop` 之后才取：`platform` 的钩子在 `stop` 之后不再记录（`frame.rs` 的 `recording_here` 在 `stop` 之后返回 None，`Store::drawable` 不被调用），所以它既不在记录里，也不计入 `unmatched`。
 - **`wait` 在后台执行器上、`on_frames` 在那个线程上调用。** 设计写「经 `on_frames` 交回，任何线程」；实现里 `PendingFrames::wait(250 ms)` 之后就在后台线程上调用，不再回主线程。
 
 ### 里程碑只等一帧
