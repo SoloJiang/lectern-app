@@ -867,7 +867,7 @@ fn app_scroll_frames_indexing(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError
         .map(|items| items.map_or_else(|| "-".to_owned(), |n| n.to_string()))
         .collect::<Vec<_>>()
         .join(", ");
-    if ctx.mode() == Mode::Measure && background.iter().any(|items| *items == Some(0)) {
+    if ctx.mode() == Mode::Measure && background.contains(&Some(0)) {
         return Err(BenchError::new(format!(
             "{ID}：滚动结束时批量层已经没有工作（后台守卫数 {held}），结果不是建索引期间的帧时间"
         )));
