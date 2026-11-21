@@ -6,7 +6,7 @@
 - 设计文档：[docs/design/workspace.md](../../docs/design/workspace.md)
 - issue：[#215](https://github.com/SoloJiang/lectern-app/issues/215)
 - ADR：[0012](../../docs/adr/0012.md)、[0015](../../docs/adr/0015.md)、[0017](../../docs/adr/0017.md)、[0025](../../docs/adr/0025.md)、[0046](../../docs/adr/0046.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`nav`（导航状态机与守卫轮询）、`registry`（贡献注册表）、`driver`（主线程循环，输出 `Effect`，调用守卫与命令处理函数）、`Hub`（`dyn Contributions` 与队列发送端）、`WorkspacePlugin`、`WindowState`。第 2 步已实现，依赖 GPUI：`host`（`install`、`WorkspaceHost`、队列的接收端）、`view`（根视图 `Workspace`：区域、三层、代理 Action、提示、帧记录）、`actions`、`payloads`（`ui::contrib` 的载荷检查）、`semantic`（区域的语义节点，`ui::semantic` 到位前的数据形式）。第 3 步（`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）的代码在 `app` 里已实现（本 crate 没有改动）；手动验收、项目窗口的 1180 × 760 居中、里程碑与帧记录转交给 bench 探针还没有做，见设计文档「与设计的差异」第 3 步。
+- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`nav`（导航状态机与守卫轮询）、`registry`（贡献注册表）、`driver`（主线程循环，输出 `Effect`，调用守卫与命令处理函数）、`Hub`（`dyn Contributions` 与队列发送端）、`WorkspacePlugin`、`WindowState`。第 2 步已实现，依赖 GPUI：`host`（`install`、`WorkspaceHost`、队列的接收端）、`view`（根视图 `Workspace`：区域、三层、代理 Action、提示、帧记录）、`actions`、`payloads`（`ui::contrib` 的载荷检查）、`semantic`（区域的语义节点，`ui::semantic` 到位前的数据形式）。第 3 步（`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）的代码在 `app` 里已实现（本 crate 没有改动）；手动验收、项目窗口的 1180 × 760 居中还没有做，见设计文档「与设计的差异」第 3 步。帧记录已实现（[#393](https://github.com/SoloJiang/lectern-app/issues/393)）：`record_frames` 在主线程上调用 `platform::frame::record`，每帧在 `on_next_frame` 的回调里调用 `frame_started`（每个记录一个编号），停止条件满足时 `stop`、在后台执行器上 `PendingFrames::wait(250 ms)`，经 `on_frames` 交回 `FrameRecord { scenario, result }`；`record` 失败时照常按停止条件结束并交回错误。成功的记录只能在带 `bench-hooks` 的真实窗口里得到，单元测试只走错误路径。
 
 ## 边界
 

@@ -1920,7 +1920,7 @@ B2. 逐帧记录（在第一个把帧时间预算改为 `Active` 的 PR 之前�
 - `frame_pairing_*`、`frame_clock_*` 在 Linux CI 和 macOS CI 上通过；macOS CI 上 `frame_hooks_on_an_offscreen_layer`、`frame_record_off_the_main_thread_is_an_error` 通过。
 - `frame_hooks` example 的逐帧检查通过（`problems` 干净，相邻 `started` 的间隔的中位数与 `refresh` 相差不超过 10%），每帧的开销写进「性能」和「实际验证」。
 - `git diff origin/main -- Cargo.lock` 为空。
-- `workspace` 在 `on_next_frame` 的回调里调用 `frame_started`，是 `workspace` 自己的 PR（[workspace 设计「本 crate 的公开项」](workspace.md#本-crate-的公开项)）。
+- `workspace` 在 `on_next_frame` 的回调里调用 `frame_started`，是 `workspace` 自己的 PR（[workspace 设计「本 crate 的公开项」](workspace.md#本-crate-的公开项)；随 [#393](https://github.com/SoloJiang/lectern-app/issues/393) 实现，真实窗口里的结果要等 `app/scroll_frames` 在 macOS CI 的运行）。
 - 本文的状态行、「实际验证」写明 B2 已实现。
 
 C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。

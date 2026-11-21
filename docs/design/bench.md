@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4 步（探针、进程调度与空窗口基线）已实现，依赖 [ADR 0051](../adr/0051.md)，首帧的时刻和判定的机器按 [ADR 0052](../adr/0052.md)（drawable 没有 `presentedTime` 时取显示回调运行的时刻，结果注明来源；首帧要真正显示的条目只在判定机器上判定，见「平台与噪声」），托管 runner 上空窗口基线的记录已写进「实际验证」和 ADR 0017，判定机器的基线在 runner 注册之后补上；第 5 步的 5a（`app` 的测量构建，[#273](https://github.com/SoloJiang/lectern-app/pull/273)）和 5b（`bench` 的 `app/*`、`plugin/*` 进程级基准）已实现，但 5b 的 `plugin/project/resident_*` 没有做（打开项目的方式未定，见「与设计的差异」第 5 步和 [#275](https://github.com/SoloJiang/lectern-app/issues/275)），判定机器的 `app/cold_start` 判定在 runner 注册之后才有；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。CI 上的分片（[ADR 0053](../adr/0053.md)，[#279](https://github.com/SoloJiang/lectern-app/issues/279)，「分片」「`just bench` 与 CI」）已实现，四个分片在 PR 上的时长都 ≤ 12 分钟（「实际验证」）。之后 `process` 目标超过了 12 分钟，按 [ADR 0062](../adr/0062.md) 分成三个分片、程序在一个任务里构建一次，已实现，没有在 CI 上运行过（「实际验证」第 6 步的修订）。文件阅读与 Files 的端到端基准（`app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand`，[file_reader 设计](file_reader.md)第 8 步的 8c，`Refs #10`）已实现，数字要等 macOS CI 的运行；它们的帧基准（`app/scroll_frames`、`app/scroll_frames_indexing`）仍等 `workspace` 的帧记录，见「与设计的差异」。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4 步（探针、进程调度与空窗口基线）已实现，依赖 [ADR 0051](../adr/0051.md)，首帧的时刻和判定的机器按 [ADR 0052](../adr/0052.md)（drawable 没有 `presentedTime` 时取显示回调运行的时刻，结果注明来源；首帧要真正显示的条目只在判定机器上判定，见「平台与噪声」），托管 runner 上空窗口基线的记录已写进「实际验证」和 ADR 0017，判定机器的基线在 runner 注册之后补上；第 5 步的 5a（`app` 的测量构建，[#273](https://github.com/SoloJiang/lectern-app/pull/273)）和 5b（`bench` 的 `app/*`、`plugin/*` 进程级基准）已实现，但 5b 的 `plugin/project/resident_*` 没有做（打开项目的方式未定，见「与设计的差异」第 5 步和 [#275](https://github.com/SoloJiang/lectern-app/issues/275)），判定机器的 `app/cold_start` 判定在 runner 注册之后才有；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。CI 上的分片（[ADR 0053](../adr/0053.md)，[#279](https://github.com/SoloJiang/lectern-app/issues/279)，「分片」「`just bench` 与 CI」）已实现，四个分片在 PR 上的时长都 ≤ 12 分钟（「实际验证」）。之后 `process` 目标超过了 12 分钟，按 [ADR 0062](../adr/0062.md) 分成三个分片、程序在一个任务里构建一次，已实现，没有在 CI 上运行过（「实际验证」第 6 步的修订）。文件阅读与 Files 的端到端基准（`app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand`，[file_reader 设计](file_reader.md)第 8 步的 8c，`Refs #10`）已实现，数字要等 macOS CI 的运行；它们的帧基准（`app/scroll_frames`、`app/scroll_frames_indexing`，含编辑模式的场景，[#393](https://github.com/SoloJiang/lectern-app/issues/393)）已实现：`workspace` 记录帧、`app` 转交 `Probe::frames` 并实现滚动场景，数字要等 macOS CI 的运行，见「与设计的差异」「实际验证」。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -285,15 +285,21 @@ pub enum OpenTarget {
     Files,
     /// 一次按键（GPUI 的写法，如 `cmd-e`、`right`），走与真实键盘输入相同的分发路径。
     Key(String),
-    Diff { session: String }, Worktree(PathBuf), Scroll, Animate,
+    Diff { session: String }, Worktree(PathBuf),
+    /// 向阅读视图（或编辑器）发一组固定的滚轮事件并记录窗口的帧，之后应答 `Frames`：每帧一个事件，
+    /// 前 `SCROLL_DOWN_EVENTS` 个向下 `SCROLL_STEP_PX`，其余的（共 `SCROLL_EVENTS`）向上，最后一个事件之后再过 `SCROLL_TAIL_FRAMES` 帧结束。
+    /// `yielding` 时 kernel 的让路开关（ADR 0033）在滚动期间打开：校准 `app/scroll_frames_indexing` 用，产品不打开它。
+    Scroll { yielding: bool },
+    Animate,
     /// 以固定间隔向当前焦点注入按键，走与真实键盘输入相同的分发路径。
     Input { text: String, interval: Duration },
 }
 /// 一段滚动或动画的逐帧时刻，按帧顺序。只有 `platform` 的 `FrameProblems` 干净的记录才会发出（见 `Probe::frames`）；
 /// `without_tick` 是不是 display link 发起的帧数（`requested` 取 `started`），只报告。
 pub struct FrameStats { pub scenario: String, pub refresh: Duration, pub frames: Vec<FrameTimes>, pub without_tick: u32 }
-/// `presented` 为 None：这一帧没有显示时刻。来源随第一个把帧时间预算改为生效的 PR 加上（ADR 0052；`platform` 的 B2 已给出 `PresentedAt`）。只报告，不判定。
-pub struct FrameTimes { pub requested: SystemTime, pub started: SystemTime, pub completed: SystemTime, pub presented: Option<SystemTime> }
+/// `presented` 为 None：这一帧没有显示时刻（`wait` 结束时显示回调还没有运行）。有时带来源（`PresentedAt { time, source }`，
+/// 与首帧相同，ADR 0052；编码为 `<ns>/<presented|handler>`）。只报告，不判定。
+pub struct FrameTimes { pub requested: SystemTime, pub started: SystemTime, pub completed: SystemTime, pub presented: Option<PresentedAt> }
 pub enum ChildKind { ProcessPlugin, LanguageServer, Other }
 
 impl Report  { pub fn encode(&self) -> String; pub fn decode(line: &str) -> Result<Report, WireError>; }
@@ -667,7 +673,10 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
   - `app/enter_edit`：打开 1 MiB 以内、接近编辑上限（`TIER_A_MAX`）的 TypeScript 文件（没有长行）并静止（整个文件读完，Edit 才可用），发 `Key("cmd-e")`，到 `EditReady`（编辑器画出、焦点在其中）。
   - `app/files_open`：夹具是 `app/idle_100k` 的 10 万文件形状；项目打开并静止之后（目录表已建好）发 `Open(Files)`，到 `FilesShown`（面板和树的第一批行画出）。
   - `app/files_expand`：同一个夹具，另有第一个目录 `aaa-wide/`，2000 个文件。先 `Open(Files)`（不计时）、`request(Key("down"))` 选中第一行并静止，再发 `Key("right")`，到 `FilesExpanded`（2000 个子项的行一次插入、画出）。
-  - 帧基准 `app/scroll_frames`（64 MiB、压缩成一行、编辑模式 1 MiB 的场景）和 `app/scroll_frames_indexing` 要 `workspace` 记录帧，仍是计划中（「与设计的差异」）。
+  - 帧基准 `app/scroll_frames`（[ADR 0034](../adr/0034.md)）和 `app/scroll_frames_indexing`（[ADR 0033](../adr/0033.md)）：`Open(Scroll { yielding })` 之后 `app` 让窗口成为前台窗口（GPUI 对不是前台的窗口按约 30 fps 请求帧，platform 设计「帧的时刻」的已知限制），`workspace` 记录窗口的帧，每一帧向窗口中心发一个滚轮事件，共 `SCROLL_EVENTS` = 240 个：前 160 个向下 90 px（约 5 行），后 80 个向上；最后一个事件之后再过 3 帧结束，记录经 `Probe::frames` 回来。每帧工作时间和相邻帧间隔由 `lectern_bench::frames` 从 `FrameStats` 算（`completed - requested`；相邻两帧 `started` 的差，一次记录内部，不跨启动），一条预算对所有场景和启动成立，判定所有帧里最差的那一帧，`note` 写每个场景自己的最大值、没有 tick 的帧数和 `presented` 的来源计数（只报告）。少于 `SCROLL_EVENTS` 的四分之三（180 帧）的记录是错误：事件没有到达视图、文件短于滚动时，帧没有画，不能当作通过。
+    - `app/scroll_frames`：每个场景 3 次启动（不是 5 次：一次启动含三次静止等待，约 20 s，场景有三个），每次先打开夹具项目并静止，打开场景的文件并静止，再发 `Open(Scroll { yielding: false })`。场景：64 MiB 的合成 TypeScript 按文件中部的字节偏移打开；压缩成一行的 4 MiB JavaScript 从头打开；编辑模式：1 MiB 以内的 TypeScript（`app/enter_edit` 的文件）打开并静止，发 `Key("cmd-e")` 到 `EditReady` 并静止，再滚动。冒烟模式用 2 MiB、1 MiB 的文件和 1 次启动。普通文件的场景没有：它短于滚动的行程，几帧之后滚到底，不画。
+    - `app/scroll_frames_indexing`：每次启动打开 `app/idle_100k` 的 10 万文件夹具（里面多一个 4 MiB 的 TypeScript 文件），**不等静止**就打开这个文件（按中部的字节偏移，等 `FileHighlighted`）并发 `Open(Scroll)`，所以滚动在批量层建索引、解析文件的窗口时进行；3 次启动。`app` 在滚动结束时记 info `bench scroll ended` 的 `background_items`（kernel 此刻持有的 `BackgroundGuard` 数），运行器退出后从日志读它：为 0 说明滚动结束时批量层已经没有工作，结果不是建索引期间的帧时间，测量时记为 `error`；`note` 写每次启动的值。让路开关按 ADR 0033：产品里它是关的，基准测产品的实际行为（`yielding: false`）；运行器的环境变量 `LECTERN_BENCH_YIELD=1` 时发 `yielding: true`，`note` 写开关的状态，用来在不让路就超标时校准让路（那时再做 `app` 里检测交互静止并打开开关的代码，设计在 [code_intel「交互让路」](code_intel.md#交互让路)）。
+    - 等待的期限：`Frames` 是 `SCROLL_LIMIT` = 15 s（240 帧在 60 Hz 下 4 s，加 10 s）。
 - 安装包（`app/bundle_size`、`app/dmg_size`）：不在 `process` 目标里。`lectern-bench-report package` 读参数给出的产物，`.app` 按目录下全部文件实际占用的块数求和（与 `du -sk` 相同），`.dmg` 取文件大小，写 `report-package.json`。目标 50 MB 只在报告里显示。
 
 计时类的进程级基准逐个运行，期间不运行别的基准；内存类最多同时运行 3 个，只影响等待时间，不影响 `phys_footprint`（`baseline/empty_window_idle`；启动 `lectern` 的 `app/idle_empty` 和 `plugin/*` 逐个运行，见「与设计的差异」第 5 步）。
@@ -723,8 +732,8 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `app/references_first`、`app/references_100k` | 中位数 ≤ 200 ms（第一批）/ ≤ 2 s（10 万文件的全部结果） | [性能预算](tech-research.md#性能预算) | 上下文抽屉（[#20](https://github.com/SoloJiang/lectern-app/issues/20)） |
 | `app/index_review_set`、`app/index_subproject`、`app/index_100k` | 打开项目到这一层全部入索引，中位数 ≤ 2 s / ≤ 10 s / ≤ 120 s（接电源）；`app/index_100k` 的夹具含一个达到依赖层上限（64 MiB 源码）的 `node_modules`，依赖层排在第 4 层之后，不推迟里程碑（[ADR 0033](../adr/0033.md)） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/index_100k_interaction` | 只记录（与 `app/index_100k` 相同，建索引期间按脚本持续滚动，记下第 3、4 层的完成时间） | [ADR 0033](../adr/0033.md) | `code_intel`（#17） |
-| `app/scroll_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期；场景另有 64 MiB 的合成源码、压缩成一行的文件和编辑模式下 1 MiB 的文件（[ADR 0034](../adr/0034.md)）。计划中：要 `workspace` 记录帧（`FRAMES_RECORDED`），不属于 8c | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录（file_reader 第 8 步之后的单独 PR） |
-| `app/scroll_frames_indexing` | 同 `app/scroll_frames`，在批量层有工作（打开 10 万文件的夹具后立即滚动）时测量；不让路就超标时启用 kernel 的让路开关，并以这个基准校准它（[ADR 0033](../adr/0033.md)）。计划中：等 `workspace` 的帧记录，和 `app/scroll_frames` 一起 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录、`code_intel`（#17） |
+| `app/scroll_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期；场景另有 64 MiB 的合成源码、压缩成一行的文件和编辑模式下 1 MiB 的文件（[ADR 0034](../adr/0034.md)） | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录（#393） |
+| `app/scroll_frames_indexing` | 同 `app/scroll_frames`，在批量层有工作（打开 10 万文件的夹具后立即滚动）时测量；不让路就超标时启用 kernel 的让路开关，并以这个基准校准它（[ADR 0033](../adr/0033.md)）。基准测产品的实际行为（开关关闭），`LECTERN_BENCH_YIELD=1` 时测让路 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录（#393）、`code_intel`（#17） |
 | `app/input_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `terminal_view` |
 | `app/terminal_output_frames` | 同 `app/input_frames`；场景：假的 agent 连续 2 秒全速输出每行 120 字符、每 8 个字符换一次 24 位色的文本，Terminal 页可见，记录这期间的帧（[terminal_view 设计「性能」](terminal_view.md#性能)）。计划中：场景随 `app` 的装配（terminal_view 第 3 步）加入 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `terminal_view` 第 3 步 |
 | `app/animation_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期 | [ADR 0015](../adr/0015.md) | `ui` |
@@ -832,14 +841,14 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `review/open_session_50`、`review/open_session_50_warm` | 中位数 < 35 ms / < 20 ms（`testing::Driven` 驱动审阅引擎，不经插件；夹具 `testing::SessionFixture`：2000 个提交、300 条 HEAD reflog 记录（10 次分支切换）、50 个会话，审阅对象的会话 20 轮、120 次改动调用，50 个 300 行的改动文件。从 `open` 到第一份 `Ready` 快照：新的缓存目录、`review.*` 全空 / 同一缓存目录上的新引擎、`review.*` 都已命中；缓存的数据库文件在计时前已打开） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/open_session_settled`、`review/cutoffs_cold`、`review/attribute_session_50` | 只记录（同一夹具：缓存全空时从 `open` 到最后一份快照；300 条记录的 `tree_changes` 全部未命中时建出截止时刻表；其余 49 个文件的改动链与归因，每一步都 `load`，不含缓存的读写） | [review](review.md#性能) | `review` 第 3 步 |
 | `review_view/items_5000` | 中位数 < 4 ms（`items::build` 对 `testing::snapshot_fixture(50, 20, 100)` 的全部 5000 行，夹具加了 40 条审阅意见（#22；#373 起其中 4 条是范围，在 `review_view` 的第 5 步）；进程内，不开窗口，只在 macOS 编译） | [review_view](review_view.md#性能) | `review_view` 第 1 步 |
-| `review_view/scroll_5000` | p95 ≤ 8.3 ms（每帧工作时间：滚过 5000 行的 diff；`Process`，`WorkspaceHost::record_frames` 的记录）。计划中：`workspace` 还不记录帧，`on_frames` 的记录总是空的 | [review_view](review_view.md#性能) | `workspace` 的帧记录 |
+| `review_view/scroll_5000` | p95 ≤ 8.3 ms（每帧工作时间：滚过 5000 行的 diff；`Process`，`WorkspaceHost::record_frames` 的记录）。计划中：帧记录已接通（#393），但没有驱动审阅屏幕的场景（`BenchDriver` 只有阅读视图的滚动） | [review_view](review_view.md#性能) | 审阅屏幕的滚动场景 |
 | `conversation/stream_apply` | p95 ≤ 4.8 ms（[ADR 0055](../adr/0055.md)；40 轮、正文合计 1 MiB 的快照；连续应用 200 个快照，每个让最后一段 agent 说明多 200 字节，测每次 `items::build`、新旧项的比较、`ListState::splice` 加这一帧里这一项的排版；夹具是 `lectern_conversation::fixture::StreamApply`，一个真实的 `MessagesModel` 在 GPUI 测试平台的窗口里；进程内，不开真实窗口，只在 macOS 编译。帧是测试平台的帧：没有 GPU，文字排版比真实的简单） | [conversation](conversation.md#性能) | `conversation` 第 4 步 |
 | `project_home/build_1000` | 中位数 < 3 ms（[ADR 0055](../adr/0055.md)；`snapshot::build` 对 `lectern_project_home::fixture::BuildFixture`：1000 个会话、50 个概览条目、17 个 worktree、2000 个子项目；进程内，不开窗口，只在 macOS 编译） | [project_home](project_home.md#性能) | `project_home` 第 3 步 |
 | `project_home/resident_bytes` | 存活字节 < 1 MB（同一夹具的 `HomeSnapshot` 与两个视图的状态；`Memory`）。计划中：视图的状态要在窗口里建 | [project_home](project_home.md#性能) | 视图的内存测量 |
 | `worktrees/build_1000` | 中位数 < 2 ms（`snapshot::build` 对 `lectern_worktrees::fixture::fixture_1000`：17 个 worktree、1000 个会话、每个 worktree 8 个重叠项和一份分支用量；进程内，不开窗口，只在 macOS 编译） | [worktrees](worktrees.md#性能) | `worktrees` 第 3 步 |
 | `worktrees/resident_bytes` | 存活字节 < 256 KiB（同一夹具合成出的 `WorktreesSnapshot`：行、会话、重叠项和每个 `NodeId`；夹具输入在计数之前建好并保持存活；`Memory`，只在 macOS 编译）。视图的状态要在窗口里建，不在计数里（[worktrees 设计「与设计的差异」](worktrees.md#与设计的差异)第 3 步） | [worktrees](worktrees.md#性能) | `worktrees` 第 3 步 |
 | `terminal_view/snap_full` | 中位数 ≤ 300 µs（`lectern_terminal_view::testing::SnapFull`：120×40 的帧，每行的字形按合成的 `LineLayout` 放到格子上（行缓存里什么也没有），再生成绘制列表：底色、选区、光标、装饰、方框图元；进程内，不开窗口，只在 macOS 编译） | [terminal_view](terminal_view.md#性能) | `terminal_view` 第 2 步 |
-| `app/home_frames` | 每帧工作时间最大值 ≤ 8.3 ms、相邻帧间隔 ≤ 1.5 个刷新周期（项目主页的概览到达与侧栏滚动；`Process`）。计划中：同 `review_view/scroll_5000` | [project_home](project_home.md#性能) | `workspace` 的帧记录 |
+| `app/home_frames` | 每帧工作时间最大值 ≤ 8.3 ms、相邻帧间隔 ≤ 1.5 个刷新周期（项目主页的概览到达与侧栏滚动；`Process`）。计划中：同 `review_view/scroll_5000`，没有驱动项目主页的场景 | [project_home](project_home.md#性能) | 项目主页的场景 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/note_add` | 中位数 < 0.2 ms（`testing::MarkSeenFixture::seed_notes` 写好 39 条待发送、240 条已发送的会话外改动审阅上 `command(AddNote)` 到快照替换；每个样本之前删掉上一个样本加的那条，不计时） | [review](review.md#性能) | `review` 第 6 步 |
 | `review/notes_prompt_40` | 中位数 < 5 ms（`notes::prompt` 拼 40 条意见，每条 4 KiB 文字、8 行摘录（#373 的上限）和一个路径，约 200 KiB；纯文字处理，进程内，不开窗口） | [review](review.md#性能) | `review` 第 7 步 |
@@ -1300,7 +1309,27 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - `just test -p lectern-file-reader`：139 个通过，其中新的 `files_milestones_are_the_first_rows_and_each_opened_directory`（第一批行报一次，选择移动不报，→ 和 ↵ 打开目录各报一次，收起不报）、`edit_the_milestone_is_the_editors_first_frame_once_per_edit_mode`、`plugin_the_reader_slot_holds_the_active_reader_weakly`。
 - **没有在本机运行：** 这五个进程级基准（要启动带探针的 `lectern` 并打开窗口），数字来自 macOS CI（托管的 `macos-15` runner，`process` 分片）；合并前 CI 的值和备注里每个场景的中位数在 PR 里补上。`just test -p lectern-app` 的 `bench_keys_*`（GPUI 的测试平台，真实的 `Workspace` 和 desktop profile 的插件，请求经 `bench::handle`）证明 ⌘E 到达阅读视图并以 `EditReady` 结束、⌘[ 回到第一个文件并以 `FileHighlighted` 结束、`↓`、`→` 到达 Files 并以 `FilesExpanded` 结束（换成别的键就失败）。只能在 CI 里首次验证的是：真实窗口里的焦点（测试平台的窗口没有系统的首响应者）、`Outside` 审阅里接近 4 MiB 的文件的 diff 能画出、画出时审阅视图已经为旧一侧登记了 `share_object`。哪一处不成立，基准会以 30 秒的 `Milestone` 超时记为 `error`，不会给出错的数字。
 
+### 帧基准（#393）
+
+`app/scroll_frames`、`app/scroll_frames_indexing`（`Closes #10`）。在 macOS（arm64，Rust 1.97.0）上运行，本机没有打开真实窗口：
+
+- `cargo nextest run -p lectern-bench --all-features --lib`：193 个通过。新增：`frames_*` 10 个（`lectern_bench::frames`：工作时间是 `completed - requested`，间隔是相邻 `started` 的差，完成早于请求记为 0，多条记录放在一起时间隔不跨记录，帧太少、没有帧、刷新周期不同或为 0 都是错误，`describe` 取最差的一帧并按来源计数）、`wire_scroll_without_yield_does_not_yield`，`wire_*` 的往返加了 `Scroll { yielding }` 和带来源的 `presented`，坏的 `presented` 编码是错误。预算表与分片的测试（每条预算恰好在一个分片里，`app/scroll_frames*` 在 `process-app`；每条生效的预算都有基准）通过。
+- `cargo check -p lectern-bench --all-features --benches`、`cargo bench -p lectern-bench --all-features --bench process --no-run` 编译通过。
+- 没有运行进程级基准（要打开真实窗口、要图形会话）：两条预算的数字、`app` 在真实窗口里记录的帧是否干净（`FrameProblems`）、`without_tick` 的比例、滚轮事件是否到达编辑器、`app/scroll_frames_indexing` 的批量层在滚动结束时是否还有工作（`background_items`）、让路开关的作用、`process-app` 分片的耗时，都以 macOS CI 为准。
+
 ## 与设计的差异
+
+帧基准（`app/scroll_frames`、`app/scroll_frames_indexing`，[#393](https://github.com/SoloJiang/lectern-app/issues/393)，`Closes #10`）：
+
+- **`OpenTarget::Scroll` 带 `yielding`。** 设计写 `Scroll`。ADR 0033 要求让路开关在不让路就超标时才启用，并用这个基准校准：基准要能在两种状态下测，所以请求带一个布尔值（编码为 `yield=1`，没有时为 false），运行器的环境变量 `LECTERN_BENCH_YIELD=1` 选让路的一种。产品没有检测交互静止的代码（[app 设计「code_intel 与 file_reader 的装配」](app.md#code_intel-与-file_reader-的装配)），不打开开关；基准的默认就是产品的实际行为。让路的一种是校准用的，它测的配置产品里没有。
+- **滚动序列是这里定的。** 设计只写「按固定序列滚动」：每帧一个滚轮事件（不是按计时器：帧数就是事件数，不受计时器抖动影响），240 个事件，160 个向下 90 px、80 个向上，最后一个事件之后 3 帧结束；常量 `SCROLL_*` 在 `wire`，运行器的期限 `SCROLL_LIMIT`（15 s）用同一组数。事件发到窗口中心，不依赖阅读视图的布局；编辑模式的编辑器也响应滚轮。
+- **每个场景 3 次启动，不是 5 次。** 端到端基准是 5 次启动（「进程级基准」）。帧基准每次启动有三次静止等待，约 20 s，`app/scroll_frames` 三个场景、`app/scroll_frames_indexing` 一个，5 次会让 `process-app` 分片（ADR 0062 估计 9 到 10 分钟）超过 12 分钟的目标更多。判定的是所有帧里最差的一帧（最大值），次数越少、遇到偶发长帧的机会越少，结果越宽松；改回 5 次只是一个数字，要在 CI 的耗时允许时做。
+- **合并多个场景与启动。** 一条预算对每个场景成立，运行器一个基准只产出一个值：`lectern_bench::frames::value` 把全部记录的每帧工作时间、记录内部的间隔放在一起（间隔不跨记录），预算判定其中最大的。刷新周期不同的记录是错误（同一台机器上不会发生）。
+- **帧太少是错误。** 少于 `SCROLL_EVENTS` 的四分之三（`MIN_SCROLL_FRAMES` = 180）的记录是错误：`intervals` 为空时统计量会 panic，几帧的记录也不是滚动。普通大小的文件的场景因此没有（它几帧之后滚到底、不再画）。
+- **`app/scroll_frames_indexing` 读日志确认批量层还在工作。** 报告协议没有后台工作的状态（`Epoch` 的应答只有静止代数；设计写过要加，第 5 步没有做），所以 `app` 在滚动结束时记 info `bench scroll ended` 的 `background_items`，运行器退出后读日志。为 0 时测量记为 `error`（冒烟模式不判，小夹具索引很快）；日志里没有时 `note` 写 `-`，不判。夹具里的文件是 4 MiB 的 TypeScript（档位 B，批量层按窗口解析它）。
+- **`FrameTimes::presented` 带来源。** ADR 0052 要求随第一个让帧时间预算生效的 PR 加上：`Option<PresentedAt>`，编码为 `<ns>/<presented|handler>`。只报告（`note` 里按来源计数），不判定。
+- **分片。** 两个基准的 ID 前缀都不在 `process` 与 `process-open-file` 的前缀里，进 `process-app`，分片表不改。这个分片的预计时长（ADR 0062：9 到 10 分钟）加上约 5 分钟（`app/scroll_frames` 9 次启动、`app/scroll_frames_indexing` 3 次启动加 10 万文件夹具的生成）可能超过 12 分钟：第一次 CI 运行之后按报告的耗时看；超过时把 `app/scroll_frames` 单独成一个分片，那要改 `ci.yml` 和 ADR 0062 的分片数，没有在这个 PR 里做。
+
 
 第 1 步：
 
@@ -1384,7 +1413,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - **里程碑的时刻只等一帧**：`workspace` 原来对每个里程碑都在下一帧回调里记时刻，`DiffShown`、`FileHighlighted` 的视图已经在 `on_next_frame` 里报告，等了两帧，读数晚一个帧周期（60 Hz 下最多约 16.7 ms），16 ms 一档的 `app/open_file`、`app/nav_back`、`app/files_open`、`app/files_expand` 因此达不到。现在这两个里程碑按报告的时刻记。`app/open_diff`（`DiffShown`）在 CI 上最多读低一个帧周期；`app/open_project`（`ProjectHome`）与 `app/switch_worktree`（`WorktreeSwitched`）由 `project_home`、`worktrees` 在 `render` 里报告，原来就只等一帧，读数不变。样本起点没有等帧：运行器在发 `Open` 之前取 `SystemTime::now()`，`app` 收到请求后不经帧回调就派发。预算不变。见 [workspace 设计「与设计的差异」](workspace.md#里程碑只等一帧)。
 - **`Session::open` 之后的静止等待从里程碑开始算**：原来从首帧开始算，打开项目之后马上发 `Epoch` 时，等待可能已经过了。`app/open_diff` 先打开项目再打开 Diff，两次都要等静止。
 - **`review_view/scroll_5000` 是 `Process` 目标**：测试 `budgets_belong_to_the_documented_targets` 按前缀把 `review_view/` 归到 `time` 目标，但这一条是测量构建的帧记录，测试加了这个例外。
-- **帧的预算仍是计划中**：`workspace` 的 `on_frames` 记录总是空的，`review_view/scroll_5000` 和 `app/home_frames` 等 `workspace` 记录帧之后再生效。`project_home/resident_bytes` 要在窗口里建两个视图的状态才能测量，也是计划中。
+- **帧的预算仍是计划中**（这一条是 8c 当时的状态；帧记录随 #393 接通，见下面「帧基准」）：`review_view/scroll_5000` 和 `app/home_frames` 缺驱动审阅屏幕、项目主页的场景（`FRAMES_RECORDED` 的原因改为这个），`app/scroll_frames` 与 `app/scroll_frames_indexing` 已生效。`project_home/resident_bytes` 要在窗口里建两个视图的状态才能测量，也是计划中。
 `worktrees` 的基准：
 
 - **`worktrees/resident_bytes` 只量快照。** 视图的状态要在窗口里建，`memory` 目标没有窗口（与 `project_home/resident_bytes` 同一原因），预算条目是 `Active`，说明里写明范围（[worktrees 设计「与设计的差异」](worktrees.md#与设计的差异)第 3 步）。
@@ -1393,7 +1422,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 
 文件阅读与 Files 的基准（[file_reader 设计](file_reader.md)第 8 步的 8c，`Refs #10`）：
 
-- **帧基准没有做。** `app/scroll_frames`、`app/scroll_frames_indexing`（含编辑模式的场景）要 `workspace` 用 `platform::frame::record` 记录帧、`app` 把记录交给 `Probe::frames`，`workspace` 的 `stop_recording` 现在交回空的记录。这是 `FRAMES_RECORDED` 一直在等的接线，不是 `BenchDriver` 的文件目标；它另开 PR，那个 PR 做完之后 `app/scroll_frames` 才生效，`Closes #10` 随它。预算表里这两条写 `FRAMES_RECORDED`，`app/scroll_frames_indexing` 随本步加了一行（计划中）。
+- **帧基准没有做**（8c 当时的状态；#393 做了，见下面「帧基准」）：要 `workspace` 用 `platform::frame::record` 记录帧、`app` 把记录交给 `Probe::frames`。
 - **新的里程碑。** `FilesShown`、`FilesExpanded`、`EditReady`（`services` 的 `Milestone`、`workspace` 的日志名、`app` 的映射、`wire`）：设计里 `app/files_open`、`app/files_expand`、`app/enter_edit` 的终点没有对应的里程碑。三个都由 `file_reader` 的视图在画出之后的下一帧回调里报告，与 `FileHighlighted` 同一做法：`FilesShown` 是 Files 树第一次有行的一帧，`FilesExpanded` 是一个目录打开之后的一帧（收起不报），`EditReady` 是编辑器第一次画出的一帧（焦点在 `start_editing` 里已经给了编辑器）。
 - **新的 `OpenTarget`：`Files`、`Key`、`Changes`，`File` 带字节偏移和旧一侧。** `File(PathBuf)` 改为结构体变体（`path`、`byte`、`old`）：设计里的 `app/open_file` 有按字节偏移和对象库的场景，一个路径表达不了。`Key` 是一次按键（`Window::dispatch_keystroke`，与真实按键同一个分发路径，⌘[ 和 ⌘E 要焦点在阅读视图里，`right`、`down` 要焦点在 Files 里，两者都是各自的屏幕或面板建好时给的）；`Changes` 是没有会话的 `Diff`（`ReviewTarget::Outside`，项目主页的 Outside Any Session 一行的命令），旧一侧的场景用它，不必造会话日志。`Session::request` 是不等里程碑的 `Open`。
 - **`app` 经 `ReaderSlot` 取 `dyn Reader`。** 测量构建的 `BenchDriver` 不是插件，不能 `requires` 服务，kernel 也没有给外部取服务的接口；`FileReaderPlugin::with_reader_slot` 在激活时把 `Weak<dyn Reader>` 放进 `app` 建的槽，`bench::attach` 在主线程上取出来，调 `Reader::open`。槽只在测量构建里有人读。
