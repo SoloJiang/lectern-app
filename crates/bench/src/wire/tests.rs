@@ -97,13 +97,25 @@ fn reports() -> Vec<Report> {
                     requested: at(100),
                     started: at(200),
                     completed: at(300),
-                    presented: Some(at(400)),
+                    presented: Some(PresentedAt {
+                        time: at(400),
+                        source: TimeSource::Presented,
+                    }),
                 },
                 FrameTimes {
                     requested: at(500),
                     started: at(600),
                     completed: at(700),
                     presented: None,
+                },
+                FrameTimes {
+                    requested: at(800),
+                    started: at(900),
+                    completed: at(1_000),
+                    presented: Some(PresentedAt {
+                        time: at(1_100),
+                        source: TimeSource::Handler,
+                    }),
                 },
             ],
             without_tick: 1,
@@ -161,7 +173,8 @@ fn requests() -> Vec<Request> {
             session: "abc 100%".into(),
         }),
         Request::Open(OpenTarget::Worktree(odd)),
-        Request::Open(OpenTarget::Scroll),
+        Request::Open(OpenTarget::Scroll { yielding: false }),
+        Request::Open(OpenTarget::Scroll { yielding: true }),
         Request::Open(OpenTarget::Animate),
         Request::Open(OpenTarget::Input {
             text: "fn main() {\n\tprintln!(\"✓\");\n}".into(),
@@ -247,10 +260,19 @@ fn wire_unknown_names_keys_and_values_are_errors() {
         "plugin id=a state=Active activation=sometimes",
         "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3",
         "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x",
+        // A presented time has its source.
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5/display",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x/handler",
     ] {
         assert!(Report::decode(line).is_err(), "{line}");
     }
-    for line in ["open target=elsewhere", "quit now=1", "plugins-end"] {
+    for line in [
+        "open target=elsewhere",
+        "quit now=1",
+        "plugins-end",
+        "open target=scroll yield=x",
+    ] {
         assert!(Request::decode(line).is_err(), "{line}");
     }
 }
@@ -274,5 +296,17 @@ fn wire_bad_percent_encoding_is_an_error() {
             byte: None,
             old: None,
         }))
+    );
+}
+
+#[test]
+fn wire_scroll_without_yield_does_not_yield() {
+    assert_eq!(
+        Request::decode("open target=scroll"),
+        Ok(Request::Open(OpenTarget::Scroll { yielding: false }))
+    );
+    assert_eq!(
+        Request::Open(OpenTarget::Scroll { yielding: false }).encode(),
+        "open target=scroll"
     );
 }

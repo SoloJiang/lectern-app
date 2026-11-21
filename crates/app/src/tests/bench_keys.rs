@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{AnyWindowHandle, Context, IntoElement, Keystroke, Render, TestAppContext, Window, div};
+use lectern_bench::wire::{FrameStats, SCROLL_EVENTS, SCROLL_TAIL_FRAMES};
 use lectern_cache::Cache;
 use lectern_executor::Executor;
 use lectern_file_reader::ReaderSlot;
@@ -32,7 +33,7 @@ use lectern_ui::Appearance;
 use lectern_ui::semantic::Recorder;
 use lectern_workspace::{WorkspaceDeps, WorkspaceHost, install};
 
-use crate::bench::{BenchRequest, Reporter, Targets, handle};
+use crate::bench::{BenchRequest, Reporter, Targets, handle, report_frames};
 use crate::profile::{Profile, Resources};
 
 /// The window's root before `install`.
@@ -44,18 +45,23 @@ impl Render for Placeholder {
     }
 }
 
-/// What the probe would have sent as `Error`.
+/// What the probe would have sent: each `Error` and each `Frames`.
 #[derive(Default)]
-struct Errors(Mutex<Vec<String>>);
+struct Errors(Mutex<Vec<String>>, Mutex<Vec<FrameStats>>);
 
 impl Reporter for Errors {
     fn error(&self, message: &str) {
         self.0.lock().unwrap().push(message.to_owned());
     }
+
+    fn frames(&self, stats: FrameStats) {
+        self.1.lock().unwrap().push(stats);
+    }
 }
 
-/// The folder the benchmarks open: two small TypeScript files and a
-/// directory (the first row of the Files tree).
+/// The folder the benchmarks open: two small TypeScript files, one of 4000
+/// lines (the scroll has somewhere to go) and a directory (the first row of
+/// the Files tree).
 fn fixture() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     // `project` reports canonical roots; the temporary directory of macOS
@@ -63,9 +69,13 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     let root = dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
     let root = root.canonicalize().unwrap();
+    let long: String = (0..4000)
+        .map(|n| format!("export const line{n} = {n};\n"))
+        .collect();
     for (name, text) in [
         ("a.ts", "// the first file\nexport const a = 1;\n"),
         ("b.ts", "// the second file\nexport const b = 2;\n"),
+        ("long.ts", long.as_str()),
         ("wide/one.txt", "1\n"),
         ("wide/two.txt", "2\n"),
         ("wide/three.txt", "3\n"),
@@ -83,7 +93,7 @@ struct Rig {
     kernel: Arc<Kernel>,
     reader: ReaderSlot,
     milestones: Arc<Mutex<Vec<Milestone>>>,
-    errors: Errors,
+    errors: Arc<Errors>,
     root: PathBuf,
     _executor: Executor,
     _dir: tempfile::TempDir,
@@ -102,6 +112,8 @@ impl Rig {
         let window: AnyWindowHandle = cx.add_window(|_, _| Placeholder).into();
         let milestones = Arc::new(Mutex::new(Vec::new()));
         let seen = milestones.clone();
+        let errors = Arc::new(Errors::default());
+        let reported = errors.clone();
         let host = cx.update(|cx| {
             install(
                 window,
@@ -110,7 +122,9 @@ impl Rig {
                     on_milestone: Arc::new(move |milestone, _| {
                         seen.lock().unwrap().push(milestone);
                     }),
-                    on_frames: Arc::new(|_| {}),
+                    // As the measurement build's `on_frames` hands them to
+                    // the probe.
+                    on_frames: Arc::new(move |record| report_frames(record, &*reported)),
                 },
                 cx,
             )
@@ -145,7 +159,7 @@ impl Rig {
             kernel,
             reader,
             milestones,
-            errors: Errors::default(),
+            errors,
             root: root.clone(),
             _executor: executor,
             _dir: dir,
@@ -179,8 +193,10 @@ impl Rig {
                     workspace: Some(hub.as_ref()),
                     reader: reader.as_deref(),
                     window,
+                    host: Some(&self.host),
+                    kernel: Some(&self.kernel),
                 },
-                &self.errors,
+                &*self.errors,
                 cx,
             );
         });
@@ -266,6 +282,24 @@ impl Rig {
             .into_iter()
             .map(|record| record.semantic.id.as_str().to_owned())
             .collect()
+    }
+
+    /// The `top` of the reading view's list of lines (the first display row
+    /// on screen), as the probe reads it.
+    fn lines_top(&self, cx: &mut TestAppContext) -> Option<String> {
+        self.frame(cx);
+        let mut visual = gpui::VisualTestContext::from_window(self.window, cx);
+        let id = visual.update(|window, _| window.window_handle().window_id());
+        Recorder::begin(id);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        Recorder::finish().into_iter().find_map(|record| {
+            record
+                .semantic
+                .attrs
+                .iter()
+                .find(|(name, _)| *name == "top")
+                .map(|(_, value)| value.to_string())
+        })
     }
 
     /// The kernel's shutdown, so no plugin thread outlives the test.
@@ -467,5 +501,59 @@ fn bench_keys_escape_closes_the_reader_and_the_next_open_starts_early(cx: &mut T
         rig.count(Milestone::FileHighlighted) == 1
     });
     assert!(rig.errors.0.lock().unwrap().is_empty());
+    rig.close();
+}
+
+/// `app/scroll_frames`: the scroll request reaches the reading view (the
+/// wheel events at the window's centre move its first row), the recording
+/// starts and ends on the scenario's own length, and, as the test platform
+/// has no Metal layer to record, its error is what the probe is told:
+/// `Error`, never `Frames`.
+#[gpui::test]
+fn bench_keys_scroll_moves_the_reading_view_and_ends_the_recording(cx: &mut TestAppContext) {
+    let log = lectern_logging::testing::capture();
+    let rig = Rig::open(cx);
+    rig.open_file(cx, "long.ts");
+    rig.wait(cx, "FileHighlighted", |rig| {
+        rig.count(Milestone::FileHighlighted) == 1
+    });
+    rig.settle(cx);
+    let before = rig.lines_top(cx).expect("the reading view's list");
+    assert_eq!(before, "0.0", "the file is shown from its start");
+    rig.request(cx, BenchRequest::Scroll { yielding: false });
+    assert!(rig.errors.0.lock().unwrap().is_empty());
+    // One event in each frame, then the tail; the recording ends after that.
+    let mut frames = 0;
+    while rig.errors.0.lock().unwrap().is_empty() {
+        frames += 1;
+        assert!(
+            frames <= SCROLL_EVENTS + SCROLL_TAIL_FRAMES + 8,
+            "the stop condition did not end the recording"
+        );
+        rig.frame(cx);
+    }
+    assert!(
+        frames >= SCROLL_EVENTS + SCROLL_TAIL_FRAMES,
+        "the recording ended after {frames} frames, before the scroll did"
+    );
+    let errors = rig.errors.0.lock().unwrap().clone();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].starts_with("frames "), "{errors:?}");
+    assert!(rig.errors.1.lock().unwrap().is_empty());
+    // 160 events down and 80 back up: 80 events of 90 px below the start.
+    let after = rig.lines_top(cx).expect("the reading view's list");
+    assert_ne!(after, before, "the wheel events reached the reading view");
+    // The end of the scroll is logged with the kernel's background work, for
+    // `app/scroll_frames_indexing`.
+    assert!(
+        log.lines()
+            .iter()
+            .any(|line| line.contains("bench scroll ended") && line.contains("background_items")),
+        "{:?}",
+        log.lines()
+    );
+    // A second frame does not report again.
+    rig.settle(cx);
+    assert_eq!(rig.errors.0.lock().unwrap().len(), 1);
     rig.close();
 }

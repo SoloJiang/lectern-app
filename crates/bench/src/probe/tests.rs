@@ -604,7 +604,7 @@ fn probe_queues_requests_until_drive() {
         Request::Epoch,
         Request::Plugins,
         Request::ActivateAll,
-        Request::Open(OpenTarget::Scroll),
+        Request::Open(OpenTarget::Scroll { yielding: false }),
         Request::Quit,
     ] {
         conn.send(&request);
@@ -615,7 +615,10 @@ fn probe_queues_requests_until_drive() {
     assert_eq!(conn.next(), Report::Epoch(None));
     assert_eq!(conn.next(), Report::PluginsEnd);
     assert_eq!(conn.next(), Report::Ready);
-    assert_eq!(done.recv_timeout(WAIT).as_deref(), Ok("open Scroll"));
+    assert_eq!(
+        done.recv_timeout(WAIT).as_deref(),
+        Ok("open Scroll { yielding: false }")
+    );
     assert_eq!(done.recv_timeout(WAIT).as_deref(), Ok("quit"));
 }
 

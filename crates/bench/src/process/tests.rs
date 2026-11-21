@@ -877,7 +877,8 @@ fn process_deadline_milestone() {
 #[test]
 fn process_deadline_frames() {
     deadline("Frames", |s| {
-        s.frames(OpenTarget::Scroll, ms(150)).map(drop)
+        s.frames(OpenTarget::Scroll { yielding: false }, ms(150))
+            .map(drop)
     });
 }
 
@@ -909,7 +910,7 @@ fn process_frames_error_from_the_probe_is_an_error() {
     let fake = Fake::new(|p| {
         p.first_frame(start());
         while let Some(request) = p.request() {
-            if request == Request::Open(OpenTarget::Scroll) {
+            if request == Request::Open(OpenTarget::Scroll { yielding: false }) {
                 p.send(&Report::Error {
                     message: "frames unmatched=1 incomplete=0 overflowed=0".into(),
                 });
@@ -919,7 +920,10 @@ fn process_frames_error_from_the_probe_is_an_error() {
     });
     let scheduler = fake.scheduler(quick());
     let mut session = scheduler.session(&program(), None).unwrap();
-    let error = message(session.frames(OpenTarget::Scroll, Duration::from_secs(2)));
+    let error = message(session.frames(
+        OpenTarget::Scroll { yielding: false },
+        Duration::from_secs(2),
+    ));
     assert!(error.contains("frames unmatched=1"), "{error}");
 }
 
@@ -950,7 +954,9 @@ fn process_answers_reach_the_runner() {
                     p.send(&Report::Plugin(answer.clone()));
                     p.send(&Report::PluginsEnd);
                 }
-                Request::Open(OpenTarget::Scroll) => p.send(&Report::Frames(frames.clone())),
+                Request::Open(OpenTarget::Scroll { yielding: false }) => {
+                    p.send(&Report::Frames(frames.clone()))
+                }
                 Request::Open(_) => p.send(&Report::Milestone {
                     milestone: Milestone::ProjectHome,
                     presented: SystemTime::now(),
@@ -966,7 +972,10 @@ fn process_answers_reach_the_runner() {
     assert_eq!(session.plugins().unwrap(), [plugin]);
     assert_eq!(
         session
-            .frames(OpenTarget::Scroll, Duration::from_secs(2))
+            .frames(
+                OpenTarget::Scroll { yielding: false },
+                Duration::from_secs(2)
+            )
             .unwrap(),
         stats
     );

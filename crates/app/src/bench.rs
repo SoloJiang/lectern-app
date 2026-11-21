@@ -10,12 +10,19 @@ use std::time::SystemTime;
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
-use gpui::{AnyWindowHandle, App, Keystroke};
+use gpui::{
+    AnyWindowHandle, App, Keystroke, PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase,
+    Window, point, px,
+};
 use lectern_bench::probe::{Driver, Probe};
-use lectern_bench::wire::{self, OpenTarget};
+use lectern_bench::wire::{
+    self, FrameStats, OpenTarget, PresentedAt, SCROLL_DOWN_EVENTS, SCROLL_EVENTS, SCROLL_STEP_PX,
+    SCROLL_TAIL_FRAMES,
+};
 use lectern_file_reader::{FILES_PANEL_ID as FILES_PANEL, ReaderSlot};
 use lectern_kernel::{Kernel, Name};
 use lectern_logging::info;
+use lectern_platform::frame::FrameRecording;
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectSnapshot, WorktreeKey};
 use lectern_services::reader::{Anchor, ReadTarget, Reader};
@@ -24,7 +31,7 @@ use lectern_services::session::{SessionKey, SourceId};
 use lectern_services::workspace::{
     Contributions, Milestone, Route, Target, WorkspaceCommand, screens,
 };
-use lectern_workspace::Hub;
+use lectern_workspace::{FrameRecord, Hub, RecordStop, WorkspaceHost};
 
 use crate::quit;
 use crate::startup::Started;
@@ -59,16 +66,83 @@ pub(crate) fn wire_milestone(milestone: Milestone) -> wire::Milestone {
     }
 }
 
-/// Where the probe's errors go. The probe sends them to the runner's
+/// `WorkspaceDeps::on_frames` of the measurement build: a recording that
+/// ended goes to the runner as `Frames` when it is clean, and as `Error`
+/// otherwise (docs/design/app.md「里程碑与帧」). Any thread.
+pub fn on_frames(probe: Arc<Probe>) -> Arc<dyn Fn(FrameRecord) + Send + Sync> {
+    Arc::new(move |record| report_frames(record, &*probe))
+}
+
+/// One finished recording to its reporter.
+pub(crate) fn report_frames(record: FrameRecord, reporter: &dyn Reporter) {
+    match frame_stats(record) {
+        Ok(stats) => reporter.frames(stats),
+        Err(message) => reporter.error(&message),
+    }
+}
+
+/// The report of a recording: the frames when `record` worked and the
+/// recording is clean (`FrameProblems::is_clean`: no frame was lost or
+/// unmatched), otherwise the message of the `Error` the runner records the
+/// benchmark with (docs/design/bench.md `Probe::frames`):
+/// `frames <HookError::as_str()>` or `frames unmatched=<n> incomplete=<n>
+/// overflowed=<n>`. The error's own text (an `io::Error` of the display
+/// link) and the scenario are not in it.
+pub(crate) fn frame_stats(record: FrameRecord) -> Result<FrameStats, String> {
+    let recording = record
+        .result
+        .map_err(|error| format!("frames {}", error.as_str()))?;
+    if !recording.problems.is_clean() {
+        let problems = recording.problems;
+        return Err(format!(
+            "frames unmatched={} incomplete={} overflowed={}",
+            problems.unmatched, problems.incomplete, problems.overflowed
+        ));
+    }
+    Ok(wire_frames(&record.scenario, recording))
+}
+
+/// `platform`'s recording as the bench's `FrameStats`: the four moments of
+/// each frame in order, the `presented` time with its source, the nominal
+/// refresh and the count of frames the display link did not ask for.
+pub(crate) fn wire_frames(scenario: &str, recording: FrameRecording) -> FrameStats {
+    FrameStats {
+        scenario: scenario.to_owned(),
+        refresh: recording.refresh,
+        without_tick: recording.problems.without_tick,
+        frames: recording
+            .frames
+            .into_iter()
+            .map(|frame| wire::FrameTimes {
+                requested: frame.requested,
+                started: frame.started,
+                completed: frame.completed,
+                presented: frame.presented.map(|at| PresentedAt {
+                    time: at.time,
+                    source: at.source,
+                }),
+            })
+            .collect(),
+    }
+}
+
+/// Where the probe's reports go. The probe sends them to the runner's
 /// socket; the tests record them.
 pub(crate) trait Reporter: Send + Sync + 'static {
     /// Any thread.
     fn error(&self, message: &str);
+
+    /// The frames of a clean recording. Any thread.
+    fn frames(&self, stats: FrameStats);
 }
 
 impl Reporter for Probe {
     fn error(&self, message: &str) {
         Probe::error(self, message);
+    }
+
+    fn frames(&self, stats: FrameStats) {
+        Probe::frames(self, stats);
     }
 }
 
@@ -94,6 +168,12 @@ pub(crate) enum BenchRequest {
     ShowFiles,
     /// One keystroke into the focus, as the keyboard sends it.
     Key(Keystroke),
+    /// The scroll scenario: the window's frames are recorded while the
+    /// reading view is scrolled by wheel events, one per frame
+    /// ([`scroll`]). With `yielding` the kernel's yield switch is on.
+    Scroll {
+        yielding: bool,
+    },
     Quit,
 }
 
@@ -119,7 +199,8 @@ impl Driver for BenchDriver {
     /// home opens it; a worktree is switched to as the Worktrees screen's
     /// button does; a file is opened through `dyn Reader`, as the review
     /// screens' hand-off does; Files is shown as its sidebar entry shows
-    /// it; a key is dispatched to the window's focus. The other kinds are
+    /// it; a key is dispatched to the window's focus; a scroll records the
+    /// frames of wheel events sent to the window. The other kinds are
     /// added by the benchmarks that use them.
     fn open(&self, target: OpenTarget) {
         match target {
@@ -163,6 +244,11 @@ impl Driver for BenchDriver {
                 }
                 Err(_) => self.reporter.error("open key with a bad keystroke"),
             },
+            OpenTarget::Scroll { yielding } => {
+                let _ = self
+                    .requests
+                    .unbounded_send(BenchRequest::Scroll { yielding });
+            }
             other => self
                 .reporter
                 .error(&format!("open {} unsupported", kind(&other))),
@@ -195,7 +281,7 @@ fn kind(target: &OpenTarget) -> &'static str {
         OpenTarget::Key(_) => "key",
         OpenTarget::Diff { .. } => "diff",
         OpenTarget::Worktree(_) => "worktree",
-        OpenTarget::Scroll => "scroll",
+        OpenTarget::Scroll { .. } => "scroll",
         OpenTarget::Animate => "animate",
         OpenTarget::Input { .. } => "input",
     }
@@ -209,6 +295,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
     let (requests, mut incoming) = unbounded();
     let reporter: Arc<dyn Reporter> = probe.clone();
     let errors = reporter.clone();
+    let kernel_handle = kernel.clone();
     cx.spawn(async move |cx| {
         while let Some(request) = incoming.next().await {
             cx.update(|cx| {
@@ -216,8 +303,9 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
                 let shell = cx
                     .try_global::<Started>()
                     .and_then(|started| started.shell.clone());
-                let hub = shell.as_ref().map(|shell| shell.host.hub().clone());
-                let window = shell.as_ref().and_then(|shell| shell.host.window());
+                let host = shell.as_ref().map(|shell| shell.host.clone());
+                let hub = host.as_ref().map(|host| host.hub().clone());
+                let window = host.as_ref().and_then(|host| host.window());
                 let reader = reader.get();
                 handle(
                     request,
@@ -225,6 +313,8 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
                         workspace: hub.as_deref(),
                         reader: reader.as_deref(),
                         window,
+                        host: host.as_ref(),
+                        kernel: Some(&kernel_handle),
                     },
                     &*errors,
                     cx,
@@ -237,12 +327,16 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
     info!("bench probe attached");
 }
 
-/// What a request acts on: the workspace of the window, the reader, and the
-/// window. Each is None while it is not there yet.
+/// What a request acts on: the workspace of the window, the reader, the
+/// window, the workspace's handle (to record frames) and the kernel (the
+/// yield switch). Each is None while it is not there yet.
+#[derive(Default)]
 pub(crate) struct Targets<'a> {
     pub workspace: Option<&'a Hub>,
     pub reader: Option<&'a dyn Reader>,
     pub window: Option<AnyWindowHandle>,
+    pub host: Option<&'a WorkspaceHost>,
+    pub kernel: Option<&'a Arc<Kernel>>,
 }
 
 /// One request, on the main thread. `Open` goes into `workspace`'s queue as
@@ -307,8 +401,85 @@ pub(crate) fn handle(
                 errors.error("open key without a window");
             }
         }
+        BenchRequest::Scroll { yielding } => match (targets.host, targets.window) {
+            (Some(host), Some(window)) => {
+                if yielding {
+                    match targets.kernel {
+                        Some(kernel) => kernel.set_yield(true),
+                        None => {
+                            errors.error("open scroll without a kernel");
+                            return;
+                        }
+                    }
+                }
+                if scroll(host, window, targets.kernel.cloned(), cx).is_err() {
+                    errors.error("open scroll without a window");
+                }
+            }
+            (None, _) => errors.error("open scroll without a workspace"),
+            (_, None) => errors.error("open scroll without a window"),
+        },
         BenchRequest::Quit => quit::quit(cx),
     }
+}
+
+/// The scroll scenario (docs/design/bench.md「进程级基准」): the window
+/// becomes the active one (an inactive window is drawn at about 30 fps,
+/// which no frame budget survives: platform design「帧的时刻」), `workspace`
+/// records the window's frames until the end, and in each frame handled a
+/// wheel event arrives at the window's centre, where the reading view (or
+/// its editor) is: [`SCROLL_DOWN_EVENTS`] events scroll down by
+/// [`SCROLL_STEP_PX`] pixels, the remaining ones of the [`SCROLL_EVENTS`] back
+/// up, the events are those the platform sends, through
+/// `Window::dispatch_event`. [`SCROLL_TAIL_FRAMES`] frames after the last
+/// one the recording stops and goes to `on_frames`; the log says how much
+/// background work the kernel still had then (`app/scroll_frames_indexing`
+/// checks it). Main thread.
+pub(crate) fn scroll(
+    host: &WorkspaceHost,
+    window: AnyWindowHandle,
+    kernel: Option<Arc<Kernel>>,
+    cx: &mut App,
+) -> gpui::Result<()> {
+    window.update(cx, |_, window, _| {
+        window.activate_window();
+        scroll_frame(host.clone(), kernel, window, 0);
+    })?;
+    host.record_frames(Name::Borrowed("scroll"), RecordStop::Manual);
+    Ok(())
+}
+
+/// The callback of frame `step` of the scroll: its wheel event, or the end.
+fn scroll_frame(host: WorkspaceHost, kernel: Option<Arc<Kernel>>, window: &mut Window, step: u32) {
+    window.on_next_frame(move |window, cx| {
+        if step < SCROLL_EVENTS {
+            let down = step < SCROLL_DOWN_EVENTS;
+            let size = window.viewport_size();
+            window.dispatch_event(
+                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: point(size.width / 2.0, size.height / 2.0),
+                    delta: ScrollDelta::Pixels(point(
+                        px(0.0),
+                        px(if down {
+                            -SCROLL_STEP_PX
+                        } else {
+                            SCROLL_STEP_PX
+                        }),
+                    )),
+                    touch_phase: TouchPhase::Moved,
+                    ..ScrollWheelEvent::default()
+                }),
+                cx,
+            );
+        } else if step >= SCROLL_EVENTS + SCROLL_TAIL_FRAMES {
+            if let Some(kernel) = &kernel {
+                info!("bench scroll ended"; background_items = kernel.background().count);
+            }
+            host.stop_recording();
+            return;
+        }
+        scroll_frame(host, kernel, window, step + 1);
+    });
 }
 
 /// The review of the first open git project's active worktree against its
