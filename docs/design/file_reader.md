@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`）已实现；第 7 步的 Files（侧栏的文件树：`FilesView`、Fluent 键与探针节点、Files 条目与面板的登记）已实现，`app/files_open`、`app/files_expand` 随 8c 生效；第 8 步的 8a（编辑模式：代码编辑器、`InputHighlighter` 适配器、保存、磁盘上的提示行与合并）已实现；8b（离开守卫与它的确认对话框、打开编辑模式：⌘E、⌘S、工具栏的 Edit…，[#392](https://github.com/SoloJiang/lectern-app/pull/392)）已实现，`workspace` 与 `app` 一侧的接线早已有，没有改；8c（`BenchDriver` 的文件目标与 `app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand` 的进程级基准，新的里程碑 `FilesShown`、`FilesExpanded`、`EditReady`，`ReaderSlot`，`Refs #10`，本 PR）已实现，数字要等 macOS CI 的运行；「下一帧画出」（[ADR 0063](../adr/0063.md)：`Reader::open` 先预热查询、预启动首屏，五条详细记录，`app/open_file` 等六条进程级预算改为中位数 < 37.5 ms，见「与设计的差异」末一条）已实现，数字要等 macOS CI 的运行；帧基准（`app/scroll_frames`、`app/scroll_frames_indexing`，含编辑模式的场景）要 `workspace` 的帧记录（`platform::frame::record` 的接线），移到单独的 PR，`Closes #10` 随那个 PR。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；第 6 步（插件与服务：`FileReaderPlugin`、`dyn Reader`、阅读状态 `Session`）已实现；第 7 步的阅读视图与 `app` 装配（`ReadingView`、查找栏、前进后退、各种状态、Fluent 键与探针节点，`syntax` 的规范内容 OID 与行内的匹配区间，`code_intel`、`file_reader` 与 `review-view-handoff` 装配进 `app`）已实现；第 7 步的 Files（侧栏的文件树：`FilesView`、Fluent 键与探针节点、Files 条目与面板的登记）已实现，`app/files_open`、`app/files_expand` 随 8c 生效；第 8 步的 8a（编辑模式：代码编辑器、`InputHighlighter` 适配器、保存、磁盘上的提示行与合并）已实现；8b（离开守卫与它的确认对话框、打开编辑模式：⌘E、⌘S、工具栏的 Edit…，[#392](https://github.com/SoloJiang/lectern-app/pull/392)）已实现，`workspace` 与 `app` 一侧的接线早已有，没有改；8c（`BenchDriver` 的文件目标与 `app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand` 的进程级基准，新的里程碑 `FilesShown`、`FilesExpanded`、`EditReady`，`ReaderSlot`，`Refs #10`，本 PR）已实现，数字要等 macOS CI 的运行；「下一帧画出」（[ADR 0063](../adr/0063.md)：`Reader::open` 先预热查询、预启动首屏，五条详细记录，`app/open_file` 等六条进程级预算改为中位数 < 37.5 ms，见「与设计的差异」末一条）已实现，数字要等 macOS CI 的运行；帧基准（`app/scroll_frames`、`app/scroll_frames_indexing`，含编辑模式的场景：`workspace` 的帧记录接 `platform::frame::record`、`app` 的滚动场景与转交、两个进程级基准，[#393](https://github.com/SoloJiang/lectern-app/issues/393)，`Closes #10`）已实现，数字要等 macOS CI 的运行，见「实际验证」「与设计的差异」。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -896,7 +896,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 只记录的基准：`syntax/full_parse_1mib`（档位 A 的整文件解析）、`syntax/chain_16mib`（档位 B 的整条窗口链）、`syntax/scan_64mib`（档位 C 的流式扫描）、`syntax/find_16mib`。
 
-- 以上分项是 `Tier::Share`，实现它们的 PR 把条目加进 [bench 设计「预算表」](bench.md#预算表)和 `crates/bench/src/budgets.rs`，出处指向本节。顶层条目 `app/open_file`、`app/enter_edit`、`app/files_open`、`app/files_expand`、`app/nav_back` 由「验收」的 8c 改为生效；`app/scroll_frames`、`app/scroll_frames_indexing` 在预算表里是 `FRAMES_RECORDED`（计划中），要 `workspace` 记录帧之后才生效。里程碑：`FileHighlighted`（`app/open_file`、`app/nav_back`）、`FilesShown`、`FilesExpanded`（Files 的树第一次有行、一个目录打开之后各一帧）、`EditReady`（编辑器第一次画出、焦点在其中的一帧），都由视图在画出之后的下一帧回调里报告。
+- 以上分项是 `Tier::Share`，实现它们的 PR 把条目加进 [bench 设计「预算表」](bench.md#预算表)和 `crates/bench/src/budgets.rs`，出处指向本节。顶层条目 `app/open_file`、`app/enter_edit`、`app/files_open`、`app/files_expand`、`app/nav_back` 由「验收」的 8c 改为生效；`app/scroll_frames`、`app/scroll_frames_indexing` 随 #393 改为生效（`workspace` 记录帧、`app` 的滚动场景，两个基准的做法见 [bench 设计「进程级基准」](bench.md#进程级基准)）。里程碑：`FileHighlighted`（`app/open_file`、`app/nav_back`）、`FilesShown`、`FilesExpanded`（Files 的树第一次有行、一个目录打开之后各一帧）、`EditReady`（编辑器第一次画出、焦点在其中的一帧），都由视图在画出之后的下一帧回调里报告。
 - 首屏的 8 + 6 + 2 ms 是从 16 ms 分出的份额：首屏窗口在 Linux 上平均 2.5–3.3 ms（合成源码）、压缩 JS 8–12 ms（大文件调研「首屏路径的准备工作」），M 系列按 1.2–1.7 倍估计。
 
 ## 界面
@@ -1215,10 +1215,10 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
    - `plugin/file-reader/activate` < 1 ms、`plugin/file-reader/resident` ≤ 0.5 MB。
 7. **阅读视图与 Files**（前置 B、E）：自绘元素、查找栏、前进后退、Files 面板、Fluent 资源、探针节点。
    - macOS 上 `just test -p lectern-file-reader` 的 `#[gpui::test]` 通过；`rg -n 'std::fs|SafeRoot|read_ranges' crates/file_reader/src --glob '!**/tests*'` 没有结果（视图不做 IO；测试的夹具要在临时目录里写文件，与 `syntax` 的同类检查一样不算）。
-   - `app/open_file`（全部场景，压缩成一行的场景按 ADR 0065 只记录）、`app/nav_back`、`app/files_open`、`app/files_expand` 在 macOS CI 上改为生效并在预算内（8c）；`app/scroll_frames`（64 MiB、压缩成一行）、`app/scroll_frames_indexing` 随 `workspace` 的帧记录（单独的 PR）。
+   - `app/open_file`（全部场景，压缩成一行的场景按 ADR 0065 只记录）、`app/nav_back`、`app/files_open`、`app/files_expand` 在 macOS CI 上改为生效并在预算内（8c）；`app/scroll_frames`（64 MiB、压缩成一行、编辑模式 1 MiB）、`app/scroll_frames_indexing` 随 `workspace` 的帧记录改为生效（#393，单独的 PR），在 macOS CI 上预算内。
 8. **编辑模式**（前置 C、D、E 的离开守卫与退出钩子，第 5 步）：编辑器（`EditorState`）、`InputHighlighter` 适配器、离开守卫、提示行与确认对话框。最后的帧基准写 `Closes #10`。分三个 PR：8a 是编辑模式本身（编辑器、适配器、保存、冲突提示行与合并、Fluent 键、探针节点、日志），没有离开守卫，所以用一个 crate 私有的常量 `edit::EDIT_REACHABLE`（false）把它关在装配好的 app 之外（不绑 ⌘E 与 ⌘S，工具栏没有 Edit…，`enter_edit` 不进入），测试经 `FileReaderPlugin::with_edit` 打开；8b 是离开守卫与它的对话框，并把常量改为 `true`（`workspace` 与 `app` 一侧的接线早已有，没有改）；8c 是文件阅读与 Files 的进程级基准的运行器侧（`BenchDriver` 的文件目标、新的里程碑，`app/open_file`、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand`）；编辑模式的 `app/scroll_frames` 和其余帧基准要 `workspace` 的帧记录，不在这三个 PR 里。8a、8b、8c 写 `Refs #10`；`Closes #10` 随 `workspace` 的帧记录之后生效的帧基准（`app/scroll_frames`）。
    - `#[gpui::test]` 的编辑场景和 `leave_guard_*`（「测试」列出的每一种触发）通过；`rg -n 'features.*tree-sitter' Cargo.toml crates/file_reader/Cargo.toml` 没有 gpui-component 的 `tree-sitter` feature。
-   - （8c）`app/enter_edit` ≤ 100 ms 在预算内；超标时按 ADR 0034 降低 `TIER_A_MAX`，在本文「接口」改常量。8b 只验收 `leave_guard_*`；这个基准要 `BenchDriver` 能打开文件目标，8b 里没有。编辑模式的 `app/scroll_frames` 与其余帧基准一起等 `workspace` 的帧记录，不在 8c。8c 写 `Refs #10`，`Closes #10` 随帧基准的 PR。
+   - （8c）`app/enter_edit` ≤ 100 ms 在预算内；超标时按 ADR 0034 降低 `TIER_A_MAX`，在本文「接口」改常量。8b 只验收 `leave_guard_*`；这个基准要 `BenchDriver` 能打开文件目标，8b 里没有。编辑模式的 `app/scroll_frames` 与其余帧基准一起等 `workspace` 的帧记录，不在 8c，随 #393 实现。8c 写 `Refs #10`，`Closes #10` 随帧基准的 PR。
 
 `syntax` 的日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，`Refs #170`）：
 
@@ -1248,6 +1248,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `project` 自己关闭项目（`ProjectEvent::Closed`，例如根目录消失）不经离开守卫：阅读视图随导航栈一起释放，编辑中未保存的改动丢失。要留住缓冲区，需要 `workspace` 在清空导航栈之前把编辑中的视图留下，另行处理。
 
 ## 实际验证
+
+### 帧基准（#393）
+
+`app/scroll_frames`（64 MiB 的合成源码、压缩成一行的文件、编辑模式 1 MiB）与 `app/scroll_frames_indexing`（`Closes #10`）：`workspace` 的 `record_frames` 经 `platform::frame::record`，`app` 转交 `Probe::frames` 并实现滚动场景，`bench` 加进程级基准，两条预算改为生效。细节与数字见 [workspace 设计](workspace.md#实际验证)、[app 设计](app.md#测量构建的装配)和 [bench 设计](bench.md#实际验证)的「帧基准」。在 macOS（arm64，Rust 1.97.0）上运行：
+
+- 本 crate 没有改动。滚轮是阅读视图唯一的滚动输入（「自绘列表：只有滚轮和触控板」），所以 `app` 的滚动场景发合成的 `ScrollWheelEvent`，不加 `Reader` 的接口。
+- 没有运行进程级基准（会打开真实窗口）：编辑模式的 `app/scroll_frames`（`InputState` 的滚轮、`changed` 里 `spans()` 的平移）、64 MiB 与压缩成一行的文件的滚动帧时间、让路开关对 `app/scroll_frames_indexing` 的作用，都由 macOS CI 的运行判定。超标时按 ADR 0034 处理（编辑模式：降低 `TIER_A_MAX`；让路：ADR 0033，运行器用 `LECTERN_BENCH_YIELD=1` 校准）。
 
 第 1 步（`syntax` 骨架、语言表与整文件高亮），在 Linux（x86_64 容器）上运行：
 
@@ -1396,7 +1403,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `just test -p lectern-file-reader`：139 个通过。新的 `files_milestones_are_the_first_rows_and_each_opened_directory`（`FilesShown` 在第一批行画出的下一帧报告一次，选择移动不报，→ 和 ↵ 打开目录各报一次 `FilesExpanded`，收起不报）、`edit_the_milestone_is_the_editors_first_frame_once_per_edit_mode`（`EditReady` 在编辑器第一次画出的下一帧报告一次，再画不重复，第二次进入编辑再报一次）、`plugin_the_reader_slot_holds_the_active_reader_weakly`（激活之前槽是空的，之后是插件的 `Session`）。
 - `just test -p lectern-app`：66 个通过，含 `bench_keys_*` 三个（测试平台里真实的 `Workspace` 和 desktop profile 的插件，经 `bench::handle`：⌘E → `EditReady`，⌘[ → 回到第一个文件的 `FileHighlighted`，`↓`、`→` → `FilesExpanded`；换成别的键就失败）（`bench-probe` 下 `src/tests/bench.rs` 的 `BenchDriver` 与 `handle` 的文件目标，见 [app 设计「文件阅读与 Files 的目标」](app.md#文件阅读与-files-的目标)）；`just test -p lectern-bench`：182 个通过（预算表、`wire_*` 的新目标与里程碑、`process_a_request_is_sent_without_waiting_for_a_milestone`）；`cargo bench -p lectern-bench --all-features --bench process --no-run` 编译通过。
 - **没有在本机运行：** `app/open_file`（六个场景）、`app/nav_back`、`app/enter_edit`、`app/files_open`、`app/files_expand`。它们要启动带探针的 `lectern` 并打开窗口，按仓库的规则不在这台机器上运行；数字来自 macOS CI（托管的 `macos-15` runner，`process` 分片），合并前在 PR 里记下 CI 的值。运行不出数字的情形（真实窗口里按键没有到焦点、`Outside` 审阅没有画出接近 4 MiB 的文件的 diff、旧一侧的内容没有登记）会让基准以里程碑超时记为 `error`，不会给出错的数字。
-- 本步没有验证的：`app/scroll_frames`、`app/scroll_frames_indexing` 与编辑模式的滚动（要 `workspace` 的帧记录，不在 8c）；这些基准里 `scroll_frames_indexing` 要的让路开关（`Kernel::set_yield`）没有接，CI 里超标时再接并校准。
+- 本步没有验证的：`app/scroll_frames`、`app/scroll_frames_indexing` 与编辑模式的滚动（要 `workspace` 的帧记录，不在 8c）；这些基准里 `scroll_frames_indexing` 要的让路开关（`Kernel::set_yield`）没有接，CI 里超标时再接并校准（8c 当时的状态；#393 之后测量构建能打开它，见下面「帧基准（#393）」）。
 
 「下一帧画出」（ADR 0063），在 macOS 上运行（本机，没有打开真实窗口）：
 
@@ -1405,6 +1412,12 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 没有运行 `app/open_file` 等进程级基准（会打开真实窗口）：改动前后的中位数、`prepare_us`、`opening` 的快照在 `ready` 之前出现的次数，都要等 macOS CI 的详细记录或手动运行。`tech-research.md「性能预算」`里这六条还写着 16 ms，由 ADR 0063 的 PR 一起改。
 
 ## 与设计的差异
+
+帧基准（#393）：
+
+- **滚动输入是合成的滚轮事件。** 设计「性能」只写 `app/scroll_frames`，没有规定怎样滚。阅读视图只响应滚轮（没有键盘滚动、滚动条拖动），所以 `app` 向窗口中心发 `ScrollWheelEvent`（每帧一个，160 个向下 90 px、80 个向上），不加 `Reader` 的接口、不加键盘滚动。编辑模式的编辑器同样用滚轮。
+- **没有普通文件的场景。** 一个约 300 行的文件在几帧之后滚到底，之后的事件不画，记录里的帧太少；预算的三个场景是 ADR 0034 的 64 MiB、压缩成一行和编辑模式。
+- **`app/scroll_frames_indexing` 的文件是 4 MiB 的 TypeScript（档位 B），夹具是 `app/idle_100k` 的 10 万文件。** 设计只写「打开 10 万文件的夹具后立即滚动」；选档位 B 的文件是为了让批量窗口的解析也在滚动期间进行。让路开关按 ADR 0033 默认关闭，基准测这个状态。
 
 第 1 步：
 
@@ -1602,7 +1615,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 第 8 步的 8c（文件阅读与 Files 的基准）：
 
-- **帧基准不在 8c。** 设计把编辑模式的 `app/scroll_frames` 放在 8c，把 `app/scroll_frames`、`app/scroll_frames_indexing` 放在第 7 步。它们要的不只是 `BenchDriver` 的文件目标：`workspace` 的 `stop_recording` 现在交回空的记录，`app` 的 `on_frames` 是空函数，`platform::frame::record` 没有接进 `workspace`（`FRAMES_RECORDED`）。这是跨 `workspace`、`app`、`bench` 的另一块工作，单独一个 PR；那个 PR 之后这三条才能生效，`Closes #10` 随它。预算表里 `app/scroll_frames` 改为 `FRAMES_RECORDED`，`app/scroll_frames_indexing` 加一行（计划中）；`app/scroll_frames_indexing` 要的让路开关也还没有接（「第 7 步的 bench 条目保持计划中」一条）。
+- **帧基准不在 8c**（#393 做了，见「帧基准（#393）」）。设计把编辑模式的 `app/scroll_frames` 放在 8c，把 `app/scroll_frames`、`app/scroll_frames_indexing` 放在第 7 步。它们要的不只是 `BenchDriver` 的文件目标：`workspace` 的 `stop_recording` 现在交回空的记录，`app` 的 `on_frames` 是空函数，`platform::frame::record` 没有接进 `workspace`（`FRAMES_RECORDED`）。这是跨 `workspace`、`app`、`bench` 的另一块工作，单独一个 PR；那个 PR 之后这三条才能生效，`Closes #10` 随它。预算表里 `app/scroll_frames` 改为 `FRAMES_RECORDED`，`app/scroll_frames_indexing` 加一行（计划中）；`app/scroll_frames_indexing` 要的让路开关也还没有接（「第 7 步的 bench 条目保持计划中」一条）。
 - **三个新的里程碑**（`FilesShown`、`FilesExpanded`、`EditReady`），见 [bench 设计「与设计的差异」](bench.md#与设计的差异)的 8c 一节。设计「性能」里 `app/files_open`、`app/files_expand`、`app/enter_edit` 写的是「从……到……」，没有说终点；终点取视图画出之后的下一帧，与 `FileHighlighted` 一致。「Files 展开完成」按 7b 的差异说明（「`app/files_open`、`app/files_expand` 保持计划中」一条）要有的里程碑就是这两个。
 - **`ReaderSlot`：** 测量构建的 `BenchDriver` 不是插件，取不到 `dyn Reader`，kernel 也没有给外部取服务的接口；`FileReaderPlugin::with_reader_slot` 在激活时把 `Weak<dyn Reader>` 放进 `app` 建的槽。只加了这一个公开项，没有改 kernel 与服务的形状。
 - **旧一侧的场景用没有会话的审阅：** `OpenTarget::Changes` 发 `Outside` 审阅的 `Push`，不必造会话日志（一个 4 MiB 文件的 `Write` 记录会让日志的一行达到 12 MiB，会话扫描是否收下它没有验证）。字节偏移是改动行在旧 blob 里的偏移，行号给 0。

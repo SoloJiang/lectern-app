@@ -20,6 +20,7 @@
 mod alloc;
 pub mod budgets;
 mod ctx;
+pub mod frames;
 pub mod merge;
 #[cfg(feature = "probe")]
 pub mod probe;

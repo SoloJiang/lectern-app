@@ -17,7 +17,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub use lectern_platform::frame::TimeSource;
+pub use lectern_platform::frame::{PresentedAt, TimeSource};
 
 #[cfg(test)]
 mod tests;
@@ -28,6 +28,24 @@ pub const SOCKET_VAR: &str = "LECTERN_BENCH_SOCKET";
 /// `closure:<id>` or `closure+self:<id>`: the plugin set is trimmed to the
 /// dependency closure of `<id>`, without or with `<id>`.
 pub const PLUGINS_VAR: &str = "LECTERN_BENCH_PLUGINS";
+
+/// The scroll scenario of `OpenTarget::Scroll` (docs/design/bench.md「进程级
+/// 基准」): one wheel event for each frame handled, so the content moves in
+/// every frame as it does under a trackpad that sends one event a refresh.
+/// [`SCROLL_DOWN_EVENTS`] events scroll down by [`SCROLL_STEP_PX`] pixels,
+/// the rest back up. The recording ends [`SCROLL_TAIL_FRAMES`] frames after
+/// the last event. The runner's deadline for the `Frames` answer is
+/// [`SCROLL_LIMIT`].
+pub const SCROLL_EVENTS: u32 = 240;
+/// See [`SCROLL_EVENTS`].
+pub const SCROLL_DOWN_EVENTS: u32 = 160;
+/// See [`SCROLL_EVENTS`]: 5 lines of the reading view's rows each frame.
+pub const SCROLL_STEP_PX: f32 = 90.0;
+/// See [`SCROLL_EVENTS`].
+pub const SCROLL_TAIL_FRAMES: u32 = 3;
+/// The scenario's length at 60 Hz (the display of the hosted CI runner), 4 s,
+/// plus 10 s (「进程级基准」: 场景时长加 10 秒).
+pub const SCROLL_LIMIT: Duration = Duration::from_secs(15);
 
 /// Probe → runner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +172,14 @@ pub enum OpenTarget {
         session: String,
     },
     Worktree(PathBuf),
-    Scroll,
+    /// Scrolls the reading view through a fixed sequence of wheel events
+    /// (see [`SCROLL_EVENTS`]) while the window's frames are recorded, then
+    /// answers with `Frames`. With `yielding`, the kernel's interaction
+    /// yield switch (ADR 0033) is on for the scroll: the calibration of
+    /// `app/scroll_frames_indexing`; the product does not turn it on.
+    Scroll {
+        yielding: bool,
+    },
     Animate,
     /// Keys injected into the focus at a fixed interval, through the same
     /// dispatch as real keyboard input.
@@ -175,15 +200,15 @@ pub struct FrameStats {
     pub without_tick: u32,
 }
 
-/// `presented` is None when the frame has no presented time. It has no time
-/// source yet: like `platform`'s `FrameTimes::presented`, it gets one with
-/// its users, `frame::record` (B2) and bench step 5 (ADR 0052).
+/// `presented` is None when the frame has no presented time (the handler
+/// had not run by the end of the wait). Its source is reported with it
+/// (ADR 0052); it is reported, not judged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameTimes {
     pub requested: SystemTime,
     pub started: SystemTime,
     pub completed: SystemTime,
-    pub presented: Option<SystemTime>,
+    pub presented: Option<PresentedAt>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,7 +417,12 @@ impl Request {
                     line.text("target", "worktree");
                     line.path("path", path);
                 }
-                OpenTarget::Scroll => line.text("target", "scroll"),
+                OpenTarget::Scroll { yielding } => {
+                    line.text("target", "scroll");
+                    if *yielding {
+                        line.number("yield", 1);
+                    }
+                }
                 OpenTarget::Animate => line.text("target", "animate"),
                 OpenTarget::Input { text, interval } => {
                     line.text("target", "input");
@@ -425,7 +455,11 @@ impl Request {
                     session: fields.text("session")?,
                 },
                 "worktree" => OpenTarget::Worktree(fields.path("path")?),
-                "scroll" => OpenTarget::Scroll,
+                "scroll" => OpenTarget::Scroll {
+                    yielding: fields
+                        .optional_number::<u64>("yield")?
+                        .is_some_and(|n| n != 0),
+                },
                 "animate" => OpenTarget::Animate,
                 "input" => OpenTarget::Input {
                     text: fields.text("text")?,
@@ -528,12 +562,14 @@ fn decode_kinds(value: &str) -> Result<Vec<ActivationKind>, WireError> {
     value.split(',').map(ActivationKind::from_name).collect()
 }
 
-/// `requested,started,completed,presented` in Unix nanoseconds; `-` for a
-/// frame that was not shown.
+/// `requested,started,completed,presented` in Unix nanoseconds; `presented`
+/// is `<ns>/<source>` (`presented` or `handler`), or `-` for a frame whose
+/// presented handler had not run.
 fn encode_frame(frame: &FrameTimes) -> String {
-    let presented = frame
-        .presented
-        .map_or_else(|| "-".to_owned(), |t| unix_ns(t).to_string());
+    let presented = frame.presented.map_or_else(
+        || "-".to_owned(),
+        |at| format!("{}/{}", unix_ns(at.time), at.source.as_str()),
+    );
     format!(
         "{},{},{},{presented}",
         unix_ns(frame.requested),
@@ -559,7 +595,15 @@ fn decode_frames(value: &str) -> Result<Vec<FrameTimes>, WireError> {
                 completed: parse_time(completed)?,
                 presented: match *presented {
                     "-" => None,
-                    t => Some(parse_time(t)?),
+                    at => {
+                        let (time, source) = at
+                            .split_once('/')
+                            .ok_or_else(|| WireError::new(format!("bad presented `{at}`")))?;
+                        Some(PresentedAt {
+                            time: parse_time(time)?,
+                            source: time_source(source)?,
+                        })
+                    }
                 },
             })
         })

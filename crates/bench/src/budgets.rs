@@ -195,10 +195,11 @@ const PROJECT_HOME: &str = "docs/design/project_home.md#性能";
 const WORKTREES: &str = "docs/design/worktrees.md#性能";
 const TERMINAL_VIEW: &str = "docs/design/terminal_view.md#性能";
 const CONVERSATION: &str = "docs/design/conversation.md#性能";
-/// The frame-time budgets of the screens wait for `workspace` to record
-/// frames (`FrameRecord::frames` is always empty, workspace design
-/// 「已知限制」) and for `app` to hand the records to the probe.
-const FRAMES_RECORDED: State = State::Planned("workspace 的帧记录");
+/// The frame-time budgets of the screens whose scenario the measurement
+/// build's driver does not play yet. `workspace` records frames and `app`
+/// hands the records to the probe (`app/scroll_frames` is active); what is
+/// missing is the scenario that drives the screen.
+const FRAMES_RECORDED: State = State::Planned("驱动这个屏幕的场景（帧记录已接通）");
 const TERMINAL: &str = "docs/design/terminal.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
@@ -502,16 +503,10 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // ---- end code navigation ----
     // The reader's scenarios (64 MiB, one line, the edit mode) and the same
-    // with the batch layer at work (ADR 0034, ADR 0033): `workspace` does
-    // not record frames yet.
-    top("app/scroll_frames", FRAMES, TECH, FRAMES_RECORDED, Process),
-    top(
-        "app/scroll_frames_indexing",
-        FRAMES,
-        TECH,
-        FRAMES_RECORDED,
-        Process,
-    ),
+    // with the batch layer at work (ADR 0034, ADR 0033): the frames of a
+    // scroll that `workspace` records.
+    top("app/scroll_frames", FRAMES, TECH, ACTIVE, Process),
+    top("app/scroll_frames_indexing", FRAMES, TECH, ACTIVE, Process),
     top(
         "app/input_frames",
         FRAMES,

@@ -12,7 +12,7 @@ use lectern_fs_watch::Watcher;
 use lectern_kernel::{Kernel, PluginSet};
 use lectern_logging::{Config, Early, Header, Logging, Value, info, warn};
 use lectern_services::workspace::Milestone;
-use lectern_workspace::{WorkspaceDeps, WorkspaceHost};
+use lectern_workspace::{FrameRecord, WorkspaceDeps, WorkspaceHost};
 
 use crate::profile::{Profile, Resources};
 use crate::window_state::{self, WindowStateLink};
@@ -155,7 +155,16 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
     };
     #[cfg(not(feature = "bench-probe"))]
     let on_milestone = no_milestones();
-    let assembled = assemble(profile, &executor, window, on_milestone, cx);
+    // The same for the frame recordings of the scroll, animation and input
+    // scenarios.
+    #[cfg(feature = "bench-probe")]
+    let on_frames = match &bench {
+        Some(probe) => crate::bench::on_frames(probe.clone()),
+        None => no_frames(),
+    };
+    #[cfg(not(feature = "bench-probe"))]
+    let on_frames = no_frames();
+    let assembled = assemble(profile, &executor, window, on_milestone, on_frames, cx);
     // The measurement build's probe starts the kernel in its place, with its
     // own plugin, and takes the runner's requests (docs/design/app.md「测量
     // 构建的装配」). The rest of the barrier is the same.
@@ -226,10 +235,18 @@ impl Assembled {
 }
 
 type OnMilestone = Arc<dyn Fn(Milestone, SystemTime) + Send + Sync>;
+type OnFrames = Arc<dyn Fn(FrameRecord) + Send + Sync>;
 
 /// `WorkspaceDeps::on_milestone` without the bench probe.
 fn no_milestones() -> OnMilestone {
     Arc::new(|_, _| {})
+}
+
+/// `WorkspaceDeps::on_frames` without the bench probe: nothing records
+/// frames then (`workspace` records only when asked, and only the probe's
+/// driver asks).
+fn no_frames() -> OnFrames {
+    Arc::new(|_| {})
 }
 
 /// The profile's plugins and the resources they share. The test profile
@@ -241,6 +258,7 @@ fn assemble(
     executor: &Executor,
     window: Option<AnyWindowHandle>,
     on_milestone: OnMilestone,
+    on_frames: OnFrames,
     cx: &mut App,
 ) -> Assembled {
     if profile == Profile::Test {
@@ -261,9 +279,7 @@ fn assemble(
             WorkspaceDeps {
                 on_state_changed: Arc::new(move |state| changed.state_changed(state)),
                 on_milestone,
-                // No frame-time budget is active yet, and `workspace` does
-                // not record frames (docs/design/app.md「里程碑与帧」).
-                on_frames: Arc::new(|_| {}),
+                on_frames,
             },
             cx,
         );

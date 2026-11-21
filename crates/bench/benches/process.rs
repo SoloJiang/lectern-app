@@ -14,11 +14,12 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime};
 
 use lectern_bench::budgets::{BUDGETS, Limit, fmt_bytes, lookup};
+use lectern_bench::frames::{self, MIN_SCROLL_FRAMES};
 use lectern_bench::process::{
     ColdStart, Exit, Idle, Launch, Launched, Launcher, Limits, NEVER_QUIESCENT, PluginPair,
     ProcessInfo, Scheduler, Session, purge,
 };
-use lectern_bench::wire::{Milestone, OpenTarget, TimeSource};
+use lectern_bench::wire::{FrameStats, Milestone, OpenTarget, SCROLL_LIMIT, TimeSource};
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Target, Value};
 use lectern_project::testing::Shape;
 
@@ -81,6 +82,14 @@ const BENCHES: &[Bench] = &[
     Bench {
         id: "app/files_expand",
         run: app_files_expand,
+    },
+    Bench {
+        id: "app/scroll_frames",
+        run: app_scroll_frames,
+    },
+    Bench {
+        id: "app/scroll_frames_indexing",
+        run: app_scroll_frames_indexing,
     },
     Bench {
         id: "app/switch_worktree",
@@ -702,6 +711,175 @@ fn app_files_expand(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![
         Measured::new("app/files_expand", Value::Time(Samples(times))).with_note(Some(note)),
     ])
+}
+
+/// Set to `1` in the runner's environment to scroll
+/// `app/scroll_frames_indexing` with the kernel's yield switch on (ADR 0033):
+/// the calibration of the switch, measured when the benchmark is over budget
+/// without it. Unset, the switch is off, as in the product, which never
+/// turns it on (docs/design/bench.md「与设计的差异」).
+const YIELD_VAR: &str = "LECTERN_BENCH_YIELD";
+
+/// A scroll recording that can be judged: `Frames` within
+/// [`SCROLL_LIMIT`], with enough frames that something was scrolled. The
+/// `scenario` is named in the error.
+fn scrolled(
+    session: &mut Session<'_>,
+    yielding: bool,
+    scenario: &str,
+) -> Result<FrameStats, BenchError> {
+    let stats = session.frames(OpenTarget::Scroll { yielding }, SCROLL_LIMIT)?;
+    frames::check(&stats, MIN_SCROLL_FRAMES)
+        .map_err(|error| BenchError::new(format!("{scenario}：{}", error.message())))?;
+    Ok(stats)
+}
+
+/// `app/scroll_frames`: for each scenario of ADR 0034, 5 launches, one at a
+/// time. Each opens the fixture project and lets it settle, opens the
+/// scenario's file and lets it settle (for the edit mode, then ⌘E and
+/// `EditReady`, and settle again), and sends `Open(Scroll)`: the window's
+/// frames are recorded while the reading view (or the editor) is scrolled
+/// by 240 wheel events, one in each frame (`SCROLL_EVENTS`), and come back
+/// as `Frames`. The scenarios are 64 MiB of synthetic TypeScript opened at
+/// a byte offset in the middle, 4 MiB of JavaScript in one line, and 1 MiB
+/// of TypeScript at the edit limit in the edit mode. The budget judges the
+/// worst frame of all of them (each frame's work, and each interval inside
+/// a recording); the note gives each scenario's own worst.
+fn app_scroll_frames(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    const ID: &str = "app/scroll_frames";
+    let program = app(ctx)?;
+    let repo = reader_files::ReaderRepo::cloudprint()?;
+    let scenarios = repo.scrolling(ctx);
+    let edit = repo.editable();
+    let scheduler = scheduler(ctx);
+    let launches = ctx.scale(5, 1);
+    let mut recordings = Vec::new();
+    let mut notes = Vec::new();
+    for scenario in &scenarios {
+        let mut own = Vec::new();
+        for _ in 0..launches {
+            let mut session = launch_with_project(&scheduler, &program, repo.root(), ID)?;
+            session.open(
+                OpenTarget::File {
+                    path: scenario.path.clone(),
+                    byte: scenario.byte,
+                    old: None,
+                },
+                Milestone::FileHighlighted,
+                OPEN_LIMIT,
+            )?;
+            settle(&mut session, ID)?;
+            own.push(scrolled(&mut session, false, scenario.name)?);
+            session.quit()?;
+        }
+        notes.push(format!(
+            "{} ({} bytes): {}",
+            scenario.name,
+            scenario.bytes,
+            frames::describe(&own)
+        ));
+        recordings.extend(own);
+    }
+    let mut own = Vec::new();
+    for _ in 0..launches {
+        let mut session = launch_with_project(&scheduler, &program, repo.root(), ID)?;
+        session.open(
+            OpenTarget::File {
+                path: edit.path.clone(),
+                byte: edit.byte,
+                old: None,
+            },
+            Milestone::FileHighlighted,
+            OPEN_LIMIT,
+        )?;
+        // The whole file is read, so Edit is available.
+        settle(&mut session, ID)?;
+        session.open(
+            OpenTarget::Key("cmd-e".to_owned()),
+            Milestone::EditReady,
+            OPEN_LIMIT,
+        )?;
+        settle(&mut session, ID)?;
+        own.push(scrolled(&mut session, false, "edit mode")?);
+        session.quit()?;
+    }
+    notes.push(format!(
+        "edit mode ({} bytes): {}",
+        edit.bytes,
+        frames::describe(&own)
+    ));
+    recordings.extend(own);
+    let value = frames::value(&recordings, MIN_SCROLL_FRAMES)?;
+    Ok(vec![
+        Measured::new(ID, value).with_note(Some(notes.join("; "))),
+    ])
+}
+
+/// `app/scroll_frames_indexing`: 5 launches, one at a time, of the large
+/// repository (`app/idle_100k`'s 100 000 files) with a 4 MiB TypeScript
+/// file in it. Each opens the project and the file at its middle and, with
+/// no wait for quiescence, sends `Open(Scroll)`: the scroll of
+/// `app/scroll_frames` while the batch layer indexes the project and parses
+/// the file's windows (ADR 0033). The app logs how many background guards
+/// the kernel held when the scroll ended; none means the indexing had
+/// finished and the result would be `app/scroll_frames`'s, which is an error
+/// when measuring. With [`YIELD_VAR`] the kernel's yield switch is on.
+fn app_scroll_frames_indexing(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    const ID: &str = "app/scroll_frames_indexing";
+    let program = app(ctx)?;
+    let repo =
+        reader_files::Wide::scrolling(ctx, ctx.scale(4 * reader_files::MIB, reader_files::MIB))?;
+    let file = repo
+        .scroll
+        .clone()
+        .ok_or_else(|| BenchError::new("the fixture has no file to scroll"))?;
+    let yielding = std::env::var_os(YIELD_VAR).is_some_and(|value| value == "1");
+    let scheduler = scheduler(ctx);
+    let mut recordings = Vec::new();
+    let mut background = Vec::new();
+    for _ in 0..ctx.scale(5, 1) {
+        let mut session = scheduler.session(&program, None)?;
+        settle(&mut session, ID)?;
+        session.open(
+            OpenTarget::Project(repo.root().to_owned()),
+            Milestone::ProjectHome,
+            OPEN_LIMIT,
+        )?;
+        // Not settled: the indexing is what the scroll runs against.
+        session.open(
+            OpenTarget::File {
+                path: file.path.clone(),
+                byte: Some(file.byte),
+                old: None,
+            },
+            Milestone::FileHighlighted,
+            OPEN_LIMIT,
+        )?;
+        recordings.push(scrolled(&mut session, yielding, "scroll while indexing")?);
+        background
+            .push(session.quit_reading_home(|home| {
+                logged(home, "bench scroll ended", "background_items")
+            })?);
+    }
+    let held = background
+        .iter()
+        .map(|items| items.map_or_else(|| "-".to_owned(), |n| n.to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if ctx.mode() == Mode::Measure && background.contains(&Some(0)) {
+        return Err(BenchError::new(format!(
+            "{ID}：滚动结束时批量层已经没有工作（后台守卫数 {held}），结果不是建索引期间的帧时间"
+        )));
+    }
+    let value = frames::value(&recordings, MIN_SCROLL_FRAMES)?;
+    let note = format!(
+        "{} files, a file of {} bytes, yield switch {}; background guards held at the end of each scroll {held}; {}",
+        repo.files,
+        file.bytes,
+        if yielding { "on" } else { "off" },
+        frames::describe(&recordings)
+    );
+    Ok(vec![Measured::new(ID, value).with_note(Some(note))])
 }
 
 /// `app/unclassified_children`: record only; the descendants of the main

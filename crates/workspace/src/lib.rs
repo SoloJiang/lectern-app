@@ -38,7 +38,7 @@ mod view;
 mod tests;
 
 pub use effect::{Effect, Notice};
-pub use host::{FrameRecord, FrameTimes, WorkspaceDeps, WorkspaceHost, install};
+pub use host::{FrameRecord, WorkspaceDeps, WorkspaceHost, install};
 pub use hub::{Hub, Item, Queued, RecordStop, Sender};
 pub use plugin::WorkspacePlugin;
 pub use state::WindowState;

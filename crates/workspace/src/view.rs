@@ -9,7 +9,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, Context, FocusHandle, InteractiveElement,
@@ -20,6 +20,8 @@ use gpui::{
 use lectern_i18n::keys;
 use lectern_kernel::{Name, PluginError, contain};
 use lectern_logging::{debug, error, warn};
+use lectern_platform::HookError;
+use lectern_platform::frame::{self, FrameRecorder};
 use lectern_services::workspace::{
     Contributions, Milestone, Route, Visibility, WorkspaceCommand, WorkspaceEvent,
 };
@@ -70,9 +72,19 @@ struct Built {
 /// A frame recording in progress.
 struct Recording {
     scenario: Name,
+    /// Which recording this is: the frame callbacks of an ended recording
+    /// find another number (or none) and end.
+    id: u64,
+    /// `platform::frame::record`'s answer: the error is kept so the stop
+    /// condition ends the recording as usual and hands it back.
+    recorder: Result<FrameRecorder, HookError>,
     /// The `After` timer; dropping it cancels it.
     _timer: Option<Task<()>>,
 }
+
+/// How long `PendingFrames::wait` waits for the GPU and the display of the
+/// last frames (docs/design/workspace.md「本 crate 的公开项」).
+const FRAME_WAIT: Duration = Duration::from_millis(250);
 
 /// The root view: one per process, shared by the windows through
 /// `host::WindowRoot`.
@@ -97,6 +109,8 @@ pub struct Workspace {
     /// The one-time notice's message key; cleared by the next command.
     notice: Option<lectern_i18n::Key>,
     recording: Option<Recording>,
+    /// The number of the last recording started.
+    recordings: u64,
     tick_scheduled: bool,
     /// Whether the first `ScreenChanged` (`from: None`) went out.
     announced: bool,
@@ -125,6 +139,7 @@ impl Workspace {
             inspector_drawn: None,
             notice: None,
             recording: None,
+            recordings: 0,
             tick_scheduled: false,
             announced: false,
         }
@@ -396,6 +411,26 @@ impl Workspace {
 
     fn start_recording(&mut self, scenario: Name, stop: RecordStop, cx: &mut Context<Self>) {
         self.stop_recording(cx);
+        self.recordings += 1;
+        let id = self.recordings;
+        let this = cx.weak_entity();
+        // `record` and the first frame callback are in the window's update:
+        // main thread, after the first frame.
+        let recorder = match self.window {
+            Some(handle) => handle
+                .update(cx, |_, window, _| {
+                    let recorder = frame::record(window);
+                    if recorder.is_ok() {
+                        frame_tick(this.clone(), window, id);
+                    }
+                    recorder
+                })
+                .unwrap_or(Err(HookError::NoMetalLayer)),
+            None => Err(HookError::NoMetalLayer),
+        };
+        if let Err(error) = &recorder {
+            debug!("frame recording not started"; kind = error.as_str());
+        }
         let timer = match stop {
             RecordStop::After(duration) => {
                 let this = cx.weak_entity();
@@ -413,18 +448,56 @@ impl Workspace {
         };
         self.recording = Some(Recording {
             scenario,
+            id,
+            recorder,
             _timer: timer,
         });
     }
 
-    /// Ends the recording and hands it to `app`. Until `platform` records
-    /// frames the record carries none (「已知限制」).
-    fn stop_recording(&mut self, _cx: &mut Context<Self>) {
-        if let Some(recording) = self.recording.take() {
-            (self.deps.on_frames)(FrameRecord {
-                scenario: recording.scenario,
-                frames: Vec::new(),
-            });
+    /// A frame of recording `id` is about to be handled: the recorder is
+    /// told, once. False when that recording has ended (or never recorded),
+    /// so the frame callbacks stop.
+    fn frame_started(&self, id: u64) -> bool {
+        match &self.recording {
+            Some(Recording {
+                id: current,
+                recorder: Ok(recorder),
+                ..
+            }) if *current == id => {
+                recorder.frame_started();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Ends the recording and hands it to `app`: the recorder stops here,
+    /// and `PendingFrames::wait` blocks a background thread that then calls
+    /// `on_frames`. A recording that could not start reports its error at
+    /// once.
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(recording) = self.recording.take() else {
+            return;
+        };
+        let scenario = recording.scenario;
+        let on_frames = self.deps.clone();
+        match recording.recorder {
+            Ok(recorder) => {
+                let pending = recorder.stop();
+                cx.background_executor()
+                    .spawn(async move {
+                        let recording = pending.wait(FRAME_WAIT);
+                        (on_frames.on_frames)(FrameRecord {
+                            scenario,
+                            result: Ok(recording),
+                        });
+                    })
+                    .detach();
+            }
+            Err(error) => (on_frames.on_frames)(FrameRecord {
+                scenario,
+                result: Err(error),
+            }),
         }
     }
 
@@ -1298,6 +1371,20 @@ fn stamp_milestone(
         .unwrap_or(0);
     debug!("milestone"; name = milestone_name(&milestone), presented_us = since_epoch);
     on_milestone(milestone, presented);
+}
+
+/// One callback per frame while recording `id`: tells the recorder the
+/// frame starts (before layout: the callbacks run first in GPUI's frame
+/// handling) and asks for the next frame, until the recording ends.
+fn frame_tick(this: WeakEntity<Workspace>, window: &mut Window, id: u64) {
+    window.on_next_frame(move |window, cx| {
+        let recording = this
+            .update(cx, |workspace, _| workspace.frame_started(id))
+            .unwrap_or(false);
+        if recording {
+            frame_tick(this, window, id);
+        }
+    });
 }
 
 /// Checks each frame whether every transition has settled, then ends the
