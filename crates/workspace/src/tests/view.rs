@@ -525,6 +525,9 @@ fn screens_can_be_pushed_twice(cx: &mut TestAppContext) {
     );
 }
 
+/// The test platform's window has no `CAMetalLayer` (and without
+/// `bench-hooks` there is no recording at all): `record` fails, the stop
+/// condition still ends the recording, and the record carries the error.
 #[gpui::test]
 fn record_frames_reports_once_per_scenario(cx: &mut TestAppContext) {
     let rig = UiRig::new(cx);
@@ -533,7 +536,8 @@ fn record_frames_reports_once_per_scenario(cx: &mut TestAppContext) {
     rig.settle(cx);
     let frames = rig.received.frames();
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].scenario, "scroll");
+    assert_eq!(frames[0].0, "scroll");
+    assert!(frames[0].1.is_some(), "no recording without a Metal layer");
 
     rig.host.record_frames(name("input"), RecordStop::Manual);
     rig.settle(cx);
@@ -542,7 +546,8 @@ fn record_frames_reports_once_per_scenario(cx: &mut TestAppContext) {
     rig.settle(cx);
     let frames = rig.received.frames();
     assert_eq!(frames.len(), 2);
-    assert_eq!(frames[1].scenario, "input");
+    assert_eq!(frames[1].0, "input");
+    assert!(frames[1].1.is_some());
     rig.host.stop_recording();
     rig.settle(cx);
     assert_eq!(
@@ -550,6 +555,25 @@ fn record_frames_reports_once_per_scenario(cx: &mut TestAppContext) {
         2,
         "a second stop reports nothing"
     );
+}
+
+/// A recording that is replaced before its stop condition holds is reported
+/// first (the one in progress ends before the next starts), and
+/// `AnimationsSettled` ends at the first frame when nothing moves.
+#[gpui::test]
+fn record_frames_ends_the_one_in_progress_and_settles_without_animation(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    rig.host.record_frames(name("first"), RecordStop::Manual);
+    rig.host
+        .record_frames(name("second"), RecordStop::AnimationsSettled);
+    rig.settle(cx);
+    let scenarios = |frames: Vec<(String, Option<&'static str>)>| -> Vec<String> {
+        frames.into_iter().map(|(scenario, _)| scenario).collect()
+    };
+    assert_eq!(scenarios(rig.received.frames()), ["first"]);
+    // The check runs in the next frame callback: nothing moves, so it ends.
+    rig.next_frame(cx);
+    assert_eq!(scenarios(rig.received.frames()), ["first", "second"]);
 }
 
 #[gpui::test]
