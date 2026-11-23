@@ -345,6 +345,16 @@ impl ActivationToken {
         self.admit(|state| state == LIVE, true)
     }
 
+    /// Like [`enter`](ActivationToken::enter), but not counted towards
+    /// quiescence (ADR 0066): only for a closure that the main thread calls
+    /// on every frame to read the contributor's current values
+    /// (`ui::contrib::Screen::toolbar`). Deactivation still waits for it.
+    /// The closure only reads state and builds elements; work it starts
+    /// takes its own `BusyGuard` or `PendingGuard` before it returns.
+    pub fn enter_frame(&self) -> Option<Admission> {
+        self.admit(|state| state == LIVE, false)
+    }
+
     /// A guard counted directly by the kernel for work queued to another thread
     /// (applying or removing UI registrations). Works for `Dead` tokens; returns
     /// `None` only after `shutdown` has closed it.
@@ -384,7 +394,8 @@ impl ActivationToken {
     }
 
     /// Like `enter`, but not counted towards quiescence. Used only to call
-    /// `Busy` / `Quiescent` / `BackgroundChanged` listeners.
+    /// `Busy` / `Quiescent` / `BackgroundChanged` listeners (the public
+    /// counterpart for per-frame reads is `enter_frame`).
     pub(crate) fn enter_uncounted(&self) -> Option<Admission> {
         self.admit(|state| state == LIVE, false)
     }

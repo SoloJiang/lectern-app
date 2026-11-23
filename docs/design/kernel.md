@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)；executor 接入（第 5 项）用到的 `SubmitGate::log_ctx`、`PanicPayload::text` 随 [#186](https://github.com/SoloJiang/lectern-app/pull/186) 公开；`ActivationToken::fail`（别的插件在准入内运行这次激活的代码、捕获到 panic 时让它失效，[workspace](workspace.md) 第 2 步的前置条件）随 [#215](https://github.com/SoloJiang/lectern-app/issues/215) 的 kernel PR 公开）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)；executor 接入（第 5 项）用到的 `SubmitGate::log_ctx`、`PanicPayload::text` 随 [#186](https://github.com/SoloJiang/lectern-app/pull/186) 公开；`ActivationToken::fail`（别的插件在准入内运行这次激活的代码、捕获到 panic 时让它失效，[workspace](workspace.md) 第 2 步的前置条件）随 [#215](https://github.com/SoloJiang/lectern-app/issues/215) 的 kernel PR 公开；`ActivationToken::enter_frame`（每帧读取不计入静止，[ADR 0066](../adr/0066.md)）随 [#403](https://github.com/SoloJiang/lectern-app/issues/403) 的 kernel PR 加入）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -180,6 +180,11 @@ impl ActivationToken {
     /// 再等准入计数归零（见「撤销」第 3 步），所以 `Dead` 之后不会有新的调用开始，已经开始的调用在守卫和 `Active`
     /// 被 drop 之前执行完。
     pub fn enter(&self) -> Option<Admission>;
+
+    /// 与 `enter()` 相同（只接受 `Live`，计入这次激活自己的准入计数，停用照常等它释放），但不计入全局准入计数，
+    /// 不影响静止（[ADR 0066](../adr/0066.md)）。只用于主线程上每帧调用、只读状态的贡献方闭包（`ui::contrib::Screen::toolbar`）：
+    /// 闭包只读状态、构造元素，不提交任务、不发事件、不排主线程队列；需要开始工作时在返回之前自己取 `BusyGuard` 或 `PendingGuard`。
+    pub fn enter_frame(&self) -> Option<Admission>;
 
     /// 取一个由 kernel 直接计数的守卫，表示还有排到其他线程、尚未完成的工作（主线程上应用或注销界面注册）。
     /// 守卫 drop 之前 kernel 不报告静止。它不属于任何插件的激活，所以提供注册的插件（如 `workspace`）
@@ -679,7 +684,7 @@ impl Emitter {
 
 界面注册的守卫在 kernel 线程上 drop 时，只是把注销排到主线程，kernel 可能先完成撤销并 drop `Active`。这段时间里界面不能调用到已停用的激活，也不能让 kernel 先报告静止：
 
-- 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。回调在准入范围内用 `catch_unwind` 包住：panic 时先用这个 token 调用 `ActivationToken::fail` 让这次激活同步失效（插件进入 `Failed`，连带停用的插件一起失效；`fail` 不等准入归零，所以持有准入时调用不会自己等自己），展开结束后才释放准入，panic 不会展开到主线程，插件也不会在失效后继续被调用。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
+- 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。每帧调用、只读状态的闭包（工具栏的当前值）改用 `token.enter_frame()`：规则相同，只是不计入静止（见「静止」）。回调在准入范围内用 `catch_unwind` 包住：panic 时先用这个 token 调用 `ActivationToken::fail` 让这次激活同步失效（插件进入 `Failed`，连带停用的插件一起失效；`fail` 不等准入归零，所以持有准入时调用不会自己等自己），展开结束后才释放准入，panic 不会展开到主线程，插件也不会在失效后继续被调用。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
 - `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程上的注销（从注册表移除 Action、命令处理函数、视图工厂，并 drop 最后一份闭包）在 `contain` 里执行，一个守卫对应多项注册时每一项单独包住，闭包捕获的值的 `Drop` panic 时只记日志、用所属激活的 token 调用 `ActivationToken::fail` 让它失效（已经失效的 token 上 `fail` 什么也不做，只剩日志），不展开到主线程，其余项照常移除；主线程的队列被丢弃时守卫随之 drop。`shutdown` 关闭准入之后取不到守卫，说明主线程的队列已经不再处理，注销请求直接丢弃。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
 后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。`executor` 的提交接口带上 `own_with` 给的 `SubmitGate`：闸门打开之前任务不会被 poll，`own_with` 在 `start` 正常返回、句柄登记完之后才打开它，所以 `start` 在提交之后、返回句柄之前 panic 时任务一次也没运行，闸门关闭后直接丢弃。任务每次被 poll 之前调用 `GateSlot::poll`：它在闸门的锁内登记 waker 并检查闸门和 token，关闭或为 `Dead` 时丢弃 future（等同取消）。token 变为 `Dead` 时 kernel 唤醒全部槽位，所以停在 `Pending` 上的任务也会被调度一次并丢弃，不会一直持有 `BusyGuard` 和状态、挡住静止。任务的 future 在某次 poll 里 panic 时，executor 捕获这个 panic、调用 `GateSlot::panicked`，这次激活按 `fail` 失效，插件进入 `Failed`；所以初始化任务中途 panic 不会让插件留在 `Active` 并被报告为静止。`executor` 的测试覆盖这两点：闸门在检查和登记之间打开时任务仍被调度；future panic 时插件进入 `Failed`、工作线程继续运行。
@@ -765,7 +770,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - kernel 线程已经处理完启动时的激活；
 - 生命周期操作的队列为空，kernel 线程上没有正在执行的生命周期操作（激活、提交、`started`、停用与撤销、`shutdown`）；
 - 没有正在进行的事件分发（kernel 计数各线程上进行中的 `emit`，监听可能正要取 `BusyGuard`）；
-- 没有持有中的准入：`ServiceRef::get`、`ServiceSet` 的调用、主线程的界面回调和结果应用都持有 `Admission`，kernel 对所有激活的准入另外维护一个全局计数，`enter()` 成功时与本激活的计数一起加一，所以插件代码正在运行、还没来得及取 `BusyGuard` 时也不会报告静止（分发 `Busy` / `Quiescent` 时调用监听用的准入除外，见下文）；
+- 没有持有中的准入：`ServiceRef::get`、`ServiceSet` 的调用、主线程的界面回调和结果应用都持有 `Admission`，kernel 对所有激活的准入另外维护一个全局计数，`enter()` 成功时与本激活的计数一起加一，所以插件代码正在运行、还没来得及取 `BusyGuard` 时也不会报告静止（分发 `Busy` / `Quiescent` 时调用监听用的准入除外，见下文；`enter_frame()` 取得的准入也除外：主线程每画一帧就读一次贡献方的当前值，计入的话界面上有东西在动时 kernel 永远不静止，[ADR 0066](../adr/0066.md)。这类闭包只读状态，需要开始工作时自己取守卫，守卫照常计入）；
 - 没有未 drop 的 `BusyGuard` 和 `PendingGuard`（排到主线程、尚未完成的界面注册或注销）。
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引的第 1、2 层）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）在等待期间不取守卫，但每一轮实际工作（一次刷新：读文件、解析、更新状态）开始时取一个 `BusyGuard`，这一轮结束、结果交给主线程并应用之后才 drop（见「撤销」里排到主线程的结果），所以刷新进行中时 kernel 不报告静止。插件停用时，它的任务句柄被 drop、任务被要求取消，但取消是协作式的：任务真正结束、守卫被 drop 之前，守卫仍然计入，kernel 不报告静止。
@@ -885,6 +890,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - `barrier` 与静止：没有其他忙碌来源时，`barrier()` 返回后立即读 `quiescent_epoch()` 得到 `Some`；排在 `shutdown` 之后、被 kernel 线程拒绝的 barrier 同样如此。
 - `started` 暂存：`started` 里发事件、提交任务后再 panic 或被 `fail`，事件没有送达任何监听，`start` 没有被调用；`started` 成功时它们在 token 变为 `Live` 之后按顺序发生。
 - 单实现服务：提供者失效后 `ServiceRef::get()` 返回 None；提供者的撤销等正在进行的 `Admitted` 调用结束。
+- 每帧读取的准入：`enter_frame()` 持有期间和释放之后 `quiescent_epoch()` 不变、`is_quiescent()` 仍为 true；停用在它释放之前不 drop 守卫和 `Active`；token 为 `Pending` 或 `Dead` 时返回 None。
 - 准入：token 为 `Dead` 之后 `enter()` 返回 None；停用在准入计数归零之前不 drop 守卫和 `Active`（主线程回调、服务调用、监听各一个测试）；在监听里调用同一插件的服务、在监听里调用 `fail` 都不死锁。
 - token 状态：`started` 期间另一个线程调用 `fail` 时，`started` 返回后 token 仍为 `Dead`，激活按失败处理，`done` 收到那个错误。
 - 新提供者：`MULTIPLE` 服务的第二个提供者在 `started` 成功之前不出现在已激活依赖者的 `ServiceSet::current()` 里，`ServiceAdded` 在它变为 `Live` 之后才发出；`started` 失败时依赖者从头到尾看不到它。
@@ -1075,6 +1081,8 @@ impl Kernel {
 - `just test -p lectern-kernel`：114 个测试通过，其中新增 5 个（`crates/kernel/src/tests/failure.rs` 的 `token_fail_*` 4 个、`logs.rs` 的 `token_fail_logs_one_deactivation_in_the_failed_activations_scope`）；`cargo nextest run -p lectern-kernel --all-features -E 'test(token_fail)' --stress-count 300` 300 轮全部通过（两个测试里 kernel 线程给自己排入的请求不在 `barrier` 的等待范围内，见上文 barrier 的已知限制，用 `wait_until` 等状态）。`just check`、`just deny`、`python3 scripts/check_architecture.py` 通过。
 - 发布构建里的路径没有变化：`PluginHandle::fail` 改为调用 `self.act.fail(error)`，两者都是原来的 `invalidate`。
 - 没有验证的：`workspace` 在离开守卫、视图工厂、命令处理函数 panic 和贡献载荷 drop panic 时怎样调用它（workspace 第 2 步的 PR）。
+
+- `enter_frame`（[#403](https://github.com/SoloJiang/lectern-app/issues/403)）：`crates/kernel/src/tests/quiescence.rs` 的 `a_frame_admission_is_not_counted_but_holds_off_revocation` 取放 10 次 `enter_frame()`，期间 `is_quiescent()` 为 true，`quiescent_epoch()` 不变；持有时停用，守卫在准入释放之后才 drop，`Dead` 之后返回 None。`a_frame_admission_rejects_a_pending_token` 在 `started` 里（token 仍是 `Pending`）取不到。把 `enter_frame` 临时改成计入静止时第一个测试失败。`just test -p lectern-kernel`：116 个测试全部通过。
 
 ## 与设计的差异
 
