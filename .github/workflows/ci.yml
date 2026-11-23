@@ -152,7 +152,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-shard-${{ matrix.shard }}
-          path: target/lectern-bench/report-*.json
+          path: |
+            target/lectern-bench/report-*.json
+            target/lectern-bench/samples/*.txt
           if-no-files-found: warn
 
   # The programs of the process shards, built once (ADR 0062): the process
@@ -223,6 +225,8 @@ jobs:
           tar -C target/lectern-bench/process-build -xf target/lectern-bench/process-build.tar
       - name: Performance budget benchmarks (shard)
         run: just bench-prebuilt ${{ matrix.shard }} target/lectern-bench/process-build
+        env:
+          LECTERN_BENCH_SAMPLE_DIR: ${{ github.workspace }}/target/lectern-bench/samples
       # The reports are uploaded even when the benchmark crashed.
       - name: Upload the shard's reports
         if: always()
