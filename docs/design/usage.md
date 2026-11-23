@@ -931,12 +931,12 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 | ID | 统计量与预算 |
 |---|---|
 | `usage/ingest_append_4k` | 中位数 < 5 ms（活跃会话追加约 4 KiB：`read`、规范化、去重、落盘与提交游标） |
-| `usage/backfill_batch` | 中位数 < 270 ms（[ADR 0061](../adr/0061.md) 从 150 ms 暂时放宽，SQLite 3.54 的语句重新编译，[#386](https://github.com/SoloJiang/lectern-app/issues/386)；一批 8 MiB 的合成会话：读取、入库；补读会话的定稿在读到末尾之后另分批，由 `usage/backfill_large_session` 覆盖） |
+| `usage/backfill_batch` | 中位数 < 400 ms（[ADR 0061](../adr/0061.md) 从 150 ms 暂时放宽到 270 ms，[ADR 0055](../adr/0055.md) 按托管 runner 的实测再放宽到 400 ms，SQLite 3.54 的语句重新编译，[#386](https://github.com/SoloJiang/lectern-app/issues/386)；一批 8 MiB 的合成会话：读取、入库；补读会话的定稿在读到末尾之后另分批，由 `usage/backfill_large_session` 覆盖） |
 | `usage/backfill_large_session` | 每批最大值 < 900 ms（[ADR 0061](../adr/0061.md) 从 300 ms 暂时放宽，[#386](https://github.com/SoloJiang/lectern-app/issues/386)）、中位数 < 150 ms（一个 200 MB 的合成会话按 8 MiB 分批补读并定稿）；适配器解析的字节合计 ≤ 文件大小的 1.2 倍（检查没有平方级的重复解析） |
 | `usage/finalize_turn_20` | 中位数 < 10 ms（一轮 20 次改动调用、3 个 worktree，`turns_unretained` 命中，`load` 20 次） |
 | `usage/project_30d` | 中位数 < 50 ms（30 个重度日、约 20 万条事实行、40 个片段：一个项目的 30 天快照，后台） |
 | `usage/all_projects_30d` | 中位数 < 80 ms（同一夹具，20 个项目） |
-| `usage/snapshot_increment` | 中位数 < 2 ms（关注着 30 天快照时一轮定稿到快照替换） |
+| `usage/snapshot_increment` | 中位数 < 3 ms（[ADR 0055](../adr/0055.md) 从 2 ms 按托管 runner 的实测放宽；关注着 30 天快照时一轮定稿到快照替换） |
 | `usage/rebuild_30d` | 只记录（同一夹具的派生表从观察整体重建） |
 | `usage/resident_bytes` | 存活字节 ≤ 2 MB（同一夹具打开数据库、补读完成并静止后，不含 SQLite 页缓存；`Memory`） |
 | `usage/disk_day_heavy` | 只记录（一个重度日写入后数据库文件的增长，含 `-wal`；乘以 396 天是热数据的上限估算，对照「磁盘」一行的 400 MB） |

@@ -2,6 +2,7 @@
 //! against the whole one, long lines' cell marks, CRLF, BOM, and rows that
 //! only touch the visible bytes.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use lectern_services::code_intel::TextOrigin;
@@ -14,7 +15,7 @@ use crate::doc::Pieces;
 use crate::doc::content::{Content, PageCache, Paged};
 use crate::highlight::Source;
 use crate::limits::{LONG_LINE, PAGE};
-use crate::text::{IndexBuilder, Text};
+use crate::text::{IndexBuilder, LongLine, Text};
 use crate::{
     DocSnapshot, DocState, Editable, Highlighting, LineCount, LineNo, NotEditable, Row, RowPos,
 };
@@ -360,4 +361,201 @@ fn text_rows_touch_only_the_visible_pages() {
         120,
     );
     assert!(matches!(far[0], Row::Pending { .. }));
+}
+
+/// Long lines for the row walk: wide characters (a wide character sticks
+/// out of a row at an odd width), tabs, an invalid byte, a row that ends
+/// exactly at a cell mark (the wide character at cells 4094 and 4095 is
+/// followed by the first mark: 4096 cells), and a last line without a line
+/// break.
+fn walk_fixture() -> Vec<u8> {
+    let mut out = b"short\n".to_vec();
+    out.extend(std::iter::repeat_n(b'a', 4094));
+    out.extend_from_slice("宽".as_bytes());
+    out.extend(std::iter::repeat_n(b'b', 3000));
+    out.push(0xff);
+    out.extend_from_slice("宽字\t宽x\t".as_bytes());
+    out.extend(std::iter::repeat_n(b'c', 2500));
+    out.extend_from_slice(b"\r\n");
+    for i in 0..3000 {
+        out.extend_from_slice(if i % 3 == 0 { "宽".as_bytes() } else { b"d\t" });
+    }
+    out
+}
+
+/// What `LongLine::row_range` (two walks from a mark for every row) gives
+/// for each row.
+fn old_rows(long: &LongLine, src: &dyn Source, cols: u32) -> Vec<Range<u64>> {
+    (0..long.rows(cols))
+        .map(|k| long.row_range(src, k, cols).expect("in memory"))
+        .collect()
+}
+
+#[test]
+fn text_row_walk_gives_what_row_range_gives() {
+    let wide = "宽".repeat(1400).into_bytes();
+    for (name, bytes, widths) in [
+        (
+            "fixture",
+            walk_fixture(),
+            &[3u32, 7, 80, 121, 1000, 4095, 4096, 4097][..],
+        ),
+        // At 1 and 2 columns half of the rows are empty: the wide
+        // character takes the cells of two rows.
+        ("wide", wide, &[1u32, 2, 3, 5][..]),
+        ("mixed", mixed(13, 150), &[7u32, 80, 121][..]),
+    ] {
+        let text = Text::from_bytes(bytes);
+        let src: &dyn Source = &text;
+        assert!(!text.index().long_lines().is_empty(), "{name}");
+        for long in text.index().long_lines() {
+            for &cols in widths {
+                let last = long.rows(cols) - 1;
+                // From the first row, the middle and the last; on past the
+                // last row, where `row_range` is empty at the end.
+                for from in [0, last / 2, last] {
+                    let mut cursor = long.row_cursor(src, from, cols).expect("in memory");
+                    for k in from..=last + 2 {
+                        assert_eq!(cursor.row(), k);
+                        assert_eq!(
+                            cursor.next_row(long, src, cols),
+                            long.row_range(src, k, cols),
+                            "{name}: row {k} of {last} from {from} at {cols} columns, line {}",
+                            long.start
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn text_row_walk_snapshot() {
+    let text = Text::from_bytes(walk_fixture());
+    let src: &dyn Source = &text;
+    // A mark sits where the first row ends at 4096 columns: the marks are
+    // 4 KiB of bytes apart from the line's start, at the first unit past
+    // that, and here that is the one after the wide character. (A mark at
+    // `row_floor`'s target is not a floor, so one cell more.)
+    let first = &text.index().long_lines()[0];
+    let row = first.row_range(src, 0, 4096).expect("in memory");
+    assert_eq!(row.end, 4103);
+    assert_eq!(first.row_floor(1, 4097), row.end);
+    let mut out = String::new();
+    for long in text.index().long_lines() {
+        for cols in [1000u32, 3001, 4096] {
+            out.push_str(&format!(
+                "line {}..{} ({} cells) at {cols} columns\n",
+                long.start, long.end, long.cells
+            ));
+            let old = old_rows(long, src, cols);
+            let mut cursor = long.row_cursor(src, 0, cols).expect("in memory");
+            let new: Vec<_> = (0..old.len())
+                .map(|_| cursor.next_row(long, src, cols).expect("in memory"))
+                .collect();
+            assert_eq!(new, old);
+            for (k, r) in new.iter().enumerate() {
+                out.push_str(&format!("  row {k}: {}..{}\n", r.start, r.end));
+            }
+        }
+    }
+    insta::assert_snapshot!(out);
+}
+
+/// `rows` and `row_count` over long lines and short ones, from every kind
+/// of position: the rows' bytes are the old per-row ranges, the count is
+/// the rows' number.
+#[test]
+fn text_rows_in_long_lines_and_their_count() {
+    let bytes = walk_fixture();
+    let size = bytes.len() as u64;
+    let text = Arc::new(Text::from_bytes(bytes));
+    let s = snapshot(Content::Text(text.clone()), size, LineCount::Exact(4));
+    let src: &dyn Source = &*text;
+    for cols in [3u32, 80, 1000, 4096] {
+        for long in text.index().long_lines() {
+            let want = old_rows(long, src, cols);
+            for k in [0, 1, want.len() as u64 / 2, want.len() as u64 - 1] {
+                let from = RowPos {
+                    line_start: long.start,
+                    sub_row: k as u32,
+                };
+                for n in [1, 2, 5, 70] {
+                    let rows = s.rows(from, n, cols);
+                    assert_eq!(s.row_count(from, n, cols), rows.len());
+                    for (i, row) in rows.iter().enumerate() {
+                        let Row::Text { pos, bytes, .. } = row else {
+                            panic!("in memory");
+                        };
+                        // In this line: the old range of that row.
+                        if pos.line_start == long.start {
+                            assert_eq!(*bytes, want[k as usize + i], "row {i} from {k} at {cols}");
+                        }
+                    }
+                }
+            }
+        }
+        // From the start of the file and from past the end.
+        for line_start in [0, 6, size, size + 1] {
+            let from = RowPos {
+                line_start,
+                sub_row: 0,
+            };
+            for n in [0, 1, 3, 100_000] {
+                assert_eq!(
+                    s.row_count(from, n, cols),
+                    s.rows(from, n, cols).len(),
+                    "from {line_start}, {n} rows at {cols}"
+                );
+            }
+        }
+    }
+}
+
+/// Bytes that are not in memory end the rows with a pending one, and the
+/// count includes it.
+#[test]
+fn text_row_count_counts_the_pending_row() {
+    const SIZE: u64 = 64 << 20;
+    let line = b"0123456789 abcdefghij klmnopqrstuvwxyz;\n";
+    let byte_at = |at: u64| line[(at % line.len() as u64) as usize];
+    let piece = |from: u64, to: u64| -> Vec<u8> { (from..to).map(byte_at).collect() };
+    let mut builder = IndexBuilder::new();
+    let mut at = 0;
+    while at < SIZE {
+        let end = (at + (1 << 20)).min(SIZE);
+        builder.feed(&piece(at, end));
+        at = end;
+    }
+    let index = Arc::new(builder.finish().index);
+    let middle = 40 << 20;
+    let mut cache = PageCache::new(SIZE);
+    cache.add(
+        (middle / PAGE..middle / PAGE + 1)
+            .map(|p| (p, Arc::from(piece(p * PAGE, (p + 1) * PAGE))))
+            .collect(),
+    );
+    let s = snapshot(
+        Content::Paged(Arc::new(Paged {
+            pages: cache.pages().clone(),
+            pieces: Arc::new(Pieces::default()),
+            index: Some(index),
+        })),
+        SIZE,
+        LineCount::Exact(SIZE / line.len() as u64 + 1),
+    );
+    // The rows run out of the one page: its last rows, then a pending one.
+    let from = s.pos_of_byte(middle + PAGE - 500, 120);
+    let rows = s.rows(from, 40, 120);
+    assert!(matches!(rows.last(), Some(Row::Pending { .. })));
+    assert!(rows.len() > 3 && rows.len() < 40);
+    assert_eq!(s.row_count(from, 40, 120), rows.len());
+    // Wholly out of memory: one pending row.
+    let far = RowPos {
+        line_start: 4 << 20,
+        sub_row: 0,
+    };
+    assert_eq!(s.row_count(far, 40, 120), 1);
+    assert_eq!(s.row_count(from, 0, 120), 0);
 }

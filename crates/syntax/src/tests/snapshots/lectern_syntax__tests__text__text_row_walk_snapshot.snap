@@ -1,0 +1,40 @@
+---
+source: crates/syntax/src/tests/text.rs
+expression: out
+---
+line 6..9616 (9608 cells) at 1000 columns
+  row 0: 6..1006
+  row 1: 1006..2006
+  row 2: 2006..3006
+  row 3: 3006..4006
+  row 4: 4006..5007
+  row 5: 5007..6007
+  row 6: 6007..7007
+  row 7: 7007..8008
+  row 8: 8008..9008
+  row 9: 9008..9616
+line 6..9616 (9608 cells) at 3001 columns
+  row 0: 6..3007
+  row 1: 3007..6009
+  row 2: 6009..9011
+  row 3: 9011..9616
+line 6..9616 (9608 cells) at 4096 columns
+  row 0: 6..4103
+  row 1: 4103..8200
+  row 2: 8200..9616
+line 9618..16618 (8000 cells) at 1000 columns
+  row 0: 9618..10493
+  row 1: 10493..11368
+  row 2: 11368..12243
+  row 3: 12243..13118
+  row 4: 13118..13993
+  row 5: 13993..14868
+  row 6: 14868..15743
+  row 7: 15743..16618
+line 9618..16618 (8000 cells) at 3001 columns
+  row 0: 9618..12246
+  row 1: 12246..14871
+  row 2: 14871..16618
+line 9618..16618 (8000 cells) at 4096 columns
+  row 0: 9618..13202
+  row 1: 13202..16618
