@@ -735,8 +735,10 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `app/references_first`、`app/references_100k` | 中位数 ≤ 200 ms（第一批）/ ≤ 2 s（10 万文件的全部结果） | [性能预算](tech-research.md#性能预算) | 上下文抽屉（[#20](https://github.com/SoloJiang/lectern-app/issues/20)） |
 | `app/index_review_set`、`app/index_subproject`、`app/index_100k` | 打开项目到这一层全部入索引，中位数 ≤ 2 s / ≤ 10 s / ≤ 120 s（接电源）；`app/index_100k` 的夹具含一个达到依赖层上限（64 MiB 源码）的 `node_modules`，依赖层排在第 4 层之后，不推迟里程碑（[ADR 0033](../adr/0033.md)） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/index_100k_interaction` | 只记录（与 `app/index_100k` 相同，建索引期间按脚本持续滚动，记下第 3、4 层的完成时间） | [ADR 0033](../adr/0033.md) | `code_intel`（#17） |
-| `app/scroll_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期；场景另有 64 MiB 的合成源码、压缩成一行的文件和编辑模式下 1 MiB 的文件（[ADR 0034](../adr/0034.md)） | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录（#393） |
-| `app/scroll_frames_indexing` | 同 `app/scroll_frames`，在批量层有工作（打开 10 万文件的夹具后立即滚动）时测量；不让路就超标时启用 kernel 的让路开关，并以这个基准校准它（[ADR 0033](../adr/0033.md)）。基准测产品的实际行为（开关关闭），`LECTERN_BENCH_YIELD=1` 时测让路 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录（#393）、`code_intel`（#17） |
+| `app/scroll_frames` | 判定机器的条目（[ADR 0067](../adr/0067.md)）：每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期；场景另有 64 MiB 的合成源码、压缩成一行的文件和编辑模式下 1 MiB 的文件（[ADR 0034](../adr/0034.md)） | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录（#393） |
+| `app/scroll_frames/main_thread/source_64mib`、`…/one_line`、`…/edit` | 每个场景主线程部分的 p95 ≤ 8.3 ms（`(drawable_asked − started) + (committed − drawable_got)`，与 `app/scroll_frames` 同一批记录；托管 runner 也判定） | [ADR 0067](../adr/0067.md) | `workspace` 的帧记录（#393） |
+| `app/scroll_frames_indexing/main_thread` | 同上，`app/scroll_frames_indexing` 的记录 | [ADR 0067](../adr/0067.md) | `workspace` 的帧记录（#393） |
+| `app/scroll_frames_indexing` | 判定机器的条目；同 `app/scroll_frames`，在批量层有工作（打开 10 万文件的夹具后立即滚动）时测量；不让路就超标时启用 kernel 的让路开关，并以这个基准校准它（[ADR 0033](../adr/0033.md)）。基准测产品的实际行为（开关关闭），`LECTERN_BENCH_YIELD=1` 时测让路 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `workspace` 的帧记录（#393）、`code_intel`（#17） |
 | `app/input_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `terminal_view` |
 | `app/terminal_output_frames` | 同 `app/input_frames`；场景：假的 agent 连续 2 秒全速输出每行 120 字符、每 8 个字符换一次 24 位色的文本，Terminal 页可见，记录这期间的帧（[terminal_view 设计「性能」](terminal_view.md#性能)）。计划中：场景随 `app` 的装配（terminal_view 第 3 步）加入 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `terminal_view` 第 3 步 |
 | `app/animation_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期 | [ADR 0015](../adr/0015.md) | `ui` |
@@ -748,7 +750,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 | `baseline/empty_window_cold_start` | 只记录；判定机器的条目 | [ADR 0017](../adr/0017.md#影响) | 第 4 步 |
 | `baseline/empty_window_idle` | 只记录；判定机器的条目 | [ADR 0017](../adr/0017.md#影响) | 第 4 步 |
 
-标为「判定机器的条目」的四条，`budgets.rs` 里 `judging_machine` 为 true（[ADR 0052](../adr/0052.md) 决策第 3 条）：`app/cold_start` 只在判定机器上判定，另外三条以判定机器的记录为 ADR 0017 的基线；别处的测量运行把四条都记为 `record`，见「平台与噪声」。
+标为「判定机器的条目」的六条，`budgets.rs` 里 `judging_machine` 为 true：`app/cold_start` 只在判定机器上判定，`app/cold_start_purged` 和两条 `baseline/*` 以判定机器的记录为 ADR 0017 的基线（[ADR 0052](../adr/0052.md) 决策第 3 条）；`app/scroll_frames`、`app/scroll_frames_indexing` 的整帧只在判定机器上判定，它们的 `main_thread` 条目在哪台机器上都判定（[ADR 0067](../adr/0067.md)）。别处的测量运行把六条都记为 `record`，见「平台与噪声」。帧记录里有一帧缺少 `drawable_asked`、`drawable_got` 或 `committed` 时，`main_thread` 条目是错误（`frames::main_thread`）。其余帧时间的条目（计划中）生效时同样分成两部分。
 
 分项预算（`Tier::Share`，随出处的设计文档修改）：
 
@@ -924,7 +926,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 - 确定性：夹具由固定种子生成，不取时钟和随机数；基准按 ID 顺序运行；运行器在 macOS 上把基准线程设为 user-interactive QoS。
 - 页缓存：进程内基准测的是热缓存（预热之后）；冷文件缓存只在 `app/cold_start_purged` 里测量。
 
-判定用的机器（[ADR 0052](../adr/0052.md)，「未决问题」第 1 条的选项 B）：测量的时间止于首帧的条目在一台自托管的实体 M 系列 Mac 上运行，即 CI 的 `Judge (physical Mac)`（[CI 设计「判定机器」](ci.md#判定机器)）：它判定 `app/cold_start`，记录 `app/cold_start_purged` 和空窗口的两条基线 `baseline/*`（这三条在预算表里本来就只记录），这两条基线以它的结果为 ADR 0017 的基线。GitHub 托管的 `macos-15` runner（Apple M1 虚拟机）不给 `presentedTime`，这些条目在那里都只记录。其余预算由托管 runner 上的 `Benchmarks (macOS arm64)` 判定。
+判定用的机器（[ADR 0052](../adr/0052.md)，「未决问题」第 1 条的选项 B）：测量的时间止于首帧的条目在一台自托管的实体 M 系列 Mac 上运行，即 CI 的 `Judge (physical Mac)`（[CI 设计「判定机器」](ci.md#判定机器)）：它判定 `app/cold_start`，记录 `app/cold_start_purged` 和空窗口的两条基线 `baseline/*`（这三条在预算表里本来就只记录），这两条基线以它的结果为 ADR 0017 的基线。GitHub 托管的 `macos-15` runner（Apple M1 虚拟机）不给 `presentedTime`，这些条目在那里都只记录。帧时间的预算分成两部分（[ADR 0067](../adr/0067.md)）：整帧工作时间的最大值和帧间隔由判定机器判定（托管 runner 的虚拟机上，等 drawable、帧源和 GPU 的时间不是 Lectern 的代码，实测每次都超标），每个场景主线程部分的 p95 ≤ 8.3 ms 由托管 runner 判定，两者来自同一批记录。其余预算由托管 runner 上的 `Benchmarks (macOS arm64)` 判定。
 
 运行器靠环境变量 `LECTERN_BENCH_JUDGE` 区分判定机器，规则如下：
 
@@ -986,7 +988,7 @@ CI：
 
 - Linux 任务在 Doctests 之后增加一步 `just bench`。目标耗时 2 分钟以内（大部分编译产物与测试步骤共用）。
 - macOS 上的基准按分片运行（[ADR 0053](../adr/0053.md)，[ADR 0062](../adr/0062.md)，[CI 设计「任务」](ci.md#任务)）：`time`、`memory` 目标的分片（`code-intel`、`git`、`rest`）各一个 `Benchmarks shard (<名字>)` 任务，与 `Build and test (macOS arm64)` 并行，运行 `just bench --shard <名字>`，上传自己的 `target/lectern-bench/report-*.json`（`if: always()`）。`process` 目标的三个分片共用一个 `Benchmarks build (process)` 任务：它运行 `just bench-build`，把三个程序打成一个 tar 上传（工件 `bench-process-build`）；三个 `Benchmarks shard (<名字>)` 任务 `needs` 它，下载、解开，运行 `just bench-prebuilt <名字>`，上传报告。`Benchmarks (macOS arm64)` 在全部分片结束后运行（`if: ${{ !cancelled() }}`：分片失败时也运行，构建失败使 `process` 分片被跳过时也运行，被新的推送取消的运行不运行），下载各分片的报告到各自的目录，运行 `lectern-bench-report merge`，判定预算、写任务摘要和注释，上传合并后的 `report.json`；它在 Linux runner 上运行。目标：最长的分片任务 ≤ 12 分钟；从第一个任务开始到合并结束 ≤ 20 分钟（不含排队；ADR 0053 的 15 分钟在 ADR 0062 里改为 20 分钟，因为 `process` 目标要串行运行约 25 分钟）；超过时先按最慢的基准重新划分分片，不减少 ADR 规定的次数和时长（冷启动 20 次、静止后等 5 秒）和样本数。这些任务不设 `LECTERN_BENCH_JUDGE`，判定机器的条目在这里只记录。
-- 判定机器上的 `Judge (physical Mac)` 不分片，设置 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`（过滤按子串匹配，后者也选中 `app/cold_start_purged`），上传 `report.json`。它只在 push 到 `main` 和手动触发时运行，不是 PR 的必需检查；runner 注册之前跳过（[CI 设计「判定机器」](ci.md#判定机器)，ADR 0052）。
+- 判定机器上的 `Judge (physical Mac)` 不分片，设置 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start app/scroll_frames`（过滤按子串匹配：`app/cold_start` 也选中 `app/cold_start_purged`，`app/scroll_frames` 也选中 `app/scroll_frames_indexing` 和 `main_thread` 条目），上传 `report.json`。它只在 push 到 `main` 和手动触发时运行，不是 PR 的必需检查；runner 注册之前跳过（[CI 设计「判定机器」](ci.md#判定机器)，ADR 0052）。
 
 ## 夹具与 `test-support`
 
@@ -1265,7 +1267,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - 默认值：`defaults read lectern` 在所有运行之前和之后完全相同，只有 `NSWindow Frame welcome = "346 213 820 521 0 0 1512 948 "` 和 `NSAutoFillHeuristicControllerEnabled = 0`；测量构建不设 frame autosave 名，没有碰真实的窗口位置。所有运行都用临时 `HOME`，保留真实的 `RUSTUP_HOME` 和 `CARGO_HOME`。
 - 没有验证的：托管 runner 上的 `Benchmarks (macOS arm64)` 和判定机器上的 `Judge (physical Mac)` 本身（本机不能运行 GitHub Actions）；`app/cold_start_purged` 的 `purge` 之后的路径（本机 `sudo -n` 要密码，只验证了 `skipped` 和 `tests/purge.rs` 的假 `sudo`）；`plugin/*` 在有进程插件和语言服务器时的路径（现在没有这样的插件，只有 `process_plugin_counts_the_process_plugin_groups` 用假进程树覆盖）；Linux 上的冒烟运行（这台机器没有 Linux，Linux 任务的 `process` 目标是 `skipped`，`runner_process_target_is_skipped_off_macos` 覆盖）。
 
-在 CI 里（[CI 设计「任务」「判定机器」](ci.md#任务)，[ADR 0052](../adr/0052.md)）：托管 runner 上的 `Benchmarks (macOS arm64)` 不设 `LECTERN_BENCH_JUDGE`，`app/cold_start`、`app/cold_start_purged` 和 `baseline/*` 记为 `record`（首帧的来源是 `handler`，数字只会偏大，不会让任务失败），判定 `app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`；`plugin/*/resident` 只记录。`Judge (physical Mac)` 设 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`：`app/cold_start` 判定，来源为 `handler` 是错误；按本机的数字，20 次都会超过 20 ms，任务失败。它只在 push 到 `main` 和手动触发时运行，不是 PR 的必需检查，处理方式按 ADR 0017「影响」由产品负责人决定。
+在 CI 里（[CI 设计「任务」「判定机器」](ci.md#任务)，[ADR 0052](../adr/0052.md)）：托管 runner 上的 `Benchmarks (macOS arm64)` 不设 `LECTERN_BENCH_JUDGE`，`app/cold_start`、`app/cold_start_purged` 和 `baseline/*` 记为 `record`（首帧的来源是 `handler`，数字只会偏大，不会让任务失败），判定 `app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`；`plugin/*/resident` 只记录。`Judge (physical Mac)` 设 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start app/scroll_frames`：`app/cold_start` 和帧时间预算的整帧判定，来源为 `handler` 是错误；按本机的数字，20 次都会超过 20 ms，任务失败。它只在 push 到 `main` 和手动触发时运行，不是 PR 的必需检查，处理方式按 ADR 0017「影响」由产品负责人决定。
 
 
 第 6 步（分片，`bench` 和 CI，[#279](https://github.com/SoloJiang/lectern-app/issues/279)），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。
@@ -1327,6 +1329,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - **`OpenTarget::Scroll` 带 `yielding`。** 设计写 `Scroll`。ADR 0033 要求让路开关在不让路就超标时才启用，并用这个基准校准：基准要能在两种状态下测，所以请求带一个布尔值（编码为 `yield=1`，没有时为 false），运行器的环境变量 `LECTERN_BENCH_YIELD=1` 选让路的一种。产品没有检测交互静止的代码（[app 设计「code_intel 与 file_reader 的装配」](app.md#code_intel-与-file_reader-的装配)），不打开开关；基准的默认就是产品的实际行为。让路的一种是校准用的，它测的配置产品里没有。
 - **滚动序列是这里定的。** 设计只写「按固定序列滚动」：每帧一个滚轮事件（不是按计时器：帧数就是事件数，不受计时器抖动影响），240 个事件，160 个向下 90 px、80 个向上，最后一个事件之后 3 帧结束；常量 `SCROLL_*` 在 `wire`，运行器的期限 `SCROLL_LIMIT`（15 s）用同一组数。事件发到窗口中心，不依赖阅读视图的布局；编辑模式的编辑器也响应滚轮。
 - **合并多个场景与启动。** 一条预算对每个场景成立，运行器一个基准只产出一个值：`lectern_bench::frames::value` 把全部记录的每帧工作时间、记录内部的间隔放在一起（间隔不跨记录），预算判定其中最大的。刷新周期不同的记录是错误（同一台机器上不会发生）。
+- **托管 runner 判定主线程部分的 p95，整帧由判定机器判定**（[ADR 0067](../adr/0067.md)）。设计原来让托管 runner 判定整帧工作时间的最大值和帧间隔。CI 上同一个提交的 3 次运行里，整帧最大值 31–76 ms、间隔最大 1.5–3.0 个刷新周期，每次都超标：等 drawable、帧源回调到帧开始和 GPU 这三段在虚拟机上不稳定，都不是 Lectern 的代码；主线程部分的最大值在对照场景（64 MiB，p95 不到 5 ms）里每次也有 2–4 帧随机超过 8.3 ms。所以 `app/scroll_frames`、`app/scroll_frames_indexing` 成为判定机器的条目，另加四条 `main_thread` 条目（`frames::main_thread`，每个场景各自的 p95 ≤ 8.3 ms），由同一个基准、同一批记录产出。基准在帧回调之后（`Window::defer`）分发滚轮事件，事件的处理因此在主线程部分里。
 - **帧太少是错误。** 少于 `SCROLL_EVENTS` 的四分之三（`MIN_SCROLL_FRAMES` = 180）的记录是错误：`intervals` 为空时统计量会 panic，几帧的记录也不是滚动。普通大小的文件的场景因此没有（它几帧之后滚到底、不再画）。
 - **`app/scroll_frames_indexing` 读日志确认批量层还在工作。** 报告协议没有后台工作的状态（`Epoch` 的应答只有静止代数；设计写过要加，第 5 步没有做），所以 `app` 在滚动结束时记 info `bench scroll ended` 的 `background_items`，运行器退出后读日志。为 0 时测量记为 `error`（冒烟模式不判，小夹具索引很快）；日志里没有时 `note` 写 `-`，不判。夹具里的文件是 4 MiB 的 TypeScript（档位 B，批量层按窗口解析它）。
 - **`FrameTimes::presented` 带来源。** ADR 0052 要求随第一个让帧时间预算生效的 PR 加上：`Option<PresentedAt>`，编码为 `<ns>/<presented|handler>`。只报告（`note` 里按来源计数），不判定。

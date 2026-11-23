@@ -209,6 +209,13 @@ const FRAMES: &[Check] = &[
     max(Limit::RefreshMultipleAtMost(1.5)),
 ];
 
+/// The main thread's part of each frame (from the frame's start to the call
+/// of `nextDrawable`, plus from the drawable to the `commit`): its p95 at
+/// most 8.3 ms. What a hosted runner judges of a frame budget; the whole
+/// frame ([`FRAMES`]) is the judging machine's (ADR 0067).
+const FRAME_MAIN_THREAD: &[Check] = &[p95(Limit::TimeAtMost(us(8300)))];
+const ADR_0067: &str = "docs/adr/0067.md";
+
 const fn top(
     id: &'static str,
     checks: &'static [Check],
@@ -505,8 +512,44 @@ pub static BUDGETS: &[Budget] = &[
     // The reader's scenarios (64 MiB, one line, the edit mode) and the same
     // with the batch layer at work (ADR 0034, ADR 0033): the frames of a
     // scroll that `workspace` records.
-    top("app/scroll_frames", FRAMES, TECH, ACTIVE, Process),
-    top("app/scroll_frames_indexing", FRAMES, TECH, ACTIVE, Process),
+    // The whole frame is judged on the judging machine; each scenario's
+    // main-thread part is judged everywhere (ADR 0067).
+    on_judging_machine(top("app/scroll_frames", FRAMES, TECH, ACTIVE, Process)),
+    top(
+        "app/scroll_frames/main_thread/source_64mib",
+        FRAME_MAIN_THREAD,
+        ADR_0067,
+        ACTIVE,
+        Process,
+    ),
+    top(
+        "app/scroll_frames/main_thread/one_line",
+        FRAME_MAIN_THREAD,
+        ADR_0067,
+        ACTIVE,
+        Process,
+    ),
+    top(
+        "app/scroll_frames/main_thread/edit",
+        FRAME_MAIN_THREAD,
+        ADR_0067,
+        ACTIVE,
+        Process,
+    ),
+    on_judging_machine(top(
+        "app/scroll_frames_indexing",
+        FRAMES,
+        TECH,
+        ACTIVE,
+        Process,
+    )),
+    top(
+        "app/scroll_frames_indexing/main_thread",
+        FRAME_MAIN_THREAD,
+        ADR_0067,
+        ACTIVE,
+        Process,
+    ),
     top(
         "app/input_frames",
         FRAMES,

@@ -51,6 +51,28 @@ pub fn cpu(stats: &FrameStats) -> Vec<Option<Duration>> {
         .collect()
 }
 
+/// The [`cpu`] parts of the recordings (one scenario's launches) as time
+/// samples: what a runner that is not the judging machine judges, by the
+/// p95 (ADR 0067). A frame without one of the four moments is an error: a
+/// record with a moment missing cannot be judged.
+pub fn main_thread(recordings: &[FrameStats]) -> Result<Value, BenchError> {
+    let mut samples = Vec::new();
+    for stats in recordings {
+        for (index, part) in cpu(stats).into_iter().enumerate() {
+            samples.push(part.ok_or_else(|| {
+                BenchError::new(format!(
+                    "帧记录 {}：第 {index} 帧缺少 drawable 或 commit 的时刻，主线程部分算不出来",
+                    stats.scenario
+                ))
+            })?);
+        }
+    }
+    if samples.is_empty() {
+        return Err(BenchError::new("没有帧记录"));
+    }
+    Ok(Value::Time(Samples(samples)))
+}
+
 /// The frame budget's time (ADR 0017 via tech-research.md): 8.3 ms.
 const FRAME_BUDGET: Duration = Duration::from_micros(8300);
 

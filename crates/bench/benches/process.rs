@@ -755,7 +755,17 @@ fn app_scroll_frames(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let launches = ctx.scale(5, 1);
     let mut recordings = Vec::new();
     let mut notes = Vec::new();
-    for scenario in &scenarios {
+    let mut parts = Vec::new();
+    // The scenarios of `ReaderRepo::scrolling`, in its order.
+    let keys = ["source_64mib", "one_line"];
+    if scenarios.len() != keys.len() {
+        return Err(BenchError::new(format!(
+            "{ID}：夹具给出 {} 个场景，应为 {}",
+            scenarios.len(),
+            keys.len()
+        )));
+    }
+    for (scenario, key) in scenarios.iter().zip(keys) {
         let mut own = Vec::new();
         for _ in 0..launches {
             let mut session = launch_with_project(&scheduler, &program, repo.root(), ID)?;
@@ -777,6 +787,10 @@ fn app_scroll_frames(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             scenario.name,
             scenario.bytes,
             frames::describe(&own)
+        ));
+        parts.push(Measured::new(
+            format!("{ID}/main_thread/{key}"),
+            frames::main_thread(&own)?,
         ));
         recordings.extend(own);
     }
@@ -810,11 +824,15 @@ fn app_scroll_frames(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         edit.bytes,
         frames::describe(&own)
     ));
+    parts.push(Measured::new(
+        format!("{ID}/main_thread/edit"),
+        frames::main_thread(&own)?,
+    ));
     recordings.extend(own);
     let value = frames::value(&recordings, MIN_SCROLL_FRAMES)?;
-    Ok(vec![
-        Measured::new(ID, value).with_note(Some(notes.join("; "))),
-    ])
+    let mut measured = vec![Measured::new(ID, value).with_note(Some(notes.join("; ")))];
+    measured.extend(parts);
+    Ok(measured)
 }
 
 /// `app/scroll_frames_indexing`: 5 launches, one at a time, of the large
@@ -881,7 +899,13 @@ fn app_scroll_frames_indexing(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError
         if yielding { "on" } else { "off" },
         frames::describe(&recordings)
     );
-    Ok(vec![Measured::new(ID, value).with_note(Some(note))])
+    Ok(vec![
+        Measured::new(
+            format!("{ID}/main_thread"),
+            frames::main_thread(&recordings)?,
+        ),
+        Measured::new(ID, value).with_note(Some(note)),
+    ])
 }
 
 /// `app/unclassified_children`: record only; the descendants of the main

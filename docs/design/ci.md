@@ -14,7 +14,7 @@
 | `Benchmarks build (process)` | `macos-15` | `just bench-build`：构建 `empty_window`、测量用的 `lectern` 和 `process` 基准的可执行文件，打成一个 tar 上传（工件 `bench-process-build`，保留 1 天） | `process` 分片都要这三个程序，构建约 6 分 44 秒；构建一次，分片直接运行（[ADR 0062](../adr/0062.md)） |
 | `Benchmarks shard (<分片>)`（`process`、`process-open-file`、`process-app`） | `macos-15`，每个分片一个，`needs` 构建任务 | 下载并解开工件，`just bench-prebuilt <分片> <目录>`：不装工具链、不编译，运行这个分片的预算，上传它的 `report-process.json`；不判定 | `process` 目标串行运行约 25 分钟，分成三个分片并行；`plugin/`、`lsp/` 的预算在 `process` 分片，插件列表来自它的报告（[ADR 0062](../adr/0062.md)） |
 | `Benchmarks (macOS arm64)` | `ubuntu-latest` | 全部分片结束后（分片失败或被跳过时也运行，运行被取消时不运行）下载它们的报告，`lectern-bench-report merge` 合并并判定性能预算，上传 `report.json`；测量的时间止于首帧的条目只记录 | 判定和注释集中在一个检查上，检查名不变；合并只读 JSON，不需要 macOS（[ADR 0053](../adr/0053.md)） |
-| `Judge (physical Mac)` | `[self-hosted, macOS, ARM64, lectern-judge]`（自托管的实体 M 系列 Mac） | `LECTERN_BENCH_JUDGE=1 just bench baseline/ app/cold_start`：判定 `app/cold_start`，记录 `app/cold_start_purged` 和 `baseline/*`，上传 `report.json` | 托管 runner 不给 `presentedTime`（[ADR 0052](../adr/0052.md)）；只在 push 到 `main` 和手动触发时运行，不自动运行 PR 的代码，并且要仓库变量 `LECTERN_JUDGE_RUNNER` 为 `true`，见「判定机器」 |
+| `Judge (physical Mac)` | `[self-hosted, macOS, ARM64, lectern-judge]`（自托管的实体 M 系列 Mac） | `LECTERN_BENCH_JUDGE=1 just bench baseline/ app/cold_start app/scroll_frames`：判定 `app/cold_start` 和帧时间预算的整帧（`app/scroll_frames`、`app/scroll_frames_indexing`，[ADR 0067](../adr/0067.md)），记录 `app/cold_start_purged` 和 `baseline/*`，上传 `report.json` | 托管 runner 不给 `presentedTime`（[ADR 0052](../adr/0052.md)）；只在 push 到 `main` 和手动触发时运行，不自动运行 PR 的代码，并且要仓库变量 `LECTERN_JUDGE_RUNNER` 为 `true`，见「判定机器」 |
 
 `Checks (Linux, GPUI-free crates)`、`Build and test (macOS arm64)`、`Benchmarks (macOS arm64)` 是必需检查，分片任务不是：分片的结果由合并任务判定。`Judge (physical Mac)` 不在 PR 上运行，不是必需检查（「判定机器」）。步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`、`just bench`），本地和 CI 跑的是同一套命令。`just bench` 在 Linux 上是冒烟运行，在 macOS 上判定预算，之后上传 `target/lectern-bench/report.json`（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。
 
@@ -26,7 +26,7 @@
 
 ## 判定机器
 
-[ADR 0052](../adr/0052.md) 决策第 3 条的判定机器：一台实体 M 系列 Mac，注册为本仓库的自托管 runner。`Judge (physical Mac)` 只在它上面运行：判定 `app/cold_start`，记录 `app/cold_start_purged` 和空窗口的两条基线 `baseline/*`（[bench 设计「平台与噪声」](bench.md#平台与噪声)）。仓库是公开的，任务按 ADR 0052 决策第 4 条写，`ci.yml` 里逐条对应：
+[ADR 0052](../adr/0052.md) 决策第 3 条的判定机器：一台实体 M 系列 Mac，注册为本仓库的自托管 runner。`Judge (physical Mac)` 只在它上面运行：判定 `app/cold_start` 和帧时间预算的整帧（整帧工作时间的最大值和帧间隔，[ADR 0067](../adr/0067.md)），记录 `app/cold_start_purged` 和空窗口的两条基线 `baseline/*`（[bench 设计「平台与噪声」](bench.md#平台与噪声)）。仓库是公开的，任务按 ADR 0052 决策第 4 条写，`ci.yml` 里逐条对应：
 
 - 条件：仓库变量 `LECTERN_JUDGE_RUNNER` 为 `true`，事件是 push（只有 `main`）或 `workflow_dispatch`。任务不在 `pull_request` 上运行，也没有 `pull_request_target`，runner 不自动运行 PR 的代码；所以它不是必需检查。
 - `runs-on: [self-hosted, macOS, ARM64, lectern-judge]`，`timeout-minutes: 60`。
@@ -35,7 +35,7 @@
 - checkout 带 `persist-credentials: false` 和 `clean: true`（开始时 `git clean -ffdx`）。没有 `rust-cache`，构建产物不跨任务保留，每次从头构建 release。
 - 任务启动的进程由 runner 的 job-completed 钩子结束，不由工作流结束：[`scripts/judge-runner/job-completed.sh`](../../scripts/judge-runner/job-completed.sh)，管理员把它装成 root 所有的 `/opt/lectern-judge/hooks/job-completed.sh`，runner 的 `.env` 用 `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` 指向它（下面第 7 步）。runner 在每个任务的最后一步之后运行它，失败或取消的任务也一样，工作流改不掉。它按内核记录的启动时刻（`ps` 的 `etime`）挑选：专用用户在这个任务的 `Runner.Worker` 之后启动的每个进程都结束（`kill -9`），只留下钩子自己的祖先（runner）和子进程；不按名字、路径或任务能改的列表。改了名字、换了路径、离开了进程组或会话、被 launchd 收养的进程都在其中。最多 5 轮，每轮之间等 1 秒，结束期间又 fork 出来的进程在下一轮结束。失败时关闭：在祖先里找不到 `Runner.Worker`、读不到它的启动时刻或列不出进程时，结束专用用户在 runner 之外的全部进程（登录会话也随之结束），退出码 1，任务失败；5 轮之后还有进程时也是 1。工作流的最后一步（`if: always()`）只再清一次工作区。bench 自己会结束测量的进程组，钩子处理被取消的运行和别的原因留下的进程。
 - 钩子也会结束任务期间按需启动的、属于专用用户的系统代理（如图形会话的 XPC 服务）。launchd 在需要时重新启动它们，判定不受影响。任务开始之前已经在运行的进程不在它的范围里：清理没有运行过钩子的任务（runner 进程被结束、机器断电）留下的进程，要靠第 11 步的定期重建和重启机器结束（ADR 0052「已知限制」）。
-- 环境变量 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`（过滤按子串匹配，后者也选中 `app/cold_start_purged`），上传 `report.json`（`lectern-bench-judge-report`）。
+- 环境变量 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start app/scroll_frames`（过滤按子串匹配：`app/cold_start` 也选中 `app/cold_start_purged`，`app/scroll_frames` 也选中 `app/scroll_frames_indexing` 和它们的 `main_thread` 条目），上传 `report.json`（`lectern-bench-judge-report`）。
 
 准备机器（产品负责人或仓库管理员，按顺序；第 8 步的第二条命令要等 bench 第 4 步合并）：
 

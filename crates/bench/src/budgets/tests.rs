@@ -20,8 +20,15 @@ fn budgets_ids_are_unique() {
 fn budgets_ids_are_crate_slash_name() {
     for budget in BUDGETS {
         let segments: Vec<&str> = budget.id.split('/').collect();
+        // A frame budget's main-thread part has a segment more
+        // (`<id>/main_thread/<scenario>`, ADR 0067).
+        let most = if segments.contains(&"main_thread") {
+            4
+        } else {
+            3
+        };
         assert!(
-            (2..=3).contains(&segments.len()),
+            (2..=most).contains(&segments.len()),
             "{}: <crate or category>/<name>[/<scenario>]",
             budget.id
         );
@@ -242,8 +249,9 @@ fn budgets_describe_their_checks() {
 }
 
 /// The judging machine's entries are the budgets whose measured time ends
-/// at the first frame, and the empty window's baselines (ADR 0052
-/// decision 3); nothing else is taken from the hosted runner's judgment.
+/// at the first frame, the empty window's baselines (ADR 0052 decision 3),
+/// and the whole frame of the active frame budgets (ADR 0067); nothing else
+/// is taken from the hosted runner's judgment.
 #[test]
 fn budgets_judging_machine_entries_end_at_the_first_frame() {
     let marked: Vec<&str> = BUDGETS
@@ -256,11 +264,35 @@ fn budgets_judging_machine_entries_end_at_the_first_frame() {
         [
             "app/cold_start",
             "app/cold_start_purged",
+            "app/scroll_frames",
+            "app/scroll_frames_indexing",
             "baseline/empty_window_cold_start",
             "baseline/empty_window_idle",
         ]
     );
     for budget in BUDGETS.iter().filter(|b| b.judging_machine) {
         assert_eq!(budget.target, Target::Process, "{}", budget.id);
+    }
+}
+
+/// Each frame budget the judging machine judges has its main-thread part
+/// judged everywhere, by the p95 (ADR 0067).
+#[test]
+fn budgets_frame_entries_of_the_judging_machine_have_a_main_thread_part() {
+    for budget in BUDGETS.iter().filter(|b| b.judging_machine) {
+        if budget.checks != FRAMES {
+            continue;
+        }
+        let prefix = format!("{}/main_thread", budget.id);
+        let parts: Vec<&Budget> = BUDGETS
+            .iter()
+            .filter(|b| b.id.starts_with(&prefix))
+            .collect();
+        assert!(!parts.is_empty(), "{} has no main-thread part", budget.id);
+        for part in parts {
+            assert!(!part.judging_machine, "{}", part.id);
+            assert_eq!(part.checks, FRAME_MAIN_THREAD, "{}", part.id);
+            assert_eq!(part.state, budget.state, "{}", part.id);
+        }
     }
 }

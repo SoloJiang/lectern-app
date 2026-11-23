@@ -279,3 +279,29 @@ fn frames_cpu_part_leaves_out_the_waits() {
         "{text}"
     );
 }
+
+#[test]
+fn frames_main_thread_is_every_frames_cpu_part_or_an_error() {
+    let whole = stats(
+        "scroll",
+        vec![
+            timed((0, 500, 30_000), (2_500, 22_500), 23_500, 24_000),
+            timed((8_333, 8_333, 20_000), (17_333, 17_333), 17_833, 18_000),
+        ],
+    );
+    let Ok(Value::Time(Samples(parts))) = main_thread(std::slice::from_ref(&whole)) else {
+        panic!("not time samples");
+    };
+    assert_eq!(
+        parts,
+        [Duration::from_micros(3_000), Duration::from_micros(9_500)]
+    );
+    let partial = stats("scroll", vec![frame(16_666, 16_666, 20_000)]);
+    let error = main_thread(&[whole, partial]).unwrap_err();
+    assert!(
+        error.message().contains("第 0 帧缺少"),
+        "{}",
+        error.message()
+    );
+    assert!(main_thread(&[]).is_err());
+}
