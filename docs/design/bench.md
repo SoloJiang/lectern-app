@@ -1327,7 +1327,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - **帧太少是错误。** 少于 `SCROLL_EVENTS` 的四分之三（`MIN_SCROLL_FRAMES` = 180）的记录是错误：`intervals` 为空时统计量会 panic，几帧的记录也不是滚动。普通大小的文件的场景因此没有（它几帧之后滚到底、不再画）。
 - **`app/scroll_frames_indexing` 读日志确认批量层还在工作。** 报告协议没有后台工作的状态（`Epoch` 的应答只有静止代数；设计写过要加，第 5 步没有做），所以 `app` 在滚动结束时记 info `bench scroll ended` 的 `background_items`，运行器退出后读日志。为 0 时测量记为 `error`（冒烟模式不判，小夹具索引很快）；日志里没有时 `note` 写 `-`，不判。夹具里的文件是 4 MiB 的 TypeScript（档位 B，批量层按窗口解析它）。
 - **`FrameTimes::presented` 带来源。** ADR 0052 要求随第一个让帧时间预算生效的 PR 加上：`Option<PresentedAt>`，编码为 `<ns>/<presented|handler>`。只报告（`note` 里按来源计数），不判定。
-- **运行器的静止等待有总上限。** `Session::idle` 原来每次 `Busy` 都重新开始等待，没有总的上限：kernel 一直忙一阵、静一阵时永远等下去（第一次 CI 运行里编辑模式的场景在 `EditReady` 之后静止，`process-app` 分片挂到 6 小时的任务上限）。现在整个等待最多 `first_quiescent + again`（60 秒），超过时报错并写出期间 `Busy` 的次数（`process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time`）。根本原因是每一帧都在贡献方的准入里调用闭包，准入计入静止：有动画或光标闪烁时 kernel 达不到静止。滚动基准因此在编辑模式下不等静止；kernel 是否应当把 UI 线程上的闭包调用计入静止，没有在这个 PR 里改。
+- **运行器的静止等待有总上限。** `Session::idle` 原来每次 `Busy` 都重新开始等待，没有总的上限：kernel 一直忙一阵、静一阵时永远等下去（第一次 CI 运行里编辑模式的场景在 `EditReady` 之后静止，`process-app` 分片挂到 6 小时的任务上限）。现在过了 `first_quiescent + again`（60 秒）就不再开始新的等待（正在进行的一次最多再等 `again`），之后报错并写出期间 `Busy` 的次数（`process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time`）。根本原因是每一帧都在贡献方的准入里调用闭包，准入计入静止：有动画或光标闪烁时 kernel 达不到静止。滚动基准因此在编辑模式下不等静止；kernel 是否应当把 UI 线程上的闭包调用计入静止，没有在这个 PR 里改。
 - **分片。** 两个基准的 ID 前缀都不在 `process` 与 `process-open-file` 的前缀里，进 `process-app`，分片表不改。这个分片的预计时长（ADR 0062：9 到 10 分钟）加上约 7 分钟（`app/scroll_frames` 15 次启动、`app/scroll_frames_indexing` 5 次启动加 10 万文件夹具的生成）可能超过 12 分钟：第一次 CI 运行之后按报告的耗时看；超过时把 `app/scroll_frames` 单独成一个分片，那要改 `ci.yml` 和 ADR 0062 的分片数，没有在这个 PR 里做。
 
 

@@ -887,9 +887,10 @@ impl<'a> Session<'a> {
     /// [`Limits::first_quiescent`] of the first frame is
     /// [`Idle::NotQuiescent`]; once one came, a later wait for `Quiescent`
     /// longer than [`Limits::again`] is an error. A kernel that keeps
-    /// turning busy again never settles: the whole wait is at most
-    /// [`Limits::first_quiescent`] plus [`Limits::again`], then an error
-    /// (each `Busy` would otherwise start the wait again without end).
+    /// turning busy again never settles: no new wait starts after
+    /// [`Limits::first_quiescent`] plus [`Limits::again`] (the one running
+    /// may take [`Limits::again`] more), then an error (each `Busy` would
+    /// otherwise start the wait again without end).
     pub fn idle<T>(
         &mut self,
         mut sample: impl FnMut(&mut Session<'a>) -> Result<T, BenchError>,
