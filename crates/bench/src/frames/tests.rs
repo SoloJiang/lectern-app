@@ -142,6 +142,11 @@ fn frames_describe_gives_the_worst_frame_and_the_sources() {
     assert!(text.contains("max interval 3.80 refresh periods"), "{text}");
     assert!(text.contains("without tick 1"), "{text}");
     assert!(text.contains("1/1/1 (presented/handler/none)"), "{text}");
+    // 100 µs from each tick to the start; 2900, 2567 and 900 µs after it.
+    assert!(
+        text.contains("tick to start 0.10/0.10/0.10 ms, start to GPU end 2.57/2.90/2.90 ms"),
+        "{text}"
+    );
 }
 
 #[test]

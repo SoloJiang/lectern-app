@@ -122,7 +122,7 @@ pub fn describe(recordings: &[FrameStats]) -> String {
         .flat_map(|stats| stats.frames.iter().copied())
         .collect();
     format!(
-        "{} frames in {} recording(s), max work {:.2} ms, max interval {periods:.2} refresh periods, without tick {}, presented {}",
+        "{} frames in {} recording(s), max work {:.2} ms, max interval {periods:.2} refresh periods, without tick {}, presented {}, {}",
         frames.len(),
         recordings.len(),
         worst_work.as_secs_f64() * 1e3,
@@ -130,7 +130,31 @@ pub fn describe(recordings: &[FrameStats]) -> String {
             .iter()
             .map(|stats| stats.without_tick)
             .sum::<u32>(),
-        sources(&frames)
+        sources(&frames),
+        stages(&frames)
+    )
+}
+
+/// The work split at `started`, for a note: the wait from the vsync tick
+/// to the frame's start (the main thread busy with something else) and
+/// the frame itself (layout, painting, the drawable and the GPU), each as
+/// median / p95 / max in ms.
+fn stages(frames: &[FrameTimes]) -> String {
+    let spread = |mut values: Vec<Duration>| {
+        values.sort_unstable();
+        let at = |q: f64| {
+            values
+                .get(((values.len() as f64 - 1.0) * q).round() as usize)
+                .map_or(0.0, |d| d.as_secs_f64() * 1e3)
+        };
+        format!("{:.2}/{:.2}/{:.2}", at(0.5), at(0.95), at(1.0))
+    };
+    let queue = frames.iter().map(|f| gap(f.started, f.requested)).collect();
+    let frame = frames.iter().map(|f| gap(f.completed, f.started)).collect();
+    format!(
+        "tick to start {} ms, start to GPU end {} ms (median/p95/max)",
+        spread(queue),
+        spread(frame)
     )
 }
 
