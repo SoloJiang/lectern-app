@@ -18,7 +18,7 @@ use gpui::{
     prelude::FluentBuilder, px,
 };
 use lectern_i18n::keys;
-use lectern_kernel::{Name, PluginError, contain};
+use lectern_kernel::{ActivationToken, Admission, Name, PluginError, contain};
 use lectern_logging::{debug, error, warn};
 use lectern_services::workspace::{
     Contributions, Milestone, Route, Visibility, WorkspaceCommand, WorkspaceEvent,
@@ -759,7 +759,7 @@ impl Workspace {
         let current = nav.nav().current();
         let strings = strings(cx);
         let items = payload::<Screen>(registry, Kind::Screen, &current.screen).and_then(|screen| {
-            in_scope(registry, Kind::Screen, &current.screen, || {
+            in_frame_scope(registry, Kind::Screen, &current.screen, || {
                 (screen.toolbar)(cx)
             })
         });
@@ -1271,8 +1271,30 @@ fn build_screen(
 /// admission and log scope, under `contain`; a panic fails the activation
 /// while the admission is still held. None when the activation is not live.
 fn in_scope<R>(registry: &Registry, kind: Kind, id: &str, f: impl FnOnce() -> R) -> Option<R> {
+    call_in_scope(registry, kind, id, ActivationToken::enter, f)
+}
+
+/// `in_scope` for a closure called on every frame to read current values
+/// (`Screen::toolbar`): its admission does not count towards quiescence
+/// (ADR 0066), so drawing frames does not make the kernel busy.
+fn in_frame_scope<R>(
+    registry: &Registry,
+    kind: Kind,
+    id: &str,
+    f: impl FnOnce() -> R,
+) -> Option<R> {
+    call_in_scope(registry, kind, id, ActivationToken::enter_frame, f)
+}
+
+fn call_in_scope<R>(
+    registry: &Registry,
+    kind: Kind,
+    id: &str,
+    enter: fn(&ActivationToken) -> Option<Admission>,
+    f: impl FnOnce() -> R,
+) -> Option<R> {
     let (token, ctx) = registry.token_of(kind, id)?;
-    let admission = token.enter()?;
+    let admission = enter(&token)?;
     let _scope = lectern_logging::scope(ctx);
     let result = match contain(f) {
         Ok(result) => Some(result),
