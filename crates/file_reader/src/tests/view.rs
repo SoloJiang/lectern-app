@@ -521,6 +521,41 @@ fn view_scrolling_stops_at_both_ends(cx: &mut TestAppContext) {
     assert_eq!(rig.read(cx, |view| view.top), top);
 }
 
+/// One line folded into many display rows: the last rows fill the
+/// viewport, as in a file of many lines (`scroll_by` counts the rows it
+/// would show with `DocSnapshot::row_count`).
+#[gpui::test]
+fn view_scrolling_a_long_line_stops_where_the_last_rows_fill_the_viewport(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    // 160 KiB in one line, no line break.
+    rig.write("app.min.js", &"var a=1;".repeat(20_000));
+    rig.open(cx, "app.min.js", Anchor::Start);
+    rig.scroll(cx, 100_000.0);
+    rig.draw(cx);
+    let (top, offset, built) = rig.read(cx, |view| (view.top, view.offset, view.built_rows));
+    let (rows, cols, total) = rig.read(cx, |view| {
+        let snapshot = view.snapshot.as_ref().expect("a document");
+        (
+            view.rows_visible(),
+            view.cols(),
+            snapshot.total_rows(view.cols()),
+        )
+    });
+    assert_eq!(top.line_start, 0);
+    assert_eq!(offset, px(0.0), "no pixel offset at the end");
+    // The last row is the line's last row, and the viewport is full.
+    assert_eq!(u64::from(top.sub_row) + rows as u64, total);
+    assert!(built >= rows, "{built} of {rows} at {cols} columns");
+    rig.scroll(cx, 100_000.0);
+    assert_eq!(rig.read(cx, |view| view.top), top);
+    // And back to the start.
+    rig.scroll(cx, -100_000.0);
+    assert_eq!(
+        rig.read(cx, |view| (view.top.sub_row, view.offset)),
+        (0, px(0.0))
+    );
+}
+
 #[gpui::test]
 fn view_find_opens_steps_and_closes_with_escape(cx: &mut TestAppContext) {
     let rig = Rig::new(cx);
