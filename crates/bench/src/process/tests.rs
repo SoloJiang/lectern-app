@@ -696,17 +696,44 @@ fn process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time() {
     // time: the wait ends with an error after first_quiescent + again
     // (600 ms). The fake keeps going for 8 s, so an unbounded wait would
     // pass the 5 s assert below; the margin absorbs a slow CI runner.
+    // A thread answers every `Epoch` at once with None (busy): a pause of
+    // the sender on a loaded runner can pass for the settle time, and the
+    // samples taken in it are invalid (three end the wait, also an error)
+    // instead of waiting out the 2 s reply limit.
     let fake = Fake::new(move |p| {
         p.first_frame(start());
+        let (mut reader, writer) = p.conn.take().expect("connected");
+        let writer = Arc::new(Mutex::new(writer));
+        let answers = Arc::clone(&writer);
+        thread::spawn(move || {
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                match Request::decode(line.trim_end_matches('\n')) {
+                    Ok(Request::Epoch) => {
+                        let reply = format!("{}\n", Report::Epoch(None).encode());
+                        let _ = answers.lock().unwrap().write_all(reply.as_bytes());
+                    }
+                    Ok(Request::Quit) => return,
+                    _ => {}
+                }
+                line.clear();
+            }
+        });
         let until = Instant::now() + Duration::from_secs(8);
         let mut epoch = 1;
         while Instant::now() < until {
-            p.send(&Report::Busy { epoch });
-            p.send(&Report::Quiescent { epoch: epoch + 1 });
+            let pair = format!(
+                "{}\n{}\n",
+                Report::Busy { epoch }.encode(),
+                Report::Quiescent { epoch: epoch + 1 }.encode()
+            );
+            if writer.lock().unwrap().write_all(pair.as_bytes()).is_err() {
+                break;
+            }
             epoch += 2;
             thread::sleep(ms(20));
         }
-        p.obey(Some(epoch))
+        0
     });
     let limits = Limits {
         first_quiescent: ms(300),
@@ -726,7 +753,11 @@ fn process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time() {
         "{:?}",
         began.elapsed()
     );
-    assert!(error.message().contains("没有静止"), "{}", error.message());
+    let message = error.message();
+    assert!(
+        message.contains("没有静止") || message.contains("连续 3 次采样无效"),
+        "{message}"
+    );
 }
 
 #[test]
