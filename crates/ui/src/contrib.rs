@@ -38,7 +38,10 @@ pub type ViewFactory<Arg> = Arc<dyn Fn(&Arg, &mut Window, &mut App) -> AnyView +
 pub struct Screen {
     pub build: ViewFactory<Target>,
     /// The toolbar's title, subtitle and at most three controls on the right;
-    /// `workspace` calls it on the main thread every frame for the current values.
+    /// `workspace` calls it on the main thread every frame for the current values,
+    /// in an admission that does not count towards quiescence (ADR 0066): it
+    /// only reads state and builds elements; work it starts takes its own
+    /// `BusyGuard` or `PendingGuard` before it returns.
     pub toolbar: Arc<dyn Fn(&mut App) -> ToolbarItems + Send + Sync>,
 }
 

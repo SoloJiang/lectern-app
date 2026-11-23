@@ -146,6 +146,14 @@ impl UiRig {
         self.settle(cx);
     }
 
+    /// Draws the window once: a refresh, then the effect cycle that draws it.
+    pub fn draw(&self, cx: &mut TestAppContext) {
+        self.window
+            .update(cx, |_, window, _| window.refresh())
+            .expect("the window is open");
+        cx.run_until_parked();
+    }
+
     /// Lets the kernel thread and the main-thread queue finish.
     pub fn settle(&self, cx: &mut TestAppContext) {
         if let Some(kernel) = self.kernel.inner() {
@@ -232,6 +240,16 @@ impl Render for Blank {
 /// A screen contribution with a verbatim title; `built` counts the factory
 /// calls.
 pub fn ui_screen(id: &'static str, layout: ScreenLayout, built: Arc<AtomicUsize>) -> Register {
+    ui_screen_counted(id, layout, built, Arc::default())
+}
+
+/// `ui_screen` whose toolbar closure counts its calls in `toolbar_calls`.
+pub fn ui_screen_counted(
+    id: &'static str,
+    layout: ScreenLayout,
+    built: Arc<AtomicUsize>,
+    toolbar_calls: Arc<AtomicUsize>,
+) -> Register {
     Box::new(move |contributions, token| {
         let built = built.clone();
         let payload = Screen {
@@ -244,11 +262,17 @@ pub fn ui_screen(id: &'static str, layout: ScreenLayout, built: Arc<AtomicUsize>
                 window.focus(&focus, cx);
                 view.into()
             }),
-            toolbar: Arc::new(move |_| ToolbarItems {
-                title: Text::verbatim(format!("Title of {id}")),
-                subtitle: None,
-                controls: Vec::new(),
-            }),
+            toolbar: {
+                let toolbar_calls = toolbar_calls.clone();
+                Arc::new(move |_| {
+                    toolbar_calls.fetch_add(1, Ordering::SeqCst);
+                    ToolbarItems {
+                        title: Text::verbatim(format!("Title of {id}")),
+                        subtitle: None,
+                        controls: Vec::new(),
+                    }
+                })
+            },
         };
         contributions.register(
             Contribution {
