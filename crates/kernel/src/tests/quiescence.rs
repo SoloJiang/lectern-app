@@ -261,3 +261,60 @@ fn a_late_busy_event_is_recognisable_by_its_sequence_number() {
     assert!(log.snapshot().contains(&"stale busy ignored".to_owned()));
     shutdown(&kernel);
 }
+
+/// ADR 0066: a per-frame read neither makes the kernel busy nor lets the
+/// revocation pass it.
+#[test]
+fn a_frame_admission_is_not_counted_but_holds_off_revocation() {
+    let log = Log::default();
+    let slot = HandleSlot::default();
+    let kernel = start(PluginSet::new().with("p", handle_plugin(&slot, after_first_frame())));
+    settle(&kernel);
+    let handle = slot.get();
+    assert!(handle.own(Guard("p".into(), log.clone())));
+    let token = handle.token();
+    let epoch = kernel.quiescent_epoch().unwrap();
+
+    for _ in 0..10 {
+        let frame = token.enter_frame().expect("live");
+        assert!(kernel.is_quiescent());
+        drop(frame);
+    }
+    assert_eq!(kernel.quiescent_epoch(), Some(epoch));
+
+    // The revocation waits for a held frame admission.
+    let frame = token.enter_frame().expect("live");
+    kernel.set_enabled("p", false);
+    thread::sleep(Duration::from_millis(50));
+    assert!(
+        log.snapshot().is_empty(),
+        "the guard waits for the admission"
+    );
+    assert!(token.enter_frame().is_none(), "a dead token admits nothing");
+    log.push("frame ends");
+    drop(frame);
+    kernel.barrier();
+    assert_eq!(log.snapshot(), vec!["frame ends", "drop guard p"]);
+    shutdown(&kernel);
+}
+
+#[test]
+fn a_frame_admission_rejects_a_pending_token() {
+    let seen: Arc<Mutex<Option<bool>>> = Arc::default();
+    let s = seen.clone();
+    let kernel = start(PluginSet::new().with(
+        "p",
+        TestPlugin::new(manifest(vec![], vec![], after_first_frame())).activate(move |_| {
+            // `started` runs before the token goes `Live`.
+            let s = s.clone();
+            Ok(Box::new(Probe::new("p", &Log::default()).started(
+                move |handle| {
+                    *s.lock().unwrap() = Some(handle.token().enter_frame().is_some());
+                },
+            )))
+        }),
+    ));
+    settle(&kernel);
+    assert_eq!(*seen.lock().unwrap(), Some(false));
+    shutdown(&kernel);
+}
