@@ -737,7 +737,8 @@ fn scrolled(
 /// `app/scroll_frames`: for each scenario of ADR 0034, 5 launches, one at a
 /// time. Each opens the fixture project and lets it settle, opens the
 /// scenario's file and lets it settle (for the edit mode, then ⌘E and
-/// `EditReady`, and settle again), and sends `Open(Scroll)`: the window's
+/// `EditReady`, with no settle after it: the caret's frames keep the kernel
+/// from being quiet), and sends `Open(Scroll)`: the window's
 /// frames are recorded while the reading view (or the editor) is scrolled
 /// by 240 wheel events, one in each frame (`SCROLL_EVENTS`), and come back
 /// as `Frames`. The scenarios are 64 MiB of synthetic TypeScript opened at
@@ -799,7 +800,11 @@ fn app_scroll_frames(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             Milestone::EditReady,
             OPEN_LIMIT,
         )?;
-        settle(&mut session, ID)?;
+        // No settle in the edit mode: the caret blinks, each frame calls the
+        // contributions' closures in their admissions, and the kernel is
+        // never quiet for the settle time (as `app/enter_edit` ends at
+        // `EditReady`).
+
         own.push(scrolled(&mut session, false, "edit mode")?);
         session.quit()?;
     }

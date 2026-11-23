@@ -691,6 +691,43 @@ fn process_busy_restarts_the_settle() {
 }
 
 #[test]
+fn process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time() {
+    // Busy and Quiescent every 20 ms, never settling for the 100 ms settle
+    // time: the wait ends with an error after first_quiescent + again.
+    let fake = Fake::new(move |p| {
+        p.first_frame(start());
+        let until = Instant::now() + Duration::from_secs(3);
+        let mut epoch = 1;
+        while Instant::now() < until {
+            p.send(&Report::Busy { epoch });
+            p.send(&Report::Quiescent { epoch: epoch + 1 });
+            epoch += 2;
+            thread::sleep(ms(20));
+        }
+        p.obey(Some(epoch))
+    });
+    let limits = Limits {
+        first_quiescent: ms(300),
+        again: ms(300),
+        settle: ms(100),
+        ..quick()
+    };
+    let scheduler = fake.scheduler(limits);
+    let mut session = scheduler.session(&program(), None).unwrap();
+    let began = Instant::now();
+    let error = match session.idle(|_| Ok(())) {
+        Err(error) => error,
+        Ok(_) => panic!("a kernel that never settles gave a sample"),
+    };
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        began.elapsed()
+    );
+    assert!(error.message().contains("没有静止"), "{}", error.message());
+}
+
+#[test]
 fn process_busy_before_the_first_epoch_answer_restarts_the_settle() {
     // The kernel is busy once more after the settle time, and the probe
     // reports it just before its first `Epoch` answer: the sample still
