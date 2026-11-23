@@ -341,7 +341,7 @@ impl ReadingView {
             // nothing is scrolled off the first row. Either way no pixel
             // offset is left.
             let rows = self.rows_visible();
-            let shown = snapshot.rows(top, rows, cols).len();
+            let shown = snapshot.row_count(top, rows, cols);
             if shown < rows {
                 top = snapshot.advance(top, -((rows - shown) as i64), cols);
                 offset = 0.0;
