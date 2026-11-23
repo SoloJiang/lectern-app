@@ -54,31 +54,64 @@ pub fn cpu(stats: &FrameStats) -> Vec<Option<Duration>> {
 /// The frame budget's time (ADR 0017 via tech-research.md): 8.3 ms.
 const FRAME_BUDGET: Duration = Duration::from_micros(8300);
 
-/// Per recording, the frames whose [`cpu`] part is above 8.3 ms, and the
-/// worst one as `ms@index`; `-` for a recording without any CPU part.
+/// The [`cpu`] parts for a note: median / p95 / p99 / max over all the
+/// recordings, then per recording the count of frames above 8.3 ms with
+/// each one as `ms@index` (the first [`LISTED`]; a cost of the product
+/// comes back at the same index in each recording, a busy machine does
+/// not); `-` for a recording without any CPU part.
 fn cpu_note(recordings: &[FrameStats]) -> String {
+    /// The frames above the budget one recording lists.
+    const LISTED: usize = 8;
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let mut all: Vec<Duration> = recordings.iter().flat_map(cpu).flatten().collect();
+    all.sort_unstable();
+    let at = |q: f64| {
+        all.get(((all.len() as f64 - 1.0) * q).round() as usize)
+            .map_or(0.0, |d| ms(*d))
+    };
+    let spread = if all.is_empty() {
+        "-".to_owned()
+    } else {
+        format!(
+            "{:.2}/{:.2}/{:.2}/{:.2}",
+            at(0.5),
+            at(0.95),
+            at(0.99),
+            at(1.0)
+        )
+    };
     let per = recordings
         .iter()
         .map(|stats| {
             let parts = cpu(stats);
-            let over = parts
-                .iter()
-                .flatten()
-                .filter(|d| **d > FRAME_BUDGET)
-                .count();
-            match parts
+            if parts.iter().all(Option::is_none) {
+                return "-".to_owned();
+            }
+            let over: Vec<String> = parts
                 .iter()
                 .enumerate()
                 .filter_map(|(i, d)| Some((i, (*d)?)))
-                .max_by_key(|(_, d)| *d)
-            {
-                Some((i, d)) => format!("{over} ({:.2}@{i})", d.as_secs_f64() * 1e3),
-                None => "-".to_owned(),
+                .filter(|(_, d)| *d > FRAME_BUDGET)
+                .map(|(i, d)| format!("{:.2}@{i}", ms(d)))
+                .collect();
+            let more = if over.len() > LISTED { ", ..." } else { "" };
+            match over.len() {
+                0 => "0".to_owned(),
+                n => format!(
+                    "{n} ({}{more})",
+                    over.iter()
+                        .take(LISTED)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             }
         })
         .collect::<Vec<_>>()
-        .join(", ");
-    format!("CPU part above 8.3 ms per recording (worst ms@frame) {per}")
+        .join("; ");
+    format!(
+        "CPU part {spread} ms (median/p95/p99/max), above 8.3 ms per recording (ms@frame) {per}"
+    )
 }
 
 fn gap(later: std::time::SystemTime, earlier: std::time::SystemTime) -> Duration {

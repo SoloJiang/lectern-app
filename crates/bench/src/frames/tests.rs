@@ -273,7 +273,9 @@ fn frames_cpu_part_leaves_out_the_waits() {
     );
     let text = describe(std::slice::from_ref(&s));
     assert!(
-        text.contains("CPU part above 8.3 ms per recording (worst ms@frame) 1 (9.50@1)"),
+        text.contains(
+            "CPU part 9.50/9.50/9.50/9.50 ms (median/p95/p99/max), above 8.3 ms per recording (ms@frame) 1 (9.50@1)"
+        ),
         "{text}"
     );
 }
