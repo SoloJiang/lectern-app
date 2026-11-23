@@ -156,11 +156,17 @@ impl LongLine {
 
     /// The first unit whose start cell is at least `target`, or the end.
     fn first_at_cell(&self, src: &dyn Source, target: u64) -> Option<u64> {
+        self.boundary(src, target).map(|(pos, _)| pos)
+    }
+
+    /// [`first_at_cell`](Self::first_at_cell) with the cells before that
+    /// unit.
+    fn boundary(&self, src: &dyn Source, target: u64) -> Option<(u64, u64)> {
         if target == 0 {
-            return Some(self.start);
+            return Some((self.start, 0));
         }
         if target >= self.cells {
-            return Some(self.end);
+            return Some((self.end, self.cells));
         }
         let i = self.marks.partition_point(|&(_, c)| c < target);
         let (from, cells) = if i == 0 {
@@ -168,11 +174,56 @@ impl LongLine {
         } else {
             self.marks[i - 1]
         };
-        walk(src, from, cells, self.end, |_, c| c >= target).map(|(pos, _)| pos)
+        walk(src, from, cells, self.end, |_, c| c >= target)
+    }
+
+    /// A [`RowCursor`] at the start of display row `k`: one walk of at most
+    /// 4 KiB, from the nearest mark.
+    pub(crate) fn row_cursor(&self, src: &dyn Source, k: u64, cols: u32) -> Option<RowCursor> {
+        let (pos, cells) = self.boundary(src, k * u64::from(cols.max(1)))?;
+        Some(RowCursor { k, pos, cells })
     }
 
     fn bytes(&self) -> usize {
         size_of::<LongLine>() + size_of_val::<[(u64, u64)]>(&self.marks)
+    }
+}
+
+/// Consecutive display rows of one long line: the walk stops at the start
+/// of the next row, so each byte is walked once for all the rows asked for
+/// (row `k`'s end is row `k + 1`'s start), not twice from a mark for every
+/// row as [`LongLine::row_range`] does. Gives the same ranges.
+pub(crate) struct RowCursor {
+    /// The row [`next_row`](Self::next_row) gives.
+    k: u64,
+    /// Where row `k` starts, and the cells before it.
+    pos: u64,
+    cells: u64,
+}
+
+impl RowCursor {
+    /// The display row [`next_row`](Self::next_row) gives.
+    pub(crate) fn row(&self) -> u64 {
+        self.k
+    }
+
+    /// The bytes of the cursor's row, then the cursor is at the next row.
+    /// None when they are not in memory (the cursor does not move).
+    pub(crate) fn next_row(
+        &mut self,
+        long: &LongLine,
+        src: &dyn Source,
+        cols: u32,
+    ) -> Option<Range<u64>> {
+        let target = (self.k + 1) * u64::from(cols.max(1));
+        let (end, cells) = if target >= long.cells {
+            (long.end, long.cells)
+        } else {
+            walk(src, self.pos, self.cells, long.end, |_, c| c >= target)?
+        };
+        let range = self.pos..end.max(self.pos);
+        (self.k, self.pos, self.cells) = (self.k + 1, end.max(self.pos), cells);
+        Some(range)
     }
 }
 
