@@ -515,23 +515,29 @@ fn scroll_frame(run: ScrollRun, window: &mut Window, phase: ScrollPhase) {
         ScrollPhase::Events(step) => {
             if step < SCROLL_EVENTS {
                 let down = step < SCROLL_DOWN_EVENTS;
-                let size = window.viewport_size();
-                window.dispatch_event(
-                    PlatformInput::ScrollWheel(ScrollWheelEvent {
-                        position: point(size.width / 2.0, size.height / 2.0),
-                        delta: ScrollDelta::Pixels(point(
-                            px(0.0),
-                            px(if down {
-                                -SCROLL_STEP_PX
-                            } else {
-                                SCROLL_STEP_PX
-                            }),
-                        )),
-                        touch_phase: TouchPhase::Moved,
-                        ..ScrollWheelEvent::default()
-                    }),
-                    cx,
-                );
+                // Deferred to the end of the frame's callbacks, so the event
+                // is handled after the recorder's `frame_started` and before
+                // the layout: its handling is part of the frame's work, not
+                // of the wait from the tick to the start.
+                window.defer(cx, move |window, cx| {
+                    let size = window.viewport_size();
+                    window.dispatch_event(
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: point(size.width / 2.0, size.height / 2.0),
+                            delta: ScrollDelta::Pixels(point(
+                                px(0.0),
+                                px(if down {
+                                    -SCROLL_STEP_PX
+                                } else {
+                                    SCROLL_STEP_PX
+                                }),
+                            )),
+                            touch_phase: TouchPhase::Moved,
+                            ..ScrollWheelEvent::default()
+                        }),
+                        cx,
+                    );
+                });
             } else if step >= SCROLL_EVENTS + SCROLL_TAIL_FRAMES {
                 if let Some(kernel) = &run.kernel {
                     info!("bench scroll ended"; background_items = kernel.background().count);

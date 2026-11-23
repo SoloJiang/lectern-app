@@ -39,6 +39,48 @@ pub fn intervals(stats: &FrameStats) -> Vec<Duration> {
         .collect()
 }
 
+/// The main thread's part of each frame's work, in order: from the start
+/// to the call of `nextDrawable`, plus from the drawable to the `commit`.
+/// It leaves out the wait from the tick to the start, the wait for the
+/// drawable and the GPU. None for a frame without one of the four times.
+pub fn cpu(stats: &FrameStats) -> Vec<Option<Duration>> {
+    stats
+        .frames
+        .iter()
+        .map(|f| Some(gap(f.drawable_asked?, f.started) + gap(f.committed?, f.drawable_got?)))
+        .collect()
+}
+
+/// The frame budget's time (ADR 0017 via tech-research.md): 8.3 ms.
+const FRAME_BUDGET: Duration = Duration::from_micros(8300);
+
+/// Per recording, the frames whose [`cpu`] part is above 8.3 ms, and the
+/// worst one as `ms@index`; `-` for a recording without any CPU part.
+fn cpu_note(recordings: &[FrameStats]) -> String {
+    let per = recordings
+        .iter()
+        .map(|stats| {
+            let parts = cpu(stats);
+            let over = parts
+                .iter()
+                .flatten()
+                .filter(|d| **d > FRAME_BUDGET)
+                .count();
+            match parts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| Some((i, (*d)?)))
+                .max_by_key(|(_, d)| *d)
+            {
+                Some((i, d)) => format!("{over} ({:.2}@{i})", d.as_secs_f64() * 1e3),
+                None => "-".to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("CPU part above 8.3 ms per recording (worst ms@frame) {per}")
+}
+
 fn gap(later: std::time::SystemTime, earlier: std::time::SystemTime) -> Duration {
     later.duration_since(earlier).unwrap_or_default()
 }
@@ -122,7 +164,7 @@ pub fn describe(recordings: &[FrameStats]) -> String {
         .flat_map(|stats| stats.frames.iter().copied())
         .collect();
     format!(
-        "{} frames in {} recording(s), max work {:.2} ms, max interval {periods:.2} refresh periods, without tick {}, presented {}, {}",
+        "{} frames in {} recording(s), max work {:.2} ms, max interval {periods:.2} refresh periods, without tick {}, presented {}, {}, {}",
         frames.len(),
         recordings.len(),
         worst_work.as_secs_f64() * 1e3,
@@ -131,7 +173,8 @@ pub fn describe(recordings: &[FrameStats]) -> String {
             .map(|stats| stats.without_tick)
             .sum::<u32>(),
         sources(&frames),
-        stages(&frames)
+        stages(&frames),
+        cpu_note(recordings)
     )
 }
 

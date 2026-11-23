@@ -249,3 +249,31 @@ fn frames_describe_several_recordings_takes_the_worst_of_them() {
 fn frames_a_scroll_needs_three_quarters_of_its_events_drawn() {
     assert_eq!(MIN_SCROLL_FRAMES, 180);
 }
+
+#[test]
+fn frames_cpu_part_leaves_out_the_waits() {
+    let s = stats(
+        "scroll",
+        vec![
+            // 2 ms to the call, 20 ms wait for the drawable, 1 ms to the
+            // commit: 3 ms.
+            timed((0, 500, 30_000), (2_500, 22_500), 23_500, 24_000),
+            // 9 ms to the call, no wait, 0.5 ms to the commit: 9.5 ms.
+            timed((8_333, 8_333, 20_000), (17_333, 17_333), 17_833, 18_000),
+            frame(16_666, 16_666, 20_000),
+        ],
+    );
+    assert_eq!(
+        cpu(&s),
+        [
+            Some(Duration::from_micros(3_000)),
+            Some(Duration::from_micros(9_500)),
+            None
+        ]
+    );
+    let text = describe(std::slice::from_ref(&s));
+    assert!(
+        text.contains("CPU part above 8.3 ms per recording (worst ms@frame) 1 (9.50@1)"),
+        "{text}"
+    );
+}
