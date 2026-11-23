@@ -16,7 +16,7 @@ use crate::cells;
 use crate::highlight::Source;
 use crate::limits::LONG_LINE;
 use crate::spans::Token;
-use crate::text::{LineIndex, LongLine, unit_at};
+use crate::text::{LineIndex, LongLine, RowCursor, unit_at};
 
 use super::content::slice;
 use super::{DocSnapshot, LineNo, Row, RowPos};
@@ -70,27 +70,62 @@ impl DocSnapshot {
         let Some(src) = self.src() else {
             return out;
         };
+        let pending = self.visit_rows(src, from, n, cols, |pos, line, bytes| {
+            let text = self.text_row(src, pos, line, bytes)?;
+            out.push(text);
+            Some(())
+        });
+        if let Some(pos) = pending {
+            out.push(Row::Pending { pos });
+        }
+        out
+    }
+
+    /// How many rows [`rows`](Self::rows) gives for the same arguments (a
+    /// pending row counts), without making them: no text, no tokens.
+    pub fn row_count(&self, from: RowPos, n: usize, cols: u32) -> usize {
+        let cols = cols.max(1);
+        let Some(src) = self.src() else {
+            return 0;
+        };
+        let mut shown = 0;
+        let pending = self.visit_rows(src, from, n, cols, |_, _, bytes| {
+            slice(src, self.shown(src, bytes)).map(|_| shown += 1)
+        });
+        shown + usize::from(pending.is_some())
+    }
+
+    /// Calls `row` with each of at most `n` display rows from `from` on, in
+    /// order, until the rows end or `row` gives None (it could not make the
+    /// row). Returns the position of the row that is pending: its bytes are
+    /// not in memory, or `row` gave None.
+    fn visit_rows(
+        &self,
+        src: &dyn Source,
+        from: RowPos,
+        n: usize,
+        cols: u32,
+        mut row: impl FnMut(RowPos, LineNo, Range<u64>) -> Option<()>,
+    ) -> Option<RowPos> {
         let mut pos = from;
         let mut line = self.line_number(pos.line_start);
-        while out.len() < n {
+        // The walk through the long line the rows are in: row `k`'s end is
+        // row `k + 1`'s start.
+        let mut walk = None;
+        for _ in 0..n {
             if pos.line_start > self.size || (pos.line_start == self.size && self.size > 0) {
                 // Past the last line (a final line break ends it).
                 if !(pos.line_start == self.size && self.ends_with_newline()) {
                     break;
                 }
             }
-            let Some(row) = self.row_span(src, pos, cols) else {
-                out.push(Row::Pending { pos });
-                break;
+            let Some(span) = self.row_span(src, pos, cols, &mut walk) else {
+                return Some(pos);
             };
-            match self.text_row(src, pos, line, row.bytes.clone()) {
-                Some(text) => out.push(text),
-                None => {
-                    out.push(Row::Pending { pos });
-                    break;
-                }
+            if row(pos, line, span.bytes.clone()).is_none() {
+                return Some(pos);
             }
-            let Some(next) = row.next else {
+            let Some(next) = span.next else {
                 break;
             };
             if next.line_start != pos.line_start {
@@ -98,7 +133,7 @@ impl DocSnapshot {
             }
             pos = next;
         }
-        out
+        None
     }
 
     /// `from` moved by `delta` display rows (wheel, keyboard); it stops at
@@ -111,7 +146,10 @@ impl DocSnapshot {
         let mut pos = from;
         if delta >= 0 {
             for _ in 0..delta {
-                match self.row_span(src, pos, cols).and_then(|r| r.next) {
+                match self
+                    .row_span(src, pos, cols, &mut None)
+                    .and_then(|r| r.next)
+                {
                     Some(next) if self.has_row(next) => pos = next,
                     _ => break,
                 }
@@ -291,7 +329,13 @@ impl DocSnapshot {
         })
     }
 
-    fn row_span(&self, src: &dyn Source, pos: RowPos, cols: u32) -> Option<RowSpan> {
+    fn row_span(
+        &self,
+        src: &dyn Source,
+        pos: RowPos,
+        cols: u32,
+        walk: &mut Option<(u64, RowCursor)>,
+    ) -> Option<RowSpan> {
         if pos.line_start >= self.size {
             // The empty line after a final line break.
             return Some(RowSpan {
@@ -314,7 +358,13 @@ impl DocSnapshot {
             Kind::Indexed(long) => {
                 let rows = long.rows(cols);
                 let k = u64::from(pos.sub_row).min(rows - 1);
-                let bytes = long.row_range(src, k, cols)?;
+                // The row the walk of this line stopped before, or a new
+                // walk from the nearest mark.
+                let cursor = match walk {
+                    Some((start, cursor)) if *start == line.start && cursor.row() == k => cursor,
+                    _ => &mut walk.insert((line.start, long.row_cursor(src, k, cols)?)).1,
+                };
+                let bytes = cursor.next_row(long, src, cols)?;
                 let next = if k + 1 < rows {
                     Some(RowPos {
                         line_start: pos.line_start,
@@ -423,14 +473,7 @@ impl DocSnapshot {
         line: LineNo,
         bytes: Range<u64>,
     ) -> Option<Row<'s>> {
-        // A BOM is not shown.
-        let shown = if bytes.start == 0
-            && slice(src, 0..3.min(self.size)).is_some_and(|b| *b == [0xEF, 0xBB, 0xBF])
-        {
-            3.min(bytes.end)..bytes.end
-        } else {
-            bytes.clone()
-        };
+        let shown = self.shown(src, bytes.clone());
         let raw = slice(src, shown.clone())?;
         let (text, map) = match raw {
             Cow::Borrowed(b) => cells::display(b),
@@ -451,6 +494,17 @@ impl DocSnapshot {
             matches,
             found,
         })
+    }
+
+    /// The bytes of a row that are shown: a BOM is not.
+    fn shown(&self, src: &dyn Source, bytes: Range<u64>) -> Range<u64> {
+        if bytes.start == 0
+            && slice(src, 0..3.min(self.size)).is_some_and(|b| *b == [0xEF, 0xBB, 0xBF])
+        {
+            3.min(bytes.end)..bytes.end
+        } else {
+            bytes
+        }
     }
 
     /// The tokens meeting `row` (bytes of the line starting at
