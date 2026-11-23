@@ -116,6 +116,8 @@ pub(crate) fn wire_frames(scenario: &str, recording: FrameRecording) -> FrameSta
             .map(|frame| wire::FrameTimes {
                 requested: frame.requested,
                 started: frame.started,
+                drawable_asked: frame.drawable_asked,
+                drawable_got: frame.drawable_got,
                 committed: frame.committed,
                 gpu_started: frame.gpu_started,
                 completed: frame.completed,

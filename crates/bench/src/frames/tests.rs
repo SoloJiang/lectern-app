@@ -12,6 +12,8 @@ fn frame(requested: u64, started: u64, completed: u64) -> FrameTimes {
     FrameTimes {
         requested: at(requested),
         started: at(started),
+        drawable_asked: None,
+        drawable_got: None,
         committed: None,
         gpu_started: None,
         completed: at(completed),
@@ -19,14 +21,17 @@ fn frame(requested: u64, started: u64, completed: u64) -> FrameTimes {
     }
 }
 
-/// A frame as `frame`, committed and with the GPU started at the given
-/// microseconds.
+/// A frame as `frame`, with the drawable asked for and got, the commit and
+/// the GPU start at the given microseconds.
 fn timed(
     (requested, started, completed): (u64, u64, u64),
+    (asked, got): (u64, u64),
     committed: u64,
     gpu_started: u64,
 ) -> FrameTimes {
     FrameTimes {
+        drawable_asked: Some(at(asked)),
+        drawable_got: Some(at(got)),
         committed: Some(at(committed)),
         gpu_started: Some(at(gpu_started)),
         ..frame(requested, started, completed)
@@ -135,9 +140,9 @@ fn frames_describe_gives_the_worst_frame_and_the_sources() {
     let mut s = stats(
         "scroll",
         vec![
-            timed((0, 100, 3_000), 600, 1_100),
-            timed((8_333, 8_433, 11_000), 9_433, 10_433),
-            timed((40_000, 40_100, 41_000), 40_400, 40_500),
+            timed((0, 100, 3_000), (200, 300), 600, 1_100),
+            timed((8_333, 8_433, 11_000), (8_933, 9_433), 9_633, 10_433),
+            timed((40_000, 40_100, 41_000), (40_200, 40_250), 40_400, 40_500),
         ],
     );
     s.frames[0].presented = Some(PresentedAt {
@@ -158,31 +163,36 @@ fn frames_describe_gives_the_worst_frame_and_the_sources() {
     assert!(text.contains("max interval 3.80 refresh periods"), "{text}");
     assert!(text.contains("without tick 1"), "{text}");
     assert!(text.contains("1/1/1 (presented/handler/none)"), "{text}");
-    // 100 µs from each tick to the start; then 500, 1000 and 300 µs to the
-    // commit, 500, 1000 and 100 µs to the GPU start, and 1900, 567 and 500
-    // µs of GPU.
+    // 100 µs from each tick to the start; then 100, 500 and 100 µs to the
+    // drawable asked, 100, 500 and 50 µs of drawable wait, 300, 200 and 150
+    // µs of encoding, 500, 800 and 100 µs to the GPU start, and 1900, 567
+    // and 500 µs of GPU.
     assert!(
         text.contains(
-            "tick to start 0.10/0.10/0.10 ms, start to commit 0.50/1.00/1.00 ms, \
-             commit to GPU start 0.50/1.00/1.00 ms, GPU start to end 0.57/1.90/1.90 ms (median/p95/max)"
+            "tick to start 0.10/0.10/0.10 ms, start to drawable asked 0.10/0.50/0.50 ms, \
+             drawable wait 0.10/0.50/0.50 ms, drawable to commit 0.20/0.30/0.30 ms, \
+             commit to GPU start 0.50/0.80/0.80 ms, GPU start to end 0.57/1.90/1.90 ms (median/p95/max)"
         ),
         "{text}"
     );
 }
 
 #[test]
-fn frames_describe_leaves_a_frame_without_a_commit_or_gpu_start_out_of_that_stage() {
+fn frames_describe_leaves_a_frame_without_a_time_out_of_the_stages_that_need_it() {
     let mut s = stats(
         "scroll",
         vec![
-            timed((0, 100, 3_000), 600, 1_100),
-            // No commit: it has the GPU start but no stage that needs both.
+            timed((0, 100, 3_000), (200, 300), 600, 1_100),
+            // Only the GPU start: no stage that needs another time, but the
+            // GPU's run.
             FrameTimes {
                 gpu_started: Some(at(9_000)),
                 ..frame(8_333, 8_433, 11_000)
             },
-            // No GPU start: the start-to-commit stage only.
+            // The drawable asked for and the commit, but no drawable got
+            // and no GPU start: the stage to the drawable asked only.
             FrameTimes {
+                drawable_asked: Some(at(40_200)),
                 committed: Some(at(40_300)),
                 ..frame(40_000, 40_100, 41_000)
             },
@@ -190,23 +200,29 @@ fn frames_describe_leaves_a_frame_without_a_commit_or_gpu_start_out_of_that_stag
     );
     let text = describe(std::slice::from_ref(&s));
     assert!(text.starts_with("3 frames in 1 recording(s)"), "{text}");
-    // Commits 500 and 200 µs after the start (the median of two is the
-    // upper one); one commit-to-GPU of 500 µs; GPU runs of 1900 and 2000 µs.
+    // Two frames have each of the first two stages (100 µs both; the
+    // median of two is the upper one), one the next three, and the GPU runs
+    // of 1900 and 2000 µs the last.
     assert!(
         text.contains(
-            "start to commit 0.50/0.50/0.50 ms, commit to GPU start 0.50/0.50/0.50 ms, \
+            "start to drawable asked 0.10/0.10/0.10 ms, drawable wait 0.10/0.10/0.10 ms, \
+             drawable to commit 0.30/0.30/0.30 ms, commit to GPU start 0.50/0.50/0.50 ms, \
              GPU start to end 2.00/2.00/2.00 ms (median/p95/max)"
         ),
         "{text}"
     );
-    // No frame has either time: the stages say so, the work is unchanged.
+    // No frame has any of them: the stages say so, the work is unchanged.
     for frame in &mut s.frames {
+        frame.drawable_asked = None;
+        frame.drawable_got = None;
         frame.committed = None;
         frame.gpu_started = None;
     }
     let text = describe(&[s]);
     assert!(
-        text.contains("start to commit - ms, commit to GPU start - ms, GPU start to end - ms"),
+        text.contains(
+            "start to drawable asked - ms, drawable wait - ms, drawable to commit - ms, commit to GPU start - ms, GPU start to end - ms"
+        ),
         "{text}"
     );
 }

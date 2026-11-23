@@ -189,6 +189,14 @@ pub struct FrameTimes {
     pub requested: SystemTime,
     /// This frame's `frame_started`.
     pub started: SystemTime,
+    /// The moment the recording thread called `-[CAMetalLayer nextDrawable]`
+    /// for this frame (just before the original ran), read on the same
+    /// clock as `started`. None when it was not read. Reported, not judged.
+    pub drawable_asked: Option<SystemTime>,
+    /// The moment `nextDrawable` returned that drawable; the span from
+    /// `drawable_asked` is the wait for a drawable. None when it was not
+    /// read. Reported, not judged.
+    pub drawable_got: Option<SystemTime>,
     /// The moment the recording thread's `commit` hook ran for this frame's
     /// command buffer, read on the same clock as `started`. None when it
     /// was not recorded. Reported, not judged.
@@ -670,12 +678,16 @@ mod imp {
             // Not reachable: `ORIGINAL` is set before the replacement.
             return ptr::null_mut();
         }
+        // GPUI's `draw`: `nextDrawable` first, then `render_frame` (encoding), then present and commit.
+        let recording = recording_here();
+        let asked = recording.map_or(0, |_| now_ticks());
         // SAFETY: `original` is the implementation of `nextDrawable` the
         // runtime gave: `id (*)(id, SEL)`, checked by the type encoding.
         let drawable = unsafe {
             let original: unsafe extern "C" fn(Id, Sel) -> Id = mem::transmute(original);
             original(this, selector)
         };
+        let got = recording.map_or(0, |_| now_ticks());
         if drawable.is_null() {
             return drawable;
         }
@@ -690,8 +702,8 @@ mod imp {
                 send1(drawable, add, block.as_id());
             }
         }
-        if let Some(store) = recording_here()
-            && let Some(index) = store.drawable()
+        if let Some(store) = recording
+            && let Some(index) = store.drawable(asked, got)
         {
             let block = Block::new(
                 recorded_presented_invoke as Invoke,

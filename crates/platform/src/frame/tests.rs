@@ -387,6 +387,11 @@ mod hooked {
             // end, to the f64 rounding of the conversion.
             let committed = frame.committed.expect("committed");
             assert!(committed >= frame.started, "{frame:?}");
+            // `nextDrawable` was asked and returned between them, in order.
+            let asked = frame.drawable_asked.expect("drawable_asked");
+            let got = frame.drawable_got.expect("drawable_got");
+            assert!(frame.started <= asked && asked <= got, "{frame:?}");
+            assert!(got <= committed, "{frame:?}");
             if let Some(gpu_started) = frame.gpu_started {
                 assert!(
                     gpu_started <= frame.completed + Duration::from_micros(1),

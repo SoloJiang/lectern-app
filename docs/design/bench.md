@@ -299,9 +299,9 @@ pub enum OpenTarget {
 pub struct FrameStats { pub scenario: String, pub refresh: Duration, pub frames: Vec<FrameTimes>, pub without_tick: u32 }
 /// `presented` 为 None：这一帧没有显示时刻（`wait` 结束时显示回调还没有运行）。有时带来源（`PresentedAt { time, source }`，
 /// 与首帧相同，ADR 0052；编码为 `<ns>/<presented|handler>`）。只报告，不判定。
-/// `committed`（记录线程上 `commit` 运行的时刻）和 `gpu_started`（命令缓冲的 `GPUStartTime`）缺少时为 None，编码为 `-`；
+/// `drawable_asked`、`drawable_got`（记录线程调用 `nextDrawable` 和它返回的时刻）、`committed`（`commit` 运行的时刻）和 `gpu_started`（命令缓冲的 `GPUStartTime`）缺少时为 None，编码为 `-`；
 /// 它们只用来在 `note` 里把一帧的工作分成几段，不进预算。
-pub struct FrameTimes { pub requested: SystemTime, pub started: SystemTime, pub committed: Option<SystemTime>, pub gpu_started: Option<SystemTime>, pub completed: SystemTime, pub presented: Option<PresentedAt> }
+pub struct FrameTimes { pub requested: SystemTime, pub started: SystemTime, pub drawable_asked: Option<SystemTime>, pub drawable_got: Option<SystemTime>, pub committed: Option<SystemTime>, pub gpu_started: Option<SystemTime>, pub completed: SystemTime, pub presented: Option<PresentedAt> }
 pub enum ChildKind { ProcessPlugin, LanguageServer, Other }
 
 impl Report  { pub fn encode(&self) -> String; pub fn decode(line: &str) -> Result<Report, WireError>; }
@@ -499,7 +499,7 @@ pub mod frame {
     /// 开始记录 `window` 的逐帧时刻。主线程，首帧之后。`workspace` 调用它，并在每一帧开头调用 `FrameRecorder::frame_started`；
     /// `stop` 之后在后台线程上 `PendingFrames::wait` 得到 `FrameRecording { refresh, frames, problems }`。
     /// `FrameTimes` 的时刻：`requested`（这一次刷新的垂直同步，即帧源要求这一帧的时刻）、`started`（主线程开始处理、布局之前）、
-    /// `committed`（`commit` 运行的时刻，可缺）、`gpu_started`（命令缓冲的 `GPUStartTime`，可缺）、
+    /// `drawable_asked`、`drawable_got`（`nextDrawable` 的调用和返回，可缺）、`committed`（`commit` 运行的时刻，可缺）、`gpu_started`（命令缓冲的 `GPUStartTime`，可缺）、
     /// `completed`（命令缓冲的 `GPUEndTime`）、`presented`（`PresentedAt`，规则与首帧相同，只报告）。`app` 把它转换成 `wire::FrameTimes`。
     pub fn record(window: &impl HasWindowHandle) -> Result<FrameRecorder, HookError>;
 }
@@ -676,7 +676,7 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
   - `app/enter_edit`：打开 1 MiB 以内、接近编辑上限（`TIER_A_MAX`）的 TypeScript 文件（没有长行）并静止（整个文件读完，Edit 才可用），发 `Key("cmd-e")`，到 `EditReady`（编辑器画出、焦点在其中）。
   - `app/files_open`：夹具是 `app/idle_100k` 的 10 万文件形状；项目打开并静止之后（目录表已建好）发 `Open(Files)`，到 `FilesShown`（面板和树的第一批行画出）。
   - `app/files_expand`：同一个夹具，另有第一个目录 `aaa-wide/`，2000 个文件。先 `Open(Files)`（不计时）、`request(Key("down"))` 选中第一行并静止，再发 `Key("right")`，到 `FilesExpanded`（2000 个子项的行一次插入、画出）。
-  - 帧基准 `app/scroll_frames`（[ADR 0034](../adr/0034.md)）和 `app/scroll_frames_indexing`（[ADR 0033](../adr/0033.md)）：`Open(Scroll { yielding })` 之后 `app` 让窗口成为前台窗口（GPUI 对不是前台的窗口按约 30 fps 请求帧，platform 设计「帧的时刻」的已知限制；平台在 `activate_window` 返回之后才告诉 GPUI，所以等窗口是活动窗口的那一帧才开始，最多 120 帧，否则 `Error`），`workspace` 记录窗口的帧，每一帧向窗口中心发一个滚轮事件，共 `SCROLL_EVENTS` = 240 个：前 160 个向下 90 px（约 5 行），后 80 个向上；最后一个事件之后再过 3 帧结束，记录经 `Probe::frames` 回来。每帧工作时间和相邻帧间隔由 `lectern_bench::frames` 从 `FrameStats` 算（`completed - requested`；相邻两帧 `started` 的差，一次记录内部，不跨启动），一条预算对所有场景和启动成立，判定所有帧里最差的那一帧，`note` 写每个场景自己的最大值、没有 tick 的帧数和 `presented` 的来源计数（只报告）。`note` 还把一帧的工作分成四段，各给中位数、p95 和最大值：`tick to start`、`start to commit`、`commit to GPU start`、`GPU start to end`；每段只统计有这一段两端时刻的帧，没有的帧不进这一段，一帧都没有时写 `-`。这是诊断，判定的仍是 `completed - requested`。少于 `SCROLL_EVENTS` 的四分之三（180 帧）的记录是错误：事件没有到达视图、文件短于滚动时，帧没有画，不能当作通过。
+  - 帧基准 `app/scroll_frames`（[ADR 0034](../adr/0034.md)）和 `app/scroll_frames_indexing`（[ADR 0033](../adr/0033.md)）：`Open(Scroll { yielding })` 之后 `app` 让窗口成为前台窗口（GPUI 对不是前台的窗口按约 30 fps 请求帧，platform 设计「帧的时刻」的已知限制；平台在 `activate_window` 返回之后才告诉 GPUI，所以等窗口是活动窗口的那一帧才开始，最多 120 帧，否则 `Error`），`workspace` 记录窗口的帧，每一帧向窗口中心发一个滚轮事件，共 `SCROLL_EVENTS` = 240 个：前 160 个向下 90 px（约 5 行），后 80 个向上；最后一个事件之后再过 3 帧结束，记录经 `Probe::frames` 回来。每帧工作时间和相邻帧间隔由 `lectern_bench::frames` 从 `FrameStats` 算（`completed - requested`；相邻两帧 `started` 的差，一次记录内部，不跨启动），一条预算对所有场景和启动成立，判定所有帧里最差的那一帧，`note` 写每个场景自己的最大值、没有 tick 的帧数和 `presented` 的来源计数（只报告）。`note` 还把一帧的工作分成六段，各给中位数、p95 和最大值：`tick to start`、`start to drawable asked`、`drawable wait`、`drawable to commit`、`commit to GPU start`、`GPU start to end`；其中 `drawable wait` 是等 drawable 的时间，`drawable to commit` 是编码（GPUI 的 `draw` 先取 drawable，再编码，最后 commit）；每段只统计有这一段两端时刻的帧，没有的帧不进这一段，一帧都没有时写 `-`。这是诊断，判定的仍是 `completed - requested`。少于 `SCROLL_EVENTS` 的四分之三（180 帧）的记录是错误：事件没有到达视图、文件短于滚动时，帧没有画，不能当作通过。
     - `app/scroll_frames`：每个场景 5 次启动，每次先打开夹具项目并静止，打开场景的文件并静止，再发 `Open(Scroll { yielding: false })`。场景：64 MiB 的合成 TypeScript 按文件中部的字节偏移打开；压缩成一行的 4 MiB JavaScript 从头打开；编辑模式：1 MiB 以内的 TypeScript（`app/enter_edit` 的文件）打开并静止，发 `Key("cmd-e")` 到 `EditReady`，不等静止就滚动（光标闪烁的每一帧都在贡献方的准入里调用闭包，kernel 一直达不到 5 秒的静止，与 `app/enter_edit` 在 `EditReady` 结束相同）。冒烟模式用 2 MiB、1 MiB 的文件和 1 次启动。普通文件的场景没有：它短于滚动的行程，几帧之后滚到底，不画。
     - `app/scroll_frames_indexing`：每次启动打开 `app/idle_100k` 的 10 万文件夹具（里面多一个 4 MiB 的 TypeScript 文件），**不等静止**就打开这个文件（按中部的字节偏移，等 `FileHighlighted`）并发 `Open(Scroll)`，所以滚动在批量层建索引、解析文件的窗口时进行；5 次启动。`app` 在滚动结束时记 info `bench scroll ended` 的 `background_items`（kernel 此刻持有的 `BackgroundGuard` 数），运行器退出后从日志读它：为 0 说明滚动结束时批量层已经没有工作，结果不是建索引期间的帧时间，测量时记为 `error`；`note` 写每次启动的值。让路开关按 ADR 0033：产品里它是关的，基准测产品的实际行为（`yielding: false`）；运行器的环境变量 `LECTERN_BENCH_YIELD=1` 时发 `yielding: true`，`note` 写开关的状态，用来在不让路就超标时校准让路（那时再做 `app` 里检测交互静止并打开开关的代码，设计在 [code_intel「交互让路」](code_intel.md#交互让路)）。
     - 等待的期限：`Frames` 是 `SCROLL_LIMIT` = 15 s（240 帧在 60 Hz 下 4 s，加 10 s）。

@@ -203,13 +203,16 @@ pub struct FrameStats {
 /// `presented` is None when the frame has no presented time (the handler
 /// had not run by the end of the wait). Its source is reported with it
 /// (ADR 0052); it is reported, not judged. `committed` (the recording
-/// thread's `commit` of the frame's command buffer) and `gpu_started` (its
-/// `GPUStartTime`) are None when missing; they only split the frame's work
-/// in a note.
+/// thread's `commit` of the frame's command buffer), `gpu_started` (its
+/// `GPUStartTime`) and `drawable_asked` and `drawable_got` (the recording
+/// thread's call of `nextDrawable` and its return) are None when missing;
+/// they only split the frame's work in a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameTimes {
     pub requested: SystemTime,
     pub started: SystemTime,
+    pub drawable_asked: Option<SystemTime>,
+    pub drawable_got: Option<SystemTime>,
     pub committed: Option<SystemTime>,
     pub gpu_started: Option<SystemTime>,
     pub completed: SystemTime,
@@ -567,10 +570,10 @@ fn decode_kinds(value: &str) -> Result<Vec<ActivationKind>, WireError> {
     value.split(',').map(ActivationKind::from_name).collect()
 }
 
-/// `requested,started,completed,presented,committed,gpu_started` in Unix
-/// nanoseconds; `presented` is `<ns>/<source>` (`presented` or `handler`),
-/// or `-` for a frame whose presented handler had not run; `committed` and
-/// `gpu_started` are `-` when missing.
+/// `requested,started,completed,presented,committed,gpu_started,
+/// drawable_asked,drawable_got` in Unix nanoseconds; `presented` is
+/// `<ns>/<source>` (`presented` or `handler`), or `-` for a frame whose
+/// presented handler had not run; the last four are `-` when missing.
 fn encode_frame(frame: &FrameTimes) -> String {
     let presented = frame.presented.map_or_else(
         || "-".to_owned(),
@@ -580,12 +583,14 @@ fn encode_frame(frame: &FrameTimes) -> String {
         time.map_or_else(|| "-".to_owned(), |time| unix_ns(time).to_string())
     };
     format!(
-        "{},{},{},{presented},{},{}",
+        "{},{},{},{presented},{},{},{},{}",
         unix_ns(frame.requested),
         unix_ns(frame.started),
         unix_ns(frame.completed),
         optional(frame.committed),
-        optional(frame.gpu_started)
+        optional(frame.gpu_started),
+        optional(frame.drawable_asked),
+        optional(frame.drawable_got)
     )
 }
 
@@ -604,6 +609,8 @@ fn decode_frames(value: &str) -> Result<Vec<FrameTimes>, WireError> {
                 presented,
                 committed,
                 gpu_started,
+                drawable_asked,
+                drawable_got,
             ] = parts.as_slice()
             else {
                 return Err(WireError::new(format!("bad frame `{frame}`")));
@@ -614,6 +621,8 @@ fn decode_frames(value: &str) -> Result<Vec<FrameTimes>, WireError> {
                 completed: parse_time(completed)?,
                 committed: parse_optional_time(committed)?,
                 gpu_started: parse_optional_time(gpu_started)?,
+                drawable_asked: parse_optional_time(drawable_asked)?,
+                drawable_got: parse_optional_time(drawable_got)?,
                 presented: match *presented {
                     "-" => None,
                     at => {

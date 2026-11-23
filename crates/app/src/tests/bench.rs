@@ -183,6 +183,8 @@ fn recording(problems: FrameProblems) -> FrameRecording {
             platform_frame::FrameTimes {
                 requested: micros(100),
                 started: micros(150),
+                drawable_asked: Some(micros(200)),
+                drawable_got: Some(micros(300)),
                 committed: Some(micros(400)),
                 gpu_started: Some(micros(500)),
                 completed: micros(900),
@@ -194,6 +196,8 @@ fn recording(problems: FrameProblems) -> FrameRecording {
             platform_frame::FrameTimes {
                 requested: micros(8_433),
                 started: micros(8_433),
+                drawable_asked: None,
+                drawable_got: None,
                 committed: None,
                 gpu_started: None,
                 completed: micros(9_000),
@@ -229,6 +233,8 @@ fn a_clean_recording_is_the_frames_report() {
         wire::FrameTimes {
             requested: micros(100),
             started: micros(150),
+            drawable_asked: Some(micros(200)),
+            drawable_got: Some(micros(300)),
             committed: Some(micros(400)),
             gpu_started: Some(micros(500)),
             completed: micros(900),
@@ -239,6 +245,8 @@ fn a_clean_recording_is_the_frames_report() {
         }
     );
     assert_eq!(stats.frames[1].presented, None);
+    assert_eq!(stats.frames[1].drawable_asked, None);
+    assert_eq!(stats.frames[1].drawable_got, None);
     assert_eq!(stats.frames[1].committed, None);
     assert_eq!(stats.frames[1].gpu_started, None);
 

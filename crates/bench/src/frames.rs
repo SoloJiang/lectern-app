@@ -136,13 +136,14 @@ pub fn describe(recordings: &[FrameStats]) -> String {
 }
 
 /// The work split at its moments, for a note: the wait from the vsync tick
-/// to the frame's start (the main thread busy with something else), then
-/// the frame's CPU work to the `commit`, the wait from the `commit` to the
-/// GPU's start, and the GPU's run, each as median / p95 / max in ms. A stage
-/// counts only the frames that have both of its moments (a missing `commit`
-/// or GPU start time leaves the frame out of that stage, not out of the
-/// others); a stage no frame has is `-`. A diagnostic only: the budgets
-/// judge `completed - requested`.
+/// to the frame's start (the main thread busy with something else), the CPU
+/// work from the start to the call of `nextDrawable`, the wait for the
+/// drawable, the encoding from the drawable to the `commit`, the wait from
+/// the `commit` to the GPU's start, and the GPU's run, each as median / p95
+/// / max in ms. A stage counts only the frames that have both of its moments
+/// (a missing time leaves the frame out of the stages that need it, not out
+/// of the others); a stage no frame has is `-`. A diagnostic only: the
+/// budgets judge `completed - requested`.
 fn stages(frames: &[FrameTimes]) -> String {
     let spread = |mut values: Vec<Duration>| {
         if values.is_empty() {
@@ -157,9 +158,17 @@ fn stages(frames: &[FrameTimes]) -> String {
         format!("{:.2}/{:.2}/{:.2}", at(0.5), at(0.95), at(1.0))
     };
     let queue = frames.iter().map(|f| gap(f.started, f.requested)).collect();
+    let to_asked = frames
+        .iter()
+        .filter_map(|f| Some(gap(f.drawable_asked?, f.started)))
+        .collect();
+    let drawable_wait = frames
+        .iter()
+        .filter_map(|f| Some(gap(f.drawable_got?, f.drawable_asked?)))
+        .collect();
     let to_commit = frames
         .iter()
-        .filter_map(|f| Some(gap(f.committed?, f.started)))
+        .filter_map(|f| Some(gap(f.committed?, f.drawable_got?)))
         .collect();
     let to_gpu = frames
         .iter()
@@ -170,8 +179,10 @@ fn stages(frames: &[FrameTimes]) -> String {
         .filter_map(|f| Some(gap(f.completed, f.gpu_started?)))
         .collect();
     format!(
-        "tick to start {} ms, start to commit {} ms, commit to GPU start {} ms, GPU start to end {} ms (median/p95/max)",
+        "tick to start {} ms, start to drawable asked {} ms, drawable wait {} ms, drawable to commit {} ms, commit to GPU start {} ms, GPU start to end {} ms (median/p95/max)",
         spread(queue),
+        spread(to_asked),
+        spread(drawable_wait),
         spread(to_commit),
         spread(to_gpu),
         spread(on_gpu)
