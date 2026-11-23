@@ -109,6 +109,49 @@ fn install_inside_the_windows_update_mounts_after_it(cx: &mut TestAppContext) {
     assert!(tree.contains("workspace.content [Group] base=welcome"));
 }
 
+/// ADR 0066: the toolbar closure runs on every frame, and frames with no
+/// other work leave both kernels quiescent with the same epoch.
+#[gpui::test]
+fn frames_leave_the_kernel_quiescent(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let toolbar_calls = Arc::new(AtomicUsize::new(0));
+    let mut registrations = standard_screens();
+    registrations[1] = ui_screen_counted(
+        screens::PROJECT_HOME,
+        home_layout(),
+        Arc::default(),
+        toolbar_calls.clone(),
+    );
+    let contributor = rig.contribute(Contributor::staged(registrations), cx);
+    rig.open(project_path(), &project(), cx);
+    rig.draw(cx);
+    rig.settle(cx);
+
+    let workspace_kernel = rig.kernel.inner().expect("the kernel runs");
+    let contributor_kernel = contributor.inner().expect("the kernel runs");
+    let epochs = (
+        workspace_kernel.quiescent_epoch(),
+        contributor_kernel.quiescent_epoch(),
+    );
+    assert!(epochs.0.is_some() && epochs.1.is_some(), "{epochs:?}");
+    let before = toolbar_calls.load(Ordering::SeqCst);
+    for _ in 0..3 {
+        rig.draw(cx);
+    }
+    assert!(
+        toolbar_calls.load(Ordering::SeqCst) >= before + 3,
+        "each frame reads the toolbar"
+    );
+    assert_eq!(
+        (
+            workspace_kernel.quiescent_epoch(),
+            contributor_kernel.quiescent_epoch(),
+        ),
+        epochs,
+        "frames alone do not make a kernel busy"
+    );
+}
+
 #[gpui::test]
 fn project_home_shows_after_opened(cx: &mut TestAppContext) {
     let rig = UiRig::new(cx);
