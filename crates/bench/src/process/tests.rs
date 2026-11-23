@@ -693,10 +693,12 @@ fn process_busy_restarts_the_settle() {
 #[test]
 fn process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time() {
     // Busy and Quiescent every 20 ms, never settling for the 100 ms settle
-    // time: the wait ends with an error after first_quiescent + again.
+    // time: the wait ends with an error after first_quiescent + again
+    // (600 ms). The fake keeps going for 8 s, so an unbounded wait would
+    // pass the 5 s assert below; the margin absorbs a slow CI runner.
     let fake = Fake::new(move |p| {
         p.first_frame(start());
-        let until = Instant::now() + Duration::from_secs(3);
+        let until = Instant::now() + Duration::from_secs(8);
         let mut epoch = 1;
         while Instant::now() < until {
             p.send(&Report::Busy { epoch });
@@ -720,7 +722,7 @@ fn process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time() {
         Ok(_) => panic!("a kernel that never settles gave a sample"),
     };
     assert!(
-        began.elapsed() < Duration::from_secs(2),
+        began.elapsed() < Duration::from_secs(5),
         "{:?}",
         began.elapsed()
     );
