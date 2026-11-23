@@ -39,6 +39,12 @@ struct Slot {
     started: AtomicU64,
     /// The `frame_started` before it (or the start of the recording).
     previous: AtomicU64,
+    /// The recording thread's `commit` of this frame's command buffer, in
+    /// clock ticks; 0 until it ran.
+    committed: AtomicU64,
+    /// `GPUStartTime`, seconds on the media clock, as `f64` bits; 0 until
+    /// the completed handler ran with a time.
+    gpu_started: AtomicU64,
     /// `GPUEndTime`, seconds on the media clock, as `f64` bits; 0 until the
     /// completed handler ran with a time.
     completed: AtomicU64,
@@ -179,6 +185,8 @@ impl Store {
         slot.started.store(current, Ordering::Relaxed);
         slot.previous
             .store(self.previous.load(Ordering::Relaxed), Ordering::Relaxed);
+        slot.committed.store(0, Ordering::Relaxed);
+        slot.gpu_started.store(0, Ordering::Relaxed);
         slot.completed.store(0, Ordering::Relaxed);
         slot.presented.store(0, Ordering::Relaxed);
         slot.presented_source.store(NOT_YET, Ordering::Relaxed);
@@ -188,12 +196,18 @@ impl Store {
         Some(index)
     }
 
-    /// The recording thread commits a command buffer: the slot it belongs
-    /// to, if it is the first commit after the slot's drawable.
-    pub(super) fn commit(&self) -> Option<u32> {
-        self.pending_commit
+    /// The recording thread commits a command buffer at `now` (clock
+    /// ticks): the slot it belongs to, if it is the first commit after the
+    /// slot's drawable. The slot keeps `now` as the frame's `committed`.
+    pub(super) fn commit(&self, now: u64) -> Option<u32> {
+        let index = self
+            .pending_commit
             .swap(0, Ordering::Relaxed)
-            .checked_sub(1)
+            .checked_sub(1)?;
+        if let Some(slot) = self.slots.get(index as usize) {
+            slot.committed.store(now, Ordering::Relaxed);
+        }
+        Some(index)
     }
 
     /// The slot of `generation` and `index`, if a frame of that recording
@@ -203,13 +217,19 @@ impl Store {
         (slot.generation.load(Ordering::Acquire) == generation).then_some(slot)
     }
 
-    /// A completed handler: the command buffer's `GPUEndTime`. A time not
-    /// greater than 0 (the buffer failed) leaves the frame incomplete.
-    pub(super) fn completed(&self, generation: u32, index: u32, gpu_end: f64) {
+    /// A completed handler: the command buffer's `GPUStartTime` and
+    /// `GPUEndTime`. An end time not greater than 0 (the buffer failed)
+    /// leaves the frame incomplete; a start time not greater than 0 only
+    /// leaves `gpu_started` missing.
+    pub(super) fn completed(&self, generation: u32, index: u32, gpu_start: f64, gpu_end: f64) {
         if gpu_end.is_nan() || gpu_end <= 0.0 {
             return;
         }
         if let Some(slot) = self.slot(generation, index) {
+            if gpu_start > 0.0 {
+                slot.gpu_started
+                    .store(gpu_start.to_bits(), Ordering::Relaxed);
+            }
             slot.completed.store(gpu_end.to_bits(), Ordering::Release);
         }
     }
@@ -307,9 +327,13 @@ impl Store {
                 time: clock.time_of_seconds(f64::from_bits(slot.presented.load(Ordering::Relaxed))),
                 source,
             });
+            let committed = slot.committed.load(Ordering::Relaxed);
+            let gpu_started = f64::from_bits(slot.gpu_started.load(Ordering::Relaxed));
             frames.push(FrameTimes {
                 requested: clock.time_of_ticks(requested),
                 started: clock.time_of_ticks(started),
+                committed: (committed != 0).then(|| clock.time_of_ticks(committed)),
+                gpu_started: (gpu_started > 0.0).then(|| clock.time_of_seconds(gpu_started)),
                 completed: clock.time_of_seconds(completed),
                 presented,
             });

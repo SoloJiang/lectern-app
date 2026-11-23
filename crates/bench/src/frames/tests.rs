@@ -12,8 +12,24 @@ fn frame(requested: u64, started: u64, completed: u64) -> FrameTimes {
     FrameTimes {
         requested: at(requested),
         started: at(started),
+        committed: None,
+        gpu_started: None,
         completed: at(completed),
         presented: None,
+    }
+}
+
+/// A frame as `frame`, committed and with the GPU started at the given
+/// microseconds.
+fn timed(
+    (requested, started, completed): (u64, u64, u64),
+    committed: u64,
+    gpu_started: u64,
+) -> FrameTimes {
+    FrameTimes {
+        committed: Some(at(committed)),
+        gpu_started: Some(at(gpu_started)),
+        ..frame(requested, started, completed)
     }
 }
 
@@ -119,9 +135,9 @@ fn frames_describe_gives_the_worst_frame_and_the_sources() {
     let mut s = stats(
         "scroll",
         vec![
-            frame(0, 100, 3_000),
-            frame(8_333, 8_433, 11_000),
-            frame(40_000, 40_100, 41_000),
+            timed((0, 100, 3_000), 600, 1_100),
+            timed((8_333, 8_433, 11_000), 9_433, 10_433),
+            timed((40_000, 40_100, 41_000), 40_400, 40_500),
         ],
     );
     s.frames[0].presented = Some(PresentedAt {
@@ -142,9 +158,55 @@ fn frames_describe_gives_the_worst_frame_and_the_sources() {
     assert!(text.contains("max interval 3.80 refresh periods"), "{text}");
     assert!(text.contains("without tick 1"), "{text}");
     assert!(text.contains("1/1/1 (presented/handler/none)"), "{text}");
-    // 100 µs from each tick to the start; 2900, 2567 and 900 µs after it.
+    // 100 µs from each tick to the start; then 500, 1000 and 300 µs to the
+    // commit, 500, 1000 and 100 µs to the GPU start, and 1900, 567 and 500
+    // µs of GPU.
     assert!(
-        text.contains("tick to start 0.10/0.10/0.10 ms, start to GPU end 2.57/2.90/2.90 ms"),
+        text.contains(
+            "tick to start 0.10/0.10/0.10 ms, start to commit 0.50/1.00/1.00 ms, \
+             commit to GPU start 0.50/1.00/1.00 ms, GPU start to end 0.57/1.90/1.90 ms (median/p95/max)"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn frames_describe_leaves_a_frame_without_a_commit_or_gpu_start_out_of_that_stage() {
+    let mut s = stats(
+        "scroll",
+        vec![
+            timed((0, 100, 3_000), 600, 1_100),
+            // No commit: it has the GPU start but no stage that needs both.
+            FrameTimes {
+                gpu_started: Some(at(9_000)),
+                ..frame(8_333, 8_433, 11_000)
+            },
+            // No GPU start: the start-to-commit stage only.
+            FrameTimes {
+                committed: Some(at(40_300)),
+                ..frame(40_000, 40_100, 41_000)
+            },
+        ],
+    );
+    let text = describe(std::slice::from_ref(&s));
+    assert!(text.starts_with("3 frames in 1 recording(s)"), "{text}");
+    // Commits 500 and 200 µs after the start (the median of two is the
+    // upper one); one commit-to-GPU of 500 µs; GPU runs of 1900 and 2000 µs.
+    assert!(
+        text.contains(
+            "start to commit 0.50/0.50/0.50 ms, commit to GPU start 0.50/0.50/0.50 ms, \
+             GPU start to end 2.00/2.00/2.00 ms (median/p95/max)"
+        ),
+        "{text}"
+    );
+    // No frame has either time: the stages say so, the work is unchanged.
+    for frame in &mut s.frames {
+        frame.committed = None;
+        frame.gpu_started = None;
+    }
+    let text = describe(&[s]);
+    assert!(
+        text.contains("start to commit - ms, commit to GPU start - ms, GPU start to end - ms"),
         "{text}"
     );
 }

@@ -96,6 +96,8 @@ fn reports() -> Vec<Report> {
                 FrameTimes {
                     requested: at(100),
                     started: at(200),
+                    committed: Some(at(230)),
+                    gpu_started: Some(at(250)),
                     completed: at(300),
                     presented: Some(PresentedAt {
                         time: at(400),
@@ -105,12 +107,16 @@ fn reports() -> Vec<Report> {
                 FrameTimes {
                     requested: at(500),
                     started: at(600),
+                    committed: None,
+                    gpu_started: Some(at(650)),
                     completed: at(700),
                     presented: None,
                 },
                 FrameTimes {
                     requested: at(800),
                     started: at(900),
+                    committed: Some(at(930)),
+                    gpu_started: None,
                     completed: at(1_000),
                     presented: Some(PresentedAt {
                         time: at(1_100),
@@ -259,11 +265,16 @@ fn wire_unknown_names_keys_and_values_are_errors() {
         "child pid=1 kind=daemon id=a",
         "plugin id=a state=Active activation=sometimes",
         "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3",
-        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x,-,-",
         // A presented time has its source.
-        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5",
-        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5/display",
-        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x/handler",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5/display,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x/handler,-,-",
+        // The commit and the GPU start are a time or `-`; both are there.
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,4",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,x,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,-,x",
     ] {
         assert!(Report::decode(line).is_err(), "{line}");
     }

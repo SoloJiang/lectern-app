@@ -10,8 +10,8 @@
 //! hosted CI runner) the time is then the moment the handler runs, and the
 //! result says so; with [`Fallback::Wait`] (the judging machine) the next
 //! drawable is waited for (ADR 0052). A recording ([`record`]) also replaces
-//! the command buffer's `commit`, to read each frame's `GPUEndTime`, and
-//! runs a CVDisplayLink for the refresh each frame answers; the pairing of
+//! the command buffer's `commit`, to read each frame's `GPUStartTime` and
+//! `GPUEndTime` and the moment of the commit, and runs a CVDisplayLink for the refresh each frame answers; the pairing of
 //! those moments is in `pairing`, which needs no Objective-C. All of that is
 //! behind the `bench-hooks` feature on macOS; everywhere else the functions
 //! compile and return `HookError::Unsupported`, and no Objective-C runtime
@@ -178,7 +178,7 @@ pub struct FrameRecording {
     pub problems: FrameProblems,
 }
 
-/// The four moments of a frame, on the system clock.
+/// The moments of a frame, on the system clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameTimes {
     /// The `CVTimeStamp.hostTime` of this module's CVDisplayLink's first
@@ -189,6 +189,13 @@ pub struct FrameTimes {
     pub requested: SystemTime,
     /// This frame's `frame_started`.
     pub started: SystemTime,
+    /// The moment the recording thread's `commit` hook ran for this frame's
+    /// command buffer, read on the same clock as `started`. None when it
+    /// was not recorded. Reported, not judged.
+    pub committed: Option<SystemTime>,
+    /// The `GPUStartTime` of this frame's command buffer. None when it was
+    /// not greater than 0. Reported, not judged.
+    pub gpu_started: Option<SystemTime>,
     /// The `GPUEndTime` of this frame's command buffer.
     pub completed: SystemTime,
     /// The drawable's presented handler, by the rule of the first frame
@@ -452,6 +459,7 @@ mod imp {
     static ADD_PRESENTED_HANDLER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
     static PRESENTED_TIME: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
     static ADD_COMPLETED_HANDLER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+    static GPU_START_TIME: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
     static GPU_END_TIME: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
     /// The memory of every recording, allocated by the first `record` and
     /// never freed (「存储与生命周期」).
@@ -615,21 +623,28 @@ mod imp {
     }
 
     /// A recording's completed handler, on a Metal thread: stores the
-    /// command buffer's `GPUEndTime` into the frame's slot.
+    /// command buffer's `GPUStartTime` and `GPUEndTime` into the frame's
+    /// slot.
     unsafe extern "C" fn completed_invoke(block: *mut c_void, buffer: Id) {
-        let selector = GPU_END_TIME.load(Ordering::Acquire);
+        let start_selector = GPU_START_TIME.load(Ordering::Acquire);
+        let end_selector = GPU_END_TIME.load(Ordering::Acquire);
         let Some(store) = STORE.get() else {
             return;
         };
-        if selector.is_null() || buffer.is_null() {
+        if start_selector.is_null() || end_selector.is_null() || buffer.is_null() {
             return;
         }
         // SAFETY: the block was made by `commit` with
         // `RECORDED_DESCRIPTOR`; `buffer` is an `MTLCommandBuffer` and
-        // `GPUEndTime` returns a `CFTimeInterval`.
-        let ((generation, index), gpu_end) =
-            unsafe { (captured(block), send_f64(buffer, selector)) };
-        store.completed(generation, index, gpu_end);
+        // `GPUStartTime` and `GPUEndTime` return a `CFTimeInterval`.
+        let ((generation, index), gpu_start, gpu_end) = unsafe {
+            (
+                captured(block),
+                send_f64(buffer, start_selector),
+                send_f64(buffer, end_selector),
+            )
+        };
+        store.completed(generation, index, gpu_start, gpu_end);
     }
 
     /// The store, while it records and the caller is the recording thread.
@@ -702,7 +717,7 @@ mod imp {
             return;
         }
         if let Some(store) = recording_here()
-            && let Some(index) = store.commit()
+            && let Some(index) = store.commit(now_ticks())
         {
             let block = Block::new(
                 completed_invoke as Invoke,
@@ -804,6 +819,7 @@ mod imp {
                 (&ADD_PRESENTED_HANDLER, c"addPresentedHandler:"),
                 (&PRESENTED_TIME, c"presentedTime"),
                 (&ADD_COMPLETED_HANDLER, c"addCompletedHandler:"),
+                (&GPU_START_TIME, c"GPUStartTime"),
                 (&GPU_END_TIME, c"GPUEndTime"),
             ] {
                 slot.store(

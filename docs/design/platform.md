@@ -27,7 +27,7 @@
   - 剪贴板的写入（`clipboard::write_text`）：审阅意见的剪贴板途径把拼好的 prompt 写进系统剪贴板，`review` 经它完成发送（#22，见「剪贴板」）。
   - 主机信息（`host::describe`）与线程 QoS（`thread::set_user_interactive`）：bench 报告里的机器信息和基准线程的 QoS（见「主机信息与线程 QoS」）。
   - 登录 shell 的环境（`login_env`）：用户的登录 shell、登录 shell 设置之后的环境变量、在 `PATH` 里找程序；Terminal 页启动 agent 和 `agents` 的 ACP 客户端共用（[ADR 0050](../adr/0050.md)，见「登录 shell 的环境」）。
-  - 帧的时刻（`frame`）：测量构建用 Objective-C 运行时的方法替换取得首帧的显示时刻和逐帧的四个时刻，只在 `bench-hooks` feature 里，发布构建不含（[ADR 0048](../adr/0048.md)，见「测量构建的方法替换」「帧的时刻」）。
+  - 帧的时刻（`frame`）：测量构建用 Objective-C 运行时的方法替换取得首帧的显示时刻和逐帧的时刻，只在 `bench-hooks` feature 里，发布构建不含（[ADR 0048](../adr/0048.md)，见「测量构建的方法替换」「帧的时刻」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -1549,7 +1549,7 @@ pub mod frame {
         pub problems: FrameProblems,
     }
 
-    /// 一帧的四个时刻，都换算成系统时钟。
+    /// 一帧的时刻，都换算成系统时钟。
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct FrameTimes {
         /// 这一帧之前那一次 `frame_started` 之后，本模块的 CVDisplayLink 的第一个 tick 的 `CVTimeStamp.hostTime`，
@@ -1558,6 +1558,11 @@ pub mod frame {
         pub requested: SystemTime,
         /// 这一帧的 `frame_started`。
         pub started: SystemTime,
+        /// 记录线程上 `commit` 的替换为这一帧的命令缓冲运行的时刻，与 `started` 读同一个时钟（`mach_absolute_time`）。
+        /// 没有记下时为 None，不使 `incomplete` 加一。只报告，不判定：bench 的报告用它把一帧的工作分成 CPU 和 GPU 两段。
+        pub committed: Option<SystemTime>,
+        /// 这一帧的命令缓冲的 `GPUStartTime`。不大于 0 时为 None，不使 `incomplete` 加一。只报告，不判定。
+        pub gpu_started: Option<SystemTime>,
         /// 这一帧的命令缓冲的 `GPUEndTime`。
         pub completed: SystemTime,
         /// 这个 drawable 的显示回调给出的时刻，规则与首帧相同（ADR 0052）：`presentedTime` 大于 0 时是它（`Presented`）；
@@ -1597,12 +1602,14 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 
 ### 逐帧记录
 
-记录期间，一帧的四个时刻分别来自：
+记录期间，一帧的各个时刻分别来自：
 
 | 时刻 | 来源 | 线程 |
 |---|---|---|
 | `started` | `FrameRecorder::frame_started`，`workspace` 在 `on_next_frame` 的回调里调用。GPUI 的帧处理函数先执行这些回调，再布局、绘制 | 主线程 |
 | `requested` | 本模块的 CVDisplayLink：每个 tick 把 `inNow.hostTime` 写进环形缓冲 | CoreVideo 的线程 |
+| `committed` | `commit` 的替换：登记完成回调之前读一次 `mach_absolute_time`，存进这一帧的槽 | 主线程 |
+| `gpu_started` | 同一个完成回调，读 `GPUStartTime`，与 `GPUEndTime` 在同一次回调里 | Metal 的线程 |
 | `completed` | `commit` 的替换：给这一帧的命令缓冲登记 `addCompletedHandler:`，回调读 `GPUEndTime` | 提交在主线程，回调在 Metal 的线程 |
 | `presented` | `nextDrawable` 的替换：记录期间给每个 drawable 登记 `addPresentedHandler:` | 登记在主线程，回调在 Core Animation 的线程 |
 
@@ -1637,7 +1644,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 | `on_first_presented` | ≤ 100 µs，首帧之前 | 一次 `objc_getClass`、`class_getInstanceMethod`、`method_getTypeEncoding`、`method_setImplementation`。计入冷启动，由 `baseline/empty_window_cold_start` 一起测出 |
 | 首帧回调交付之前的每次 `nextDrawable` | 一次 block 登记，几微秒 | 首帧回调交付之后、不在记录期间时，只读一个原子标志 |
 | 第一次 `record` | < 1 ms，首帧之后 | 临时的命令队列和命令缓冲、CVDisplayLink 的建立、0.5 MiB 的分配 |
-| 记录期间每帧 | 两次 block 登记（显示、完成）加 `frame_started` 的一次 `mach_absolute_time`，几微秒；实测 `frame_started` 中位数 0.1 µs，`commit` 一段与不记录时的差在 ±15 µs 的噪声以内 | 计入被测帧的工作时间，是测量的误差，相对 8.3 ms 的预算很小 |
+| 记录期间每帧 | 两次 block 登记（显示、完成）加 `frame_started` 和 `commit` 各一次 `mach_absolute_time`，几微秒；实测 `frame_started` 中位数 0.1 µs，`commit` 一段与不记录时的差在 ±15 µs 的噪声以内 | 计入被测帧的工作时间，是测量的误差，相对 8.3 ms 的预算很小 |
 
 实现 PR 用 `examples/frame_hooks.rs` 测出 `on_first_presented` 和记录期间每帧的实际开销，写进「实际验证」。`on_first_presented` 超过 100 µs 时先找原因，不放宽上限。
 
@@ -1657,7 +1664,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 ### 测试
 
 - 所有平台：
-  - `frame_pairing_*`：配对是纯函数（输入开始时刻、drawable、提交、tick 和回调的序列，输出 `FrameTimes` 和 `FrameProblems`）。场景：连续的帧（每个 tick 一帧，`requested` 是 tick，`started` 在它之后）；主线程跨两个 tick 阻塞（`requested` 是阻塞之前的那个 tick，工作时间包含阻塞）；两帧之间有一次没有画的帧处理（下一帧的 `requested` 在它之后）；没有 tick 的帧（`requested` 等于 `started`，`without_tick` 加一）；没有开始时刻的 drawable 和同一次帧处理里的第二个 drawable（`unmatched`）；到期限没有完成时刻（`incomplete`，不在 `frames` 里）；超出容量（`overflowed`）；`presentedTime` 为 0（`presented` 的来源为 `Handler`）；到期限还没有显示回调（`presented` 为 None）；代数过时的回调不写。
+  - `frame_pairing_*`：配对是纯函数（输入开始时刻、drawable、提交、tick 和回调的序列，输出 `FrameTimes` 和 `FrameProblems`）。场景：连续的帧（每个 tick 一帧，`requested` 是 tick，`started` 在它之后）；主线程跨两个 tick 阻塞（`requested` 是阻塞之前的那个 tick，工作时间包含阻塞）；两帧之间有一次没有画的帧处理（下一帧的 `requested` 在它之后）；没有 tick 的帧（`requested` 等于 `started`，`without_tick` 加一）；没有开始时刻的 drawable 和同一次帧处理里的第二个 drawable（`unmatched`）；到期限没有完成时刻（`incomplete`，不在 `frames` 里）；超出容量（`overflowed`）；`committed` 与 `gpu_started` 随帧写入、按槽换算；`GPUStartTime` 不大于 0 或没有 `commit` 的记录时对应的时刻为 None、帧仍算完成（不计入 `incomplete`）；重用的槽不带上一次记录的 `committed`；`presentedTime` 为 0（`presented` 的来源为 `Handler`）；到期限还没有显示回调（`presented` 为 None）；代数过时的回调不写。
   - `frame_clock_*`：刻度到纳秒的换算（`mach_timebase_info` 为 1/1 和 125/3）和到 `SystemTime` 的换算。
   - `hook_error_kinds_are_distinct_static_names`；`hook_type_encoding_check`（核对是纯函数：相同时通过；不同、为空时为 `Mismatch`）。
 - 没有 `bench-hooks`，或不在 macOS 上：`frame_is_unsupported_without_bench_hooks`（`on_first_presented`、`record` 都为 `Unsupported`，回调从不被调用）。

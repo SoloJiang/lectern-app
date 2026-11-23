@@ -102,7 +102,7 @@ pub(crate) fn frame_stats(record: FrameRecord) -> Result<FrameStats, String> {
     Ok(wire_frames(&record.scenario, recording))
 }
 
-/// `platform`'s recording as the bench's `FrameStats`: the four moments of
+/// `platform`'s recording as the bench's `FrameStats`: the moments of
 /// each frame in order, the `presented` time with its source, the nominal
 /// refresh and the count of frames the display link did not ask for.
 pub(crate) fn wire_frames(scenario: &str, recording: FrameRecording) -> FrameStats {
@@ -116,6 +116,8 @@ pub(crate) fn wire_frames(scenario: &str, recording: FrameRecording) -> FrameSta
             .map(|frame| wire::FrameTimes {
                 requested: frame.requested,
                 started: frame.started,
+                committed: frame.committed,
+                gpu_started: frame.gpu_started,
                 completed: frame.completed,
                 presented: frame.presented.map(|at| PresentedAt {
                     time: at.time,

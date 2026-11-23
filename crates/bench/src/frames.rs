@@ -135,12 +135,19 @@ pub fn describe(recordings: &[FrameStats]) -> String {
     )
 }
 
-/// The work split at `started`, for a note: the wait from the vsync tick
-/// to the frame's start (the main thread busy with something else) and
-/// the frame itself (layout, painting, the drawable and the GPU), each as
-/// median / p95 / max in ms.
+/// The work split at its moments, for a note: the wait from the vsync tick
+/// to the frame's start (the main thread busy with something else), then
+/// the frame's CPU work to the `commit`, the wait from the `commit` to the
+/// GPU's start, and the GPU's run, each as median / p95 / max in ms. A stage
+/// counts only the frames that have both of its moments (a missing `commit`
+/// or GPU start time leaves the frame out of that stage, not out of the
+/// others); a stage no frame has is `-`. A diagnostic only: the budgets
+/// judge `completed - requested`.
 fn stages(frames: &[FrameTimes]) -> String {
     let spread = |mut values: Vec<Duration>| {
+        if values.is_empty() {
+            return "-".to_owned();
+        }
         values.sort_unstable();
         let at = |q: f64| {
             values
@@ -150,11 +157,24 @@ fn stages(frames: &[FrameTimes]) -> String {
         format!("{:.2}/{:.2}/{:.2}", at(0.5), at(0.95), at(1.0))
     };
     let queue = frames.iter().map(|f| gap(f.started, f.requested)).collect();
-    let frame = frames.iter().map(|f| gap(f.completed, f.started)).collect();
+    let to_commit = frames
+        .iter()
+        .filter_map(|f| Some(gap(f.committed?, f.started)))
+        .collect();
+    let to_gpu = frames
+        .iter()
+        .filter_map(|f| Some(gap(f.gpu_started?, f.committed?)))
+        .collect();
+    let on_gpu = frames
+        .iter()
+        .filter_map(|f| Some(gap(f.completed, f.gpu_started?)))
+        .collect();
     format!(
-        "tick to start {} ms, start to GPU end {} ms (median/p95/max)",
+        "tick to start {} ms, start to commit {} ms, commit to GPU start {} ms, GPU start to end {} ms (median/p95/max)",
         spread(queue),
-        spread(frame)
+        spread(to_commit),
+        spread(to_gpu),
+        spread(on_gpu)
     )
 }
 

@@ -183,6 +183,8 @@ fn recording(problems: FrameProblems) -> FrameRecording {
             platform_frame::FrameTimes {
                 requested: micros(100),
                 started: micros(150),
+                committed: Some(micros(400)),
+                gpu_started: Some(micros(500)),
                 completed: micros(900),
                 presented: Some(platform_frame::PresentedAt {
                     time: micros(1_200),
@@ -192,6 +194,8 @@ fn recording(problems: FrameProblems) -> FrameRecording {
             platform_frame::FrameTimes {
                 requested: micros(8_433),
                 started: micros(8_433),
+                committed: None,
+                gpu_started: None,
                 completed: micros(9_000),
                 presented: None,
             },
@@ -225,6 +229,8 @@ fn a_clean_recording_is_the_frames_report() {
         wire::FrameTimes {
             requested: micros(100),
             started: micros(150),
+            committed: Some(micros(400)),
+            gpu_started: Some(micros(500)),
             completed: micros(900),
             presented: Some(PresentedAt {
                 time: micros(1_200),
@@ -233,6 +239,8 @@ fn a_clean_recording_is_the_frames_report() {
         }
     );
     assert_eq!(stats.frames[1].presented, None);
+    assert_eq!(stats.frames[1].committed, None);
+    assert_eq!(stats.frames[1].gpu_started, None);
 
     let recorder = Recorder::default();
     report_frames(record(Ok(recording(problems))), &recorder);
