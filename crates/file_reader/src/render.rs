@@ -26,6 +26,7 @@ use crate::actions::{
     self, Back, Close, DiscardMine, Edit, Find, FindNext, FindPrevious, Forward, KeepEditing,
     Merge, Save, SaveAnyway,
 };
+use crate::fast_row::{FastRow, colour_only};
 use crate::nodes;
 use crate::text::{expand, runs};
 use crate::view::ReadingView;
@@ -477,7 +478,13 @@ fn code_row(
             };
             // A long line's later display rows have no number of their own.
             let number = (pos.sub_row == 0).then_some(number);
-            let element = if styled.is_empty() {
+            // A colour-only ASCII row is laid out as one font run
+            // (`fast_row`); any other style keeps `StyledText`.
+            let element = if let Some(colours) = colour_only(&shown.text, &styled) {
+                div()
+                    .child(FastRow::new(shown.text.clone(), colours))
+                    .into_any_element()
+            } else if styled.is_empty() {
                 div().child(shown.text.clone()).into_any_element()
             } else {
                 div()
