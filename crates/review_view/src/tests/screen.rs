@@ -91,7 +91,7 @@ fn screen_opens_the_review_and_shows_loading_phases(cx: &mut TestAppContext) {
         Some("progress")
     );
     let cancel = must(&records, "review.loading.cancel");
-    assert_eq!(label_key(cancel), Some("review-cancel"));
+    assert_eq!(label_key(cancel), Some("common-cancel"));
 
     // Ready: the content takes the place.
     let (snapshot, rows) = snapshot_fixture(3, 2, 8);

@@ -23,8 +23,8 @@ use lectern_services::workspace::{Milestone, Target, WorkspaceCommand};
 use lectern_ui::contrib::ToolbarItems;
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
-    Button, ButtonKind, ButtonSize, Capsule, LoadingPhase, Skeleton, SystemColor, Text, TextRole,
-    TextRoleExt, colors, loading_phase, mono_metrics,
+    Button, ButtonKind, ButtonSize, Capsule, LoadingPhase, LoadingProgress, Skeleton, SystemColor,
+    Text, TextRole, TextRoleExt, colors, loading_phase, mono_metrics,
 };
 
 use crate::actions::{
@@ -177,7 +177,7 @@ impl Render for ReviewScreen {
         }
         let body: AnyElement = match &state {
             LoadState::Failed(error) => self.render_failed(error, &strings, window, cx),
-            LoadState::Loading => self.render_loading(&strings, window, cx),
+            LoadState::Loading => self.render_loading(&strings, cx),
             LoadState::Ready => {
                 let list_state = model.read(cx).list.clone();
                 let items = model.clone();
@@ -441,12 +441,7 @@ impl ReviewScreen {
         .into_any_element()
     }
 
-    fn render_loading(
-        &self,
-        strings: &Strings,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_loading(&self, strings: &Strings, cx: &mut Context<Self>) -> AnyElement {
         let elapsed = self.model.read(cx).opened_at.elapsed();
         let phase = loading_phase(elapsed);
         let name = match phase {
@@ -469,24 +464,16 @@ impl ReviewScreen {
                 .child(Skeleton::new(px(480.0), px(14.0)))
                 .into_any_element(),
             LoadingPhase::Progress => {
+                // The shared state for a load over 1 s (interaction spec
+                // 「加载超过 1 s」): it declares `review.loading` itself, with
+                // `phase=progress` and Cancel at `review.loading.cancel`.
                 let shared = self.shared.clone();
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(12.0))
-                    .text_role(TextRole::Secondary, window, cx)
-                    .child(Text::key(strings, keys::review::LOADING).shared())
-                    .child(
-                        Button::new(
-                            nodes::plain("loading").child("cancel"),
-                            Text::key(strings, keys::review::CANCEL),
-                        )
-                        .on_click(move |_, _| shared.dispatch(WorkspaceCommand::Pop)),
-                    )
-                    .into_any_element()
+                return LoadingProgress::new(
+                    nodes::plain("loading"),
+                    Text::key(strings, keys::review::LOADING),
+                )
+                .on_cancel(move |_, _| shared.dispatch(WorkspaceCommand::Pop))
+                .into_any_element();
             }
         };
         semantic(spec, div().size_full().child(content)).into_any_element()
