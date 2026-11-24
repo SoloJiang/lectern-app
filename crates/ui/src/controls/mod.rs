@@ -44,7 +44,7 @@ pub use expander::Expander;
 pub use grouped_list::{GroupedList, Row};
 pub use hint::{Hint, HintFrame};
 pub use loading::{LoadingPhase, Skeleton, loading_phase};
-pub use loading_progress::{LoadingProgress, SPOKES, spin_step};
+pub use loading_progress::{LoadingProgress, spin_step};
 pub use menu::{MenuItem, PopUpButton, show_menu};
 pub use progress::{Progress, ProgressShape};
 pub use segmented::Segmented;

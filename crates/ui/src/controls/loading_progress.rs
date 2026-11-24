@@ -31,7 +31,7 @@ use crate::semantic::{self, NodeId, Role, Semantic};
 use crate::text::{Text, strings};
 
 /// The spinner's spokes, one step each.
-pub const SPOKES: usize = 12;
+const SPOKES: usize = 12;
 /// The HIG's small indeterminate spinner.
 const SIDE: Pixels = px(16.0);
 const GAP: Pixels = px(8.0);
@@ -41,8 +41,10 @@ pub struct LoadingProgress {
     id: NodeId,
     label: Text,
     fraction: Option<f32>,
-    cancel: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    cancel: Option<OnCancel>,
 }
+
+type OnCancel = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// The spinner's clock: when it was first drawn, and the timer of the next
 /// step. Kept in the element's keyed state, so it lives as long as the
