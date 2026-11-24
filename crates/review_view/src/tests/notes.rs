@@ -1171,6 +1171,11 @@ fn the_bar_follows_the_notes_state(cx: &mut TestAppContext) {
     assert_eq!(attr(send, "route").as_deref(), Some("clipboard"));
     assert_eq!(send_label(&records), "Copy as Prompt ⌘↩");
     assert!(!send.semantic.state.disabled);
+    assert_eq!(
+        attr(send, "tooltip").as_deref(),
+        Some("Copy the review notes as a prompt, then paste it into the session"),
+        "Send by the clipboard says what it does"
+    );
 
     // Copy Again, Discard, Looks Good, Copy as Prompt and Send, in order.
     change(&rig, &opened, cx, |snapshot| {
@@ -1212,6 +1217,23 @@ fn the_bar_follows_the_notes_state(cx: &mut TestAppContext) {
         attr(must(&records, "review.bar.copy-again"), "batch").as_deref(),
         Some("0000000000000001")
     );
+    // The hover texts: one sent note, the singular; Discard has none; Send
+    // by the session has none.
+    let tooltip = |id: &str| attr(must(&records, id), "tooltip");
+    assert_eq!(
+        tooltip("review.bar.copy-again").as_deref(),
+        Some("Copy the 1 review note you sent last, with the same marker")
+    );
+    assert_eq!(
+        tooltip("review.bar.looks-good").as_deref(),
+        Some("Mark every file as reviewed")
+    );
+    assert_eq!(
+        tooltip("review.bar.copy").as_deref(),
+        Some("Copy the review notes as a prompt, then paste it into the session")
+    );
+    assert_eq!(tooltip("review.bar.discard"), None);
+    assert_eq!(tooltip("review.bar.send"), None);
     // Copy as Prompt sends the pending notes by the clipboard.
     let mut visual = opened.visual(cx);
     visual.simulate_click(
@@ -1911,6 +1933,10 @@ fn the_plus_shows_on_the_row_under_the_pointer(cx: &mut TestAppContext) {
     assert!(!plus(&records, "-:1"), "the pointer left that row");
 
     let button = must(&records, "review.diff.item[step:0].row.item[2:2].add-note");
+    assert_eq!(
+        attr(button, "tooltip").as_deref(),
+        Some("Add a review note (C)")
+    );
     visual.simulate_click(button.bounds.center(), gpui::Modifiers::default());
     visual.run_until_parked();
     assert_eq!(editor_target(&opened, cx), target_at(DiffSide::New, 2));

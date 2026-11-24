@@ -856,9 +856,11 @@ fn the_analysis_row_shows_each_state(cx: &mut TestAppContext) {
         match analysis {
             AnalysisState::Unavailable(_) => {
                 assert!(analyze.semantic.state.disabled, "nothing can run");
+                assert!(attr(analyze, "tooltip").is_some(), "the reason");
             }
             AnalysisState::Idle => {
                 assert!(!analyze.semantic.state.disabled, "Analyze can start");
+                assert_eq!(attr(analyze, "tooltip"), None, "nothing to explain");
             }
             AnalysisState::Failed(_) => {
                 assert_eq!(attr(analyze, "state").as_deref(), Some("failed"));

@@ -600,6 +600,11 @@ fn range_drag_sets_a_range_and_shows_add_note(cx: &mut TestAppContext) {
     assert_eq!(attr(button, "side").as_deref(), Some("new"));
     assert_eq!(attr(button, "line").as_deref(), Some("1"));
     assert_eq!(attr(button, "last").as_deref(), Some("3"));
+    // The same lines as the editor will name (1-based).
+    assert_eq!(
+        attr(button, "tooltip").as_deref(),
+        Some("Add a review note on lines 2\u{2013}4 (C)")
+    );
     // At the end of the row where the button went up; taller than the row.
     let released = must(&records, &row_id("-:3")).bounds;
     assert!((button.bounds.center().y - released.center().y).abs() < px(1.0));
