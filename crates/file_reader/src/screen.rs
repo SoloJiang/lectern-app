@@ -153,20 +153,19 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
         )
     };
     let weak = view.downgrade();
+    let back_key = if edit.editing {
+        keys::file_reader::BACK_EDITING_TOOLTIP
+    } else {
+        keys::file_reader::BACK_TOOLTIP
+    };
     let back = {
         let weak = weak.clone();
         Button::icon_only(
             nodes::plain("toolbar").child("back"),
             Icon::Back,
-            Text::key(
-                &strings,
-                if edit.editing {
-                    keys::file_reader::BACK_EDITING_TOOLTIP
-                } else {
-                    keys::file_reader::BACK_TOOLTIP
-                },
-            ),
+            Text::key(&strings, back_key),
         )
+        .tooltip(Text::key(&strings, back_key))
         .disabled(edit.editing)
         .on_click(move |window, cx| {
             let _ = weak.update(cx, |view, cx| view.go_back(window, cx));
@@ -216,6 +215,7 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
                 Icon::Forward,
                 Text::key(&strings, keys::file_reader::FORWARD_TOOLTIP),
             )
+            .tooltip(Text::key(&strings, keys::file_reader::FORWARD_TOOLTIP))
             .disabled(!forward)
             .on_click(move |window, cx| {
                 let _ = weak.update(cx, |view, cx| view.go_forward(window, cx));
@@ -223,8 +223,7 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
         };
         controls.push(forward.into_any_element());
         if edit.reachable {
-            // A reason for a grey button goes in the probe node: `ui`'s
-            // button has no tooltip (the reason is what the tooltip says).
+            // A grey button says why in its tooltip: the reason's text.
             let mut button = Button::new(
                 nodes::plain("toolbar").child("edit"),
                 Text::key(&strings, keys::file_reader::EDIT),
@@ -245,7 +244,7 @@ fn toolbar(cx: &mut App) -> ToolbarItems {
                 }
                 None => keys::file_reader::EDIT_TOOLTIP,
             };
-            button = button.attr("tooltip", Text::key(&strings, tooltip).shared());
+            button = button.tooltip(Text::key(&strings, tooltip));
             controls.push(button.into_any_element());
         }
     }

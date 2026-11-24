@@ -172,6 +172,18 @@ fn edit_is_reachable_in_the_shipped_configuration(cx: &mut TestAppContext) {
         Some(Strings::of(Locale::En).get(keys::file_reader::EDIT_TOOLTIP))
     );
     assert_eq!(attr(edit, "reason"), None);
+    // Back and Forward say what they are in their tooltips too.
+    let en = Strings::of(Locale::En);
+    for (id, key) in [
+        ("file-reader.toolbar.back", keys::file_reader::BACK_TOOLTIP),
+        (
+            "file-reader.toolbar.forward",
+            keys::file_reader::FORWARD_TOOLTIP,
+        ),
+    ] {
+        let node = find_node(&records, id).expect(id);
+        assert_eq!(attr(node, "tooltip"), Some(en.get(key)), "{id}");
+    }
     // ⌘E enters.
     let mut visual = rig.visual(cx);
     visual.simulate_keystrokes("cmd-e");
@@ -262,6 +274,12 @@ fn edit_enter_puts_the_text_in_the_editor_and_marks_the_document(cx: &mut TestAp
     assert_eq!(
         label_key(&bar, "file-reader.toolbar.back"),
         Some("file-reader-back-editing.tooltip")
+    );
+    // The grey Back says why in its tooltip.
+    let back = find_node(&bar, "file-reader.toolbar.back").unwrap();
+    assert_eq!(
+        attr(back, "tooltip"),
+        Some(Strings::of(Locale::En).get(keys::file_reader::BACK_EDITING_TOOLTIP))
     );
     assert!(!disabled(&bar, "file-reader.toolbar.done"));
     assert!(disabled(&bar, "file-reader.toolbar.save"));
