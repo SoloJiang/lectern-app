@@ -4,6 +4,7 @@
 //! window.
 
 mod edit;
+mod fast_row;
 mod files;
 mod focus;
 mod history;

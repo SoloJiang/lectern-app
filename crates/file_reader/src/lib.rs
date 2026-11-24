@@ -17,6 +17,7 @@
 pub mod actions;
 mod diag;
 mod edit;
+mod fast_row;
 mod files;
 mod focus;
 mod history;
