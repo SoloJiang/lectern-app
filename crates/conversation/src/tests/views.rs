@@ -74,7 +74,7 @@ fn history_renders_in_order_with_loading_phases(cx: &mut TestAppContext) {
     assert_eq!(phase(vcx), LoadingPhase::Progress);
     let shown = tree(vcx, all);
     assert!(
-        shown.contains("conversation.empty Text label=[conversation-loading]"),
+        shown.contains("conversation.loading Group label=[conversation-loading] phase=progress"),
         "{shown}"
     );
 
