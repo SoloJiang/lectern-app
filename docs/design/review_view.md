@@ -1017,6 +1017,10 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - 在编辑框里连续打字，文本框长到 8 行（`lines(2, 8)`）时，下缘可能再次低于浮条：这次只处理打开的时刻，没有在打字时重新滚动。
   - 深色外观、减弱动态效果下的样子。
 
+### 悬停说明（#283 的 UX 审计）
+
+`src/tests` 里已有的测试加了对探针节点属性 `tooltip` 的断言（测试用 en；`Args::str` 的参数带方向隔离符）：浮条的 Looks Good、Copy Again（`count` 为 1 的单数）、Copy as Prompt、Send（剪贴板途径有提示，会话途径没有）、Discard 没有提示（`the_bar_follows_the_notes_state`）；行尾的 +（`the_plus_shows_on_the_row_under_the_pointer`）；拖选后的 Add Note（`range_drag_sets_a_range_and_shows_add_note`，`2–4` 行，与编辑框的 Lines 2–4 是同一个范围）；Analyze 在 `Unavailable` 时有原因的提示、`Idle` 时没有（`analyze_commands_follow_the_state`、`the_analysis_row_shows_each_state`）。没有验证：窗口里的外观与延迟手感（`ui` 的 `Button::tooltip` 也还没有在窗口里检查）。
+
 ## 与设计的差异
 
 ### 编辑框在浮条上方（#380）
@@ -1036,10 +1040,31 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - **Esc 在按下期间先结束这次按下**（然后才是范围、选中项），设计的 Esc 一行没有写按下。
 - **行尾的 + 在任何按下期间都不画，**不只是拖动期间：按下时还不知道是点击还是拖选，松开后选中的行照常出现 +。
 - **Add Note 的点击直接调 `add_note_at_selection`，不经 `window.dispatch_action`；**效果与 C 相同（有范围时锚在范围上），不依赖焦点在哪里。按钮淡入用 `HOVER_IN`，动画的 ID 由松开那一行的行号组成（同一行上连续两次范围不重播）。
-- **没有悬停说明。** `review-note-add-range.tooltip` 在 .ftl 里，`ui::Button` 没有接口，同第 4 步的几个 `.tooltip`。
+- **悬停说明：**`review-note-add-range.tooltip` 已接上（`Button::tooltip`），见「悬停说明（#283 的 UX 审计）」。
 - **编辑框的展开动画（`EXPAND_HEIGHT`、`EXPAND_FADE`）仍没有：**第 4 步就没有做，这一步没有补，编辑框照旧是整表重建后的下一帧出现。
 - **多出的探针节点：**`review.note[<id>].lines`、`review.note-editor.lines`（`Text`，`Label::key` 是 `review-note-lines`），测试靠它们看到 Lines n–m；摘录的画法拆成纯函数 `render_notes::excerpt_lines`（`ExcerptLine::Gap` / `Line { own }`），gap 和第一行的颜色由单元测试覆盖，摘录的行本身不是探针节点。
 - **范围的 `lines` 在日志里是范围的行数（`last - line + 1`）；**`cancelled` 记按下时已有的范围的行数，没有时为 0。
+
+### 悬停说明（#283 的 UX 审计）
+
+`ui::Button::tooltip`（[ui 设计](ui.md)）已经有了，本 crate 把 .ftl 里已有的 `.tooltip` 属性接到对应的按钮上，没有加新字符串。提示的文字同时是该按钮探针节点的属性 `tooltip`。
+
+| 按钮（探针节点） | 键 | 说明 |
+|---|---|---|
+| 浮条的 Looks Good（`review.bar.looks-good`） | `review-looks-good.tooltip` | 置灰（没有文件）时也显示 |
+| 浮条的 Copy as Prompt（`review.bar.copy`，会话途径失败后的备用按钮） | `review-copy-prompt.tooltip` | |
+| 浮条的 Send（`review.bar.send`） | `review-copy-prompt.tooltip` | 只在第一条途径是剪贴板时（标签就是 Copy as Prompt）；会话途径没有提示 |
+| 浮条的 Copy Again（`review.bar.copy-again`） | `review-notes-copy-again.tooltip`（`count` 是最近一批里还在的意见数） | |
+| 行尾的 +（`….add-note`） | `review-note-add-here.tooltip` | |
+| 拖选之后的 Add Note（`review.range.add-note`） | `review-note-add-range.tooltip`（`first`、`last` 是 1 起的行号，同 `review-note-lines`） | |
+| 简报的 Analyze（`review.brief.analyze`），`Unavailable(reason)` 时 | `review-analyze-unavailable` | 原因原样；`reason` 为空时没有提示（快照到达之前视图自己放的占位值，`model.rs` 的 `Arc::from("")`；领域层在 #66 之前给的原因是 `"unavailable"`，提示照原样显示） |
+
+没有接的：
+
+- 圆形勾选（`review-mark-seen.tooltip`、`review-mark-unseen.tooltip`）：`ui::CircleCheck` 没有 `tooltip` 的接口，本 crate 不改 `ui`；要等 `ui` 给它加。
+- `review-refresh.tooltip`：Refresh 是 `app` 的 View 菜单项，不在本 crate。
+- 工具栏的 Mark Reviewed、Open File、Cancel 等：没有 `.tooltip` 键（`review-open-file` 的已在第 4 步去掉），设计也没有要求。
+- 键盘用户看不到提示（见 [ui 设计](ui.md)「`Button::tooltip`」的已知限制）。
 
 ### 工具栏的键提示与意见的入口（`Refs #22`）
 
@@ -1067,7 +1092,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - **编辑框的打开和关闭整表重建（`rebuild_in_place`，O(项数)），不用 `ListState::splice`。** `Prepared` 和行离开范围时，`note_file` 为 Some（有意见或编辑框）的 diff 用 `rows_items_with` / `placeholder_items` 带上意见再 `replace_segment`；没有意见时路径不变。`known_lines` 不数意见项。
 - **键绑定的谓词是 `(Content > review) && !Input`，不是 `Content > review`。** gpui 在焦点路径的每个深度上都试绑定，所以焦点在编辑框里时 `Content > review` 仍然匹配，J、K、V、C、空格会被屏幕拿走，意见里打不出这几个字符（写测试时发现）。`>` 比 `&&` 弱，括号不能省。`tests/plugin.rs` 里的断言随之改了。副作用：编辑框开着时在编辑框里按 C 是打字，设计里「已经有一个编辑框开着时按 C：存草稿、换到新锚点」键盘上到不了，改成 Esc 之后再 C，或点另一行再点它的 +（`escape_in_the_editor_keeps_a_draft` 里换锚点那一步由测试把焦点设回屏幕）。
 - **行尾的 + 在选中的行和指针下的行出现。** 第 4 步只做了选中（`Button` 没有悬停时才出现的接口）；现在行的 `on_hover` 把行的键放进 `hovered_row`，该行有 + 才画。没有用 `group_hover` 加透明度：那样每行都有一个看不见的按钮，探针和辅助功能树里每行多一个 `add-note`。代价是指针过每一行边界时屏幕重画一次（列表只画可见的项）。选中 hunk 时第一行画选中样式，没有 +。+ 是 `ButtonSize::Small` 的图标按钮。
-- **没有悬停说明。** `review-note-add-here.tooltip`、`review-notes-copy-again.tooltip`、`review-copy-prompt.tooltip` 已在 .ftl 里，没有调用方（`ui::Button` 没有悬停说明的接口）。
+- **悬停说明：**`review-note-add-here.tooltip`、`review-notes-copy-again.tooltip`、`review-copy-prompt.tooltip` 已接上（`Button::tooltip`），见「悬停说明（#283 的 UX 审计）」。
 - **`ui::Button::attr`（新，`docs/design/ui.md` 已补）：** 探针节点要带属性（`review.bar.send` 的 `route`、`review.bar.copy-again` 的 `batch`）。
 - **探针：** 节点 ID 与其他节点同一写法：`review.note.item[<16 位十六进制>]`、`….edit`、`….delete`（设计表写 `review.note[<id>]`）；加了 `review.note-editor.too-long`（超过上限时的 `review-note-too-long`）；`review.bar.comments` 的 `sending` 是 bool。
 - **浮条：** `routes` 为空时发送按钮置灰且没有 `route` 属性，标签按 agent 名 / `review-send`；`FolderProject` 时浮条仍只有意见数：这个屏幕里没有可锚定的行（`review` 的 `folder_round` 给叙事的 `step_files` 和 `command_files` 都是空的，编辑和命令都成了 `Tool` 项（`engine/narrative.rs`），没有 `Step`、`files` 为空，也就没有 diff 行和 blob OID），C 和 Add Note 什么也不做，永远没有待发送的意见，所以再次复制、放弃、Looks Good、Copy as Prompt 和发送都不出现（`folder_project_cannot_anchor_a_note_on_a_tool_call` 对每一项按 C 验证）。`review` 的 `AddNote` 在文件夹项目里是收的（意见只在内存里，要调用方给摘录），但本屏幕没有路径发出它（视图的 `AddNote` 不带摘录，文件夹项目里领域层会忽略；除 `bench` 外没有别的发送方）；以后若给 `Tool` 行加锚点，浮条要同时改。快照夹具带两条途径（`terminal` 会话途径、`clipboard`），所以 `review_tree_session`、`review_tree_groups` 的发送按钮多了 `route=session`。
@@ -1151,7 +1176,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - **规则分组视图的组标题**：「界面」的键表里没有 Code / Tests / Config / Deps / Docs 的名字，所以组之间只有一条分隔线，第一个组上方是 `review-files-changed`（总文件数）。要显示组名需要新的 Fluent 键，不在本 PR 范围。
 - **多轮归因的连接**：设计写「多轮用顿号连接」；`i18n` 没有连接词的消息，所以每一轮一个标签（`review-hunk-turn`），并排显示。`FileOnly` 的文件把轮次标签放在步标题 / 文件标题下，与表一致。
 - **探针节点的 ID 按 `ui::semantic::NodeId` 的形式**：带业务键的节点写成 `视图.区域.item[键]`，设计表里的 `review.step[<id>]` 是 `review.step.item[<id>]`，`.check`、`.prompt`、`.hunk.item[…]`、`.row.item[…]`、`.fold.item[…]`、`.placeholder` 是子节点；文本项是 `review.turn.item[<会话>:<序号>].text.item[<位置>]`。Progress 行的节点由 `ui::Row` 声明（`review.progress.item[<路径>]`，`ListItem`、`selected`），它不接受属性，所以 `seen`、`group`、`noise` 放在外面一层的 `review.progress-file.item[<路径>]`（`Group`）上。`Role::DiffHunk` 的节点带 `selected`；`DiffLine` 的 `selected` 同。`review.diff[…]`（`Role::Diff`，`prepared`、`highlighted` 属性）随第 2 步，第 1 步没有。
-- **Analyze 行只显示状态**：`Unavailable` / `Idle` 是置灰的 Analyze 按钮，`Running`、`Done`、`Failed` 是说明文字；触发、取消、重新分析的按钮随第 2 步（「验收」把 Analyze 命令放在第 2 步），所以没有 `review::Analyze` / `CancelAnalyze` 两个 Action。`Unavailable` 的原因（设计：悬停显示）不显示：`ui` 没有提示气泡的原语（`Hint` 是短暂的提示），原因只在 `Analyze` 的探针节点之外不可见；`.tooltip` 属性的几条键（Looks good、Refresh、勾选）同理不用。
+- **Analyze 行只显示状态**：`Unavailable` / `Idle` 是置灰的 Analyze 按钮，`Running`、`Done`、`Failed` 是说明文字；触发、取消、重新分析的按钮随第 2 步（「验收」把 Analyze 命令放在第 2 步），所以没有 `review::Analyze` / `CancelAnalyze` 两个 Action。`Unavailable` 的原因（设计：悬停显示）和 `.tooltip` 属性的几条键（Looks good）当时没有接口，现在已接上（`Button::tooltip`），见「悬停说明（#283 的 UX 审计）」；Refresh、勾选仍没有。
 - **简报条目的 `line`**：设计写「滚到 `Final` 行里 `(side, line)` 对应的 `Row`」，而会话审阅的叙事只显示每一步的行（「叙事列表的项」），`Final` 的行只在规则分组视图里出现。所以规则分组视图里滚到那一行并选中（行还没准备好时等 `Prepared`），会话审阅里落在这个文件的第一步；`line` 在会话审阅里只决定不了行，条目的 `line` 属性仍在探针节点上。
 - **折叠的早先轮次里的文件**：Progress 的行、简报条目和子 agent 行跳向折叠的早先轮次里的内容时，先展开（`review::ToggleEarlierTurns` 的效果）再跳，与噪声文件一样。
 - **`review.narrative` 节点**：`Role::List`，属性 `items`（项数）、`visible`（可见范围，`起..止`）、`mode`（第 1 步总是 `unified`）；它包着整个列表，所以叙事里的节点在语义树里是它的子节点。

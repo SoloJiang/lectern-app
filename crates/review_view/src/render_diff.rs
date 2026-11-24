@@ -305,6 +305,7 @@ impl ReviewModel {
                             Icon::Plus,
                             Text::key(strings, keys::review::NOTE_ADD_HERE),
                         )
+                        .tooltip(Text::key(strings, keys::review::NOTE_ADD_HERE_TOOLTIP))
                         .size(ButtonSize::Small)
                         .on_click(move |window, cx| {
                             let _ = weak.update(cx, |model, cx| {
@@ -375,6 +376,13 @@ impl ReviewModel {
             node.clone(),
             Text::key(strings, keys::review::NOTE_ADD_RANGE),
         )
+        .tooltip(Text::fmt(
+            strings,
+            keys::review::NOTE_ADD_RANGE_TOOLTIP,
+            &Args::new()
+                .num("first", line.saturating_add(1))
+                .num("last", last.saturating_add(1)),
+        ))
         .kind(ButtonKind::Secondary)
         .size(ButtonSize::Small)
         .attr(

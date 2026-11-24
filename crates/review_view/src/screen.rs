@@ -505,13 +505,18 @@ impl ReviewScreen {
             shown,
         ));
         if !folder {
-            if let Some((batch, _)) = copy_again {
+            if let Some((batch, count)) = copy_again {
                 let weak = self.model.downgrade();
                 capsule = capsule.child(
                     Button::new(
                         bar.child("copy-again"),
                         Text::key(strings, keys::review::NOTES_COPY_AGAIN),
                     )
+                    .tooltip(Text::fmt(
+                        strings,
+                        keys::review::NOTES_COPY_AGAIN_TOOLTIP,
+                        &Args::new().num("count", count),
+                    ))
                     .kind(ButtonKind::Plain)
                     .size(ButtonSize::Regular)
                     .pill()
@@ -549,6 +554,7 @@ impl ReviewScreen {
                         bar.child("looks-good"),
                         Text::key(strings, keys::review::LOOKS_GOOD),
                     )
+                    .tooltip(Text::key(strings, keys::review::LOOKS_GOOD_TOOLTIP))
                     .kind(ButtonKind::Secondary)
                     .size(ButtonSize::Regular)
                     .pill()
@@ -575,6 +581,7 @@ impl ReviewScreen {
                         bar.child("copy"),
                         Text::key(strings, keys::review::COPY_PROMPT),
                     )
+                    .tooltip(Text::key(strings, keys::review::COPY_PROMPT_TOOLTIP))
                     .kind(ButtonKind::Plain)
                     .size(ButtonSize::Regular)
                     .pill()
@@ -604,6 +611,11 @@ impl ReviewScreen {
                     .on_click(|window, cx| {
                         window.dispatch_action(Box::new(SendNotes), cx);
                     });
+            if route == Some(RouteKind::Clipboard) {
+                // The label of this route is Copy as Prompt: it says what
+                // Send will do.
+                button = button.tooltip(Text::key(strings, keys::review::COPY_PROMPT_TOOLTIP));
+            }
             if let Some(route) = route {
                 button = button.attr(
                     "route",

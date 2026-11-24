@@ -5,7 +5,7 @@ expression: text
 review.narrative List items=19 visible=0..19 mode=unified
   review.header Group <review-title-untitled> "Untitled session" files=1 added=0 removed=0 turns=1
   review.brief Group items=1 omitted=0 pending=0 analysis=unavailable
-    review.brief.analyze Button <review-analyze-with> "Analyze with \u{2068}Claude Code\u{2069}" [disabled]
+    review.brief.analyze Button <review-analyze-with> "Analyze with \u{2068}Claude Code\u{2069}" [disabled] tooltip=Analyze isn't available: ⁨not yet⁩
     review.brief.item[sensitive-ci:src/file_000.rs] ListItem <review-brief-sensitive-ci> "\u{2068}src/file_000.rs\u{2069} runs in CI" critical=true
   review.turn.item[0:1] Group <review-turn> "Turn 1" [expanded=true] after_last_seen=true running=false
   review.turn.item[0:1].prompt Text "Make the change."
@@ -27,7 +27,7 @@ review.narrative List items=19 visible=0..19 mode=unified
     review.note.item[0000000000000001].edit Button <review-note-edit> "Edit"
     review.note.item[0000000000000001].delete Button <review-note-delete> "Delete"
   review.diff.item[step:0].row.item[2:2] DiffLine [selected] kind=context drifted=false
-    review.diff.item[step:0].row.item[2:2].add-note Button <review-note-add-here> "Add Note"
+    review.diff.item[step:0].row.item[2:2].add-note Button <review-note-add-here> "Add Note" tooltip=Add a review note (C)
   review.note-editor Group target=new side=new line=2 too_long=false
     review.note-editor.text TextField [focused]
     review.note-editor.cancel Button <review-cancel> "Cancel"
@@ -40,8 +40,8 @@ review.narrative List items=19 visible=0..19 mode=unified
     review.note.item[0000000000000004].delete Button <review-note-delete> "Delete"
 review.bar Group
   review.bar.comments Text <review-notes-not-sent> "Not sent: \u{2068}no answer in 10 seconds\u{2069}" pending=3 sending=false
-  review.bar.copy-again Button <review-notes-copy-again> "Copy Again" batch=0000000000000001
+  review.bar.copy-again Button <review-notes-copy-again> "Copy Again" batch=0000000000000001 tooltip=Copy the 1 review note you sent last, with the same marker
   review.bar.discard Button <review-notes-discard> "Discard"
-  review.bar.looks-good Button <review-looks-good> "Looks Good"
-  review.bar.copy Button <review-copy-prompt> "Copy as Prompt"
+  review.bar.looks-good Button <review-looks-good> "Looks Good" tooltip=Mark every file as reviewed
+  review.bar.copy Button <review-copy-prompt> "Copy as Prompt" tooltip=Copy the review notes as a prompt, then paste it into the session
   review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" route=session
