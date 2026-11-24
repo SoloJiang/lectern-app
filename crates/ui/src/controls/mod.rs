@@ -28,6 +28,7 @@ mod progress;
 mod segmented;
 mod sidebar_row;
 mod text_area;
+mod tooltip;
 
 pub use action_card::ActionCard;
 pub use agent_dot::{Agent, AgentDot};

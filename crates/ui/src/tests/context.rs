@@ -202,7 +202,7 @@ impl Render for CanaryControls {
         let text = || Text::verbatim(Arc::<str>::from(canary));
         let list = NodeId::new("canary", "list", None);
         div()
-            .child(Button::new(list.child("button"), text()))
+            .child(Button::new(list.child("button"), text()).tooltip(text()))
             // A node of a view's own: the canary as a business key, in the
             // label and in an attribute.
             .child(semantic(

@@ -12,10 +12,10 @@
 - 只用系统字体、系统语义色和系统控件；浅色与深色由系统外观决定。
 - 颜色值只出现在 `src/palette/builtin.rs`（内置表、agent 标识色、强调色上的文字色）。其他文件不写 `hsla(`、`rgb(`、`rgba(` 和十六进制颜色，验收用 `rg` 检查（设计文档「验收」）。
 - 首帧之前只有 `init`：读减弱动态效果、登记 `platform` 的通知、用内置表建 `Palette`；系统色在 `ready`（首帧之后）才读（[platform 设计「系统外观」](../../docs/design/platform.md#系统外观)）。不做 IO、不建线程。
-- 动画时长与曲线见[交互规范「动效」](../../docs/design/interaction.md#动效)，在 `motion.rs` 里定义一次，视图不自定义；本 crate 其他文件也不写 `Duration::from_millis`（验收用 `rg` 检查）。控件用到的加载阈值与提示时长（`LOADING_SKELETON_AT`、`LOADING_PROGRESS_AT`、`HINT_DURATION`）也在 `motion.rs`。
+- 动画时长与曲线见[交互规范「动效」](../../docs/design/interaction.md#动效)，在 `motion.rs` 里定义一次，视图不自定义；本 crate 其他文件也不写 `Duration::from_millis`（验收用 `rg` 检查）。控件用到的加载阈值与提示时长（`LOADING_SKELETON_AT`、`LOADING_PROGRESS_AT`、`HINT_DURATION`、悬停提示的延迟 `TOOLTIP_DELAY`）也在 `motion.rs`。
 - 弹出的菜单是系统菜单（gpui-component 的 `native_menu::NativeMenu`），不用它自己画的 `PopupMenu` / `ContextMenu`；菜单项不是探针节点，选中项经 `Window::dispatch_action` 派发。
 - 控件只接受 `Text`，每个 render 先 `require_ready`（`ready` 之前 panic，是 `app` 的装配错误）；颜色从 `Palette` 取，悬停 / 按下只做明度偏移或 `label` 的淡色，不写新颜色值。不包装 gpui-component 的 `Skeleton`、`Progress`、`ProgressCircle`（自带关不掉的动画），自绘；只包装它的 `Button`、`Icon`。
-- 跨帧的控件状态（`Row` 的悬停过渡）放在 GPUI 的 keyed element state（`window.use_keyed_state`），不放在视图里，也不建 Entity。
+- 跨帧的控件状态（`Row` 的悬停过渡）放在 GPUI 的 keyed element state（`window.use_keyed_state`），不放在视图里，也不建 Entity。唯一的例外是 `tooltip.rs` 的 `TooltipView`：GPUI 的提示接口要一个 `AnyView`，它只在提示到点时建、收起时 drop。
 - 减弱动态效果由 `motion::reduced` 和 `Motion::effective` 处理（位移改为淡入淡出、时长减半）；不设置 GPUI 自己的 `App::reduce_motion` 标志，它会让 `with_animation` 直接画终态。
 - `Transition::tick` 只在视图的 render 里调用：它请求下一帧，GPUI 只允许正在渲染的视图这样做。
 - gpui-component 的 API 只在本 crate 和视图层使用；升级要和 GPUI 一起，先确认（[ADR 0016](../../docs/adr/0016.md)）。
@@ -34,7 +34,7 @@
 | `terminal.rs` | `TerminalColors`、`terminal_colors`（终端的默认色与 ANSI 16 色，[terminal_view 设计](../../docs/design/terminal_view.md#对其他-crate-的要求)） |
 | `contrib.rs` | `workspace` 贡献的载荷类型与 `into_payload` |
 | `icon.rs` | `Icon` 枚举、Lucide 文件名的对应、`IconAssets`（包着 `icon_assets!` 生成的来源，只嵌入这 16 个 SVG 和应用图标 `assets/app-icon.svg`） |
-| `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`，第二批的 `ActionCard`、`menu.rs`（`MenuItem`、`show_menu`、`PopUpButton`、行的右键菜单）、`SidebarRow`、`Capsule`、`Disclosure`、`AppIcon`（整块是一个 SVG，颜色在文件里，不在 Rust 里），多行文本框 `TextArea` 与 `TextAreaState`（包装 gpui-component 的 `Textarea`；⌘↩ 与 Esc 在外框上以 `capture_action` 处理，见设计文档「多行文本框」），以及共用的悬停过渡 `hover.rs`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
+| `controls/` | 共用控件，每个一个文件：`Button`（含只画图标的 `icon_only`，和 `tooltip` 的悬停提示视图 `tooltip.rs`：GPUI 自己的提示，不用 gpui-component 的，提示文字不进日志）、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList` 与 `Row`（卡片行与紧凑行）、`loading_phase` 与 `Skeleton`、`Expander`、`Hint`，第二批的 `ActionCard`、`menu.rs`（`MenuItem`、`show_menu`、`PopUpButton`、行的右键菜单）、`SidebarRow`、`Capsule`、`Disclosure`、`AppIcon`（整块是一个 SVG，颜色在文件里，不在 Rust 里），多行文本框 `TextArea` 与 `TextAreaState`（包装 gpui-component 的 `Textarea`；⌘↩ 与 Esc 在外框上以 `capture_action` 处理，见设计文档「多行文本框」），以及共用的悬停过渡 `hover.rs`；`mod.rs` 的 `require_ready` 是每个 render 开头的断言 |
 | `semantic.rs` | `NodeId`、`Role`、`Label`、`State`、`Semantic`、`Record`、`Recorder`、包装元素 `semantic(...)` / `semantic_interactive(...)`（`SemanticElement`）、无障碍属性的映射，以及控件声明节点的接缝 `declare` |
 | `state.rs` | 唯一的 GPUI 全局 `UiState` |
 | `testing.rs` | `test-support` feature：`simulate_appearance_change`、`simulate_platform_change`、`mono_resolutions` |
