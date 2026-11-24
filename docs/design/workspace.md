@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。里程碑与帧记录转交给 bench 的探针（前置条件 F）：里程碑随 bench 第 5 步，帧记录（`record_frames` 经 `platform::frame::record`、`FrameRecord` 带 `Result`、`app` 转交 `Probe::frames`，`Refs #393`）已实现，见「实际验证」「与设计的差异」的「帧记录（#393）」，macOS CI 的帧基准在真实窗口里记录成功（CI 运行 45355728393，见 bench 设计「实际验证」）。`Contributions::current_route`（conversation 设计的前置条件 A，`Refs #23`）已实现，见「实际验证」。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。工具栏闭包改在 `enter_frame()` 的准入内调用，画帧不再让 kernel 变忙（[ADR 0066](../adr/0066.md)，[#403](https://github.com/SoloJiang/lectern-app/issues/403)）。工具栏的返回与检查器图标按钮已加悬停提示（`Button::tooltip`，文字复用辅助名的键；窗口里的外观没有检查，见「实际验证」）。产品负责人 2026-11-24 的决定（⌘[ 与返回按钮只退一层、Esc 先把检查器从 Conversation 切回 Files，见「区域与三层」的状态表，[#422](https://github.com/SoloJiang/lectern-app/issues/422)）已写进设计，尚未实现。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。里程碑与帧记录转交给 bench 的探针（前置条件 F）：里程碑随 bench 第 5 步，帧记录（`record_frames` 经 `platform::frame::record`、`FrameRecord` 带 `Result`、`app` 转交 `Probe::frames`，`Refs #393`）已实现，见「实际验证」「与设计的差异」的「帧记录（#393）」，macOS CI 的帧基准在真实窗口里记录成功（CI 运行 45355728393，见 bench 设计「实际验证」）。`Contributions::current_route`（conversation 设计的前置条件 A，`Refs #23`）已实现，见「实际验证」。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。工具栏闭包改在 `enter_frame()` 的准入内调用，画帧不再让 kernel 变忙（[ADR 0066](../adr/0066.md)，[#403](https://github.com/SoloJiang/lectern-app/issues/403)）。工具栏的返回与检查器图标按钮已加悬停提示（`Button::tooltip`，文字复用辅助名的键；窗口里的外观没有检查，见「实际验证」）。产品负责人 2026-11-24 的决定（⌘[ 与返回按钮只退一层、Esc 先把检查器从 Conversation 切回 Files，见「区域与三层」的状态表，[#422](https://github.com/SoloJiang/lectern-app/issues/422)）已实现（`workspace::Back` 与工具栏的返回按钮是 `Pop`，`Escape` 加了 Conversation 页一步，`Contributions::inspector_tab`，`workspace::CloseProject`，`Refs #422`），见「实际验证」「与设计的差异」。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -81,7 +81,7 @@ pub trait Contributions: Send + Sync {
     fn current_route(&self, window: WindowId) -> Option<Route>;
 
     /// 检查器显示着时它的当前分页名（如 `files`、`conversation`），隐藏或当前屏幕没有检查器时为 `None`。
-    /// 取锁复制，不阻塞，任何线程；值与 `current_route` 同样在状态机改变检查器时记下。`review_view` 的 Esc 用它把 Conversation 页
+    /// 取锁复制，不阻塞，任何线程；值由根视图在状态机处理完一批输入之后、发出这批事件之前记下（与 `current_route` 一样先写后发，见「与设计的差异」「返回与 Esc 的产品决定」），`WindowClosed` 时删除。`review_view` 的 Esc 用它把 Conversation 页
     /// 让给本 crate 的 `Escape`（2026-11-24 的决定，[交互规范「返回与 Esc」](interaction.md#返回与-esc)）。
     fn inspector_tab(&self, window: WindowId) -> Option<Name>;
 
@@ -420,7 +420,7 @@ struct Nav {
 
 当前屏幕是栈顶，栈空时是基底（`Welcome` → `screens::WELCOME`，`Project` → `screens::PROJECT_HOME`）。各区域的显示由当前屏幕的 `ScreenLayout` 和 `Nav` 决定：侧栏 = `layout.sidebar == Shown`；检查器 = `layout.inspector && nav.inspector`；面板、覆盖层只看 `nav`；浮条 = `layout.floating_bar`。内容区是否限制在阅读栏里 = 当前屏幕在 `nav.reading_column` 里的值，没有时是 `layout.reading_column`。
 
-**检查器页的范围。** `InspectorTab::screen` 为 `None` 的页在每个 `layout.inspector` 为 true 的屏幕上显示。`Some(s)` 的页只在当前屏幕是 `s` 时显示。当前屏幕有自己的页（`screen == Some(当前屏幕)`）时，检查器只显示这些页，不显示 `None` 的页；没有时只显示 `None` 的页。`nav.inspector_tab` 不在可见的页里时，检查器显示第一个可见的页（按 `(order, id)`），`nav.inspector_tab` 本身不变，所以弹回原屏幕后原来选的页又出现。这是根视图的显示规则，状态机不查页。
+**检查器页的范围。** `InspectorTab::screen` 为 `None` 的页在每个 `layout.inspector` 为 true 的屏幕上显示。`Some(s)` 的页只在当前屏幕是 `s` 时显示。当前屏幕有自己的页（`screen == Some(当前屏幕)`）时，检查器只显示这些页，不显示 `None` 的页；没有时只显示 `None` 的页。`nav.inspector_tab` 不在可见的页里时，检查器显示第一个可见的页（按 `(order, id)`），`nav.inspector_tab` 本身不变，所以弹回原屏幕后原来选的页又出现。这是显示规则，由 `Registry::inspector_tabs(屏幕)` 给出，根视图画检查器和状态机的 `Escape` 用同一份结果（状态机经 `Env::inspector_tabs` 取）；状态机只在 `Escape` 里读它，不改页的范围。
 
 | 当前状态 | 输入 | 守卫 | 结果 |
 |---|---|---|---|
@@ -595,6 +595,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`inspector_tab_scoped_to_its_screen`（`screen: Some(s)` 的页只在 `s` 上显示；`s` 有自己的页时不显示 `None` 的页；选中的页不可见时显示第一个可见的页，`nav.inspector_tab` 不变，弹回后恢复）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`；测试平台的窗口没有 `CAMetalLayer`，`platform::frame::record` 返回错误，交回的 `result` 是这个错误）、`record_frames_ends_the_one_in_progress_and_settles_without_animation`（新记录开始前先把进行中的那次交回；`AnimationsSettled` 在下一帧回调里没有动画时结束）。成功的记录（有 `CAMetalLayer` 和 `bench-hooks`）没有单元测试：`FrameRecorder` 在没有测量构建的 Metal 窗口时造不出来，它由 `app/scroll_frames` 在 macOS CI 里检验。
 - `frames_leave_the_kernel_quiescent`（`view.rs`，`#[gpui::test]`）：激活并静止之后只画 3 帧（`UiRig::draw`：`Window::refresh` 后 `run_until_parked`），不做其他事，`Kernel::quiescent_epoch()` 不变；测试贡献方的工具栏闭包记录调用次数，断言它确实在这几帧里被调用（[ADR 0066](../adr/0066.md)）。
 - `current_route_follows_the_screen`（`view.rs`，`#[gpui::test]`）：激活之后、压入、弹出、打开与关闭项目、关闭窗口，`Contributions::current_route(WindowId(0))` 每一步都等于状态机的当前屏幕（即最近一次 `ScreenChanged::to`），窗口关闭后和不存在的窗口为 `None`。`services` 的 `workspace_contributions_is_a_shared_trait_object` 另外调用一次 `current_route`。
+- 2026-11-24 的决定（`Refs #422`）：`nav.rs` 的 `escape_switches_the_conversation_page_to_files_then_pops`（面板先于 Conversation 页关闭、页切回第一页而检查器与屏幕不变、第二次 Esc 才弹出屏幕）、`escape_leaves_the_conversation_page_alone_when_it_is_not_shown`（检查器隐藏、已在第一页、Conversation 是唯一的页时 Esc 直接返回）；`view.rs` 的 `back_pops_one_screen_at_a_time`（两层栈上 ⌘[ 与 `Back` 各退一层）、`escape_takes_the_inspector_from_conversation_to_files_first`、`inspector_tab_follows_the_page_on_show`（`Contributions::inspector_tab` 跟随选中的页、屏幕自己的页、隐藏、没有检查器的屏幕、Esc 切页、窗口关闭）、`close_project_action_returns_to_welcome`（Welcome 上 `is_action_available` 为假且无事发生；有项目时为真，守卫拒绝则不动，通过后 `Projects::close`，`Closed` 之后回到 Welcome 且又不可用）。
 - 工具栏图标按钮的悬停提示（`src/tests/view.rs`，`#[gpui::test]`）：`toolbar_icon_buttons_name_their_action_in_a_tooltip`：审阅屏幕上，用 `ui::semantic::Recorder` 记一帧（`UiRig::record`），返回与检查器两个节点的 `tooltip` 属性等于各自的辅助名（`Back` / `Inspector`），辅助名不变；切到 zh-CN 再记一帧，是 `返回` / `检查器`。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
@@ -672,6 +673,15 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 空闲内存：空窗口的 `phys_footprint` 与 app 设计「实际验证」的 40 MB 相比增加不超过 1 MB。
 
 ## 实际验证
+
+### 返回与 Esc 的产品决定（#422）
+
+`workspace::Back` 与工具栏的返回按钮改为 `Pop`；`Escape` 在面板之后、替换侧栏的面板之前加「检查器显示着且当前页是 `conversation` 时选第一页」一步（`Nav::shown_inspector_tab`、`Env::inspector_tabs`、`Registry::inspector_tabs`）；`Contributions::inspector_tab`（`Hub` 持有 `Mutex<BTreeMap<WindowId, Name>>`，根视图在状态机处理完一批输入之后、发出这批事件之前，以及绑定窗口时记下，`WindowClosed` 时删除）；`workspace::CloseProject`（只在有项目时挂在根视图上）。`services` 的 `Contributions` 加 `inspector_tab`，`welcome`、`project_home`、`review_view`、`worktrees`、`conversation`、`file_reader` 的假 `Contributions` 与 `services` 的替身各加一个返回 `None` 的实现；`registry::Payloads` 加 `inspector_tab_screen`，`app` 测试里的 `NoPayloads` 跟着加。在 macOS（arm64）上运行：
+
+- `just check`：退出码 0。
+- `cargo nextest run -p lectern-workspace -p lectern-services`：214 个通过，跳过 0 个（`workspace` 93 个，其中新增 6 个；`services` 121 个）。
+- 新增的测试（上面「测试」）：`escape_switches_the_conversation_page_to_files_then_pops`、`escape_leaves_the_conversation_page_alone_when_it_is_not_shown`、`back_pops_one_screen_at_a_time`、`escape_takes_the_inspector_from_conversation_to_files_first`、`inspector_tab_follows_the_page_on_show`、`close_project_action_returns_to_welcome`；`workspace_contributions_is_a_shared_trait_object` 多调用一次 `inspector_tab`。把 `Back` 改回 `PopToBase`、去掉 `Escape` 的新一步、让 `CloseProject` 的处理对 Welcome 也生效、不记 `inspector_tab`，变异检查（四个改动合在一次运行里：`Back` 改回 `PopToBase`、去掉 `Escape` 的新一步、`CloseProject` 的处理对 Welcome 也挂上、不记 `inspector_tab`）：`escape_switches_the_conversation_page_to_files_then_pops`、`back_pops_one_screen_at_a_time`、`escape_takes_the_inspector_from_conversation_to_files_first`、`inspector_tab_follows_the_page_on_show`、`close_project_action_returns_to_welcome` 失败；`escape_leaves_the_conversation_page_alone_when_it_is_not_shown` 是反向测试（不该切页的情况），变异下仍通过。
+- 没有验证：真实窗口里的 ⌘[、Esc、工具栏返回按钮的点击（`#[gpui::test]` 的测试窗口不画真实的帧；工具栏按钮只改了一行 `Pop`，没有点击它的测试）；File 菜单的 Close Project 项和它的置灰（菜单由 `app` 随后加，这里只验证了 `is_action_available`）；`review_view` 的 Esc 对 `inspector_tab` 的使用（随它自己的 PR）。本机没有打开真实窗口。
 
 ### 帧记录（#393）
 
@@ -786,6 +796,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 没有验证：真实窗口里的提示外观与 1 s 延迟的手感（`ui` 设计「实际验证」同样没有做）。
 
 ## 与设计的差异
+
+### 返回与 Esc 的产品决定（#422）
+
+- **状态机读检查器的页**：设计原来写「状态机不查页」，而 Esc 要知道当前页和第一页。可见页的规则（屏幕自己的页优先）移到 `Registry::inspector_tabs(屏幕)`，根视图和状态机共用，状态机经 `Env::inspector_tabs` 取。`registry::Payloads` 为此加 `inspector_tab_screen(&Payload) -> Option<Name>`，状态机本身没有依赖 GPUI。
+- **`inspector_tab` 由根视图记下**：设计写「状态机改变检查器时记下」。显示的页还取决于登记的页和当前屏幕（选中的页在这个屏幕上不可见时显示第一个可见的页），状态机只知道 `nav.inspector_tab`，所以根视图在状态机处理完一批输入之后、发出这批事件之前（和 `current_route` 一样先写后发，监听 `LayerChanged`、`ScreenChanged` 的插件读到的是事件之后的页）、`bind_window` 时按它画的规则算出显示的页写入 `Hub`；窗口关闭之后（没有 route）写入 `None`。
+- **Esc 在 Conversation 是第一页时直接往下走**：只有一页、或第一页就是 Conversation 时没有可切的页，这一步不吞掉 Esc，继续到下面的层。设计没有写这种情况。
+- **`CONVERSATION_TAB` 移到 `nav`**：状态机要用它，`actions` 重新导出，名字不变。
 
 ### 帧记录（#393）
 

@@ -24,7 +24,7 @@ use lectern_services::workspace::{
 use lectern_ui::contrib::KeyBindings;
 
 use crate::WorkspacePlugin;
-use crate::actions::{Back, CloseWindow, Command, OpenFolder};
+use crate::actions::{Back, CloseProject, CloseWindow, Command, OpenFolder};
 use crate::host::WindowRoot;
 use crate::hub::RecordStop;
 use crate::nav::Base;
@@ -305,6 +305,177 @@ fn escape_and_back_return_to_the_home(cx: &mut TestAppContext) {
     cx.simulate_keystrokes(rig.window, "cmd-[");
     rig.settle(cx);
     assert_eq!(rig.nav(cx).depth(), 0, "⌘[ returns to the home");
+}
+
+/// 2026-11-24: ⌘[ goes back one screen, not to the base. From Worktrees into
+/// a review, the first ⌘[ shows Worktrees again.
+#[gpui::test]
+fn back_pops_one_screen_at_a_time(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let mut screens_and_tabs = standard_screens();
+    screens_and_tabs.push(ui_screen(
+        screens::WORKTREES,
+        review_layout(),
+        Arc::default(),
+    ));
+    let _plugins = rig.contribute(Contributor::staged(screens_and_tabs), cx);
+    rig.open(project_path(), &project(), cx);
+    rig.push(screens::WORKTREES, cx);
+    rig.push(screens::REVIEW, cx);
+    assert_eq!(rig.nav(cx).depth(), 2);
+
+    cx.simulate_keystrokes(rig.window, "cmd-[");
+    rig.settle(cx);
+    let nav = rig.nav(cx);
+    assert_eq!(nav.depth(), 1, "⌘[ pops one level");
+    assert_eq!(nav.current().screen, name(screens::WORKTREES));
+
+    cx.dispatch_action(rig.window, Back);
+    rig.settle(cx);
+    assert_eq!(rig.nav(cx).depth(), 0, "the second Back reaches the home");
+}
+
+/// 2026-11-24: with the inspector on its Conversation page the first Esc
+/// shows Files and keeps the inspector open; the second Esc goes back.
+#[gpui::test]
+fn escape_takes_the_inspector_from_conversation_to_files_first(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let _plugins = rig.contribute(Contributor::staged(standard_screens()), cx);
+    rig.open(project_path(), &project(), cx);
+    rig.push(screens::REVIEW, cx);
+    cx.simulate_keystrokes(rig.window, "cmd-\\");
+    rig.settle(cx);
+    assert_eq!(rig.nav(cx).inspector_tab.as_deref(), Some("conversation"));
+
+    cx.simulate_keystrokes(rig.window, "escape");
+    rig.settle(cx);
+    let nav = rig.nav(cx);
+    assert_eq!(nav.inspector_tab.as_deref(), Some("files"));
+    assert!(nav.inspector, "the inspector stays open");
+    assert_eq!(nav.depth(), 1, "the review stays");
+    assert!(
+        rig.tree(cx)
+            .contains("workspace.inspector [Panel] tab=files"),
+        "{}",
+        rig.tree(cx)
+    );
+
+    cx.simulate_keystrokes(rig.window, "escape");
+    rig.settle(cx);
+    assert_eq!(rig.nav(cx).depth(), 0, "the second Esc pops the review");
+}
+
+/// `Contributions::inspector_tab` follows the page on show: the selection,
+/// the first visible page when the selection is hidden on this screen, and
+/// nothing while the inspector is hidden, the screen has none or the window
+/// is gone.
+#[gpui::test]
+fn inspector_tab_follows_the_page_on_show(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let hub = rig.host.hub().clone();
+    let window = WindowId(0);
+    let mut screens_and_tabs = standard_screens();
+    screens_and_tabs.push(ui_screen(
+        screens::WORKTREES,
+        review_layout(),
+        Arc::default(),
+    ));
+    screens_and_tabs.push(scoped_inspector_tab(
+        "worktree",
+        0,
+        Some(screens::WORKTREES),
+    ));
+    let _plugins = rig.contribute(Contributor::staged(screens_and_tabs), cx);
+    assert_eq!(hub.inspector_tab(window), None, "Welcome has no inspector");
+    rig.open(project_path(), &project(), cx);
+    assert_eq!(hub.inspector_tab(window), None, "the home has none either");
+
+    rig.push(screens::REVIEW, cx);
+    assert_eq!(hub.inspector_tab(window), None, "hidden");
+    rig.dispatch(WorkspaceCommand::SetInspector(true), cx);
+    assert_eq!(hub.inspector_tab(window), Some(name("files")));
+    cx.simulate_keystrokes(rig.window, "cmd-\\");
+    rig.settle(cx);
+    assert_eq!(hub.inspector_tab(window), Some(name("conversation")));
+
+    // Worktrees has a page of its own: that one shows, the selection stays.
+    rig.push(screens::WORKTREES, cx);
+    assert_eq!(hub.inspector_tab(window), Some(name("worktree")));
+    assert_eq!(rig.nav(cx).inspector_tab.as_deref(), Some("conversation"));
+    rig.dispatch(WorkspaceCommand::Pop, cx);
+    assert_eq!(hub.inspector_tab(window), Some(name("conversation")));
+
+    // Esc switches the page, and the hub follows.
+    cx.simulate_keystrokes(rig.window, "escape");
+    rig.settle(cx);
+    assert_eq!(hub.inspector_tab(window), Some(name("files")));
+
+    rig.dispatch(WorkspaceCommand::SetInspector(false), cx);
+    assert_eq!(hub.inspector_tab(window), None);
+    rig.dispatch(WorkspaceCommand::SetInspector(true), cx);
+    assert_eq!(hub.inspector_tab(window), Some(name("files")));
+    assert_eq!(hub.inspector_tab(WindowId(1)), None, "no such window");
+
+    cx.dispatch_action(rig.window, CloseWindow);
+    rig.settle(cx);
+    assert_eq!(hub.inspector_tab(window), None, "a closed window");
+}
+
+/// 2026-11-24: Close Project goes back to Welcome, through the guard. Its
+/// action has a handler only while a project is open, so a menu item for it is
+/// disabled on Welcome.
+#[gpui::test]
+fn close_project_action_returns_to_welcome(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let refusing = FixedGuard::new(false);
+    let guard = refusing.clone();
+    let refuser = rig.contribute(
+        Contributor::staged(vec![Box::new(move |c, t| {
+            c.register_leave_guard(guard.clone(), t)
+        })]),
+        cx,
+    );
+    let _plugins = rig.contribute(Contributor::staged(standard_screens()), cx);
+    let available = |cx: &mut TestAppContext| {
+        rig.window
+            .update(cx, |_, window, cx| {
+                window.is_action_available(&CloseProject, cx)
+            })
+            .expect("the window is open")
+    };
+
+    // Welcome: no handler, nothing happens.
+    rig.draw(cx);
+    assert!(!available(cx));
+    cx.dispatch_action(rig.window, CloseProject);
+    rig.settle(cx);
+    assert!(rig.projects.calls().is_empty());
+
+    rig.open(project_path(), &project(), cx);
+    rig.draw(cx);
+    assert!(available(cx), "a project is open");
+    let calls_before = rig.projects.calls().len();
+
+    // The guard refuses: the project stays.
+    cx.dispatch_action(rig.window, CloseProject);
+    rig.settle(cx);
+    assert_eq!(refusing.asked(), vec![LeaveScope::Project(project())]);
+    assert_eq!(rig.projects.calls().len(), calls_before);
+    assert_eq!(rig.nav(cx).base, Base::Project(project()));
+
+    // Without the guard: `Projects::close`, then `Closed` shows Welcome.
+    refuser.deactivate();
+    rig.settle(cx);
+    cx.dispatch_action(rig.window, CloseProject);
+    rig.settle(cx);
+    assert_eq!(
+        rig.projects.calls().last(),
+        Some(&ProjectCall::Close(project()))
+    );
+    rig.emit(closed(&project()), cx);
+    assert_eq!(rig.nav(cx).base, Base::Welcome);
+    rig.draw(cx);
+    assert!(!available(cx), "Welcome again");
 }
 
 /// `Contributions::current_route` (conversation design「对其他 crate 的要求」A):

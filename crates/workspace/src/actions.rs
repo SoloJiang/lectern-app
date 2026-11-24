@@ -13,8 +13,13 @@ actions!(
         OpenFolder,
         /// ⌘W: `CloseWindow` (through the leave guards).
         CloseWindow,
-        /// ⌘[ when the screen did not handle it: `PopToBase`.
+        /// ⌘[ and the toolbar's back button when the screen did not handle it:
+        /// `Pop`, one screen back.
         Back,
+        /// File ▸ Close Project (no key): `CloseProject`. Only the root view of
+        /// a window with a project handles it, so on Welcome the menu item is
+        /// disabled.
+        CloseProject,
         /// Esc when the screen did not handle it: `Escape`.
         Escape,
         /// ⌥⌘I: `SetInspector(!inspector)`.
@@ -44,7 +49,7 @@ pub const PANEL: &str = "Panel";
 pub const OVERLAY: &str = "Overlay";
 
 /// The inspector tab ⌘\ selects.
-pub const CONVERSATION_TAB: &str = "conversation";
+pub use crate::nav::CONVERSATION_TAB;
 
 /// The bindings `install` adds to the keymap. The keystrokes are GPUI key
 /// names, not interface text.

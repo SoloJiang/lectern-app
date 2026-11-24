@@ -165,6 +165,9 @@ pub struct Hub {
     /// The current screen of each window, as of the last `ScreenChanged`
     /// that went out (`Contributions::current_route`).
     routes: Mutex<BTreeMap<WindowId, Route>>,
+    /// The inspector page on show in each window that shows the inspector
+    /// (`Contributions::inspector_tab`), kept by the root view.
+    inspector_tabs: Mutex<BTreeMap<WindowId, Name>>,
 }
 
 impl Hub {
@@ -174,6 +177,7 @@ impl Hub {
             sender,
             plugin: Mutex::new(Plugin::default()),
             routes: Mutex::new(BTreeMap::new()),
+            inspector_tabs: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -246,6 +250,19 @@ impl Hub {
             .insert(window, route);
     }
 
+    /// Records the inspector page on show in `window` for `inspector_tab`;
+    /// None when the inspector is hidden or the screen has none.
+    pub(crate) fn note_inspector_tab(&self, window: WindowId, tab: Option<Name>) {
+        let mut tabs = self
+            .inspector_tabs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match tab {
+            Some(tab) => tabs.insert(window, tab),
+            None => tabs.remove(&window),
+        };
+    }
+
     /// Emits a `WorkspaceEvent` through the plugin's emitter; nothing before
     /// `started` (no listener can exist yet). `ScreenChanged` and
     /// `WindowClosed` also update the routes `current_route` reads, before
@@ -261,6 +278,7 @@ impl Hub {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(window);
+                self.note_inspector_tab(*window, None);
             }
             _ => {}
         }
@@ -328,6 +346,14 @@ impl Contributions for Hub {
 
     fn current_route(&self, window: WindowId) -> Option<Route> {
         self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&window)
+            .cloned()
+    }
+
+    fn inspector_tab(&self, window: WindowId) -> Option<Name> {
+        self.inspector_tabs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&window)

@@ -84,6 +84,10 @@ impl Payloads for NoPayloads {
     fn share(&self, _: Payload) -> Option<SharedPayload> {
         None
     }
+
+    fn inspector_tab_screen(&self, _: &Payload) -> Option<Name> {
+        None
+    }
 }
 
 #[test]

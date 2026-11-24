@@ -60,6 +60,10 @@ impl Env for Surroundings<'_> {
         self.registry.has(Kind::Overlay, id)
     }
 
+    fn inspector_tabs(&self, screen: &str) -> Vec<Name> {
+        self.registry.inspector_tabs(screen)
+    }
+
     fn guards(&self) -> Vec<GuardId> {
         self.registry
             .guards()

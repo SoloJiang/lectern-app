@@ -532,6 +532,86 @@ fn escape_closes_the_topmost_layer() {
     assert!(out.is_empty(), "nothing left to close");
 }
 
+/// 2026-11-24: the Conversation page is a layer of its own, between the
+/// panel and the sidebar panel. Esc switches it to the first page and keeps
+/// the inspector open; the next Esc goes on to the screen.
+#[test]
+fn escape_switches_the_conversation_page_to_files_then_pops() {
+    let mut env = FakeEnv::standard();
+    env.panels.insert("context".to_owned());
+    env.inspector_tabs = vec!["files".to_owned(), "conversation".to_owned()];
+    let mut nav = on_project(&env);
+    let mut out = Vec::new();
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    nav.dispatch(
+        WorkspaceCommand::SelectInspectorTab(name("conversation")),
+        &env,
+        &mut out,
+    );
+    nav.dispatch(WorkspaceCommand::OpenPanel(name("context")), &env, &mut out);
+    out.clear();
+
+    // The panel is above the Conversation page: it closes first.
+    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
+    assert_eq!(nav.nav().panel, None);
+    assert_eq!(nav.nav().inspector_tab, Some(name("conversation")));
+
+    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
+    assert_eq!(nav.nav().inspector_tab, Some(name("files")));
+    assert!(nav.nav().inspector, "the inspector stays open");
+    assert_eq!(nav.nav().depth(), 1, "the screen stays");
+    assert!(
+        layers(&out)
+            .iter()
+            .all(|(layer, _)| *layer != Layer::Inspector),
+        "no layer change for the page switch"
+    );
+
+    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
+    assert_eq!(nav.nav().depth(), 0, "the second Esc pops the screen");
+    assert!(nav.nav().inspector, "popping does not close the inspector");
+}
+
+#[test]
+fn escape_leaves_the_conversation_page_alone_when_it_is_not_shown() {
+    let mut env = FakeEnv::standard();
+    env.inspector_tabs = vec!["files".to_owned(), "conversation".to_owned()];
+    let mut nav = on_project(&env);
+    let mut out = Vec::new();
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+
+    // Hidden inspector with Conversation selected: Esc pops.
+    nav.dispatch(
+        WorkspaceCommand::SelectInspectorTab(name("conversation")),
+        &env,
+        &mut out,
+    );
+    nav.dispatch(WorkspaceCommand::SetInspector(false), &env, &mut out);
+    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
+    assert_eq!(nav.nav().depth(), 0);
+    assert_eq!(nav.nav().inspector_tab, Some(name("conversation")));
+
+    // The first page is on show (nothing selected): Esc pops.
+    let mut nav = on_project(&env);
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    nav.dispatch(WorkspaceCommand::SetInspector(true), &env, &mut out);
+    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
+    assert_eq!(nav.nav().depth(), 0);
+    assert_eq!(nav.nav().inspector_tab, None);
+
+    // Conversation is the only page: there is nothing to switch to, Esc pops.
+    env.inspector_tabs = vec!["conversation".to_owned()];
+    let mut nav = on_project(&env);
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    nav.dispatch(
+        WorkspaceCommand::SelectInspectorTab(name("conversation")),
+        &env,
+        &mut out,
+    );
+    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
+    assert_eq!(nav.nav().depth(), 0);
+}
+
 #[test]
 fn show_sidebar_panel_needs_a_registered_panel() {
     let mut env = FakeEnv::standard();

@@ -23,6 +23,10 @@ use crate::diag::{command_name, id_text, open_error_kind};
 use crate::effect::{Effect, Notice};
 use crate::state::WindowState;
 
+/// The inspector tab ⌘\ selects (the Conversation page); Esc takes it back
+/// to the first page.
+pub const CONVERSATION_TAB: &str = "conversation";
+
 /// The base screen: Welcome, or the open project's home.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Base {
@@ -71,6 +75,17 @@ impl Nav {
             .iter()
             .find(|(at, _)| *at == depth)
             .map(|(_, value)| *value)
+    }
+
+    /// The inspector tab on show among `tabs` (the visible tabs of the
+    /// current screen, by order): the selected one when it is among them,
+    /// else the first. The selection itself stays as it is, so it shows again
+    /// when its screen comes back.
+    pub fn shown_inspector_tab(&self, tabs: &[Name]) -> Option<Name> {
+        match &self.inspector_tab {
+            Some(tab) if tabs.contains(tab) => Some(tab.clone()),
+            _ => tabs.first().cloned(),
+        }
     }
 
     /// The route of the base screen.
@@ -133,6 +148,8 @@ pub trait Env {
     fn has_sidebar_panel(&self, id: &str) -> bool;
     fn has_panel(&self, id: &str) -> bool;
     fn has_overlay(&self, id: &str) -> bool;
+    /// The inspector tabs shown on a screen, by `(order, id)`.
+    fn inspector_tabs(&self, screen: &str) -> Vec<Name>;
     /// The registered leave guards, in registration order.
     fn guards(&self) -> Vec<GuardId>;
     /// `Projects::open`; None when the service is not available (the
@@ -609,6 +626,10 @@ impl Navigator {
                 } else if self.nav.panel.is_some() {
                     self.done(name);
                     self.close_panel(out);
+                } else if let Some(first) = self.conversation_tab_to_leave(env) {
+                    // The inspector stays open; only its page changes.
+                    self.done(name);
+                    self.nav.inspector_tab = Some(first);
                 } else if self.nav.sidebar_panel.is_some()
                     && self.layout(env).sidebar == Visibility::Shown
                 {
@@ -790,6 +811,18 @@ impl Navigator {
             self.layer_changed(Layer::SidebarPanel(new.clone()), true, out);
             self.nav.sidebar_panel = Some(new);
         }
+    }
+
+    /// The first inspector tab, when the inspector is shown on its
+    /// Conversation page and another page comes first (Esc switches to it).
+    fn conversation_tab_to_leave(&self, env: &dyn Env) -> Option<Name> {
+        if !(self.nav.inspector && self.layout(env).inspector) {
+            return None;
+        }
+        let tabs = env.inspector_tabs(&self.nav.current().screen);
+        let shown = self.nav.shown_inspector_tab(&tabs)?;
+        let first = tabs.first()?;
+        (shown == CONVERSATION_TAB && *first != shown).then(|| first.clone())
     }
 
     fn set_inspector(&mut self, shown: bool, out: &mut Vec<Effect>) {

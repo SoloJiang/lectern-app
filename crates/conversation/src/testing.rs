@@ -706,6 +706,9 @@ impl Contributions for FakeContributions {
     fn current_route(&self, _window: WindowId) -> Option<Route> {
         lock(&self.route).clone()
     }
+    fn inspector_tab(&self, _window: WindowId) -> Option<Name> {
+        None
+    }
     fn report_milestone(&self, _: Milestone) {
         unreachable!("conversation reports no milestone")
     }
