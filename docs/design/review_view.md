@@ -666,7 +666,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 | `LoadState::Loading` | 按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `review-loading` 与取消；`Ready` 到达时骨架换成内容（`ARRIVE`） |
 | `Failed(Missing)`、`Failed(NotInOpenProject)`、`Failed(Changes(e))` | 内容区一行说明（对应的 `review-failed-*`，`Changes` 带错误种类）和 `review-back`；浮条隐藏；记 warn |
 | `Degraded::UnrecognizedSession` | 规则分组视图；`review-notice-unrecognized`；没有轮次、说明和归因标签 |
-| `Degraded::FolderProject` | 只有轮次与按日志原文的改动（`Tool` 行）；`review-notice-folder`；Progress 页显示 `review-progress-empty`；浮条只有意见数、Looks Good 和发送 |
+| `Degraded::FolderProject` | 只有轮次与按日志原文的改动（`Tool` 行）；`review-notice-folder`；Progress 页显示 `review-progress-empty`；浮条只有意见数（没有 Copy Again、Discard、Looks Good、Copy as Prompt 和发送）：`Tool` 行不是 diff 行，没有 blob OID，C 与 Add Note 锚定不到任何东西（`selection_anchor` 要 `RowsSide::oid`），所以不会有意见可发，也没有进度可标 |
 | `BaseHow::CurrentHead` | `review-notice-base-current-head` |
 | `unclaimed > 0`、`invalid_paths` 非空 | 对应的 `Notice` 行 |
 | 归因 `Pending` | 不显示标签（见「归因、Drifted 与 Pending」） |
@@ -1070,7 +1070,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - **没有悬停说明。** `review-note-add-here.tooltip`、`review-notes-copy-again.tooltip`、`review-copy-prompt.tooltip` 已在 .ftl 里，没有调用方（`ui::Button` 没有悬停说明的接口）。
 - **`ui::Button::attr`（新，`docs/design/ui.md` 已补）：** 探针节点要带属性（`review.bar.send` 的 `route`、`review.bar.copy-again` 的 `batch`）。
 - **探针：** 节点 ID 与其他节点同一写法：`review.note.item[<16 位十六进制>]`、`….edit`、`….delete`（设计表写 `review.note[<id>]`）；加了 `review.note-editor.too-long`（超过上限时的 `review-note-too-long`）；`review.bar.comments` 的 `sending` 是 bool。
-- **浮条：** `routes` 为空时发送按钮置灰且没有 `route` 属性，标签按 agent 名 / `review-send`；`FolderProject` 时浮条仍只有意见数（Looks Good 和发送本来就不出现）。快照夹具带两条途径（`terminal` 会话途径、`clipboard`），所以 `review_tree_session`、`review_tree_groups` 的发送按钮多了 `route=session`。
+- **浮条：** `routes` 为空时发送按钮置灰且没有 `route` 属性，标签按 agent 名 / `review-send`；`FolderProject` 时浮条仍只有意见数：这个屏幕里没有可锚定的行（`review` 的 `folder_round` 给叙事的 `step_files` 和 `command_files` 都是空的，编辑和命令都成了 `Tool` 项（`engine/narrative.rs`），没有 `Step`、`files` 为空，也就没有 diff 行和 blob OID），C 和 Add Note 什么也不做，永远没有待发送的意见，所以再次复制、放弃、Looks Good、Copy as Prompt 和发送都不出现（`folder_project_cannot_anchor_a_note_on_a_tool_call` 对每一项按 C 验证）。`review` 的 `AddNote` 在文件夹项目里是收的（意见只在内存里，要调用方给摘录），但本屏幕没有路径发出它（视图的 `AddNote` 不带摘录，文件夹项目里领域层会忽略；除 `bench` 外没有别的发送方）；以后若给 `Tool` 行加锚点，浮条要同时改。快照夹具带两条途径（`terminal` 会话途径、`clipboard`），所以 `review_tree_session`、`review_tree_groups` 的发送按钮多了 `route=session`。
 - **`review-notes-full`：** 先看选中项能不能锚定，再看是否已满（没有选中项时 C 什么也不做，也没有提示）；提示在对意见的命令（`AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`、`SendNotes`、`CopyBatch`）发出时清除，`Prepare` 不清除。
 - **改已有的意见时，编辑框在这条意见之后**（`EditorAt::AfterNote`），意见本身仍显示；设计只说插在锚点行的意见之后。`turn.answers` 的条数取 `batches` 里那一批的 `count`，批次已不在（14 天之前）时不显示。
 - **测试支持：** `FakeReview` 在返回前应用 `AddNote`、`EditNote`、`RemoveNote`、`DiscardNotes`、`SendNotes`；`finish_send`、`fail_send`、`finish_copy`、`answer_batch` 替 `review` 交回发送结果；`testing::add_notes`（`items_5000` 的夹具加 40 条意见）。
@@ -1158,7 +1158,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - **V 之后的滚动**：`SCROLL_NEXT` 用 `Transition` 逐帧给出位移，经 `ListState::scroll_by` 滚动，最后用 `scroll_to` 落在目标项上。目标项还没有布局过（离得远）或系统开了减弱动态效果时直接 `scroll_to`。下一个未看的文件只向后找，不绕回开头（设计「没有时停在原处」）。Progress 里点噪声文件时，噪声先展开再跳转。
 - **`Current`**：屏幕建好时设成 GPUI 全局 `Current` 的是它的 `WeakEntity<ReviewModel>`，工具栏和 Progress 页读它；屏幕 drop 后弱引用升级失败，页面显示空状态。同时有两个审阅屏幕时（不应发生）后建的赢。
 - **`ReviewModel::missing`**：工厂收到不是 `Target::Review` 的目标时，建一个不打开任何审阅、直接是 `Failed(Missing)` 的模型，显示 `review-failed-missing` 加返回按钮。
-- **日志**：`snapshot inconsistent` 只检查 `turn_ref`（轮次的 `session` 超出 `sessions`），`step`、`file_index` 两种不查：文件夹项目里叙事的文件本来可以不在 `files` 里。
+- **日志**：`snapshot inconsistent` 只检查 `turn_ref`（轮次的 `session` 超出 `sessions`），`step`、`file_index` 两种不查：文件夹项目里叙事本来就没有 `Step`、`files` 为空。
 - **`Screen::toolbar` 的 `Refresh` 没有提示文字**（见 Analyze 一条）。Progress 页的标题用 `review-progress`（已看 n/m），`review-progress-title` 只作检查器页的标签。（#283 之后：Refresh 不在工具栏；Files 页顶上一行用 `review-files-reviewed`。）
 - **基准**：`review_view/items_5000` 加进预算表（`share_macos`，中位数 < 4 ms）和 bench 的 `time` 目标，`lectern-bench` 在 macOS 上加 dev 依赖 `lectern-review-view`（`test-support`）；设计把预算表与 `scroll_5000` 放在前置条件 D（第 3 步），这里只加第 1 步要判定的这一条，`scroll_5000` 与 `app/open_diff` 仍是 `Planned`。基准夹具是纯函数，不开窗口。
 - **默认的产品问题**（「未决问题」）：1 统一视图是默认（双栏随第 2 步，所以现在没有切换）；2 Looks good 之后留在审阅页，浮条显示 `review-all-reviewed`；3 折叠早先轮次（见上）；4 agent 说明按纯文本、保留换行，行内代码块不识别。

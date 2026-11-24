@@ -1915,3 +1915,65 @@ fn the_plus_shows_on_the_row_under_the_pointer(cx: &mut TestAppContext) {
     visual.run_until_parked();
     assert_eq!(editor_target(&opened, cx), target_at(DiffSide::New, 2));
 }
+
+// ----- folder projects ---------------------------------------------------
+
+/// What `review` gives for a folder project (docs/design/review.md「未决问题」
+/// 2): turns whose edits are `Tool` calls, no files and no steps, so no diff
+/// rows and no blob OID.
+fn folder_snapshot() -> ReviewSnapshot {
+    let (mut snapshot, _) = snapshot_fixture(1, 1, 4);
+    snapshot.degraded = Some(lectern_services::review::Degraded::FolderProject);
+    snapshot.files = Arc::from(Vec::new());
+    let turns: Vec<_> = snapshot
+        .turns
+        .iter()
+        .flat_map(|turns| turns.iter())
+        .map(|turn| {
+            let mut turn = turn.clone();
+            let kept: Vec<_> = turn
+                .items
+                .iter()
+                .filter(|item| !matches!(item, lectern_services::review::NarrativeItem::Step(_)))
+                .cloned()
+                .collect();
+            turn.items = Arc::from(kept);
+            turn
+        })
+        .collect();
+    snapshot.turns = Some(Arc::from(turns));
+    snapshot
+}
+
+#[gpui::test]
+fn folder_project_cannot_anchor_a_note_on_a_tool_call(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    rig.review.set_auto_prepare(true);
+    let opened = rig.open(cx, session(), Some(folder_snapshot()));
+    opened.draw(cx);
+    rig.settle(cx);
+    opened.draw(cx);
+    let call = lectern_services::session::ToolCallId(Arc::from("tool-0"));
+    let keys = opened.read(cx, |model| {
+        model
+            .items
+            .iter()
+            .map(|item| item.key())
+            .collect::<Vec<_>>()
+    });
+    assert!(keys.contains(&ItemKey::Call(call)), "{keys:?}");
+    assert!(
+        keys.iter()
+            .all(|key| !matches!(key, ItemKey::Row { .. } | ItemKey::Hunk { .. })),
+        "a folder project has no diff rows: {keys:?}"
+    );
+    let mut visual = opened.visual(cx);
+    // Every item there is: C anchors nothing.
+    for key in keys {
+        select(&opened, cx, key.clone());
+        visual.simulate_keystrokes("c");
+        opened.draw(cx);
+        assert_eq!(editor_target(&opened, cx), None, "{key:?}");
+    }
+    assert!(note_commands(&rig).is_empty());
+}
