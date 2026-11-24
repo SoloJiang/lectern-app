@@ -747,7 +747,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
 
   View 菜单放审阅屏幕在画布里没有控件的两个命令（[review_view 设计「对其他 crate 的要求」](review_view.md#对其他-crate-的要求) G，[#283](https://github.com/SoloJiang/lectern-app/issues/283)）。只有审阅屏幕处理这两个 `Action`，所以焦点不在审阅屏幕上时 macOS 把它们置灰、⌘R 也不起作用；菜单在启动时设置一次，统一 / 双栏不显示勾选状态。
 
-  产品负责人 2026-11-24 决定补齐菜单栏（[交互规范「菜单栏」](interaction.md#菜单栏)，[#422](https://github.com/SoloJiang/lectern-app/issues/422)，尚未实现）：File（Open Folder… ⌘O → `workspace::OpenFolder`，Close Project → `workspace` 的 `CloseProject`，Close Window ⌘W → `workspace::CloseWindow`）、Edit（系统标准的撤销、重做、剪切、拷贝、粘贴、全选，接到文本框实际处理的 Action）、Review（J、K、V、C、⌘↩ 对应 `review_view` 的 Action）、Window（最小化 ⌘M、缩放、全部移到前面）。关键约束：
+  产品负责人 2026-11-24 决定补齐菜单栏（[交互规范「菜单栏」](interaction.md#菜单栏)，[#422](https://github.com/SoloJiang/lectern-app/issues/422)，尚未实现）：File（Open Folder… ⌘O → `workspace::OpenFolder`，Close Project → `workspace::CloseProject`（[workspace 设计](workspace.md)的 Action 表；Welcome 上置灰），Close Window ⌘W → `workspace::CloseWindow`）、Edit（系统标准的撤销、重做、剪切、拷贝、粘贴、全选，接到文本框实际处理的 Action）、Review（J、K、V、C、⌘↩ 对应 `review_view` 的 Action）、Window（最小化 ⌘M、缩放、全部移到前面）。关键约束：
   - 菜单仍在上面这一次 `set_menus` 里建好，首帧之前不多做菜单结构以外的事；新的 Fluent 键 en 与 zh-CN 同时加。
   - 菜单项只派发已有的具名 Action，不在 `app` 里实现动作；Review 菜单的项在焦点不在审阅屏幕时置灰（没有处理它的 Action）。
   - 不带修饰键的快捷键（J、K、V、C）在菜单里只作显示，不能抢走文本框里的输入；实现 PR 读锁定版本的 GPUI 确认菜单的键等价怎样处理，做不到时这几项不显示快捷键。

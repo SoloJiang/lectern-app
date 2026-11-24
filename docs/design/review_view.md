@@ -169,7 +169,7 @@ pub(crate) enum Job {
 ```
 
 - 构造（`Screen` 工厂，主线程，< 1 ms）：`Review::open(target)` 立即返回；建 `futures::channel::mpsc::unbounded::<Job>()`，发送端先登记进 `Shared::screens`，然后才 `snapshot()`（这个顺序让登记之前发出的 `Changed` 不会丢：之后读到的快照至少是那一代）；接收端由 `cx.spawn` 的前台任务持有：每次 `await` 到一项就把队列里已有的项一次取完、按种类只留最高的 `generation`，然后 `model.update(cx, …)` 应用。发送端的 `wake` 经 GPUI 的平台分发器唤醒主线程，任何线程都能投递，不轮询。`ReviewTarget::Session(key)` 时另取 `Handoff::usage`，`Usage::watch(UsageQuery::Session { session: key })` 的 `UsageInterest` 存进模型。构造里不等待任何事件。
-- drop（`Pop`、插件停用）：`Review::close(id)`（30 秒内再进入同一会话不重算，[review 设计「接口」](review.md#接口)）；`brief.analysis` 是 `Running` 时先发 `CancelAnalyze`（`crates/review_view/AGENTS.md`「边界」）；`shares`、`usage_interest` 随模型 drop；从 `Shared::screens` 移除通道。
+- drop（`Pop`、插件停用）：`Review::close(id)`（30 秒内再进入同一会话不重算，[review 设计「接口」](review.md#接口)）；`brief.analysis` 是 `Running` 时先发 `CancelAnalyze`（`crates/review_view/AGENTS.md`「边界」）；`shares`、`usage_interest` 随模型 drop；从 `Shared::screens` 移除通道；草稿（含开着的编辑框里新意见的文字）按 `ReviewTarget` 交给 `Shared`（「审阅意见（#22）」的「离开审阅」）。
 - 读快照、行与正文都在主线程上：`snapshot`、`rows`、`text` 只取锁复制 `Arc`（review 设计）；`command`、`open`、`close` 立即返回。本 crate 在主线程上没有 IO、解析和 git 操作。
 
 ### 本 crate 的其他公开项
@@ -389,7 +389,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - 事件的监听在发出事件的线程（executor）上运行，只做转发：取 `Shared::screens` 的锁、按 `ReviewId` 找通道、`unbounded_send`，不做别的。`UsageEvent` 由 `review-view-usage` 订阅（它才 requires `dyn Usage`），同样只转发 `Job::Usage`；这个插件放进或取出服务时转发 `Job::UsageService`（`review-view-handoff` 到达或离开转发 `Job::Handoff`，两件事互不牵连）。
 - 事件的合并：前台任务每次醒来把通道里的项全部取出：`Review(Changed)` 只应用最高的 `generation`（低的丢弃）；`Prepared` 合并成一次；`Spans` 逐条应用。应用之后 `cx.notify()` 一次。
 - 派生数据：高亮区间以（OID、查询版本、窗口）为键（架构规则 5）；其余都从快照和行直接算，不缓存。
-- 首帧之前什么都不做：三个插件 `AfterFirstFrame` 激活，`activate` 只登记（[ADR 0017](../adr/0017.md)）。没有审阅屏幕时本 crate 没有任务、没有通道，`Shared` 只有几个空的 `Mutex`。
+- 首帧之前什么都不做：三个插件 `AfterFirstFrame` 激活，`activate` 只登记（[ADR 0017](../adr/0017.md)）。没有审阅屏幕时本 crate 没有任务、没有通道，`Shared` 只有几个 `Mutex` 和离开审阅时留下的草稿（至多 20 条）。
 
 ## 性能
 
@@ -403,7 +403,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 | 审阅意见（#22） | C 到编辑框画出在下一帧（整表重建，见第 4 步的差异）；编辑框在浮条之下时，再下一帧滚到浮条上方（#380，一次 `bounds_for_item` 和一次 `scroll_by`）；`command(AddNote)` 返回前 review 已换出 `notes`（< 0.2 ms）；`items::build` 多 O(意见数) 的建表；滚动时每项的元素构造不变，意见块按项排版。prompt 不经过本 crate |
 | 拖选（#373） | 只在按下期间有开销。指针移动：先比较 `focus` 的一个 `bounds_for_item`，换行时查约 60 个可见项和一次 `range_of`（5000 行的一段约 10 µs），目标 < 0.1 ms。`focus` 变化时重画可见的行，与悬停相同，每帧 ≤ 8.3 ms。自动滚动就是滚动（`review_view/scroll_5000`）。松开不改 `items`，没有 `splice`。`items::build` 不变：意见仍按一个键（`anchor.last`）进 `by_line`，O(意见数)。每行多一次 O(1) 的范围比较。按下之前和冷启动没有新的工作，模型多两个 `Option`。预算不变，不加基准 |
 | 刷新 | `Changed` 到新画面：`items::build` < 2 ms（5000 行时 < 4 ms），锚点找回 O(1)；不等 `Prepared` |
-| 空闲内存（采样状态，没有打开审阅） | 本 crate 没有屏幕时 < 16 KiB（`Shared` 与注册的工厂）。屏幕在 `Pop` 时 drop，不保留 |
+| 空闲内存（采样状态，没有打开审阅） | 本 crate 没有屏幕时 < 16 KiB（`Shared` 与注册的工厂），另加留下的草稿：至多 20 条，每条是用户打的文字，通常不到 1 KiB。屏幕在 `Pop` 时 drop，不保留 |
 | 审阅打开时的内存 | 展示行由 review 保留（≤ 8 MiB，只为 `Prepare` 的范围）；本 crate 另有：`items`（5000 行约 5000 × 40 B = 200 KiB）、显示行的配对（双栏时同量级）、高亮区间 ≤ 2 MiB（LRU）、`texts` 的引用（内容由 review 持有）。合计 ≤ 3 MiB 之外不持有两侧文本的副本（`ArcSource` 只借 review 给的 `Arc<[u8]>`） |
 | 冷启动 20 ms | 首帧之前没有代码运行；`plugin/review-view/activate`、`plugin/review-view-handoff/activate`、`plugin/review-view-usage/activate` 各 < 1 ms（只登记） |
 
@@ -633,7 +633,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   | `review::ToggleEarlierTurns` | — | `review` | 展开 / 折叠早先的轮次 |
   | `review::Refresh` | — | `review` | `ReviewCommand::Refresh` |
   | `review::Analyze` / `CancelAnalyze` | — | `review` | 对应命令 |
-  | `review::Escape` | Esc | `review` | 面板或覆盖层开着时（`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里）不处理，Esc 冒泡到 `workspace` 先关面板；没有开着的层而有拖选的范围时只清除范围并停止传播（#373）；没有范围而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
+  | `review::Escape` | Esc | `review` | 面板或覆盖层开着、或检查器显示着 Conversation 页时不处理（面板和覆盖层：`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里；Conversation 页：处理 Esc 时调 `Contributions::inspector_tab(window)`，它是 `Some("conversation")` 时不处理。`LayerChanged` 不带分页，所以这里用查询），Esc 冒泡到 `workspace`，先关面板或切回 Files 页（2026-11-24 的决定）；没有开着的层而有拖选的范围时只清除范围并停止传播（#373）；没有范围而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
   | `review::SelectNext` / `SelectPrevious` / `JumpToSelected` | ↓ / ↑ / ↵ | `review-progress` | Progress 列表的选择与跳转（跳到那个文件的步标题）；跳转（↵ 或点击）之后焦点移到屏幕，J、K、C 随即可用 |
   | `review::Back` | — | `review` | 失败态的返回按钮：`dispatch(Pop)` |
   | `review::AddNote` | C | `review` | #22：在拖选的范围（#373）、选中的行或 hunk 上打开编辑框（「审阅意见（#22）」）；行尾的 + 和 Add Note 触发同一个 Action；点行号不经 Action，直接选中那一行并打开 |
@@ -841,7 +841,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - `review-view-handoff` 两个依赖（`dyn Reader`、`dyn CodeIntel`）里任一个失败，交接一起不可用；用量由 `review-view-usage` 单独提供，不受影响。
 - 别的 worktree 里的子 agent 不在这个审阅里，它的派出在叙事里只是一行 `Tool`（review 设计「未决问题」1 的 (a)），不能从这里进入它的审阅；同一 worktree 里的子 agent 的 `Subagent` 行点开只滚到它的第一轮。
 - `Provided` 规则的文案只覆盖静态表里的（provider, rule）；新的提供者要改表。
-- 审阅意见的草稿（Esc 关掉的新意见的文字）只在屏幕存在期间保留，离开审阅页后丢失；不写盘。
+- 审阅意见的草稿（Esc 关掉的、或离开审阅时编辑框里的新意见的文字）只在内存里，本次运行有效：离开审阅后经 `Shared` 保留（2026-11-24 的决定，「审阅意见（#22）」），退出应用后丢失；不写盘。改已有的意见时离开，改动丢失。
 - 已发送的意见不能改，只能删掉再写（`review` 的规则）。复制之后没有粘贴成功时用 Copy Again 重新复制；浮条只给最近一批这个按钮，更早的批次不能再复制。
 - 会话外的改动和比较范围没有回应的那一轮（`answered_by` 总是 None），所以那里的 Copy Again 一直留到发出下一批或删掉这一批的意见为止。
 - 只有剪贴板途径时，用户要自己把 prompt 粘贴进会话；Lectern 只能按 prompt 第一行的标记找出回应的那一轮，粘贴到别处时找不到（review 设计「审阅意见」的「已知限制」）。

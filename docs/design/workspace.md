@@ -80,6 +80,11 @@ pub trait Contributions: Send + Sync {
     /// 根视图绑定窗口时（`install`、Dock 重开的 `attach`）记下当前屏幕，所以第一次 `ScreenChanged`（`from: None`，要等 `WorkspacePlugin::started`）之前也有值。
     fn current_route(&self, window: WindowId) -> Option<Route>;
 
+    /// 检查器显示着时它的当前分页名（如 `files`、`conversation`），隐藏或当前屏幕没有检查器时为 `None`。
+    /// 取锁复制，不阻塞，任何线程；值与 `current_route` 同样在状态机改变检查器时记下。`review_view` 的 Esc 用它把 Conversation 页
+    /// 让给本 crate 的 `Escape`（2026-11-24 的决定，[交互规范「返回与 Esc」](interaction.md#返回与-esc)）。
+    fn inspector_tab(&self, window: WindowId) -> Option<Name>;
+
     /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：本 crate 记下时刻并转给 `app`，
     /// 从画出结果的那一帧到记时刻只等一帧。`Milestone::reported_after_frame()` 为 `true` 的（`DiffShown`、
     /// `FileHighlighted`、`FilesShown`、`FilesExpanded`、`EditReady`），视图在 `Window::on_next_frame` 的回调里报告，那一帧已经显示，本 crate 按调用的时刻记
@@ -537,6 +542,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   |---|---|---|---|
   | `workspace::OpenFolder` | ⌘O | 全局 | `PromptOpenProject` |
   | `workspace::CloseWindow` | ⌘W | 全局 | `CloseWindow` |
+  | `workspace::CloseProject` | 无（File 菜单的 Close Project，2026-11-24 的决定） | `Workspace > project`（Welcome 上没有处理者，菜单项置灰） | `CloseProject`：问 `Project` 守卫，通过后 `Projects::close(k)` → `ProjectEvent::Closed` → `base = Welcome` → `on_state_changed` 写出 `project` 为空的窗口状态，下次启动显示 Welcome |
   | `workspace::Back` | ⌘[ | `Workspace`（屏幕没处理时冒泡到这里） | `Pop`（2026-11-24 之前是 `PopToBase`） |
   | `workspace::Escape` | Esc | `Workspace` | `Escape` |
   | `workspace::ToggleInspector` | ⌥⌘I | 全局（原定 `Workspace > project`，见「与设计的差异」第 2 步） | `SetInspector(!inspector)`；没有检查器的屏幕上状态机忽略 |
