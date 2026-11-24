@@ -528,7 +528,6 @@ impl ReviewModel {
                 .mx(-HOVER_PAD)
                 .px(HOVER_PAD)
                 .rounded(HOVER_RADIUS)
-                .cursor_pointer()
                 .text_role(TextRole::Body, window, cx)
                 .text_color(palette.label)
                 .child(dot)
@@ -817,7 +816,6 @@ impl ReviewModel {
             .flex_row()
             .items_center()
             .gap(px(10.0))
-            .cursor_pointer()
             .text_role(TextRole::Secondary, window, cx)
             .text_color(palette.secondary_label)
             .child(Disclosure::new(if expanded { 1.0 } else { 0.0 }))
@@ -917,7 +915,6 @@ impl ReviewModel {
                 .flex_row()
                 .items_center()
                 .gap(px(10.0))
-                .cursor_pointer()
                 .when_some(hover.fill(palette), |row, fill| row.bg(fill))
                 .on_hover(hover.listener())
                 .border_t(HAIRLINE)
@@ -968,7 +965,6 @@ impl ReviewModel {
                 .flex_row()
                 .items_baseline()
                 .gap(px(10.0))
-                .cursor_pointer()
                 .when_some(hover.fill(palette), |row, fill| row.bg(fill))
                 .on_hover(hover.listener())
                 .border_t(HAIRLINE)
@@ -1311,7 +1307,6 @@ impl ReviewModel {
             .gap(px(2.0))
             .px(HEAD_PAD_X)
             .py(HEAD_PAD_Y)
-            .cursor_pointer()
             .on_hover(hover.listener())
             .child(top);
         // Selected, the title has its own fill; hovered, the lighter one.
@@ -1612,11 +1607,9 @@ impl ReviewModel {
             column = column.h(HAIRLINE);
         }
         let click_key = key;
-        let column = column
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.select(Some(click_key.clone()), cx);
-            }));
+        let column = column.on_click(cx.listener(move |this, _, _, cx| {
+            this.select(Some(click_key.clone()), cx);
+        }));
         semantic_interactive(spec, column).into_any_element()
     }
 
@@ -1697,7 +1690,6 @@ impl ReviewModel {
         let hover = Hover::track(&node, window, cx);
         let mut row = div()
             .id(&node)
-            .cursor_pointer()
             .w_full()
             .px(GUTTER)
             .pt(px(6.0))
