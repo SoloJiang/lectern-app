@@ -434,6 +434,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
   | `worktrees.item[<WorktreeKey>].badge[<current / locked / missing>]` | `Badge` | — |
   | `worktrees.toolbar.refresh` | `Button` | — |
   | `worktrees.only-one`、`worktrees.empty` | `Text` | `Label::key` 是文案的键 |
+  | `worktrees.loading` | `Group` | `phase=progress`；`ui::LoadingProgress`，只在第一轮比较超过 1 s 时出现 |
   | `worktrees.detail` | `Panel` | `selected`（是否有选中的行） |
   | `worktrees.detail.usage` | `Group` | `kind`（`branch` / `mr` / `not-counted`）、`tokens` |
   | `worktrees.detail.usage.mr[<MR 引用>]` | `ListItem` | `tokens`、`shared` |
