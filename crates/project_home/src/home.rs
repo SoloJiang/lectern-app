@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use futures::channel::mpsc;
 use lectern_executor::{Executor, Priority};
-use lectern_kernel::{PluginHandle, ServiceRef, ServiceSet};
+use lectern_kernel::{Name, PluginHandle, ServiceRef, ServiceSet};
 use lectern_logging::{debug, info, trace, warn};
 use lectern_services::project::{OpenRequest, ProjectEvent, ProjectKey, Projects};
 use lectern_services::review::{OverviewInterest, Review, ReviewEvent};
@@ -92,11 +92,16 @@ struct State {
     opened: Option<Opened>,
     /// The milestone was reported for the base project.
     reported: bool,
-    /// The window shows another screen than the project home (the sidebar's
-    /// Overview entry is not selected then). The sidebar only exists in a
+    /// The screen the window shows when it is not the project home (the
+    /// sidebar's Overview entry is not selected then, the entry that opens
+    /// this screen is). `None` is the home. The sidebar only exists in a
     /// project, whose base screen is the home, so a view built before any
     /// navigation event is on the home.
-    elsewhere: bool,
+    screen: Option<Name>,
+    /// The sidebar's Sessions list shows all the sessions, not the newest few.
+    /// Here, not in the sidebar, so the `ToggleSessions` action of the screen
+    /// and the row's click change the same flag.
+    sessions_expanded: bool,
 }
 
 struct Opened {
@@ -176,7 +181,30 @@ impl Home {
     /// Whether the window shows the project home (the Overview entry of the
     /// sidebar is selected).
     pub fn on_home_screen(&self) -> bool {
-        !self.lock().elsewhere
+        self.lock().screen.is_none()
+    }
+
+    /// The screen the window shows when it is not the project home; `None` on
+    /// the home. Copies a name under a lock.
+    pub fn other_screen(&self) -> Option<Name> {
+        self.lock().screen.clone()
+    }
+
+    /// Whether the sidebar's Sessions list shows all the sessions.
+    pub fn sessions_expanded(&self) -> bool {
+        self.lock().sessions_expanded
+    }
+
+    /// `ToggleSessions`, and the click of the "N more" row: unfolds the
+    /// Sessions list, or folds it again. Wakes the views. Main thread.
+    pub(crate) fn toggle_sessions(&self) {
+        let expanded = {
+            let mut state = self.lock();
+            state.sessions_expanded = !state.sessions_expanded;
+            state.sessions_expanded
+        };
+        debug!("home sessions toggled"; expanded = expanded);
+        self.wake();
     }
 
     /// `Contributions::dispatch`, logged. The command goes to the window's
@@ -235,10 +263,10 @@ impl Home {
             }
             WorkspaceEvent::ScreenChanged { to, .. } => {
                 trace!("home event"; event = "screen-changed");
-                let elsewhere = to.screen != screens::PROJECT_HOME;
+                let screen = (to.screen != screens::PROJECT_HOME).then(|| to.screen.clone());
                 let changed = {
                     let mut state = self.lock();
-                    std::mem::replace(&mut state.elsewhere, elsewhere) != elsewhere
+                    std::mem::replace(&mut state.screen, screen.clone()) != screen
                 };
                 if changed {
                     self.wake();
@@ -377,6 +405,7 @@ impl Home {
             state.built_once = false;
             state.completed.clear();
             state.warned.clear();
+            state.sessions_expanded = false;
             state.opened = Some(Opened {
                 at: Instant::now(),
                 request,
@@ -417,6 +446,7 @@ impl Home {
             state.completed.clear();
             state.warned.clear();
             state.opened = None;
+            state.sessions_expanded = false;
             state.interest.take()
         };
         drop(interest);

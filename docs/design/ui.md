@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。终端配色（`terminal_colors`，[terminal_view 设计](terminal_view.md#验收)第 1 步的 `ui` 部分）已实现（本 PR）：窗口里的视觉检查随 terminal_view 第 3 步。 `Button::tooltip`（悬停提示，[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的 UX 审计）已实现（本 PR）：窗口里的外观与延迟手感还没有检查（见「实际验证」）。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。终端配色（`terminal_colors`，[terminal_view 设计](terminal_view.md#验收)第 1 步的 `ui` 部分）已实现（本 PR）：窗口里的视觉检查随 terminal_view 第 3 步。 `Button::tooltip`（悬停提示，[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的 UX 审计）已实现（本 PR）：窗口里的外观与延迟手感还没有检查（见「实际验证」）。 `Row` 与 `SidebarRow` 只在设了 `on_click` 时才有悬停底色（[#422](https://github.com/SoloJiang/lectern-app/issues/422) 的 UX 审计：点击没有动作的行不该变），见「实际验证」「与设计的差异」的「#422」。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -502,7 +502,7 @@ impl GroupedList {
     pub fn row(self, row: Row) -> GroupedList;
 }
 
-/// 列表行：悬停背景 `HOVER_IN` / `HOVER_OUT`。内容由调用方给（agent 圆点、几行文字、进度环都是它的子元素），
+/// 列表行：悬停背景 `HOVER_IN` / `HOVER_OUT`，只有设了 `on_click` 的行才有（点击没有动作的行，如占位的骨架行，指针经过时不变）。内容由调用方给（agent 圆点、几行文字、进度环都是它的子元素），
 /// 文字默认 `Body`；行标题要 semibold 的调用方自己用 `TextRole::Headline`（画板里只有会话卡片的标题是 600，
 /// 其余行是常规字重，所以不由行统一设置）。
 /// 在 `GroupedList` 里是卡片行：左右 16pt、上下 14pt，子元素间距 14pt。
@@ -603,7 +603,7 @@ impl PopUpButton {
 pub fn show_menu(items: Vec<MenuItem>, position: Point<Pixels>, window: &mut Window, cx: &mut App);
 
 /// 侧栏样式的平铺行：没有卡片、没有分隔线，圆角 8pt、左右内缩由父元素给。内容由调用方给（文字层级由行内元素给出）。
-/// 默认（Welcome 的右栏）：内边距上下 8pt 左右 10pt、子元素间距 2pt；悬停 `fill`；选中 `accent()` 时用 `selected_content_background` 与 `on_accent`，
+/// 默认（Welcome 的右栏）：内边距上下 8pt 左右 10pt、子元素间距 2pt；悬停 `fill`（只有设了 `on_click` 的行）；选中 `accent()` 时用 `selected_content_background` 与 `on_accent`，
 /// 第二行文字由调用方用 `on_accent` 的 85% 不透明度；不带 `accent()` 时选中是 `fill_strong`。
 /// `compact()`（工作区侧栏）：高 28pt、左右 8pt、子元素间距 8pt、圆角 6pt；`trailing`（行尾的数量，次要色）。探针节点同 `Row`：`ListItem` 加 `State::selected`。
 pub struct SidebarRow { /* id, selected, accent, compact, trailing: Option<Text>, on_click, menu: Vec<MenuItem>, children */ }
@@ -1108,6 +1108,12 @@ pub mod semantic {
 - 提示框用 `debug_bounds` 按文字找（`tooltip.rs` 给框设了 `debug_selector`，发布构建里它是空操作），所以测试看到的是真画出来的框，不是 GPUI 内部的状态。
 - **没有做**：真实窗口里的外观（字号、边线、阴影、与指针的间距、窗口边缘处的翻转）和真实鼠标下的延迟手感；测试平台没有 AppKit 的光标，指针位置由模拟事件给出。
 
+`Row` 与 `SidebarRow` 的悬停只在有 `on_click` 时挂（[#422](https://github.com/SoloJiang/lectern-app/issues/422) 的 UX 审计；macOS，Apple 芯片，没有打开真实窗口）：
+
+- 测试在 `project_home` 的 `tests/views.rs`，因为要的是真实的行：`a_row_without_a_click_does_not_answer_the_pointer`（侧栏的 Packages 行，`SidebarRow`）、`the_loading_placeholder_does_not_answer_the_pointer`（主区的加载骨架行，`Row`）：指针移到行上之后 `motion::active_transitions` 不变；移到会话行（有 `on_click`）上则增加，作对照。把 `controls/` 还原到修复前，这两个测试失败。
+- `just test -p lectern-ui -p lectern-project-home -p lectern-welcome -p lectern-worktrees -p lectern-review-view -p lectern-file-reader -p lectern-workspace`：806 个通过，没有快照变化（悬停不在语义树里）；`just check` 通过。`ui` 自己的测试没有加：`Hover` 的 keyed state 在控件外读不到，计数 `active_transitions` 在 `project_home` 的真实行上更直接。
+- **没有做**：真实窗口里看指针经过 Packages 行与骨架行时没有底色。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1208,3 +1214,7 @@ pub mod semantic {
 - 已知限制：GPUI 的滚动监听在指针位于提示自己的范围内时不收起提示。范围从提示出现处右下 1pt 起，含框上方的 `POINTER_GAP` 空白；指针出现提示后向右下移几 pt、仍在按钮上，就在范围内，这时滚动滚轮提示还在，鼠标按下仍会收起（`tooltip_stays_on_scroll_over_its_own_bounds`）。不绕开 GPUI 的这条规则：提示在指针离开按钮后收起，工具栏按钮上滚动滚轮很少见。
 - 提示的内容不进日志（[ADR 0046](../adr/0046.md)）；`TooltipView` 不调用任何日志宏。
 - 键盘用户看不到提示：GPUI 的提示只由悬停和触摸长按触发，焦点到按钮上不触发。这是已知限制；提示文字在探针节点的 `tooltip` 属性里，不在辅助名里。
+
+### #422
+
+- `Row` 与 `SidebarRow` 原来不管有没有 `on_click` 都挂 `on_hover`，点击没有动作的行（侧栏的 Packages 行、主区的加载骨架行）指针经过时也出底色，像是可以点。现在只有设了 `on_click` 的行挂悬停监听。只设 `context_menu` 不设 `on_click` 的行也不再有悬停底色：现有调用方（`welcome`）两者都设，没有受影响的行。

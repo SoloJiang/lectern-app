@@ -31,6 +31,7 @@ use lectern_ui::{
 
 use crate::actions::{
     CONTEXT, Open, OpenOutside, OpenSession, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+    ToggleSessions,
 };
 use crate::home::Home;
 use crate::nodes;
@@ -713,6 +714,7 @@ impl Render for HomeScreen {
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select(Move::Last, cx)))
             .on_action(cx.listener(|this, _: &Open, _, cx| this.open(cx)))
             .on_action(cx.listener(|this, _: &OpenOutside, _, cx| this.open_outside(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSessions, _, _| this.home.toggle_sessions()))
             .on_action(cx.listener(|this, action: &OpenSession, _, cx| {
                 this.open_session(action.key.clone(), cx);
             }));

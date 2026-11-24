@@ -14,9 +14,10 @@ use lectern_services::workspace::{
 };
 use lectern_ui::Icon;
 use lectern_ui::contrib::{SidebarItem, SidebarPanel};
-use lectern_ui::motion::{LOADING_PROGRESS_AT, LOADING_SKELETON_AT};
+use lectern_ui::motion::{LOADING_PROGRESS_AT, LOADING_SKELETON_AT, active_transitions};
 
-use crate::testing::{MINUTE, ProjectFx, entry, overview, package, progress, sess};
+use crate::actions::ToggleSessions;
+use crate::testing::{MINUTE, ProjectFx, Rig, entry, overview, package, progress, sess};
 
 use super::stage::*;
 
@@ -1164,4 +1165,197 @@ fn a_waiting_session_in_recently_done_says_so_in_its_facts_only(cx: &mut TestApp
             .any(|line| line.contains(".facts Group") && line.contains("waiting=true")),
         "the row's facts say it: {main}"
     );
+}
+
+#[gpui::test]
+fn the_toggle_action_unfolds_and_folds_the_sessions(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let _world = standard(&rig);
+    let (_host, vcx) = window(cx, &rig);
+    let folded = tree(vcx, sidebar_part);
+    assert!(
+        folded.contains("label=[project-home-sessions-more] hidden=3 expanded=false")
+            && !folded.contains("sessions.item[s4]"),
+        "{folded}"
+    );
+
+    // The named action, as the probe sends it: no click.
+    vcx.dispatch_action(ToggleSessions);
+    frame(vcx);
+    let open = tree(vcx, sidebar_part);
+    assert!(
+        open.contains("label=[project-home-sessions-less] hidden=3 expanded=true")
+            && open.contains("sessions.item[s4]")
+            && open.contains("project-home.sidebar Group sessions=6 shown=6"),
+        "{open}"
+    );
+
+    vcx.dispatch_action(ToggleSessions);
+    frame(vcx);
+    let folded = tree(vcx, sidebar_part);
+    assert!(
+        folded.contains("label=[project-home-sessions-more] hidden=3 expanded=false")
+            && !folded.contains("sessions.item[s4]"),
+        "{folded}"
+    );
+    assert!(
+        rig.contributions.commands().is_empty(),
+        "folding opens nothing"
+    );
+}
+
+#[gpui::test]
+fn the_click_and_the_action_change_the_same_flag(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let _world = standard(&rig);
+    let (_host, vcx) = window(cx, &rig);
+    // A click unfolds; the action then folds what the click unfolded.
+    click(vcx, "project-home.sidebar.sessions.more");
+    assert!(tree(vcx, sidebar_part).contains("sessions.item[s4]"));
+    vcx.dispatch_action(ToggleSessions);
+    frame(vcx);
+    assert!(!tree(vcx, sidebar_part).contains("sessions.item[s4]"));
+}
+
+#[gpui::test]
+fn a_row_without_a_click_does_not_answer_the_pointer(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let _world = standard(&rig);
+    let (_host, vcx) = window(cx, &rig);
+    let rest = vcx.update(|_, cx| active_transitions(cx));
+
+    // A sub-project is not clickable yet: no hover transition starts.
+    hover(vcx, "project-home.sidebar.packages.item[api]");
+    assert_eq!(
+        vcx.update(|_, cx| active_transitions(cx)),
+        rest,
+        "a package row stays as it is under the pointer"
+    );
+
+    // The control: a session row opens its review, and it fades its fill in.
+    hover(vcx, "project-home.sidebar.sessions.item[s1]");
+    assert!(
+        vcx.update(|_, cx| active_transitions(cx)) > rest,
+        "a clickable row answers the pointer"
+    );
+}
+
+#[gpui::test]
+fn the_loading_placeholder_does_not_answer_the_pointer(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let fx = ProjectFx::git("app");
+    let key = fx.key();
+    rig.projects.set(fx.snapshot());
+    rig.sessions
+        .set(vec![sess("fake", "s1", &key, Some(&fx.wt("main"))).build()]);
+    rig.review.set_overview(None);
+    rig.activate_home();
+    rig.opened(&key);
+    rig.run();
+    let (_host, vcx) = window(cx, &rig);
+    vcx.executor().advance_clock(LOADING_SKELETON_AT);
+    vcx.run_until_parked();
+    let tree = tree(vcx, main_part);
+    assert!(
+        tree.contains("project-home.loading Group phase=skeleton"),
+        "{tree}"
+    );
+    let rest = vcx.update(|_, cx| active_transitions(cx));
+
+    hover(vcx, "project-home.loading.row");
+    assert_eq!(
+        vcx.update(|_, cx| active_transitions(cx)),
+        rest,
+        "the skeleton row stays as it is under the pointer"
+    );
+}
+
+#[gpui::test]
+fn the_entry_of_the_current_screen_is_selected(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let world = standard(&rig);
+    let push = |screen: &str| {
+        WorkspaceCommand::Push(Route {
+            screen: screen.to_owned().into(),
+            target: Target::None,
+        })
+    };
+    rig.contributions.add_entry(
+        SidebarSection::Views,
+        "worktrees",
+        0,
+        entry_item(keys::workspace::BACK, push(screens::WORKTREES)),
+    );
+    rig.contributions.add_entry(
+        SidebarSection::Views,
+        "usage-screen",
+        1,
+        entry_item(keys::workspace::INSPECTOR_TOGGLE, push(screens::USAGE)),
+    );
+    let (_host, vcx) = window(cx, &rig);
+    let route = |screen: &str| Route {
+        screen: screen.to_owned().into(),
+        target: Target::Project(world.key.clone()),
+    };
+    let on = |rig: &Rig, from: &str, to: &str| {
+        rig.workspace_event(WorkspaceEvent::ScreenChanged {
+            window: lectern_services::workspace::WindowId(0),
+            from: Some(route(from)),
+            to: route(to),
+        });
+    };
+    let selected_in_sidebar = |vcx: &mut gpui::VisualTestContext| {
+        selected(&tree(vcx, sidebar_part))
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        selected_in_sidebar(vcx),
+        ["project-home.sidebar.overview"],
+        "the home selects Overview"
+    );
+
+    // Usage first, so that Worktrees is a move between two other screens.
+    on(&rig, screens::PROJECT_HOME, screens::USAGE);
+    frame(vcx);
+    assert_eq!(
+        selected_in_sidebar(vcx),
+        ["project-home.sidebar.views.item[usage-screen]"]
+    );
+    on(&rig, screens::USAGE, screens::WORKTREES);
+    frame(vcx);
+    assert_eq!(
+        selected_in_sidebar(vcx),
+        ["project-home.sidebar.views.item[worktrees]"],
+        "the Worktrees entry is selected on the Worktrees screen"
+    );
+
+    on(&rig, screens::WORKTREES, screens::PROJECT_HOME);
+    frame(vcx);
+    assert_eq!(selected_in_sidebar(vcx), ["project-home.sidebar.overview"]);
+}
+
+#[gpui::test]
+fn the_fold_starts_again_with_another_project(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    let _world = standard(&rig);
+    let home = rig.home();
+    home.toggle_sessions();
+    assert!(home.sessions_expanded());
+
+    // Another project replaces the base: its list starts folded.
+    let other = ProjectFx::git("other");
+    let other_key = other.key();
+    rig.projects.set(other.snapshot());
+    rig.opened(&other_key);
+    rig.run();
+    assert!(!home.sessions_expanded(), "another project is folded");
+
+    // And so does the same project after it was closed.
+    home.toggle_sessions();
+    rig.projects.remove(&other_key);
+    rig.closed(&other_key);
+    rig.run();
+    assert!(!home.sessions_expanded(), "a closed project is folded");
 }

@@ -23,6 +23,9 @@ actions!(
         Open,
         /// The Outside Any Session row's click, and the probe.
         OpenOutside,
+        /// The sidebar's "N more" row: unfolds the Sessions list, or folds it
+        /// again. The row's click and the probe both go through it.
+        ToggleSessions,
     ]
 );
 

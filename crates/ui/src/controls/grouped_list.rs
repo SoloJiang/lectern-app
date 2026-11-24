@@ -3,7 +3,8 @@
 //! on any page background; rows 16 × 14pt apart by 0.5pt `separator` lines
 //! that start at the text (`separator_inset`), under a 13pt semibold
 //! `secondary_label` header. A `Row` fades its hover background in
-//! (`HOVER_IN`) and out (`HOVER_OUT`). Selection is quiet
+//! (`HOVER_IN`) and out (`HOVER_OUT`), but only with an `on_click`: a row
+//! that does nothing when clicked does not answer the pointer. Selection is quiet
 //! (`unemphasized_selected_content_background`) unless the row asks for the
 //! accent (`Row::accent`, a focused source list); its content is the
 //! caller's (agent dot, lines of text, progress ring). A `Row` outside a
@@ -251,9 +252,12 @@ impl RenderOnce for Row {
         } else if hover.strength > 0.0 {
             row = row.bg(palette.label.alpha(HOVER_ALPHA * hover.strength));
         }
-        row = row.on_hover(hover.listener());
+        // Only a row that does something when clicked answers the pointer: a
+        // row with no click handler stays as it is under it.
         if let Some(on_click) = self.on_click {
-            row = row.on_click(move |_, window, cx| on_click(window, cx));
+            row = row
+                .on_hover(hover.listener())
+                .on_click(move |_, window, cx| on_click(window, cx));
         }
         if let Some(menu) = &self.menu {
             row = row.on_mouse_down(MouseButton::Right, menu.on_right_down());
