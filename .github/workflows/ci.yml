@@ -152,9 +152,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-shard-${{ matrix.shard }}
-          path: |
-            target/lectern-bench/report-*.json
-            target/lectern-bench/samples/*.txt
+          path: target/lectern-bench/report-*.json
           if-no-files-found: warn
 
   # The programs of the process shards, built once (ADR 0062): the process
@@ -233,7 +231,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-shard-${{ matrix.shard }}
-          path: target/lectern-bench/report-*.json
+          path: |
+            target/lectern-bench/report-*.json
+            target/lectern-bench/samples/*.txt
           if-no-files-found: warn
 
   # Merges the shards' reports and judges the budgets. It reads only JSON,
