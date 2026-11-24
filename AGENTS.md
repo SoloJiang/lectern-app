@@ -74,7 +74,7 @@ CI 的三个任务见 [docs/design/ci.md](docs/design/ci.md)。
 负责推进的 agent 可以直接合并 PR（squash），以下条件全部满足时才能合并：
 
 1. PR 的最新提交在推送前通过了自审：审阅 agent 没有报出未处理的 P0、P1，PR 上有一条自审记录写明审过的提交（见 [ship-pr](.claude/skills/ship-pr/SKILL.md) 第 2 步）。只改文档的 PR 不需要满足这一条；设计文档和 ADR 的 PR 除外。
-2. CI 全部通过，没有合并冲突。
+2. CI 的功能检查（`Checks (Linux, GPUI-free crates)`、`Build and test (macOS arm64)`）全部通过，没有合并冲突。产品能力完成之前，`Benchmarks*` 任务不卡合并，超标记进 [#440](https://github.com/SoloJiang/lectern-app/issues/440)；空闲内存和安装包的顶层预算仍然守住（[ADR 0069](docs/adr/0069.md)）。
 3. 人留下的审阅讨论串都已回复并解决。
 
 自审意见按 [ship-pr](.claude/skills/ship-pr/SKILL.md) 第 4 步分级处理：P0、P1 在推送前修复，修复后的提交再审一次；P2 只在改动小、属于本 PR 范围、不让文档变复杂时修，否则在自审记录里写明理由（已知限制、实现阶段处理、超出威胁模型）。叠在其他分支上的 PR，先合底层，再把上层的 base 改为 `main`。
