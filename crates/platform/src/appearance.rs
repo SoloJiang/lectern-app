@@ -74,6 +74,10 @@ pub struct SystemColors {
     pub selected_content_background: Srgba,
     /// `unemphasizedSelectedContentBackgroundColor`.
     pub unemphasized_selected_content_background: Srgba,
+    /// `selectedTextBackgroundColor`: selected text in the key window.
+    pub selected_text_background: Srgba,
+    /// `unemphasizedSelectedTextBackgroundColor`: selected text elsewhere.
+    pub unemphasized_selected_text_background: Srgba,
     /// `systemRedColor`, `systemOrangeColor`, `systemYellowColor`,
     /// `systemGreenColor`, `systemMintColor`, `systemTealColor`,
     /// `systemCyanColor`, `systemBlueColor`, `systemIndigoColor`,
@@ -515,6 +519,10 @@ mod imp {
             selected_content_background: read(c"selectedContentBackgroundColor")?,
             unemphasized_selected_content_background: read(
                 c"unemphasizedSelectedContentBackgroundColor",
+            )?,
+            selected_text_background: read(c"selectedTextBackgroundColor")?,
+            unemphasized_selected_text_background: read(
+                c"unemphasizedSelectedTextBackgroundColor",
             )?,
             system,
             accent_available,

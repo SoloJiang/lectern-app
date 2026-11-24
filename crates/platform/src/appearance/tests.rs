@@ -129,6 +129,8 @@ mod macos {
                 colors.accent,
                 colors.selected_content_background,
                 colors.unemphasized_selected_content_background,
+                colors.selected_text_background,
+                colors.unemphasized_selected_text_background,
             ]
             .into_iter()
             .chain(colors.system)
