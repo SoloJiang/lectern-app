@@ -165,6 +165,12 @@ pub const HOVER_OUT: Motion = motion(200, Easing::Linear, false);
 pub const LOADING_SKELETON_AT: Duration = ms(100);
 /// … a skeleton until this much, a progress indicator after it.
 pub const LOADING_PROGRESS_AT: Duration = Duration::from_secs(1);
+/// One step of the `LoadingProgress` spinner: twelve spokes, a turn a
+/// second (interaction spec「动效」, the spinner row). A timer, not a frame:
+/// the window redraws at 12 Hz while it spins.
+pub const SPIN_STEP: Duration = Duration::from_nanos(1_000_000_000 / 12);
+/// After this the spinner holds still: a load can stay pending.
+pub const SPIN_LIMIT: Duration = Duration::from_secs(30);
 /// How long a `Hint` stays before it fades out (`HOVER_OUT`).
 pub const HINT_DURATION: Duration = ms(2500);
 /// How long the pointer rests on a control before its tooltip shows

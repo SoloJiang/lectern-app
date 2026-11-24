@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。终端配色（`terminal_colors`，[terminal_view 设计](terminal_view.md#验收)第 1 步的 `ui` 部分）已实现（本 PR）：窗口里的视觉检查随 terminal_view 第 3 步。 `Button::tooltip`（悬停提示，[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的 UX 审计）已实现（本 PR）：窗口里的外观与延迟手感还没有检查（见「实际验证」）。 `Row` 与 `SidebarRow` 只在设了 `on_click` 时才有悬停底色（[#422](https://github.com/SoloJiang/lectern-app/issues/422) 的 UX 审计：点击没有动作的行不该变），见「实际验证」「与设计的差异」的「#422」。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。终端配色（`terminal_colors`，[terminal_view 设计](terminal_view.md#验收)第 1 步的 `ui` 部分）已实现（本 PR）：窗口里的视觉检查随 terminal_view 第 3 步。 `Button::tooltip`（悬停提示，[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的 UX 审计）已实现（本 PR）：窗口里的外观与延迟手感还没有检查（见「实际验证」）。 `Row` 与 `SidebarRow` 只在设了 `on_click` 时才有悬停底色（[#422](https://github.com/SoloJiang/lectern-app/issues/422) 的 UX 审计：点击没有动作的行不该变），见「实际验证」「与设计的差异」的「#422」。`LoadingProgress`（加载超过 1 s 的进度，[#422](https://github.com/SoloJiang/lectern-app/issues/422)）已实现，见「与设计的差异」「#422」。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -352,7 +352,8 @@ pub mod motion {
     pub const ARRIVE_OFFSET: Pixels;  // 8pt
     pub const HOVER_IN: Motion;       // 120 ms · Linear
     pub const HOVER_OUT: Motion;      // 200 ms · Linear
-    pub const SPIN: Motion;           // 1000 ms · Linear · 循环（`LoadingProgress` 的圆环；`reduced` 时不转）
+    pub const SPIN_STEP: Duration;    // 1/12 s（`LoadingProgress` 的辐条，一秒一圈；定时器，不是每帧）
+    pub const SPIN_LIMIT: Duration;   // 30 s（之后辐条不再前进）
 
     /// 进入会话：spring · response 0.35 · damping 0.86。换算（质量 1）：
     /// stiffness = (2π / 0.35)² ≈ 322.3，damping = 2 × 0.86 × √stiffness ≈ 30.9。
@@ -523,20 +524,23 @@ impl Row {
 pub enum LoadingPhase { Nothing, Skeleton, Progress }
 pub fn loading_phase(elapsed: Duration) -> LoadingPhase;   // < 100 ms → Nothing，< 1 s → Skeleton，否则 Progress
 
-/// 加载超过 1 s 时的进度（交互规范「状态与异常」的「加载超过 1 s」）：居中的不确定进度圆环（16pt，`secondary_label`，
-/// `motion::SPIN` 匀速转动；减弱动态效果时静止）、一行 `Secondary` 层级的说明文字和可选的朴素按钮 Cancel（`common-cancel`）。
-/// 圆环是一个只画它自己的小视图（`Entity<Spinner>`，`LoadingProgress` 以自己的 `id` 经 `window.use_keyed_state` 取得，持有视图每次 render 拿到同一个实体，转动不从头开始），在里面用 `with_animation`
-/// （`SPIN`，`repeat`）转动。GPUI 的动画每帧 `notify` 当前视图（`Window::request_animation_frame` 取 `current_view`），
-/// 所以只有放在独立的视图里，每帧重新 render 的才只是圆环，而不是持有它的审阅、阅读或主页视图。转动是「只改低开销属性」的一个例外：旋转只变换这个 16pt 的图形，不触发重排。
-/// 元素不画（加载结束、换屏、窗口不可见）时动画随之停下。`SPIN` 不经 `Transition`，不计入 `active_transitions`，
-/// 所以慢加载期间 `RecordStop::AnimationsSettled` 照常结算。
+/// 加载超过 1 s 时的进度（交互规范「状态与异常」的「加载超过 1 s」）：居中的不确定进度指示器（16pt，`secondary_label`）、
+/// 一行 `Secondary` 层级的说明文字和可选的朴素按钮 Cancel（`common-cancel`）。指示器是 macOS 的样子：12 根辐条，
+/// 领先的一根最深，每 `motion::SPIN_STEP`（1/12 s）前进一根，一秒一圈；减弱动态效果时、或显示超过 `motion::SPIN_LIMIT`
+/// （30 s，有的加载会一直停在 Pending）后不再前进。Lectern 不缓存视图，GPUI 每次 notify 都从根重画整个窗口，
+/// 所以辐条由一次性定时器推进而不是每帧推进：窗口在转动期间以 12 Hz 重画；每次 render 才排下一步的定时器，
+/// 元素不再画出（加载结束、换屏）或窗口被完全挡住（不画帧）时不再排，转动随之停下。时钟（首次画出的时刻、
+/// 下一步的定时器）放在元素的 keyed state 里，定时器只在 state 还在时 notify 持有视图。不经 `Transition`，
+/// 不计入 `active_transitions`，慢加载期间 `RecordStop::AnimationsSettled` 照常结算。
 /// 语义节点：`Role::Group`，`attr("phase", "progress")`；Cancel 是它的子节点 `….cancel`（`Role::Button`）。
-pub struct LoadingProgress { /* id, label, cancel: Option<Box<dyn Fn(&mut Window, &mut App)>> */ }
+pub struct LoadingProgress { /* id, label, fraction, cancel */ }
+/// 某一刻领先的辐条和到下一步的时间（None：不再前进）。纯函数。
+pub fn spin_step(elapsed: Duration, reduced: bool) -> (usize, Option<Duration>);
 impl LoadingProgress {
     pub fn new(id: NodeId, label: Text) -> LoadingProgress;
     /// 有取消时给出取消做的事（调用方派发 `Pop`；只有占满压入屏幕的加载才给，见交互规范）。
     pub fn on_cancel(self, f: impl Fn(&mut Window, &mut App) + 'static) -> LoadingProgress;
-    /// 加载方报告了比例（0–1）时，圆环换成 `Progress` 的 `Bar`。
+    /// 加载方报告了比例（0–1）时，指示器换成 `Progress` 的 `Bar`。
     pub fn fraction(self, f: f32) -> LoadingProgress;
 }
 
@@ -1236,3 +1240,4 @@ pub mod semantic {
 ### #422
 
 - `Row` 与 `SidebarRow` 原来不管有没有 `on_click` 都挂 `on_hover`，点击没有动作的行（侧栏的 Packages 行、主区的加载骨架行）指针经过时也出底色，像是可以点。现在只有设了 `on_click` 的行挂悬停监听。只设 `context_menu` 不设 `on_click` 的行也不再有悬停底色：现有调用方（`welcome`）两者都设，没有受影响的行。
+- **`LoadingProgress` 的转动改为 12 Hz 的定时器（#422）。** 设计（#429）写「圆环是独立的 `Entity<Spinner>`，经 `use_keyed_state` 取得，每帧只重画圆环」。两处与 GPUI 源码不符：`use_keyed_state` 让持有视图观察这个实体（`observe_keyed_state`），实体一 notify 持有视图也 notify；而且 Lectern 不缓存视图（没有 `.cached`），未缓存的子视图在父视图布局时总会重新 render（`request_layout_view`），所以每帧转动就是每帧重画整个窗口，且没有上限。改为 macOS 不确定进度指示器本来的样子：12 根辐条逐根前进（`SPIN_STEP` = 1/12 s），由每次 render 排下的一次性定时器推进，窗口以 12 Hz 重画；超过 `SPIN_LIMIT`（30 s）或减弱动态效果时不再前进。`SPIN` 常量换成 `SPIN_STEP`、`SPIN_LIMIT`。测试：`spinner_steps_twelve_times_a_second_then_holds`（纯函数）、`spinner_redraws_twelve_times_a_second`（推进时钟 1 s，持有视图 render 11–13 次；移除后 1 s 内 0 次）、`spinner_holds_still_under_reduced_motion`（0 次）、`spinner_holds_still_after_the_limit`（过了 30 s 后 0 次）。没有验证：窗口里的实际外观。
