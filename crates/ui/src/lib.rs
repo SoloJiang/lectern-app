@@ -42,9 +42,9 @@ mod tests;
 pub use code::{CodeStyle, code_style, code_styles};
 pub use controls::{
     ActionCard, Agent, AgentDot, AppIcon, Button, ButtonKind, ButtonSize, Capsule, CircleCheck,
-    Disclosure, Expander, GroupedList, Hint, HintFrame, LoadingPhase, MenuItem, PopUpButton,
-    Progress, ProgressShape, Row, Segmented, SidebarRow, Skeleton, TextArea, TextAreaState,
-    loading_phase, show_menu,
+    Disclosure, Expander, GroupedList, Hint, HintFrame, LoadingPhase, LoadingProgress, MenuItem,
+    PopUpButton, Progress, ProgressShape, Row, Segmented, SidebarRow, Skeleton, TextArea,
+    TextAreaState, loading_phase, show_menu, spin_step,
 };
 pub use font::{
     MONO_FALLBACK_FAMILY, MONO_FAMILY, MonoMetrics, TextRole, TextRoleExt, UI_FAMILY, mono_metrics,

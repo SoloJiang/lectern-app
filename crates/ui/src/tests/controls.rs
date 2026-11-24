@@ -370,6 +370,10 @@ impl Render for Gallery {
             .child(CircleCheck::new(root.child("seen"), true).on_change(|_, _, _| {}))
             .child(CircleCheck::new(root.child("unseen"), false))
             .child(Progress::new(root.child("bar"), ProgressShape::Bar, 0.4))
+            .child(
+                crate::LoadingProgress::new(root.child("loading"), verbatim("Counting files…"))
+                    .fraction(0.5),
+            )
             .child(Progress::new(root.child("ring"), ProgressShape::Ring, 0.75))
             .child(Progress::new(
                 root.child("ring-full"),
@@ -705,4 +709,113 @@ fn menu_item_clone_keeps_its_action() {
     };
     let copy = item.clone();
     assert_eq!(copy.action.name(), item.action.name());
+}
+
+#[test]
+fn spinner_steps_twelve_times_a_second_then_holds() {
+    use crate::motion::{SPIN_LIMIT, SPIN_STEP};
+    assert_eq!(
+        crate::spin_step(Duration::ZERO, false),
+        (0, Some(SPIN_STEP))
+    );
+    let (lead, next) = crate::spin_step(SPIN_STEP + Duration::from_millis(1), false);
+    assert_eq!(lead, 1);
+    assert_eq!(next, Some(SPIN_STEP - Duration::from_millis(1)));
+    // A turn a second: the lead spoke is back at the top.
+    assert_eq!(crate::spin_step(Duration::from_secs(1), false).0, 0);
+    assert_eq!(crate::spin_step(Duration::from_secs(1), true), (0, None));
+    assert_eq!(crate::spin_step(SPIN_LIMIT, false), (0, None));
+}
+
+/// A view that shows a `LoadingProgress` while `shown`, counting renders.
+struct Loading {
+    shown: bool,
+    renders: Rc<Cell<usize>>,
+}
+
+impl Render for Loading {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        let root = div().size_full();
+        if !self.shown {
+            return root;
+        }
+        root.child(
+            crate::LoadingProgress::new(
+                NodeId::new("gallery", "loading", None),
+                Text::key(&strings(cx), keys::common::OK),
+            )
+            .on_cancel(|_, _| {}),
+        )
+    }
+}
+
+fn loading_window(
+    cx: &mut TestAppContext,
+    reduced: bool,
+) -> (
+    gpui::Entity<Loading>,
+    &mut VisualTestContext,
+    Rc<Cell<usize>>,
+) {
+    fixed(cx, reduced);
+    let renders = Rc::new(Cell::new(0));
+    let (view, cx) = cx.add_window_view({
+        let renders = renders.clone();
+        move |_, _| Loading {
+            shown: true,
+            renders,
+        }
+    });
+    cx.run_until_parked();
+    (view, cx, renders)
+}
+
+/// The window redraws at the spinner's 12 Hz, not every frame, and not at
+/// all once the spinner is gone, under reduced motion or after the limit.
+#[gpui::test]
+fn spinner_redraws_twelve_times_a_second(cx: &mut TestAppContext) {
+    let (view, cx, renders) = loading_window(cx, false);
+    renders.set(0);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let per_second = renders.get();
+    assert!(
+        (11..=13).contains(&per_second),
+        "{per_second} renders in 1 s"
+    );
+
+    view.update(cx, |view, cx| {
+        view.shown = false;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    renders.set(0);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(renders.get(), 0, "no redraw once the spinner is gone");
+}
+
+#[gpui::test]
+fn spinner_holds_still_under_reduced_motion(cx: &mut TestAppContext) {
+    let (_view, cx, renders) = loading_window(cx, true);
+    renders.set(0);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(renders.get(), 0);
+}
+
+#[gpui::test]
+fn spinner_holds_still_after_the_limit(cx: &mut TestAppContext) {
+    let (_view, cx, renders) = loading_window(cx, false);
+    // Step through the limit one step at a time, as the timers fire.
+    let steps = crate::motion::SPIN_LIMIT.as_millis() / crate::motion::SPIN_STEP.as_millis() + 2;
+    for _ in 0..steps {
+        cx.executor().advance_clock(crate::motion::SPIN_STEP);
+        cx.run_until_parked();
+    }
+    renders.set(0);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(renders.get(), 0, "the spinner stopped after the limit");
 }
