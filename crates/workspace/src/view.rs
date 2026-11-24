@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, Context, FocusHandle, InteractiveElement,
     IntoElement, KeyBinding, KeyBindingContextPredicate, KeyContext, ParentElement,
-    PathPromptOptions, Pixels, Render, Styled, Task, WeakEntity, Window, div,
+    PathPromptOptions, Pixels, Render, Styled, Task, WeakEntity, WeakFocusHandle, Window, div,
     prelude::FluentBuilder, px,
 };
 use lectern_i18n::keys;
@@ -68,6 +68,10 @@ const VIEW: &str = "workspace";
 struct Built {
     route: Route,
     view: Option<AnyView>,
+    /// What had the focus when this screen was pushed: the Back of this
+    /// screen gives it back (the Files tree, a row of the screen below).
+    /// Weak, so a dropped view's handle does not stay alive here.
+    return_focus: Option<WeakFocusHandle>,
 }
 
 /// A frame recording in progress.
@@ -517,6 +521,10 @@ impl Workspace {
         // Screens: the base, then the stack.
         let mut routes = vec![nav.base_route()];
         routes.extend(nav.stack.iter().cloned());
+        let mut restore = self
+            .screens
+            .get(routes.len())
+            .and_then(|popped| popped.return_focus.clone());
         self.screens.truncate(routes.len());
         for (index, route) in routes.into_iter().enumerate() {
             let stale = self
@@ -524,8 +532,20 @@ impl Workspace {
                 .get(index)
                 .is_none_or(|built| built.route != route);
             if stale {
+                // A screen replaced at the same depth keeps its opener; a
+                // new depth records what has the focus now.
+                let return_focus = match self.screens.get(index) {
+                    Some(replaced) => replaced.return_focus.clone(),
+                    None if index > 0 => window.focused(cx).map(|focus| focus.downgrade()),
+                    None => None,
+                };
                 self.screens.truncate(index);
-                self.screens.push(Built { route, view: None });
+                self.screens.push(Built {
+                    route,
+                    view: None,
+                    return_focus,
+                });
+                restore = None;
             }
             let built = &mut self.screens[index];
             if built.view.is_none() && registry.has(Kind::Screen, &built.route.screen) {
@@ -626,6 +646,15 @@ impl Workspace {
             if let Some(view) = view {
                 self.overlay = Some((overlay_id.clone(), view));
             }
+        }
+
+        // Back gives the focus to what opened the popped screen, so the
+        // arrows keep working in the Files tree (#422). A dropped opener
+        // (its view went with the layout) falls back to the root in render.
+        if nav.overlay.is_none()
+            && let Some(focus) = restore.and_then(|weak| weak.upgrade())
+        {
+            window.focus(&focus, cx);
         }
     }
 

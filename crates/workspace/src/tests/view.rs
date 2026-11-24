@@ -1338,3 +1338,113 @@ fn a_milestone_reported_while_a_frame_is_drawn_waits_for_exactly_one_frame(
         assert_eq!(rig.received.milestones().len(), done + 1, "once");
     }
 }
+
+/// A view that takes the focus once, when built (as the Files tree and the
+/// real screens do), and never grabs it back in `render`.
+struct TakesFocusOnce {
+    focus: FocusHandle,
+}
+
+impl Render for TakesFocusOnce {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().track_focus(&self.focus)
+    }
+}
+
+fn takes_focus_once(
+    window: &mut Window,
+    cx: &mut gpui::App,
+    slot: &Arc<Mutex<Option<FocusHandle>>>,
+) -> gpui::AnyView {
+    let view = cx.new(|cx| TakesFocusOnce {
+        focus: cx.focus_handle(),
+    });
+    let focus = view.read(cx).focus.clone();
+    window.focus(&focus, cx);
+    *slot.lock().unwrap() = Some(focus);
+    view.into()
+}
+
+/// #422: Back gives the keyboard back to what opened the popped screen.
+/// From the Files tree, ↵ opens a screen; after Back the arrows reach the
+/// tree again without a click.
+#[gpui::test]
+fn back_returns_the_focus_to_the_opener(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let home: Arc<Mutex<Option<FocusHandle>>> = Arc::default();
+    let tree: Arc<Mutex<Option<FocusHandle>>> = Arc::default();
+    let screen = {
+        let home = home.clone();
+        Box::new(move |contributions: &dyn Contributions, token| {
+            let home = home.clone();
+            let payload = lectern_ui::contrib::Screen {
+                build: Arc::new(move |_, window, cx| takes_focus_once(window, cx, &home)),
+                toolbar: Arc::new(|_| lectern_ui::contrib::ToolbarItems {
+                    title: lectern_ui::Text::verbatim(String::from("Home")),
+                    subtitle: None,
+                    controls: Vec::new(),
+                }),
+            };
+            contributions.register(
+                Contribution {
+                    kind: ContributionKind::Screen(home_layout()),
+                    id: Name::Borrowed(screens::PROJECT_HOME),
+                    order: 0,
+                    payload: payload.into_payload(),
+                },
+                token,
+            )
+        }) as Register
+    };
+    let panel = {
+        let tree = tree.clone();
+        Box::new(move |contributions: &dyn Contributions, token| {
+            let tree = tree.clone();
+            let payload = lectern_ui::contrib::SidebarPanel {
+                build: Arc::new(move |_, window, cx| takes_focus_once(window, cx, &tree)),
+            };
+            contributions.register(
+                Contribution {
+                    kind: ContributionKind::SidebarPanel,
+                    id: Name::Borrowed("files"),
+                    order: 0,
+                    payload: payload.into_payload(),
+                },
+                token,
+            )
+        }) as Register
+    };
+    let registrations = vec![
+        ui_screen(screens::WELCOME, welcome_layout(), Arc::default()),
+        screen,
+        ui_screen(screens::REVIEW, review_layout(), Arc::default()),
+        sidebar_panel("project"),
+        panel,
+    ];
+    let _plugins = rig.contribute(Contributor::staged(registrations), cx);
+    rig.open(project_path(), &project(), cx);
+    rig.dispatch(WorkspaceCommand::ShowSidebarPanel(Some(name("files"))), cx);
+    rig.settle(cx);
+    let tree_focus = tree
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the Files panel was built");
+    let focused = |cx: &mut TestAppContext| {
+        rig.window
+            .update(cx, |_, window, cx| {
+                tree_focus.is_focused(window) && window.focused(cx).is_some()
+            })
+            .unwrap()
+    };
+    assert!(focused(cx), "the tree has the keyboard when shown");
+
+    rig.push(screens::REVIEW, cx);
+    rig.settle(cx);
+    assert!(!focused(cx), "the review took the keyboard");
+
+    cx.dispatch_action(rig.window, Back);
+    rig.settle(cx);
+    assert_eq!(rig.nav(cx).depth(), 0);
+    assert!(focused(cx), "Back gave the keyboard back to the tree");
+}
