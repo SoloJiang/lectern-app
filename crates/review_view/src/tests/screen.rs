@@ -1137,3 +1137,20 @@ fn events_of_another_review_reach_nobody(cx: &mut TestAppContext) {
     assert_eq!(opened.read(cx, |model| model.snapshot.generation), 2);
     assert_eq!(rig.review.commands().len(), commands);
 }
+
+#[gpui::test]
+fn the_screen_takes_the_keyboard_back_when_the_one_above_is_popped(cx: &mut TestAppContext) {
+    let (_rig, opened, _) = ready(cx, 2, 1, 4);
+    let screen = opened.read(cx, |model| model.screen_focus.clone().unwrap());
+    let mut visual = opened.visual(cx);
+    assert!(visual.update(|window, _| screen.is_focused(window)));
+    // The reader on top had the focus and was dropped: nothing is focused
+    // (in the app the workspace's root then holds it).
+    visual.update(|window, cx| window.blur(cx));
+    opened.draw(cx);
+    let mut visual = opened.visual(cx);
+    assert!(
+        visual.update(|window, _| screen.is_focused(window)),
+        "J, K, V and C work without a click"
+    );
+}

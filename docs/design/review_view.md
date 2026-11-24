@@ -324,6 +324,7 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
   - 编辑框的位置（#380）：不管用哪一种方式打开（点行号、C、行尾的 +、Add Note、编辑已有的意见），编辑框整个（含取消和保存）都在浮条上方，不在浮条下面。打开会整表重建，`ListState::reset` 把每一项都当作没测过、高度记为 0，这时 `scroll_to_reveal_item` 看不到新项的高度，什么也不会滚。所以 `open_editor` 只置 `reveal_editor`（等几帧，至多 `REVEAL_FRAMES`），屏幕的 `render` 在列表排完这一帧后（`ListState::bounds_for_item` 有值）调 `ReviewModel::bring_editor_into_view(BAR_RESERVE)`：编辑框的下缘低于「列表的下缘减去 `BAR_RESERVE`」时，用 `ListState::scroll_by` 向上滚这个距离；列表只排版可见范围之外 `OVERDRAW`（400pt）以内的项，编辑框离得更远时（向上拖选的范围，`last` 是按下的那一行，之后又滚走）或在列表之上时，它画出一帧之后仍没有高度，这时先 `scroll_to` 到它（放在列表的最上面），再下一帧照常移到浮条上方；编辑框比空出的地方还高时只滚到它的上缘与列表的上缘对齐，文本框留在视野里；上缘已在列表之上时滚回来；已经整个在视野里时不动。没有编辑框在打开时，`render` 里只多一次 `reveal_editor == 0` 的判断，不请求额外的帧。编辑框在画出之前被关掉或被快照换代拿走时，等待取消。
 - 编辑框里：`ui::TextArea`（`lines(2, 8)`，占位 `review-note-placeholder`）；下面一行右边是取消（朴素按钮，`review-cancel`）和保存（主按钮：新意见 `review-note-add`，已有的意见 `review-note-save`，后面跟键提示 ⌘↩）。文字去掉首尾空白后为空、超过 `limits::NOTE_BYTES` 字节、或与原来相同（已有的意见）时保存不可用；超过上限时左边显示 `review-note-too-long`；锚点是范围时左边先显示 `review-note-lines`。
   - ⌘↩：文本框的 `on_submit` 派发 `review::SaveNote`（gpui-component 的 `Input` 的上下文比屏幕的 KeyContext 深，屏幕上 ⌘↩ 的绑定收不到这个键，[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求) F）。新意见发 `AddNote { rows: Some(这份行的 RowsKey), anchor, text, excerpt: None }`，已有的意见发 `EditNote`。`command` 返回时快照里已经有这条意见：编辑框随即收起，焦点回到屏幕，选中项不变，这个锚点的草稿删掉。
+  - 屏幕上面的一层（完整文件阅读）弹出后，`workspace` 把焦点交给根视图；屏幕在下一次 render 时取回焦点（焦点在检查器、面板、覆盖层或侧栏时不动），与项目主页相同，J、K、V、C 不必先点一下（`the_screen_takes_the_keyboard_back_when_the_one_above_is_popped`）。
   - Esc：文本框的 `on_cancel` 派发 `review::CancelNote`：编辑框收起，焦点回到屏幕。新意见有文字时存为这个锚点的草稿（`drafts`，至多 20 条，超出时丢最早的；屏幕 drop 时丢弃），之后在同一行按 C 时带回，打出的文字不会因为一次 Esc 丢失；改已有的意见时丢弃这次的改动，意见本身不变。输入法组字时 Esc 先给输入法。
   - 编辑框开着时快照换代：锚点行还在时编辑框跟着它（按 `ItemKey::NoteEditor` 找回）；锚点行没了（文件变了）时编辑框跟在这个文件的标题之后，保存照常发出：锚点带着写下时的 OID，`review` 把意见放成 `Drifted`。改已有的意见时，这条意见变成发送中或被删掉，编辑框关闭、改动丢弃。
 - 意见（`Item::Note`）：锚点行之下、与代码左对齐的一块（`fill` 底、圆角，没有描边）。第一行是状态（Caption 层级、次要色：待发送 `review-note-pending`，发送中 `review-notes-sending`，已发送 `review-note-sent` 或 `review-note-copied`，`$when` 是 `relative_time`）和右端的编辑、删除（朴素按钮；待发送时两个都有，已发送时只有删除，发送中都没有）；下面是原文（Body 层级，`Text::verbatim`，保留换行）。锚点行的行号栏里画一个 6pt 圆点：待发送的 `accent`，已发送的 `tertiary_label`。点一下意见选中它（`ItemKey::Note`），编辑、删除也作用在选中的意见上。
@@ -632,7 +633,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   | `review::Refresh` | — | `review` | `ReviewCommand::Refresh` |
   | `review::Analyze` / `CancelAnalyze` | — | `review` | 对应命令 |
   | `review::Escape` | Esc | `review` | 面板或覆盖层开着时（`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里）不处理，Esc 冒泡到 `workspace` 先关面板；没有开着的层而有拖选的范围时只清除范围并停止传播（#373）；没有范围而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
-  | `review::SelectNext` / `SelectPrevious` / `JumpToSelected` | ↓ / ↑ / ↵ | `review-progress` | Progress 列表的选择与跳转（跳到那个文件的步标题） |
+  | `review::SelectNext` / `SelectPrevious` / `JumpToSelected` | ↓ / ↑ / ↵ | `review-progress` | Progress 列表的选择与跳转（跳到那个文件的步标题）；跳转（↵ 或点击）之后焦点移到屏幕，J、K、C 随即可用 |
   | `review::Back` | — | `review` | 失败态的返回按钮：`dispatch(Pop)` |
   | `review::AddNote` | C | `review` | #22：在拖选的范围（#373）、选中的行或 hunk 上打开编辑框（「审阅意见（#22）」）；行尾的 + 和 Add Note 触发同一个 Action；点行号不经 Action，直接选中那一行并打开 |
   | `review::ExtendRangeUp` / `review::ExtendRangeDown` | — | `review` | #373：把选中的行或范围向上、向下扩一行（「拖选范围」）；选中项不是行时不处理 |
