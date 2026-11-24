@@ -58,6 +58,8 @@ project-home-outside-review = Review
 project-home-outside-capped = { $count } changed paths (not attributed)
 project-home-done = Recently Done
 project-home-all-reviewed = Every session is reviewed.
+# The overview takes over 1 s (interaction spec「加载超过 1 s」).
+project-home-loading = Counting files…
 project-home-empty = No agent sessions in this project yet.
 # The accessible name of the progress ring; the figures beside it are -short.
 project-home-progress = { $seen }/{ $total } reviewed

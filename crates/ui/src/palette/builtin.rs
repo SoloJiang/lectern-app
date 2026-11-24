@@ -35,6 +35,8 @@ const LIGHT: SystemColors = SystemColors {
     accent: srgba(0.0, 0.4784, 1.0, 1.0),
     selected_content_background: srgba(0.0, 0.3922, 0.8824, 1.0),
     unemphasized_selected_content_background: srgba(0.8627, 0.8627, 0.8627, 1.0),
+    selected_text_background: srgba(0.7020, 0.8431, 1.0, 1.0),
+    unemphasized_selected_text_background: srgba(0.8627, 0.8627, 0.8627, 1.0),
     system: [
         srgba(1.0, 0.2196, 0.2353, 1.0),    // systemRed
         srgba(1.0, 0.5529, 0.1569, 1.0),    // systemOrange
@@ -65,6 +67,8 @@ const DARK: SystemColors = SystemColors {
     accent: srgba(0.0, 0.4784, 1.0, 1.0),
     selected_content_background: srgba(0.0, 0.3490, 0.8196, 1.0),
     unemphasized_selected_content_background: srgba(0.2745, 0.2745, 0.2745, 1.0),
+    selected_text_background: srgba(0.2471, 0.3882, 0.5451, 1.0),
+    unemphasized_selected_text_background: srgba(0.2745, 0.2745, 0.2745, 1.0),
     system: [
         srgba(1.0, 0.2588, 0.2706, 1.0),    // systemRed
         srgba(1.0, 0.5725, 0.1882, 1.0),    // systemOrange

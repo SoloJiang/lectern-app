@@ -1222,6 +1222,8 @@ pub mod appearance {
         pub accent: Srgba,                                    // controlAccentColor；读不到时是 systemBlueColor
         pub selected_content_background: Srgba,               // selectedContentBackgroundColor
         pub unemphasized_selected_content_background: Srgba,  // unemphasizedSelectedContentBackgroundColor
+        pub selected_text_background: Srgba,                  // selectedTextBackgroundColor（#421）
+        pub unemphasized_selected_text_background: Srgba,     // unemphasizedSelectedTextBackgroundColor（#421）
         /// systemRed、Orange、Yellow、Green、Mint、Teal、Cyan、Blue、Indigo、Purple、Pink、Brown、Gray。
         pub system: [Srgba; SYSTEM_COLOR_COUNT],
         /// `accent` 是否读自 `controlAccentColor`（macOS 10.14 起都有；`ui::accent_follows_system` 报告它）。
@@ -1949,6 +1951,10 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
 - 本文的状态行、「实际验证」写明 `login_env` 已实现；`crates/platform/AGENTS.md` 的「边界」「测试」加上 `login_env`，`lib.rs` 的模块文档和 `Cargo.toml` 的 `description` 提到它。
 
 ## 实际验证
+
+### 选中文字的底色（#421）
+
+`Refs #421`，在 macOS 27.0.1（arm64）上运行：`cargo nextest run -p lectern-platform -p lectern-ui` 通过。`SystemColors` 与 `Palette` 加 `selected_text_background`（`selectedTextBackgroundColor`）和 `unemphasized_selected_text_background`（`unemphasizedSelectedTextBackgroundColor`），供审阅 diff 的文字选择用（[review_view 设计「文字选择（#421）」](review_view.md)「对其他 crate 的要求」O）。内置表的值是本机用 `NSAppearance.performAsCurrentDrawingAppearance` 读到的 sRGB 分量：浅色 (0.7020, 0.8431, 1.0) 与 (0.8627, 0.8627, 0.8627)，深色 (0.2471, 0.3882, 0.5451) 与 (0.2745, 0.2745, 0.2745)，不透明；`Palette` 由 31 个颜色变为 33 个。
 
 在 Linux（x86_64，内核 6.18，`openat2` 可用）上运行。macOS 专属的部分（`NofollowAny`、`nofollow_any_*`、macOS 上的 `perf_smoke`）没有在 macOS 上运行过，由 macOS CI 验证：
 

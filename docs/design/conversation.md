@@ -1,6 +1,6 @@
 # conversation 设计
 
-状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`；「验收」的第 2 步（回复框、停止、权限请求、草稿，以及只把 `dyn Terminals` 放进共享状态的插件 `conversation-terminal`）已实现，见「实际验证」「与设计的差异」，这一步没有真正的 Terminal 页、终端快捷键和离开守卫，issue 仍是 `Refs #23`、`Refs #24`；前置条件 C 的第 6 步（`agents` 的插件 `conversations`、历史窗口、程序查找）和第 7 步（进程与 JSON-RPC、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限）已实现，见 [agents 设计](agents.md#acp-客户端)；第 8 步（实时项换成历史项、`Edits` 的改动预览、`waiting()` 与 `WaitingChanged`）已实现，见 [agents 设计](agents.md#acp-客户端)。「验收」的第 3 步（Terminal 页、终端的快捷键与离开守卫）已实现，见「实际验证」「与设计的差异」，issue 仍是 `Refs #23`、`Refs #24`、`Refs #12`。「验收」的第 4 步（`app` 装配 J、基准 K）已实现，见「实际验证」「与设计的差异」；前置条件 H（`project_home` 的等待标记，插件 "project-home-waiting"）已实现，见 [project_home 设计](project_home.md#第-4-步等待标记)，`app` 现在是 20 个插件；真机验证（发布构建、两个适配器）没有做，所以 issue 仍是 `Refs #23`、`Refs #24`，没有 `Closes`。
+状态：实现中。前置条件 A（`workspace` 的 `Contributions::current_route`，`Refs #23`）已实现，见 [workspace 设计「实际验证」](workspace.md#实际验证)；前置条件 G（`conversation.ftl`，「界面」表的 90 个键）已实现；前置条件 B（`services` 的 `conversation` 模块）已实现；「验收」的第 1 步（插件 `conversation` 与 `conversation-live`、检查器页、Messages 页的显示、探针节点）已实现，见「实际验证」「与设计的差异」，这一步没有回复框、权限请求和真正的 Terminal 页，issue 仍是 `Refs #23`；「验收」的第 2 步（回复框、停止、权限请求、草稿，以及只把 `dyn Terminals` 放进共享状态的插件 `conversation-terminal`）已实现，见「实际验证」「与设计的差异」，这一步没有真正的 Terminal 页、终端快捷键和离开守卫，issue 仍是 `Refs #23`、`Refs #24`；前置条件 C 的第 6 步（`agents` 的插件 `conversations`、历史窗口、程序查找）和第 7 步（进程与 JSON-RPC、实时项、计划、上下文占用、权限请求、空闲退出与 3 个连接的上限）已实现，见 [agents 设计](agents.md#acp-客户端)；第 8 步（实时项换成历史项、`Edits` 的改动预览、`waiting()` 与 `WaitingChanged`）已实现，见 [agents 设计](agents.md#acp-客户端)。「验收」的第 3 步（Terminal 页、终端的快捷键与离开守卫）已实现，见「实际验证」「与设计的差异」，issue 仍是 `Refs #23`、`Refs #24`、`Refs #12`。「验收」的第 4 步（`app` 装配 J、基准 K）已实现，见「实际验证」「与设计的差异」；前置条件 H（`project_home` 的等待标记，插件 "project-home-waiting"）已实现，见 [project_home 设计](project_home.md#第-4-步等待标记)，`app` 现在是 20 个插件；真机验证（发布构建、两个适配器）没有做，所以 issue 仍是 `Refs #23`、`Refs #24`，没有 `Closes`。读历史超过 1 s 时的 `ui::LoadingProgress` 已换上（#422）。
 
 对应 issue [#23](https://github.com/SoloJiang/lectern-app/issues/23)（Conversation 面板：经 ACP 的结构化对话）、[#24](https://github.com/SoloJiang/lectern-app/issues/24)（权限请求的界面）和 [#12](https://github.com/SoloJiang/lectern-app/issues/12) 的 Terminal 页。`conversation` 是检查器的 Conversation 页（⌘\）：Messages 页显示正在审阅的会话的对话（prompt、agent 说明、工具调用、发回的审阅意见），用户在这里回复 agent、批准或拒绝 agent 的权限请求；Terminal 页在内嵌终端里恢复这个会话（`claude --resume`、`codex resume`），显示原始输出（[交互规范「三层结构」](interaction.md#三层结构)、[「状态与异常」](interaction.md#状态与异常)的「Agent 请求权限」、[ADR 0012](../adr/0012.md)、[技术调研「Agent 原生面板」](tech-research.md#4-agent-原生面板第二阶段)）。ACP agent 的启动方式和信任边界见 [ADR 0050](../adr/0050.md)。
 
@@ -498,7 +498,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 | 冷启动 20 ms（`app/cold_start`） | 首帧之前没有代码运行；`plugin/conversation/activate`、`plugin/conversation-live/activate`、`plugin/conversation-terminal/activate` 各 < 1 ms，只登记 |
 | 空闲内存 60 MB（ADR 0017） | 没有打开 Conversation 页时只有 `Shared`（几百字节）。ACP agent 与终端进程空闲时不运行，也不计入（ADR 0050）；草稿至多 16 × 256 KiB，只在用户写过时存在 |
 | 帧预算 8.3 ms（120 Hz） | 应用一次流式更新只重新排版最后一项（≤ 64 KiB）：新基准 `conversation/stream_apply` 的 p95 ≤ 4.8 ms（[ADR 0055](../adr/0055.md)）；列表是虚拟的，只排版可见项 |
-| 打开页 | 快照已有时下一帧画出；历史窗口还在读时按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `conversation-loading` |
+| 打开页 | 快照已有时下一帧画出；历史窗口还在读时按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `ui::LoadingProgress`（`conversation-loading`） |
 | 安装包 80 MB（ADR 0018） | 不新增外部 crate；适配器不随安装包分发（ADR 0050） |
 
 新基准（「对其他 crate 的要求」K）：`conversation/stream_apply`：40 轮、正文合计 1 MiB 的快照，连续应用 200 个快照，每个让最后一段 agent 说明多 200 字节，测每次 `items::build` 加 `splice` 加这一项的排版，p95 ≤ 4.8 ms（[ADR 0055](../adr/0055.md)）。夹具是本 crate 的 `fixture::StreamApply`（`test-support` feature）：一个真实的 `MessagesModel` 在 GPUI 测试平台的窗口里（不开真实窗口），每一步应用下一个快照并画一帧；一个周期 200 步，最后一段从 16 KiB 长到约 55 KiB，周期结束后回到开头（`generation` 继续增加）。帧是测试平台的帧，没有 GPU，文字排版比真实的简单，所以这个基准量的是本 crate 的工作（建项、比较、`splice`、渲染可见的项），不是真实的文字排版；真实帧的预算由帧记录的基准判定（`workspace` 记录帧之后）。
@@ -635,6 +635,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   | `conversation.notice.action` | `Button` | 「显示终端」「关闭」等 |
   | `conversation.notice.detail` | `Text` | `link` 为 `Failed(PromptFailed)` 时 agent 写的错误文字（原样，`Label` 为 verbatim）；探针的节点不进日志 |
   | `conversation.empty` | `Text` | `Label::key` 是空状态的键 |
+  | `conversation.loading` | `Group` | `phase=progress`；`ui::LoadingProgress`，历史窗口读了超过 1 s 时出现 |
   | `conversation.terminal` | `Group` | `attrs`：`state`（`none` / `starting` / `running` / `exited` / `failed`） |
   | `conversation.terminal.resume` | `Button` | `State::disabled`；`Label::key` 是按钮的键 |
   | `conversation.terminal.warning` | `Text` | `Label::key` |
@@ -960,6 +961,10 @@ Terminal 页、终端的快捷键与离开守卫，叠在第 2 步和前置条�
 - `conversation/stream_apply`：`cargo bench --locked -p lectern-bench --all-features --bench time -- conversation/`，不开真实窗口。p95 655 µs（预算 ≤ 2 ms），中位数 459 µs，最大 749 µs，721 个样本，状态 `ok`（报告标 noisy）。不画帧、只算 `apply`（`items::build`、比较、`splice`）时 p95 568 µs，所以这一帧在测试平台上约增加 90 µs；这个数是测试平台的帧，真实窗口里的文字排版更贵，没有测。夹具由 `stream_apply_changes_only_the_last_item` 守住：120 项、正文恰好 1 MiB，450 步（两个多周期）每一步只替换最后一项。预算表和 bench 设计的表加了这一条；没有放宽任何预算。
 - 发布构建（`cargo build --release --locked -p lectern-app`）的 `lectern` 为 44 857 712 字节，装配前的基线没有测（main 上还合并了别的 PR，不能和 terminal 装配时的数字比）；ADR 0018 的 80 MB 是安装包，没有打包，没有核对。
 - 没有验证：`tests/startup.rs`（`plugins` 为 19，首帧之前没有 target 为 `conversation` 的记录）、`tests/bench_probe.rs`（19 个应答）、`tests/probe.rs` 都要图形会话，已写好，没有在本机运行，结果以 macOS CI 为准；冷启动（`app/cold_start`）、空闲内存（`app/idle_empty`）、`plugin/conversation*/activate`、`plugin/conversations/activate` 没有测；设计「验收」第 4 步的真机验证（发布构建、已安装并登录的两个适配器、回复一句、命令卡片、审阅页出现新一轮、空闲 10 分钟后适配器退出、Terminal 页恢复）一项也没有做，因为没有适配器、不能打开真实窗口；前置条件 H 没有。
+
+### 加载超过 1 s（#422）
+
+`Refs #422`，在 macOS（arm64）上运行：`cargo nextest run -p lectern-conversation`（103 个测试）通过。`history_renders_in_order_with_loading_phases` 确认超过 1 s 时 Messages 页的正文是 `conversation.loading Group label=[conversation-loading] phase=progress`（原来是 `conversation.empty` 的一行文字），历史到达后消失。没有取消：页是检查器里的一个标签，关掉它就停止读取。没有验证：真实窗口里的显示。
 
 ## 与设计的差异
 

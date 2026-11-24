@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。编辑框打开后一定在浮条上方（[#380](https://github.com/SoloJiang/lectern-app/issues/380)）：见「审阅意见（#22）」的「编辑框的位置」，差异与验证见同名小节。产品负责人 2026-11-24 决定离开审阅时保留编辑框里的新意见为草稿（「审阅意见（#22）」的「离开审阅」，[#422](https://github.com/SoloJiang/lectern-app/issues/422)），已实现（屏幕释放时经 `Shared` 交接，再开同一个审阅目标时取回）。同一个 issue 的审阅屏幕 UX 修复也已实现：只能用鼠标做的三个操作有了具名 Action（`ToggleTurn`、`JumpToBriefEntry`、`JumpToSubagent`），Conversation 页开着时 Esc 交给 `workspace`，可点的行有悬停底色（见「Action 与快捷键」「界面」的悬停一条，差异与验证见「与设计的差异」和「实际验证」的「审阅屏幕的 UX 修复（#422）」）。指针在可点的行、标题和简报条目上保持箭头，只有行号栏用手形（ADR 0015 的 macOS 原生做法；行号栏点一下就打开编辑框，与点代码不同，手形提示这一点；见「实际验证」的「光标（#422）」）。⌥ 加拖动选中代码文字、⌘C 复制（[#421](https://github.com/SoloJiang/lectern-app/issues/421)）已设计，尚未实现：见「数据结构」的「文字选择（#421）」和「验收」第 6 步。
+状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。编辑框打开后一定在浮条上方（[#380](https://github.com/SoloJiang/lectern-app/issues/380)）：见「审阅意见（#22）」的「编辑框的位置」，差异与验证见同名小节。产品负责人 2026-11-24 决定离开审阅时保留编辑框里的新意见为草稿（「审阅意见（#22）」的「离开审阅」，[#422](https://github.com/SoloJiang/lectern-app/issues/422)），已实现（屏幕释放时经 `Shared` 交接，再开同一个审阅目标时取回）。同一个 issue 的审阅屏幕 UX 修复也已实现：只能用鼠标做的三个操作有了具名 Action（`ToggleTurn`、`JumpToBriefEntry`、`JumpToSubagent`），Conversation 页开着时 Esc 交给 `workspace`，可点的行有悬停底色（见「Action 与快捷键」「界面」的悬停一条，差异与验证见「与设计的差异」和「实际验证」的「审阅屏幕的 UX 修复（#422）」）。指针在可点的行、标题和简报条目上保持箭头，只有行号栏用手形（ADR 0015 的 macOS 原生做法；行号栏点一下就打开编辑框，与点代码不同，手形提示这一点；见「实际验证」的「光标（#422）」）。加载超过 1 s 时换成 `ui::LoadingProgress`（交互规范「加载超过 1 s」，#422；见「实际验证」的「加载超过 1 s（#422）」）。⌥ 加拖动选中代码文字、⌘C 复制（[#421](https://github.com/SoloJiang/lectern-app/issues/421)）已设计，尚未实现：见「数据结构」的「文字选择（#421）」和「验收」第 6 步。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -501,7 +501,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   | `review-mode-unified` / `review-mode-side-by-side` | Unified / Side by side | 统一 / 双栏 | View 菜单项 |
   | `review-refresh`（`.tooltip`） | Refresh（Compare the working tree again） | 刷新（重新比较工作区） | View 菜单项 |
   | `review-loading` | Preparing the review… | 正在准备审阅… | 超过 1 s 的加载态 |
-  | `review-cancel` | Cancel | 取消 | 加载态、Analyze |
+  | `review-cancel` | Cancel | 取消 | Analyze、意见编辑框 |
   | `review-brief-title` | Worth a look first | 值得先看 | 简报标题 |
   | `review-brief-empty` | Nothing stands out. | 没有需要特别注意的地方。 | 简报为空 |
   | `review-brief-omitted` | { $count } more | 还有 { $count } 条 | `omitted` |
@@ -1126,6 +1126,11 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - `rg -c 'cursor_pointer' crates/review_view/src`：`render_diff.rs:2`，其他文件没有。整个 `crates/` 里也只剩这 2 处。
 - `INSTA_UPDATE=no just test -p lectern-review-view` 通过（光标不在语义树和快照里，没有新的测试）；`just check` 通过。
 - 没有验证：真实窗口里的光标形状。
+
+### 加载超过 1 s（#422）
+
+- `LoadState::Loading` 的进度阶段画 `ui::LoadingProgress`（`review-loading`，Cancel 派发 `Pop`）：节点仍是 `review.loading`、`phase=progress`，Cancel 仍是 `review.loading.cancel`，文字的键从 `review-cancel` 换成 `ui` 的 `common-cancel`（`review-cancel` 留给 Analyze 和意见编辑框）。
+- 测试：`screen_opens_the_review_and_shows_loading_phases`（1 s 后 `phase=progress`，Cancel 的键是 `common-cancel`，点击后 `Pop`）；`cargo nextest run -p lectern-review-view` 208/208。没有验证：窗口里的外观。
 
 ## 与设计的差异
 

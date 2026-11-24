@@ -734,7 +734,7 @@ fn skeleton_appears_after_100ms_only(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     let tree2 = tree(vcx, main_part);
     assert!(
-        tree2.contains("project-home.loading Group phase=progress"),
+        tree2.contains("project-home.loading Group label=[project-home-loading] phase=progress"),
         "{tree2}"
     );
 

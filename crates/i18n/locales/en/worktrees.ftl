@@ -15,6 +15,8 @@ worktrees-active = Active
 worktrees-idle = Idle
 worktrees-only-one = This repository has one worktree. Agents working in other worktrees appear here.
 worktrees-not-git = This folder is not a git repository.
+# Under the list while the first comparison runs over 1 s.
+worktrees-loading = Comparing worktrees…
 # The small labels after a branch name.
 worktrees-current = Current
 worktrees-locked = Locked
