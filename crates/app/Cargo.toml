@@ -89,6 +89,10 @@ lectern-ui = { path = "../ui" }
 # The "workspace" plugin, `install` and `WindowState`
 # (docs/design/workspace.md「对其他 crate 的要求」E).
 lectern-workspace = { path = "../workspace" }
+# The Edit menu's actions: `input::{Undo, Redo, Cut, Copy, Paste, SelectAll}`,
+# the ones the text boxes handle (docs/design/app.md「界面」). The before-ready
+# test also uses `Theme`.
+gpui-component.workspace = true
 # `window.json`, and the startup tests read the log file's JSON lines.
 serde_json.workspace = true
 
@@ -100,8 +104,6 @@ lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-logging = { path = "../logging", features = ["sink", "test-support"] }
 # `testing::simulate_appearance_change` for the skeleton window tests.
 lectern-ui = { path = "../ui", features = ["test-support"] }
-# `Theme`: the before-ready test checks that no theme global exists.
-gpui-component.workspace = true
 # `Executor::manual`: the window state tests run the write when they say so.
 lectern-executor = { path = "../executor", features = ["test-support"] }
 tempfile.workspace = true
