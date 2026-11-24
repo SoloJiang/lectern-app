@@ -18,6 +18,7 @@ use crate::diag;
 use crate::items::{self, Item, ItemKey, RangeSpan};
 use crate::model::{Direction, ReviewModel};
 use crate::screen::BAR_RESERVE;
+use crate::text_select::{PressMode, TextPoint};
 
 /// The distance from the list's top or bottom edge within which a drag
 /// scrolls the list.
@@ -52,9 +53,39 @@ pub(crate) struct Press {
     focus_item: Option<usize>,
     /// The contents of the two sides when the press began: a change of
     /// either ends the press.
-    oids: (Option<BlobId>, Option<BlobId>),
+    pub(crate) oids: (Option<BlobId>, Option<BlobId>),
     /// The frame the list was last scrolled for.
     last_tick: Option<Instant>,
+    /// A range of lines, or a text selection (#421).
+    pub(crate) mode: PressMode,
+}
+
+impl Press {
+    /// The press of a ⌥ drag over the text (#421).
+    pub(crate) fn text(
+        rows: RowsKey,
+        ix: u32,
+        run: Range<u32>,
+        half: Option<DiffSide>,
+        oids: (Option<BlobId>, Option<BlobId>),
+        anchor: TextPoint,
+    ) -> Press {
+        Press {
+            rows,
+            start: ix,
+            focus: ix,
+            run,
+            half,
+            span: None,
+            focus_item: None,
+            oids,
+            last_tick: None,
+            mode: PressMode::Text {
+                anchor,
+                head: anchor,
+            },
+        }
+    }
 }
 
 /// The range a drag left: lines `line` to `last` of one side of one diff.
@@ -127,7 +158,10 @@ impl ReviewModel {
             focus_item: None,
             oids,
             last_tick: None,
+            mode: PressMode::Lines,
         });
+        // A press without ⌥ ends a text selection (#421).
+        self.drop_text("cleared");
         // The screen draws the tracker of the pointer from the next frame on.
         cx.notify();
     }
@@ -152,6 +186,9 @@ impl ReviewModel {
         let Some(press) = &self.press else {
             return false;
         };
+        if matches!(press.mode, PressMode::Text { .. }) {
+            return self.follow_text(position, cx);
+        }
         let (rows, run, current) = (press.rows.clone(), press.run.clone(), press.focus);
         // The row that had the focus is the usual answer: one look at it.
         if let Some(item) = press.focus_item
@@ -208,7 +245,7 @@ impl ReviewModel {
 
     /// The list item under height `y`: the pointer above or below the list
     /// stands for the item at that edge.
-    fn item_under(&self, y: Pixels) -> Option<usize> {
+    pub(crate) fn item_under(&self, y: Pixels) -> Option<usize> {
         let viewport = self.list.viewport_bounds();
         if viewport.size.height <= Pixels::ZERO {
             return None;
@@ -268,6 +305,10 @@ impl ReviewModel {
             return;
         };
         cx.notify();
+        if matches!(press.mode, PressMode::Text { .. }) {
+            self.finish_text(press);
+            return;
+        }
         if press.focus == press.start {
             return;
         }
@@ -333,6 +374,11 @@ impl ReviewModel {
         let Some(press) = self.press.take() else {
             return;
         };
+        // A text drag that ends unfinished leaves no selection and logs
+        // nothing: no selection was made.
+        if matches!(press.mode, PressMode::Text { .. }) {
+            return;
+        }
         debug!(
             "note range";
             id = self.id.0,
@@ -395,6 +441,9 @@ impl ReviewModel {
     /// The range is over (a new selection, Esc, a change of mode, a note
     /// saved on it, a change of the content).
     pub(crate) fn drop_range(&mut self) {
+        // Every way the range ends (a selection, J, K, V, a change of mode
+        // or of the content) ends a text selection too (#421).
+        self.drop_text("cleared");
         let Some(range) = self.range.take() else {
             return;
         };
@@ -430,6 +479,7 @@ impl ReviewModel {
         if gone {
             self.drop_range();
         }
+        self.check_text();
     }
 
     /// The anchor of the range, for C and the Add Note button.

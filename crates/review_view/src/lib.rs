@@ -36,6 +36,7 @@ mod render;
 mod render_diff;
 mod render_notes;
 mod screen;
+mod text_select;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;

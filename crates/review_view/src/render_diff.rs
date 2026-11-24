@@ -8,7 +8,8 @@ use std::ops::Range;
 use gpui::{
     AnimationExt as _, AnyElement, ClickEvent, Context, HighlightStyle, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, ScrollDelta, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement, Styled, StyledText, Window, deferred, div, px,
+    SharedString, StatefulInteractiveElement, Styled, StyledText, Window, canvas, deferred, div,
+    px,
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_services::review::{DiffSide, FileRows, RowsKey};
@@ -25,9 +26,10 @@ use crate::items::{self, DiffMode, DisplayRow, ItemKey, RowKind, RowNotes, Side}
 use crate::lines::{self, DisplayLine};
 use crate::model::ReviewModel;
 use crate::nodes;
+use crate::text_select;
 
-/// One side of a side-by-side row: the line, its text and its runs.
-type Half2 = (Side, DisplayLine, Vec<(Range<usize>, HighlightStyle)>);
+/// One side of a side-by-side row: the line and its drawn code cell.
+type Half2 = (Side, AnyElement);
 
 /// What a click on a line number does (see `render_row`).
 type GutterClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App)>;
@@ -143,7 +145,11 @@ impl ReviewModel {
             move |side: Option<DiffSide>| -> GutterClick {
                 let weak = weak.clone();
                 let key = gutter_key.clone();
-                Box::new(move |_, window, cx| {
+                Box::new(move |event, window, cx| {
+                    // ⌥ on a line number writes nothing (#421).
+                    if text_select::option_click(event) {
+                        return;
+                    }
                     cx.stop_propagation();
                     let _ = weak.update(cx, |model, cx| {
                         model.select(Some(key.clone()), cx);
@@ -190,6 +196,14 @@ impl ReviewModel {
                 })
             }
         };
+        // The text a ⌥ drag selected (#421): the system's colour, dimmed when
+        // the window is not the key window.
+        let selection_bg = if window.is_window_active() {
+            palette.selected_text_background
+        } else {
+            palette.unemphasized_selected_text_background
+        };
+        let mut text_selected = false;
         let content = match self.mode {
             DiffMode::Unified => {
                 // The new side when the row has one (a context line is on both).
@@ -200,14 +214,25 @@ impl ReviewModel {
                 };
                 let line = self.draw_line(&rows, half, side);
                 self.note_width(&rows_key, &line);
+                let runs = code(&line, &spans, half, side, &rows, &row, palette);
+                let (cell, chosen_text) = self.code_cell(
+                    &rows_key,
+                    ix,
+                    None,
+                    half,
+                    &line,
+                    runs,
+                    offset,
+                    selection_bg,
+                    cx,
+                );
+                text_selected |= chosen_text;
                 self.unified_row(
                     old,
                     new,
                     Some(side.kind),
                     selected || in_range,
-                    &line,
-                    code(&line, &spans, half, side, &rows, &row, palette),
-                    offset,
+                    cell,
                     mono.cell_width,
                     palette,
                     gutter(None),
@@ -221,7 +246,23 @@ impl ReviewModel {
                             let line = self.draw_line(&rows, half, side);
                             self.note_width(&rows_key, &line);
                             let runs = code(&line, &spans, half, side, &rows, &row, palette);
-                            halves.push(Some((side, line, runs)));
+                            let pressed = match half {
+                                Half::Old => DiffSide::Old,
+                                Half::New => DiffSide::New,
+                            };
+                            let (cell, chosen_text) = self.code_cell(
+                                &rows_key,
+                                ix,
+                                Some(pressed),
+                                half,
+                                &line,
+                                runs,
+                                offset,
+                                selection_bg,
+                                cx,
+                            );
+                            text_selected |= chosen_text;
+                            halves.push(Some((side, cell)));
                         }
                         None => halves.push(None),
                     }
@@ -229,7 +270,6 @@ impl ReviewModel {
                 self.split_row(
                     halves,
                     [selected || in_old, selected || in_new],
-                    offset,
                     mono.cell_width,
                     palette,
                     &gutter,
@@ -237,6 +277,9 @@ impl ReviewModel {
                 )
             }
         };
+        if text_selected {
+            spec = spec.attr("text_selected", "true");
+        }
         // The fill of the line under the pointer; not while a button is held
         // (the pointer is dragging a range, GPUI still hovers the lines it
         // passes).
@@ -356,7 +399,11 @@ impl ReviewModel {
         let scroll_key = rows_key.clone();
         let line_height = self.line_height;
         line = line
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                // The end of a ⌥ drag inside the row is not a click (#421).
+                if text_select::option_click(event) {
+                    return;
+                }
                 this.select(Some(click_key.clone()), cx);
             }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -436,6 +483,77 @@ impl ReviewModel {
         .into_any_element()
     }
 
+    /// The code of one side of a row (#421): always a `StyledText`, so that
+    /// every painted cell has a layout for the hit test, registered in the
+    /// paint phase (the layout is only complete then); the selected part on
+    /// the selection's colour; ⌥ and a press start a text drag. Also says
+    /// whether some of it is selected.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a cell's pieces: where it is, its text and runs, and the frame's"
+    )]
+    fn code_cell(
+        &self,
+        rows_key: &RowsKey,
+        ix: u32,
+        pressed: Option<DiffSide>,
+        half: Half,
+        line: &DisplayLine,
+        runs: Vec<(Range<usize>, HighlightStyle)>,
+        offset: Pixels,
+        selection_bg: gpui::Hsla,
+        cx: &mut Context<ReviewModel>,
+    ) -> (AnyElement, bool) {
+        let side = match half {
+            Half::Old => DiffSide::Old,
+            Half::New => DiffSide::New,
+        };
+        let chosen = self.text_span.as_ref().and_then(|span| {
+            if span.rows != *rows_key {
+                return None;
+            }
+            let display = self.displays.get(rows_key)?;
+            text_select::display_range(span, ix as usize, side, line, display)
+        });
+        let runs = match &chosen {
+            Some(range) => text_select::paint_selection(runs, range.clone(), selection_bg),
+            None => runs,
+        };
+        let text = StyledText::new(line.text.clone()).with_highlights(runs);
+        let layout = text.layout().clone();
+        let layouts = self.text_layouts.clone();
+        let key = (rows_key.clone(), ix, half);
+        let register = canvas(
+            |_, _, _| (),
+            move |_, (), _, _| {
+                layouts.borrow_mut().insert(key.clone(), layout.clone());
+            },
+        )
+        .absolute()
+        .size_0();
+        let weak = cx.weak_entity();
+        let rows = rows_key.clone();
+        let cell = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
+                if !text_select::option_only(&event.modifiers) {
+                    return;
+                }
+                cx.stop_propagation();
+                let _ = weak.update(cx, |model, cx| {
+                    model.begin_text(rows.clone(), ix, pressed, event.position, cx);
+                });
+            })
+            .child(div().flex_shrink_0().ml(-offset).child(text))
+            .child(register)
+            .into_any_element();
+        (cell, chosen.is_some())
+    }
+
     /// The text of a line of one side of a row.
     fn draw_line(&self, rows: &FileRows, half: Half, side: Side) -> DisplayLine {
         let rows_side = match half {
@@ -479,7 +597,7 @@ impl ReviewModel {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "a row's pieces: numbers, kind, text and the shared offset"
+        reason = "a row's pieces: numbers, kind, the code cell and the handlers"
     )]
     fn unified_row(
         &self,
@@ -487,9 +605,7 @@ impl ReviewModel {
         new: Option<u32>,
         kind: Option<RowKind>,
         selected: bool,
-        line: &DisplayLine,
-        runs: Vec<(Range<usize>, HighlightStyle)>,
-        offset: Pixels,
+        code: AnyElement,
         cell: Pixels,
         palette: &Palette,
         gutter: GutterClick,
@@ -533,19 +649,18 @@ impl ReviewModel {
             .child(number(new));
         row.child(numbers)
             .child(sign_cell(kind.unwrap_or(RowKind::Context), cell, palette))
-            .child(text_cell(line, runs, offset))
+            .child(code)
             .into_any_element()
     }
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "a row's pieces: both halves, their accents, the offset and the handlers"
+        reason = "a row's pieces: both halves, their accents and the handlers"
     )]
     fn split_row(
         &self,
         halves: Vec<Option<Half2>>,
         accent: [bool; 2],
-        offset: Pixels,
         cell: Pixels,
         palette: &Palette,
         gutter: &dyn Fn(Option<DiffSide>) -> GutterClick,
@@ -585,7 +700,7 @@ impl ReviewModel {
                 .items_center()
                 .overflow_hidden()
                 .on_mouse_down(MouseButton::Left, press(Some(pressed)));
-            if let Some((side, line, runs)) = half {
+            if let Some((side, code)) = half {
                 if let Some(background) = kind_background(side.kind, palette) {
                     cell_div = cell_div.bg(background);
                 }
@@ -613,7 +728,7 @@ impl ReviewModel {
                             .child(SharedString::from((side.line + 1).to_string())),
                     )
                     .child(sign_cell(side.kind, cell, palette))
-                    .child(text_cell(&line, runs, offset));
+                    .child(code);
             }
             row = row.child(cell_div);
         }
@@ -734,27 +849,6 @@ fn code(
         background,
         palette,
     )
-}
-
-fn text_cell(
-    line: &DisplayLine,
-    runs: Vec<(Range<usize>, HighlightStyle)>,
-    offset: Pixels,
-) -> AnyElement {
-    let text: AnyElement = if runs.is_empty() {
-        div().child(line.text.clone()).into_any_element()
-    } else {
-        div()
-            .child(StyledText::new(line.text.clone()).with_highlights(runs))
-            .into_any_element()
-    };
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .overflow_hidden()
-        .child(div().flex_shrink_0().ml(-offset).child(text))
-        .into_any_element()
 }
 
 /// The sign column: `+` in green, `\u{2212}` in red.

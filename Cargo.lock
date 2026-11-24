@@ -4908,6 +4908,7 @@ name = "lectern-review-view"
 version = "0.0.0"
 dependencies = [
  "futures",
+ "gpui-component",
  "gpui-pre",
  "insta",
  "lectern-executor",

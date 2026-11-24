@@ -399,6 +399,36 @@ fn logs_hold_no_note_contents(cx: &mut TestAppContext) {
     visual.run_until_parked();
     assert_eq!(opened.read(cx, |model| model.range.clone()), None);
 
+    // A text selection (#421): code lines with the canary in them, a ⌥ drag
+    // over two of them, ⌘C, and Esc.
+    {
+        use crate::highlight::Half;
+        use crate::tests::text_select::{char_at, drag_with};
+
+        let mut coded = crate::tests::range::long_rows(step_key());
+        let text: String = (0..14).map(|n| format!("line {n} {CANARY}\n")).collect();
+        coded.old.text = lectern_services::changes::SideText::Text(Arc::from(text.as_bytes()));
+        coded.new.text = lectern_services::changes::SideText::Text(Arc::from(text.as_bytes()));
+        rig.review
+            .set_rows(crate::testing::FIRST_ID, step_key(), coded);
+        rig.review.emit_prepared(crate::testing::FIRST_ID);
+        rig.settle(cx);
+        opened.draw(cx);
+        let from = char_at(&opened, cx, (Some(0), Some(0)), Half::New, 0);
+        let to = char_at(&opened, cx, (Some(1), Some(1)), Half::New, 9);
+        drag_with(&mut visual, &opened, cx, from, to, gpui::Modifiers::alt());
+        assert!(opened.read(cx, |model| model.text.is_some()));
+        visual.simulate_keystrokes("cmd-c");
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert!(
+            copied.as_deref().is_some_and(|text| text.contains(CANARY)),
+            "the copied text has the canary: {copied:?}"
+        );
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        assert!(opened.read(cx, |model| model.text.is_none()));
+    }
+
     // The screen goes away.
     let window = opened.window;
     drop(opened);
@@ -436,6 +466,34 @@ fn logs_hold_no_note_contents(cx: &mut TestAppContext) {
         assert!(
             !line.contains("\"line\":") && !line.contains("\"last\":"),
             "a line number in {line}"
+        );
+    }
+    // The text selection records: how, how many lines, the bytes copied;
+    // no line number, offset or text (#421).
+    let selections: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("\"msg\":\"text selection\""))
+        .collect();
+    for how in ["set", "copied", "cleared"] {
+        assert!(
+            selections
+                .iter()
+                .any(|line| line.contains(&format!("\"how\":\"{how}\""))
+                    && line.contains("\"lines\":2")
+                    && line.contains("\"mode\":\"unified\"")),
+            "no text selection record for {how}: {selections:#?}"
+        );
+    }
+    assert!(
+        selections
+            .iter()
+            .any(|line| line.contains("\"how\":\"copied\"") && line.contains("\"bytes\":")),
+        "{selections:#?}"
+    );
+    for line in &selections {
+        assert!(
+            !line.contains("\"line\":") && !line.contains("\"byte\":"),
+            "a place in {line}"
         );
     }
     assert!(has("note editor"), "{lines:#?}");

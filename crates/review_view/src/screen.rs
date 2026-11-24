@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext, Context, DispatchPhase, Entity, FocusHandle, Focusable,
-    FontWeight, InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, PromptLevel, Render, Styled, Subscription, Window, canvas, div, list,
-    px,
+    AnyElement, AnyView, App, AppContext, Context, CursorStyle, DispatchPhase, Entity, FocusHandle,
+    Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, PromptLevel, Render, Styled, Subscription, Window, canvas,
+    div, list, px,
 };
 use lectern_i18n::{Args, Strings, keys};
 use lectern_logging::warn;
@@ -39,6 +39,7 @@ use crate::model::{self, Direction, ReviewModel};
 use crate::nodes;
 use crate::notes::{Reason, Status};
 use crate::plugin::Shared;
+use crate::text_select::PressMode;
 
 /// The room the floating bar takes at the bottom of the list.
 pub(crate) const BAR_RESERVE: Pixels = px(72.0);
@@ -146,6 +147,10 @@ impl Render for ReviewScreen {
             if model.bring_editor_into_view(BAR_RESERVE) {
                 window.request_animation_frame();
             }
+            // The code cells of this frame register their layouts again
+            // when they are painted (#421).
+            model.text_layouts.borrow_mut().clear();
+            model.text_span = model.work_out_span();
             model.tick_glide(window, now);
             model.row_fade.tick(window);
             if model.tick_drag(window, now, cx) {
@@ -356,11 +361,23 @@ impl Render for ReviewScreen {
                 }),
             )
             .child(body);
+        // Copy only while text is selected: otherwise the Edit menu's Copy
+        // is greyed out (#421).
+        if model.read(cx).text.is_some() {
+            root = root.on_action(cx.listener(|this, _: &gpui_component::input::Copy, _, cx| {
+                this.model.update(cx, |model, cx| model.copy_text(cx));
+            }));
+        }
         if ready {
             root = root.child(self.render_bar(degraded_folder, &strings, window, cx));
         }
-        if model.read(cx).press.is_some() {
-            root = root.child(self.tracker());
+        let text_drag = model
+            .read(cx)
+            .press
+            .as_ref()
+            .map(|press| matches!(press.mode, PressMode::Text { .. }));
+        if let Some(text_drag) = text_drag {
+            root = root.child(self.tracker(text_drag));
         }
         root
     }
@@ -372,11 +389,15 @@ impl ReviewScreen {
     /// button go up. They are made in the paint of this element and last one
     /// frame, so a frame without a press has none (docs/design/review_view.md
     /// 「拖选范围」).
-    fn tracker(&self) -> impl IntoElement {
+    fn tracker(&self, text_drag: bool) -> impl IntoElement {
         let weak = self.model.downgrade();
         canvas(
             |_, _, _| (),
             move |_, (), window, _| {
+                // A ⌥ drag over the text shows the I-beam (#421).
+                if text_drag {
+                    window.set_window_cursor_style(CursorStyle::IBeam);
+                }
                 let moved = weak.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {

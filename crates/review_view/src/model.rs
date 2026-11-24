@@ -38,6 +38,7 @@ use crate::needs;
 use crate::notes::{CONVERSATION_TAB, NoteEditor};
 use crate::plugin::{Job, JobReceiver, JobSender, Shared};
 use crate::range::{LineRange, Press};
+use crate::text_select::{Layouts, TextSelection, TextSpan};
 
 /// The items assumed visible before the list has been laid out once.
 const INITIAL_VISIBLE: usize = 40;
@@ -177,6 +178,12 @@ pub struct ReviewModel {
     pub(crate) press: Option<Press>,
     /// #373: the range the last drag left.
     pub(crate) range: Option<LineRange>,
+    /// #421: the text the last ⌥ drag selected.
+    pub(crate) text: Option<TextSelection>,
+    /// #421: the selection as rows, worked out once for each frame.
+    pub(crate) text_span: Option<TextSpan>,
+    /// #421: the code cells painted in the last frame, for the hit test.
+    pub(crate) text_layouts: Layouts,
     needs: Arc<[Need]>,
     pub(crate) visible: Range<usize>,
     pub(crate) line_height: Pixels,
@@ -300,6 +307,9 @@ impl ReviewModel {
             hovered_row: None,
             row_fade: RowFade::default(),
             press: None,
+            text: None,
+            text_span: None,
+            text_layouts: Layouts::default(),
             range: None,
             needs: Arc::from(Vec::new()),
             visible: 0..0,
@@ -399,6 +409,9 @@ impl ReviewModel {
             hovered_row: None,
             row_fade: RowFade::default(),
             press: None,
+            text: None,
+            text_span: None,
+            text_layouts: Layouts::default(),
             range: None,
             needs: Arc::from(Vec::new()),
             visible: 0..0,
@@ -1027,7 +1040,8 @@ impl ReviewModel {
     pub(crate) fn select(&mut self, key: Option<ItemKey>, cx: &mut Context<ReviewModel>) {
         self.pending_row = None;
         // A new current line ends the range (#373): a range is set after it.
-        if self.range.is_some() {
+        // It ends a text selection too (#421).
+        if self.range.is_some() || self.text.is_some() {
             self.drop_range();
             cx.notify();
         }
@@ -1622,9 +1636,16 @@ impl ReviewModel {
         if self.layer_open || self.conversation_open() {
             return false;
         }
-        // The drag, then the range it left, then the current line (#373).
+        // The drag, then the text selected, then the range a drag left, then
+        // the current line (#373, #421).
         if self.press.is_some() {
             self.cancel_press(cx);
+            return true;
+        }
+        // The text a ⌥ drag selected comes before the range (#421).
+        if self.text.is_some() {
+            self.drop_text("cleared");
+            cx.notify();
             return true;
         }
         if self.range.is_some() {

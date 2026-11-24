@@ -122,6 +122,13 @@ pub fn key_bindings() -> Vec<(&'static str, Box<dyn Action>, Option<&'static str
         ("space", Box::new(OpenContext), Some(IN_REVIEW)),
         ("enter", Box::new(ExpandFold), Some(IN_REVIEW)),
         ("escape", Box::new(Escape), Some(IN_REVIEW)),
+        // The Edit menu's Copy: the selected text of a diff (#421). The note
+        // editor's own `Input` context copies its text.
+        (
+            "cmd-c",
+            Box::new(gpui_component::input::Copy),
+            Some(IN_REVIEW),
+        ),
         ("c", Box::new(AddNote), Some(IN_REVIEW)),
         ("cmd-enter", Box::new(SendNotes), Some(IN_REVIEW)),
         ("down", Box::new(SelectNext), Some(IN_PROGRESS)),

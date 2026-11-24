@@ -45,7 +45,7 @@ use crate::tests::support::{Opened, Rig};
 /// Side by side the removed line 2 shares a row with the added line 2, so
 /// there is one row less before the fold: 0 `0:0`, 1 `1:1`, 2 `2:2`, 3 `-:3`,
 /// 4 `3:4`, 5 `4:5`, 6 fold, 7 `9:10`, 8 `10:-`, 9 `11:11`.
-fn long_rows(key: RowsKey) -> FileRows {
+pub(super) fn long_rows(key: RowsKey) -> FileRows {
     let context = |old, new, hunk| DiffRow::Context {
         old,
         new,
@@ -411,7 +411,7 @@ mod items_range {
 // ----- the screen ---------------------------------------------------------------------
 
 /// The review open on `long_rows`, drawn.
-fn open_long(cx: &mut TestAppContext) -> (Rig, Opened) {
+pub(super) fn open_long(cx: &mut TestAppContext) -> (Rig, Opened) {
     let rig = Rig::new(cx);
     rig.review.set_auto_prepare(true);
     for key in [step_key(), final_key()] {
@@ -428,13 +428,13 @@ fn open_long(cx: &mut TestAppContext) -> (Rig, Opened) {
     (rig, opened)
 }
 
-fn row_id(lines: &str) -> String {
+pub(super) fn row_id(lines: &str) -> String {
     format!("review.diff.item[step:0].row.item[{lines}]")
 }
 
 /// A point on a row of the last frame: `fraction` of its width from the
 /// left, halfway down.
-fn on(records: &[Record], lines: &str, fraction: f32) -> Point<gpui::Pixels> {
+pub(super) fn on(records: &[Record], lines: &str, fraction: f32) -> Point<gpui::Pixels> {
     let bounds = must(records, &row_id(lines)).bounds;
     point(
         bounds.origin.x + bounds.size.width * fraction,
@@ -443,19 +443,19 @@ fn on(records: &[Record], lines: &str, fraction: f32) -> Point<gpui::Pixels> {
 }
 
 /// The code of a row, where a click only moves the current line.
-fn code(records: &[Record], lines: &str) -> Point<gpui::Pixels> {
+pub(super) fn code(records: &[Record], lines: &str) -> Point<gpui::Pixels> {
     on(records, lines, 0.5)
 }
 
 /// A line number of a row, where a click writes a note.
-fn number(records: &[Record], lines: &str) -> Point<gpui::Pixels> {
+pub(super) fn number(records: &[Record], lines: &str) -> Point<gpui::Pixels> {
     let bounds = must(records, &row_id(lines)).bounds;
     point(bounds.origin.x + px(12.0), bounds.center().y)
 }
 
-const LEFT: MouseButton = MouseButton::Left;
+pub(super) const LEFT: MouseButton = MouseButton::Left;
 
-fn press(
+pub(super) fn press(
     visual: &mut VisualTestContext,
     opened: &Opened,
     cx: &mut TestAppContext,
@@ -466,7 +466,7 @@ fn press(
     opened.draw(cx);
 }
 
-fn drag(
+pub(super) fn drag(
     visual: &mut VisualTestContext,
     opened: &Opened,
     cx: &mut TestAppContext,
@@ -476,7 +476,7 @@ fn drag(
     opened.draw(cx);
 }
 
-fn release(
+pub(super) fn release(
     visual: &mut VisualTestContext,
     opened: &Opened,
     cx: &mut TestAppContext,
@@ -487,7 +487,7 @@ fn release(
 }
 
 /// A drag from the code of one row to the code of another, released there.
-fn drag_rows(
+pub(super) fn drag_rows(
     visual: &mut VisualTestContext,
     opened: &Opened,
     cx: &mut TestAppContext,
