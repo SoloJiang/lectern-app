@@ -430,7 +430,7 @@ struct Nav {
 | `Project` | `Push(r)` | — | `r` 的屏幕已注册：压栈，`panel`、`overlay` 关闭；没注册：记 warn，不变；`r` 与当前屏幕（栈顶，栈空时是基底）是同一个 `Route`：忽略，记 debug（侧栏的条目点第二次不会压入同样的屏幕） |
 | `Project`，栈非空 | `Pop` | `View` | 弹出栈顶，`panel`、`overlay` 关闭 |
 | `Project`，栈非空 | `PopToBase` | 每层一次 `View` | 逐层弹出，任一层被拒即停在那一层 |
-| 任意 | `Escape` | 见下 | 关闭最上面的一层 |
+| 任意 | `Escape` | 见下 | 关闭最上面的、看得见的一层 |
 | 任意 | `ShowSidebarPanel(p)` | — | 面板已注册才换 |
 | `layout.inspector` | `SetInspector` / `SelectInspectorTab` | — | 改 `inspector`、`inspector_tab`；`LayerChanged`；`on_state_changed` |
 | `Project` | `SetReadingColumn(v)` | — | 当前屏幕（栈深度）的覆盖设为 `v`；屏幕被弹出、项目关闭或切换、屏幕的贡献被撤销时清掉 |
@@ -438,7 +438,7 @@ struct Nav {
 | 任意 | `CloseWindow` | `Window` | 通过后 `remove_window`，`WindowClosed` |
 | `Welcome` | `Pop`、`PopToBase`、`Push` | — | 忽略，记 debug |
 
-`Escape` 的顺序：覆盖层 → 面板 → 替换侧栏的面板（回到项目侧栏）→ 栈顶屏幕（`Pop`，经 `View` 守卫）→ 都没有时不做任何事。当前屏幕的视图先收到 Esc（它可能关闭自己的查找栏），没有处理时才冒泡到本 crate。⌘[ 同样先给当前屏幕，没有处理时是 `PopToBase`（「Esc · ⌘[：关闭面板 · 返回 Overview」）。阅读视图是例外：它自己处理 ⌘[（后退），退到历史起点之后 `dispatch(Pop)` 回到打开它的那个屏幕（审阅或项目主页，[file_reader 设计「Action 与快捷键」](file_reader.md#action-与快捷键)），不是 `PopToBase`。
+`Escape` 的顺序：覆盖层 → 面板 → 替换侧栏的面板（回到项目侧栏；只在当前屏幕显示侧栏时，审阅这类隐藏侧栏的屏幕上它留给下面的屏幕，不让一次 Esc 落在看不见的面板上）→ 栈顶屏幕（`Pop`，经 `View` 守卫）→ 都没有时不做任何事。当前屏幕的视图先收到 Esc（它可能关闭自己的查找栏），没有处理时才冒泡到本 crate。⌘[ 同样先给当前屏幕，没有处理时是 `PopToBase`（「Esc · ⌘[：关闭面板 · 返回 Overview」）。阅读视图是例外：它自己处理 ⌘[（后退），退到历史起点之后 `dispatch(Pop)` 回到打开它的那个屏幕（审阅或项目主页，[file_reader 设计「Action 与快捷键」](file_reader.md#action-与快捷键)），不是 `PopToBase`。
 
 守卫的询问：对一次命令，按登记顺序逐个 `ask(scope, done)`，前一个 `done(true)` 之后才问下一个；任一个 `done(false)` 就作废这次命令。询问期间到达的同范围命令排队，不并发询问。守卫的 `ask` 在它的激活准入内调用；`enter()` 失败的守卫跳过。
 
