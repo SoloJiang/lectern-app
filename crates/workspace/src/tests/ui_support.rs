@@ -68,8 +68,21 @@ impl Received {
         self.states.lock().unwrap().clone()
     }
 
-    pub fn frames(&self) -> Vec<FrameRecord> {
-        self.frames.lock().unwrap().clone()
+    /// The scenario of each record received, and the kind of its error
+    /// (`HookError::as_str`; None for a recording). `FrameRecord` is not
+    /// `Clone`: `HookError` holds an `io::Error`.
+    pub fn frames(&self) -> Vec<(String, Option<&'static str>)> {
+        self.frames
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|record| {
+                (
+                    record.scenario.to_string(),
+                    record.result.as_ref().err().map(|e| e.as_str()),
+                )
+            })
+            .collect()
     }
 
     pub fn milestones(&self) -> Vec<(Milestone, SystemTime)> {

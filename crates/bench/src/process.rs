@@ -886,14 +886,27 @@ impl<'a> Session<'a> {
     /// invalid sample in a row is an error. No `Quiescent` within
     /// [`Limits::first_quiescent`] of the first frame is
     /// [`Idle::NotQuiescent`]; once one came, a later wait for `Quiescent`
-    /// longer than [`Limits::again`] is an error.
+    /// longer than [`Limits::again`] is an error. A kernel that keeps
+    /// turning busy again never settles: no new wait starts after
+    /// [`Limits::first_quiescent`] plus [`Limits::again`] (the one running
+    /// may take [`Limits::again`] more), then an error (each `Busy` would
+    /// otherwise start the wait again without end).
     pub fn idle<T>(
         &mut self,
         mut sample: impl FnMut(&mut Session<'a>) -> Result<T, BenchError>,
     ) -> Result<Idle<T>, BenchError> {
         let mut invalid = 0;
         let mut seen = false;
+        let busy_at_start = self.busy_count;
+        let whole = self.limits.first_quiescent + self.limits.again;
+        let end = Instant::now() + whole;
         loop {
+            if seen && Instant::now() >= end {
+                return Err(BenchError::new(format!(
+                    "{whole:?} 内没有静止：期间 Busy {} 次",
+                    self.busy_count - busy_at_start
+                )));
+            }
             let (deadline, limit) = if seen {
                 (Instant::now() + self.limits.again, self.limits.again)
             } else {

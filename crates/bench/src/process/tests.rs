@@ -691,6 +691,76 @@ fn process_busy_restarts_the_settle() {
 }
 
 #[test]
+fn process_a_kernel_that_keeps_turning_busy_is_an_error_in_bounded_time() {
+    // Busy and Quiescent every 20 ms, never settling for the 100 ms settle
+    // time: the wait ends with an error after first_quiescent + again
+    // (600 ms). The fake keeps going for 8 s, so an unbounded wait would
+    // pass the 5 s assert below; the margin absorbs a slow CI runner.
+    // A thread answers every `Epoch` at once with None (busy): a pause of
+    // the sender on a loaded runner can pass for the settle time, and the
+    // samples taken in it are invalid (three end the wait, also an error)
+    // instead of waiting out the 2 s reply limit.
+    let fake = Fake::new(move |p| {
+        p.first_frame(start());
+        let (mut reader, writer) = p.conn.take().expect("connected");
+        let writer = Arc::new(Mutex::new(writer));
+        let answers = Arc::clone(&writer);
+        thread::spawn(move || {
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                match Request::decode(line.trim_end_matches('\n')) {
+                    Ok(Request::Epoch) => {
+                        let reply = format!("{}\n", Report::Epoch(None).encode());
+                        let _ = answers.lock().unwrap().write_all(reply.as_bytes());
+                    }
+                    Ok(Request::Quit) => return,
+                    _ => {}
+                }
+                line.clear();
+            }
+        });
+        let until = Instant::now() + Duration::from_secs(8);
+        let mut epoch = 1;
+        while Instant::now() < until {
+            let pair = format!(
+                "{}\n{}\n",
+                Report::Busy { epoch }.encode(),
+                Report::Quiescent { epoch: epoch + 1 }.encode()
+            );
+            if writer.lock().unwrap().write_all(pair.as_bytes()).is_err() {
+                break;
+            }
+            epoch += 2;
+            thread::sleep(ms(20));
+        }
+        0
+    });
+    let limits = Limits {
+        first_quiescent: ms(300),
+        again: ms(300),
+        settle: ms(100),
+        ..quick()
+    };
+    let scheduler = fake.scheduler(limits);
+    let mut session = scheduler.session(&program(), None).unwrap();
+    let began = Instant::now();
+    let error = match session.idle(|_| Ok(())) {
+        Err(error) => error,
+        Ok(_) => panic!("a kernel that never settles gave a sample"),
+    };
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    let message = error.message();
+    assert!(
+        message.contains("没有静止") || message.contains("连续 3 次采样无效"),
+        "{message}"
+    );
+}
+
+#[test]
 fn process_busy_before_the_first_epoch_answer_restarts_the_settle() {
     // The kernel is busy once more after the settle time, and the probe
     // reports it just before its first `Epoch` answer: the sample still
@@ -877,7 +947,8 @@ fn process_deadline_milestone() {
 #[test]
 fn process_deadline_frames() {
     deadline("Frames", |s| {
-        s.frames(OpenTarget::Scroll, ms(150)).map(drop)
+        s.frames(OpenTarget::Scroll { yielding: false }, ms(150))
+            .map(drop)
     });
 }
 
@@ -909,7 +980,7 @@ fn process_frames_error_from_the_probe_is_an_error() {
     let fake = Fake::new(|p| {
         p.first_frame(start());
         while let Some(request) = p.request() {
-            if request == Request::Open(OpenTarget::Scroll) {
+            if request == Request::Open(OpenTarget::Scroll { yielding: false }) {
                 p.send(&Report::Error {
                     message: "frames unmatched=1 incomplete=0 overflowed=0".into(),
                 });
@@ -919,7 +990,10 @@ fn process_frames_error_from_the_probe_is_an_error() {
     });
     let scheduler = fake.scheduler(quick());
     let mut session = scheduler.session(&program(), None).unwrap();
-    let error = message(session.frames(OpenTarget::Scroll, Duration::from_secs(2)));
+    let error = message(session.frames(
+        OpenTarget::Scroll { yielding: false },
+        Duration::from_secs(2),
+    ));
     assert!(error.contains("frames unmatched=1"), "{error}");
 }
 
@@ -950,7 +1024,9 @@ fn process_answers_reach_the_runner() {
                     p.send(&Report::Plugin(answer.clone()));
                     p.send(&Report::PluginsEnd);
                 }
-                Request::Open(OpenTarget::Scroll) => p.send(&Report::Frames(frames.clone())),
+                Request::Open(OpenTarget::Scroll { yielding: false }) => {
+                    p.send(&Report::Frames(frames.clone()))
+                }
                 Request::Open(_) => p.send(&Report::Milestone {
                     milestone: Milestone::ProjectHome,
                     presented: SystemTime::now(),
@@ -966,7 +1042,10 @@ fn process_answers_reach_the_runner() {
     assert_eq!(session.plugins().unwrap(), [plugin]);
     assert_eq!(
         session
-            .frames(OpenTarget::Scroll, Duration::from_secs(2))
+            .frames(
+                OpenTarget::Scroll { yielding: false },
+                Duration::from_secs(2)
+            )
             .unwrap(),
         stats
     );

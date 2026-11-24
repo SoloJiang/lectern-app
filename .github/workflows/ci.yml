@@ -206,7 +206,7 @@ jobs:
       fail-fast: false
       matrix:
         # The process shards in crates/bench/src/shards.rs.
-        shard: [process, process-open-file, process-app]
+        shard: [process, process-open-file, process-frames, process-app]
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -316,7 +316,7 @@ jobs:
       - name: Judge the budgets that end at the first frame
         env:
           LECTERN_BENCH_JUDGE: '1'
-        run: just bench baseline/ app/cold_start
+        run: just bench baseline/ app/cold_start app/scroll_frames
       - name: Upload the judging report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

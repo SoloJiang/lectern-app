@@ -25,6 +25,11 @@ lectern-i18n = { path = "../i18n" }
 lectern-kernel = { path = "../kernel" }
 # Runtime logging (docs/design/workspace.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
+# `frame::record` for `WorkspaceHost::record_frames`. No features: only the
+# measurement build's `lectern-bench/probe` turns `bench-hooks` on; without
+# it `record` answers `Unsupported` (docs/design/workspace.md「依赖」,
+# docs/design/platform.md「帧的时刻」).
+lectern-platform = { path = "../platform" }
 # `dyn Contributions` and its data types, `dyn Projects` and `ProjectEvent`.
 lectern-services = { path = "../services" }
 # Colours, text, `TextRole`, motion and the `contrib` payload types

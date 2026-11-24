@@ -216,12 +216,12 @@ fn first_frame_plugins_and_quit() {
     });
 
     // A kind no benchmark of this step uses is an error for the runner.
-    session.send(&Request::Open(OpenTarget::Scroll));
+    session.send(&Request::Open(OpenTarget::Animate));
     let message = session.next("Error", |report| match report {
         Report::Error { message } => Some(message.clone()),
         _ => None,
     });
-    assert_eq!(message, "open scroll unsupported");
+    assert_eq!(message, "open animate unsupported");
 
     assert!(session.quit().success());
 }

@@ -96,14 +96,38 @@ fn reports() -> Vec<Report> {
                 FrameTimes {
                     requested: at(100),
                     started: at(200),
+                    drawable_asked: Some(at(210)),
+                    drawable_got: Some(at(220)),
+                    committed: Some(at(230)),
+                    gpu_started: Some(at(250)),
                     completed: at(300),
-                    presented: Some(at(400)),
+                    presented: Some(PresentedAt {
+                        time: at(400),
+                        source: TimeSource::Presented,
+                    }),
                 },
                 FrameTimes {
                     requested: at(500),
                     started: at(600),
+                    drawable_asked: Some(at(610)),
+                    drawable_got: None,
+                    committed: None,
+                    gpu_started: Some(at(650)),
                     completed: at(700),
                     presented: None,
+                },
+                FrameTimes {
+                    requested: at(800),
+                    started: at(900),
+                    drawable_asked: None,
+                    drawable_got: None,
+                    committed: Some(at(930)),
+                    gpu_started: None,
+                    completed: at(1_000),
+                    presented: Some(PresentedAt {
+                        time: at(1_100),
+                        source: TimeSource::Handler,
+                    }),
                 },
             ],
             without_tick: 1,
@@ -161,7 +185,8 @@ fn requests() -> Vec<Request> {
             session: "abc 100%".into(),
         }),
         Request::Open(OpenTarget::Worktree(odd)),
-        Request::Open(OpenTarget::Scroll),
+        Request::Open(OpenTarget::Scroll { yielding: false }),
+        Request::Open(OpenTarget::Scroll { yielding: true }),
         Request::Open(OpenTarget::Animate),
         Request::Open(OpenTarget::Input {
             text: "fn main() {\n\tprintln!(\"✓\");\n}".into(),
@@ -246,11 +271,30 @@ fn wire_unknown_names_keys_and_values_are_errors() {
         "child pid=1 kind=daemon id=a",
         "plugin id=a state=Active activation=sometimes",
         "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3",
-        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x,-,-,-,-",
+        // A presented time has its source.
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5,-,-,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,5/display,-,-,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,x/handler,-,-,-,-",
+        // The commit, the GPU start and the drawable's two moments are a
+        // time or `-`; all four are there.
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,4",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,-,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,x,-,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,-,x,-,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,-,-,x,-",
+        "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3,-,-,-,-,x",
     ] {
         assert!(Report::decode(line).is_err(), "{line}");
     }
-    for line in ["open target=elsewhere", "quit now=1", "plugins-end"] {
+    for line in [
+        "open target=elsewhere",
+        "quit now=1",
+        "plugins-end",
+        "open target=scroll yield=x",
+    ] {
         assert!(Request::decode(line).is_err(), "{line}");
     }
 }
@@ -274,5 +318,17 @@ fn wire_bad_percent_encoding_is_an_error() {
             byte: None,
             old: None,
         }))
+    );
+}
+
+#[test]
+fn wire_scroll_without_yield_does_not_yield() {
+    assert_eq!(
+        Request::decode("open target=scroll"),
+        Ok(Request::Open(OpenTarget::Scroll { yielding: false }))
+    );
+    assert_eq!(
+        Request::Open(OpenTarget::Scroll { yielding: false }).encode(),
+        "open target=scroll"
     );
 }

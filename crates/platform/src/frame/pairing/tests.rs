@@ -39,13 +39,22 @@ fn recording() -> (Store, u32) {
     (store, generation)
 }
 
-/// One frame handling that draws: started at `started`, completed at
-/// `completed`, shown at `shown`. Returns its slot.
+/// One frame handling that draws: started at `started`, the drawable asked
+/// for 0.1 ms later and got 0.2 ms after that, committed 0.5 ms after the
+/// start, the GPU started 0.5 ms after that, completed at `completed`, shown
+/// at `shown`. Returns its slot.
 fn frame(store: &Store, generation: u32, started: u64, completed: u64, shown: u64) -> u32 {
     store.frame_started(started);
-    let index = store.drawable().expect("a slot");
-    assert_eq!(store.commit(), Some(index));
-    store.completed(generation, index, seconds(completed));
+    let index = store
+        .drawable(started + 100_000, started + 300_000)
+        .expect("a slot");
+    assert_eq!(store.commit(started + 500_000), Some(index));
+    store.completed(
+        generation,
+        index,
+        seconds(started + 1_000_000),
+        seconds(completed),
+    );
     store.presented(generation, index, seconds(shown), seconds(shown + 500));
     index
 }
@@ -63,6 +72,17 @@ fn assert_times(found: &FrameTimes, requested: u64, started: u64, completed: u64
     assert_eq!(found.requested, at(requested), "requested {found:?}");
     assert_eq!(found.started, at(started), "started {found:?}");
     assert!(close(found.completed, at(completed)), "completed {found:?}");
+    // The frames of `frame()` ask for the drawable 0.1 ms and get it 0.3 ms
+    // after the start, commit 0.5 ms and start the GPU 1 ms after it.
+    assert_eq!(
+        found.drawable_asked,
+        Some(at(started + 100_000)),
+        "{found:?}"
+    );
+    assert_eq!(found.drawable_got, Some(at(started + 300_000)), "{found:?}");
+    assert_eq!(found.committed, Some(at(started + 500_000)), "{found:?}");
+    let gpu_started = found.gpu_started.expect("gpu_started");
+    assert!(close(gpu_started, at(started + 1_000_000)), "{found:?}");
 }
 
 #[test]
@@ -147,10 +167,10 @@ fn frame_pairing_a_frame_without_a_tick() {
 fn frame_pairing_unmatched_drawables() {
     let (store, generation) = recording();
     // A drawable before any frame handling started.
-    assert_eq!(store.drawable(), None);
+    assert_eq!(store.drawable(0, 0), None);
     frame(&store, generation, 5_000_000, 7_000_000, 9_000_000);
     // A second drawable in the same frame handling.
-    assert_eq!(store.drawable(), None);
+    assert_eq!(store.drawable(0, 0), None);
     let taken = store.stop();
     let recording = store.collect(taken, REFRESH, &clock());
     assert_eq!(recording.problems.unmatched, 2);
@@ -161,22 +181,22 @@ fn frame_pairing_unmatched_drawables() {
 #[test]
 fn frame_pairing_only_the_first_commit_after_a_drawable() {
     let (store, _) = recording();
-    assert_eq!(store.commit(), None);
+    assert_eq!(store.commit(4_000_000), None);
     store.frame_started(5_000_000);
-    let index = store.drawable();
+    let index = store.drawable(0, 0);
     assert!(index.is_some());
-    assert_eq!(store.commit(), index);
-    assert_eq!(store.commit(), None);
+    assert_eq!(store.commit(5_100_000), index);
+    assert_eq!(store.commit(5_200_000), None);
 }
 
 #[test]
 fn frame_pairing_incomplete_frames_are_left_out() {
     let (store, generation) = recording();
     store.frame_started(5_000_000);
-    let first = store.drawable().unwrap();
-    store.commit();
+    let first = store.drawable(0, 0).unwrap();
+    store.commit(5_100_000);
     // A failed command buffer gives no time.
-    store.completed(generation, first, 0.0);
+    store.completed(generation, first, 0.0, 0.0);
     store.presented(generation, first, seconds(9_000_000), seconds(9_000_000));
     frame(&store, generation, 15_000_000, 17_000_000, 19_000_000);
     let taken = store.stop();
@@ -189,13 +209,75 @@ fn frame_pairing_incomplete_frames_are_left_out() {
 }
 
 #[test]
+fn frame_pairing_a_missing_commit_or_gpu_start_does_not_make_a_frame_incomplete() {
+    let (store, generation) = recording();
+    // A start time not greater than 0 (0, negative, NaN) leaves it missing;
+    // the frame still has its end.
+    for (i, gpu_start) in [0.0, -1.0, f64::NAN].into_iter().enumerate() {
+        let started = 5_000_000 + i as u64 * 10_000_000;
+        store.frame_started(started);
+        let index = store.drawable(started + 20_000, started + 60_000).unwrap();
+        store.commit(started + 100_000);
+        store.completed(generation, index, gpu_start, seconds(started + 2_000_000));
+        store.presented(generation, index, seconds(started + 3_000_000), 0.0);
+    }
+    // A frame whose `commit` hook never ran has no `committed`, and one
+    // whose drawable times were not read has neither of theirs.
+    store.frame_started(35_000_000);
+    let index = store.drawable(0, 0).unwrap();
+    store.completed(generation, index, seconds(35_500_000), seconds(37_000_000));
+    store.presented(generation, index, seconds(38_000_000), 0.0);
+    let taken = store.stop();
+    assert!(store.settled(taken));
+    let recording = store.collect(taken, REFRESH, &clock());
+    assert!(recording.problems.is_clean(), "{:?}", recording.problems);
+    assert_eq!(recording.frames.len(), 4);
+    for (i, found) in recording.frames[..3].iter().enumerate() {
+        let started = 5_000_000 + i as u64 * 10_000_000;
+        assert_eq!(found.committed, Some(at(started + 100_000)));
+        assert_eq!(found.drawable_asked, Some(at(started + 20_000)));
+        assert_eq!(found.drawable_got, Some(at(started + 60_000)));
+        assert_eq!(found.gpu_started, None, "{found:?}");
+        assert!(close(found.completed, at(started + 2_000_000)));
+    }
+    let last = &recording.frames[3];
+    assert_eq!(last.committed, None);
+    assert_eq!(last.drawable_asked, None);
+    assert_eq!(last.drawable_got, None);
+    assert!(close(last.gpu_started.unwrap(), at(35_500_000)));
+    assert!(close(last.completed, at(37_000_000)));
+}
+
+#[test]
+fn frame_pairing_a_slot_reused_by_a_later_recording_forgets_the_commit_and_drawable() {
+    let (store, generation) = recording();
+    frame(&store, generation, 5_000_000, 7_000_000, 9_000_000);
+    store.stop();
+    assert!(store.claim());
+    let generation = store.begin(20_000_000);
+    store.frame_started(25_000_000);
+    let index = store.drawable(0, 0).unwrap();
+    store.completed(generation, index, seconds(25_500_000), seconds(26_000_000));
+    let taken = store.stop();
+    let recording = store.collect(taken, REFRESH, &clock());
+    assert_eq!(recording.frames[0].committed, None);
+    assert_eq!(recording.frames[0].drawable_asked, None);
+    assert_eq!(recording.frames[0].drawable_got, None);
+}
+
+#[test]
 fn frame_pairing_past_the_capacity_overflows() {
     let (store, generation) = recording();
     for i in 0..SLOTS as u64 + 2 {
         store.frame_started(2_000_000 + i * 1000);
-        if let Some(index) = store.drawable() {
-            store.commit();
-            store.completed(generation, index, seconds(3_000_000 + i * 1000));
+        if let Some(index) = store.drawable(0, 0) {
+            store.commit(2_500_000 + i * 1000);
+            store.completed(
+                generation,
+                index,
+                seconds(2_800_000 + i * 1000),
+                seconds(3_000_000 + i * 1000),
+            );
             store.presented(generation, index, 0.0, seconds(4_000_000));
         }
     }
@@ -210,9 +292,9 @@ fn frame_pairing_past_the_capacity_overflows() {
 fn frame_pairing_presented_time_zero_is_the_handler_time() {
     let (store, generation) = recording();
     store.frame_started(5_000_000);
-    let index = store.drawable().unwrap();
-    store.commit();
-    store.completed(generation, index, seconds(7_000_000));
+    let index = store.drawable(0, 0).unwrap();
+    store.commit(5_100_000);
+    store.completed(generation, index, seconds(6_000_000), seconds(7_000_000));
     store.presented(generation, index, 0.0, seconds(9_000_000));
     let taken = store.stop();
     let recording = store.collect(taken, REFRESH, &clock());
@@ -225,9 +307,9 @@ fn frame_pairing_presented_time_zero_is_the_handler_time() {
 fn frame_pairing_no_presented_handler_by_the_deadline_is_none() {
     let (store, generation) = recording();
     store.frame_started(5_000_000);
-    let index = store.drawable().unwrap();
-    store.commit();
-    store.completed(generation, index, seconds(7_000_000));
+    let index = store.drawable(0, 0).unwrap();
+    store.commit(5_100_000);
+    store.completed(generation, index, seconds(6_000_000), seconds(7_000_000));
     let taken = store.stop();
     assert!(!store.settled(taken));
     let recording = store.collect(taken, REFRESH, &clock());
@@ -239,7 +321,7 @@ fn frame_pairing_no_presented_handler_by_the_deadline_is_none() {
 fn frame_pairing_a_stale_generation_writes_nothing() {
     let (store, old) = recording();
     store.frame_started(5_000_000);
-    let index = store.drawable().unwrap();
+    let index = store.drawable(0, 0).unwrap();
     store.stop();
     // The next recording takes the same slot; the old handlers arrive late.
     assert!(store.claim());
@@ -247,8 +329,8 @@ fn frame_pairing_a_stale_generation_writes_nothing() {
     assert_ne!(new, old);
     assert_eq!(store.generation(), new);
     store.frame_started(25_000_000);
-    assert_eq!(store.drawable(), Some(index));
-    store.completed(old, index, seconds(26_000_000));
+    assert_eq!(store.drawable(0, 0), Some(index));
+    store.completed(old, index, seconds(25_500_000), seconds(26_000_000));
     store.presented(old, index, seconds(27_000_000), seconds(27_000_000));
     let taken = store.stop();
     let recording = store.collect(taken, REFRESH, &clock());

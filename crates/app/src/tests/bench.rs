@@ -5,15 +5,17 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc::unbounded;
 use gpui::{Keystroke, TestAppContext};
 use lectern_bench::probe::Driver;
-use lectern_bench::wire::{self, OpenTarget};
+use lectern_bench::wire::{self, FrameStats, OpenTarget, PresentedAt, TimeSource};
 use lectern_i18n::{Locale, Strings};
 use lectern_kernel::Name;
 use lectern_logging::EarlyConfig;
+use lectern_platform::HookError;
+use lectern_platform::frame::{self as platform_frame, FrameProblems, FrameRecording};
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{
     ActiveTree, BlobId, FileList, Head, ProjectKey, ProjectSnapshot, Scan, Worktree, WorktreeKey,
@@ -26,11 +28,11 @@ use lectern_services::workspace::{
 };
 use lectern_ui::Appearance;
 use lectern_workspace::registry::Payloads;
-use lectern_workspace::{Hub, Item, Queued};
+use lectern_workspace::{FrameRecord, Hub, Item, Queued};
 
 use crate::bench::{
-    BenchDriver, BenchRequest, Reporter, Targets, handle, open_changes, open_file, read_target,
-    switch_worktree, wire_milestone,
+    BenchDriver, BenchRequest, Reporter, Targets, frame_stats, handle, open_changes, open_file,
+    read_target, report_frames, switch_worktree, wire_milestone,
 };
 use crate::profile::Profile;
 use crate::quit;
@@ -38,13 +40,18 @@ use crate::startup::Startup;
 use crate::window::{self};
 use crate::window_state::{WELCOME, autosave_name};
 
-/// Records what the probe would have sent to the runner as `Error`.
+/// Records what the probe would have sent to the runner: each `Error`, and
+/// the scenario of each `Frames`.
 #[derive(Default)]
-struct Recorder(Mutex<Vec<String>>);
+struct Recorder(Mutex<Vec<String>>, Mutex<Vec<FrameStats>>);
 
 impl Recorder {
     fn errors(&self) -> Vec<String> {
         self.0.lock().unwrap().clone()
+    }
+
+    fn frames(&self) -> Vec<FrameStats> {
+        self.1.lock().unwrap().clone()
     }
 }
 
@@ -52,14 +59,17 @@ impl Reporter for Recorder {
     fn error(&self, message: &str) {
         self.0.lock().unwrap().push(message.to_owned());
     }
+
+    fn frames(&self, stats: FrameStats) {
+        self.1.lock().unwrap().push(stats);
+    }
 }
 
 /// What a request acts on when only the workspace is there.
 fn at(workspace: Option<&Hub>) -> Targets<'_> {
     Targets {
         workspace,
-        reader: None,
-        window: None,
+        ..Targets::default()
     }
 }
 
@@ -111,7 +121,6 @@ fn open_is_reported_as_unsupported() {
     let recorder = Arc::new(Recorder::default());
     let driver = BenchDriver::new(requests, recorder.clone());
     for target in [
-        OpenTarget::Scroll,
         OpenTarget::Animate,
         OpenTarget::Input {
             text: "x".to_owned(),
@@ -122,15 +131,168 @@ fn open_is_reported_as_unsupported() {
     }
     assert_eq!(
         recorder.errors(),
-        [
-            "open scroll unsupported",
-            "open animate unsupported",
-            "open input unsupported",
-        ]
+        ["open animate unsupported", "open input unsupported"]
     );
     // None of them reaches the main thread, and the path of an unsupported
     // kind is not in the message.
     assert!(incoming.try_recv().is_err());
+}
+
+#[test]
+fn a_scroll_is_forwarded_with_its_yield_switch() {
+    let (requests, mut incoming) = unbounded();
+    let recorder = Arc::new(Recorder::default());
+    let driver = BenchDriver::new(requests, recorder.clone());
+    driver.open(OpenTarget::Scroll { yielding: false });
+    driver.open(OpenTarget::Scroll { yielding: true });
+    assert_eq!(
+        incoming.try_recv().unwrap(),
+        BenchRequest::Scroll { yielding: false }
+    );
+    assert_eq!(
+        incoming.try_recv().unwrap(),
+        BenchRequest::Scroll { yielding: true }
+    );
+    assert!(recorder.errors().is_empty());
+}
+
+/// A scroll acts on the workspace's handle: without it there is nothing to
+/// record, and the runner must hear of it.
+#[gpui::test]
+fn a_scroll_without_a_workspace_is_an_error(cx: &mut TestAppContext) {
+    let recorder = Recorder::default();
+    cx.update(|cx| {
+        handle(
+            BenchRequest::Scroll { yielding: false },
+            &Targets::default(),
+            &recorder,
+            cx,
+        );
+    });
+    assert_eq!(recorder.errors(), ["open scroll without a workspace"]);
+}
+
+fn micros(us: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_micros(us)
+}
+
+fn recording(problems: FrameProblems) -> FrameRecording {
+    FrameRecording {
+        refresh: Duration::from_micros(8_333),
+        frames: vec![
+            platform_frame::FrameTimes {
+                requested: micros(100),
+                started: micros(150),
+                drawable_asked: Some(micros(200)),
+                drawable_got: Some(micros(300)),
+                committed: Some(micros(400)),
+                gpu_started: Some(micros(500)),
+                completed: micros(900),
+                presented: Some(platform_frame::PresentedAt {
+                    time: micros(1_200),
+                    source: platform_frame::TimeSource::Presented,
+                }),
+            },
+            platform_frame::FrameTimes {
+                requested: micros(8_433),
+                started: micros(8_433),
+                drawable_asked: None,
+                drawable_got: None,
+                committed: None,
+                gpu_started: None,
+                completed: micros(9_000),
+                presented: None,
+            },
+        ],
+        problems,
+    }
+}
+
+fn record(result: Result<FrameRecording, HookError>) -> FrameRecord {
+    FrameRecord {
+        scenario: Name::Borrowed("scroll"),
+        result,
+    }
+}
+
+/// A clean recording becomes the `Frames` report with each frame's four
+/// moments, the presented source, the refresh and the frames without a tick.
+#[test]
+fn a_clean_recording_is_the_frames_report() {
+    let problems = FrameProblems {
+        without_tick: 1,
+        ..FrameProblems::default()
+    };
+    let stats = frame_stats(record(Ok(recording(problems)))).unwrap();
+    assert_eq!(stats.scenario, "scroll");
+    assert_eq!(stats.refresh, Duration::from_micros(8_333));
+    assert_eq!(stats.without_tick, 1);
+    assert_eq!(stats.frames.len(), 2);
+    assert_eq!(
+        stats.frames[0],
+        wire::FrameTimes {
+            requested: micros(100),
+            started: micros(150),
+            drawable_asked: Some(micros(200)),
+            drawable_got: Some(micros(300)),
+            committed: Some(micros(400)),
+            gpu_started: Some(micros(500)),
+            completed: micros(900),
+            presented: Some(PresentedAt {
+                time: micros(1_200),
+                source: TimeSource::Presented,
+            }),
+        }
+    );
+    assert_eq!(stats.frames[1].presented, None);
+    assert_eq!(stats.frames[1].drawable_asked, None);
+    assert_eq!(stats.frames[1].drawable_got, None);
+    assert_eq!(stats.frames[1].committed, None);
+    assert_eq!(stats.frames[1].gpu_started, None);
+
+    let recorder = Recorder::default();
+    report_frames(record(Ok(recording(problems))), &recorder);
+    assert_eq!(recorder.frames(), [stats]);
+    assert!(recorder.errors().is_empty());
+}
+
+/// A recording that did not start, or that is not clean, is an `Error` with
+/// the messages of the bench design (`Probe::frames`), never `Frames`.
+#[test]
+fn an_unclean_or_failed_recording_is_an_error() {
+    let recorder = Recorder::default();
+    report_frames(record(Err(HookError::NoMetalLayer)), &recorder);
+    report_frames(record(Err(HookError::Unsupported)), &recorder);
+    report_frames(record(Err(HookError::NotMainThread)), &recorder);
+    report_frames(
+        record(Ok(recording(FrameProblems {
+            unmatched: 1,
+            incomplete: 2,
+            overflowed: 3,
+            without_tick: 0,
+        }))),
+        &recorder,
+    );
+    // One problem is enough, and a frame the display link did not ask for is
+    // only reported.
+    report_frames(
+        record(Ok(recording(FrameProblems {
+            incomplete: 1,
+            ..FrameProblems::default()
+        }))),
+        &recorder,
+    );
+    assert_eq!(
+        recorder.errors(),
+        [
+            "frames no_metal_layer",
+            "frames unsupported",
+            "frames not_main_thread",
+            "frames unmatched=1 incomplete=2 overflowed=3",
+            "frames unmatched=0 incomplete=1 overflowed=0",
+        ]
+    );
+    assert!(recorder.frames().is_empty());
 }
 
 #[test]
@@ -468,7 +630,7 @@ fn files_and_file_requests_take_their_paths(cx: &mut TestAppContext) {
         let targets = Targets {
             workspace: Some(&*hub),
             reader: Some(&reader),
-            window: None,
+            ..Targets::default()
         };
         let file = || BenchRequest::OpenFile {
             path: PathBuf::from("/repos/a-main/src/lib.rs"),

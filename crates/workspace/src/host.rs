@@ -12,6 +12,8 @@ use gpui::{
     Task, Window,
 };
 use lectern_kernel::Name;
+use lectern_platform::HookError;
+use lectern_platform::frame::FrameRecording;
 use lectern_services::workspace::{LeaveScope, Milestone, WindowId};
 
 use crate::driver::Driver;
@@ -32,19 +34,14 @@ pub struct WorkspaceDeps {
     pub on_frames: Arc<dyn Fn(FrameRecord) + Send + Sync>,
 }
 
-/// One frame's times. Stands in for `platform::frame::FrameTimes` until
-/// `platform` implements frame recording (「已知限制」); until then a
-/// `FrameRecord` carries no frames.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct FrameTimes {
-    pub presented: SystemTime,
-}
-
 /// The frames of one recording; `app` turns it into the bench's `FrameStats`.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// `result` is `platform::frame::record`'s error, or what
+/// `PendingFrames::wait` gave after the recording stopped (its
+/// `FrameProblems` say whether the frames can be trusted).
+#[derive(Debug)]
 pub struct FrameRecord {
     pub scenario: Name,
-    pub frames: Vec<FrameTimes>,
+    pub result: Result<FrameRecording, HookError>,
 }
 
 struct Inner {
@@ -196,7 +193,11 @@ impl WorkspaceHost {
 
     /// Starts recording the window's frames until `stop` holds; the record
     /// comes back through `on_frames`. A recording in progress ends first.
-    /// Any thread.
+    /// Each frame asks for the next one and calls `frame_started` before it
+    /// is laid out; at the stop the recorder stops on the main thread and
+    /// `PendingFrames::wait(250 ms)` runs on the background executor. When
+    /// `platform::frame::record` fails the stop condition still ends the
+    /// recording, with that error. Any thread.
     pub fn record_frames(&self, scenario: Name, stop: RecordStop) {
         self.0.hub.enqueue(Item::RecordFrames { scenario, stop });
     }

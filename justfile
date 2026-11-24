@@ -66,7 +66,7 @@ doctest: zig
 # elsewhere. `--measure` samples on Linux too (reported, not gated); other
 # arguments filter IDs, e.g. `just bench agents/`. On macOS,
 # `--shard <name>` runs one CI shard (code-intel, process, process-open-file,
-# process-app, git or rest) and writes its reports without merging them: CI
+# process-frames, process-app, git or rest) and writes its reports without merging them: CI
 # merges the shards' reports. See docs/design/bench.md.
 bench *args: zig
     #!/usr/bin/env bash
