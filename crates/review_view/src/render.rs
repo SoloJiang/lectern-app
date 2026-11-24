@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnimationExt, AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
     Pixels, SharedString, StatefulInteractiveElement, Styled, Window, div, px, svg,
@@ -35,6 +36,7 @@ enum Analyze {
     Start,
     Cancel,
 }
+use crate::hover::Hover;
 use crate::items::{self, Item, ItemKey, Notice, Pos};
 use crate::model::ReviewModel;
 use crate::nodes;
@@ -57,6 +59,10 @@ const DIFF_PAD: Pixels = px(6.0);
 const HEAD_PAD_X: Pixels = px(14.0);
 const HEAD_PAD_Y: Pixels = px(10.0);
 const HEAD_GAP: Pixels = px(10.0);
+/// How far the hover fill of a brief entry reaches past its text, and its
+/// corners.
+const HOVER_PAD: Pixels = px(6.0);
+const HOVER_RADIUS: Pixels = px(6.0);
 
 /// The separator between the parts of a line of facts.
 const SEPARATOR: &str = " \u{00B7} ";
@@ -493,7 +499,7 @@ impl ReviewModel {
                     .child(Text::key(strings, keys::review::BRIEF_EMPTY).shared()),
             );
         }
-        for line in lines {
+        for (entry, line) in lines.into_iter().enumerate() {
             let node = root.item(&line.id);
             let mut spec = Semantic::new(node.clone(), Role::ListItem)
                 .label(&line.text)
@@ -510,22 +516,30 @@ impl ReviewModel {
                 } else {
                     palette.tertiary_label
                 });
-            let file = line.file.clone();
-            let anchor = line.line;
-            let row = div()
+            let hover = Hover::track(&node, window, cx);
+            // The fill reaches `HOVER_PAD` past the text on both sides; the
+            // margin takes it back, so that the text stays where it is.
+            let mut row = div()
                 .id(&node)
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(10.0))
+                .mx(-HOVER_PAD)
+                .px(HOVER_PAD)
+                .rounded(HOVER_RADIUS)
                 .cursor_pointer()
                 .text_role(TextRole::Body, window, cx)
                 .text_color(palette.label)
                 .child(dot)
                 .child(div().flex_1().min_w_0().child(line.text.shared()))
+                .on_hover(hover.listener())
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.jump_to_brief(file.clone(), anchor, cx);
+                    this.open_brief_entry(entry, cx);
                 }));
+            if let Some(fill) = hover.fill(palette) {
+                row = row.bg(fill);
+            }
             column = column.child(semantic_interactive(spec, row));
         }
         if brief.omitted > 0 {
@@ -793,7 +807,8 @@ impl ReviewModel {
                 expanded: Some(expanded),
                 ..State::default()
             });
-        let row = div()
+        let hover = Hover::track(&node, window, cx);
+        let mut row = div()
             .id(&node)
             .w_full()
             .px(GUTTER)
@@ -807,7 +822,11 @@ impl ReviewModel {
             .text_color(palette.secondary_label)
             .child(Disclosure::new(if expanded { 1.0 } else { 0.0 }))
             .child(text.shared())
+            .on_hover(hover.listener())
             .on_click(cx.listener(|this, _, _, cx| this.toggle_earlier(cx)));
+        if let Some(fill) = hover.fill(palette) {
+            row = row.bg(fill);
+        }
         semantic_interactive(spec, row).into_any_element()
     }
 
@@ -877,6 +896,7 @@ impl ReviewModel {
                            cx: &mut Context<ReviewModel>| {
             this.toggle_turn(at, cx);
         };
+        let hover = Hover::track(&node, window, cx);
         let row = if collapsed {
             let aside = if files == 0 {
                 Text::key(strings, keys::review::TURN_NONE)
@@ -898,6 +918,8 @@ impl ReviewModel {
                 .items_center()
                 .gap(px(10.0))
                 .cursor_pointer()
+                .when_some(hover.fill(palette), |row, fill| row.bg(fill))
+                .on_hover(hover.listener())
                 .border_t(HAIRLINE)
                 .border_color(palette.separator)
                 .text_role(TextRole::Secondary, window, cx)
@@ -947,6 +969,8 @@ impl ReviewModel {
                 .items_baseline()
                 .gap(px(10.0))
                 .cursor_pointer()
+                .when_some(hover.fill(palette), |row, fill| row.bg(fill))
+                .on_hover(hover.listener())
                 .border_t(HAIRLINE)
                 .border_color(palette.separator)
                 .child(
@@ -1244,6 +1268,7 @@ impl ReviewModel {
             key,
         } = head;
         let has_diff = !self.slice_of(list_ix).last;
+        let hover = Hover::track(&node, window, cx);
         let check = self.check(&node.child("check"), &file, seen, cx);
         let path_color = if matches!(seen, SeenState::Seen) {
             palette.secondary_label
@@ -1287,8 +1312,14 @@ impl ReviewModel {
             .px(HEAD_PAD_X)
             .py(HEAD_PAD_Y)
             .cursor_pointer()
-            .when_selected(selected, palette)
+            .on_hover(hover.listener())
             .child(top);
+        // Selected, the title has its own fill; hovered, the lighter one.
+        head = if selected {
+            head.bg(palette.unemphasized_selected_content_background)
+        } else {
+            head.when_some(hover.fill(palette), |head, fill| head.bg(fill))
+        };
         if has_diff {
             head = head.border_b(HAIRLINE).border_color(palette.separator);
         }
@@ -1653,7 +1684,7 @@ impl ReviewModel {
         session: u16,
         call: lectern_services::session::ToolCallId,
         _at: Pos,
-        _palette: &Palette,
+        palette: &Palette,
         strings: &Strings,
         window: &mut Window,
         cx: &mut Context<ReviewModel>,
@@ -1663,6 +1694,7 @@ impl ReviewModel {
         let spec = Semantic::new(node.clone(), Role::Text)
             .label(&text)
             .attr("kind", "subagent");
+        let hover = Hover::track(&node, window, cx);
         let mut row = div()
             .id(&node)
             .cursor_pointer()
@@ -1673,6 +1705,8 @@ impl ReviewModel {
             .flex_row()
             .items_center()
             .gap(px(8.0))
+            .when_some(hover.fill(palette), |row, fill| row.bg(fill))
+            .on_hover(hover.listener())
             .text_role(TextRole::Secondary, window, cx);
         let agent = self
             .snapshot
@@ -1684,7 +1718,9 @@ impl ReviewModel {
         }
         let row = row
             .child(text.shared())
-            .on_click(cx.listener(move |this, _, _, cx| this.jump_to_session(session, cx)));
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_subagent(call.clone(), session, cx);
+            }));
         semantic_interactive(spec, row).into_any_element()
     }
 

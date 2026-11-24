@@ -30,8 +30,9 @@ use lectern_ui::{
 use crate::actions::{
     self, AddNote, Analyze, Back, CancelAnalyze, CancelNote, CopyNotesAgain, CopyNotesAsPrompt,
     DeleteNote, DiscardNotes, Edit, EditNote, Escape, ExpandFold, ExtendRangeDown, ExtendRangeUp,
-    LooksGood, MarkSeenAndNext, NextHunk, OpenContext, OpenFile, PreviousHunk, Refresh, SaveNote,
-    SendNotes, ToggleDiffMode, ToggleEarlierTurns, ToggleNoise, ToggleSeen,
+    JumpToBriefEntry, JumpToSubagent, LooksGood, MarkSeenAndNext, NextHunk, OpenContext, OpenFile,
+    PreviousHunk, Refresh, SaveNote, SendNotes, ToggleDiffMode, ToggleEarlierTurns, ToggleNoise,
+    ToggleSeen, ToggleTurn,
 };
 use crate::brief;
 use crate::model::{self, Direction, ReviewModel};
@@ -146,6 +147,7 @@ impl Render for ReviewScreen {
                 window.request_animation_frame();
             }
             model.tick_glide(window, now);
+            model.row_fade.tick(window);
             if model.tick_drag(window, now, cx) {
                 window.request_animation_frame();
             }
@@ -231,6 +233,32 @@ impl Render for ReviewScreen {
             }))
             .on_action(cx.listener(|this, _: &ToggleEarlierTurns, _, cx| {
                 this.model.update(cx, |model, cx| model.toggle_earlier(cx));
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTurn, _, cx| {
+                // No turn at the selection (or at the top of the list): the
+                // key goes on.
+                if !this
+                    .model
+                    .update(cx, |model, cx| model.toggle_current_turn(cx))
+                {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &JumpToBriefEntry, _, cx| {
+                if !this
+                    .model
+                    .update(cx, |model, cx| model.open_next_brief_entry(cx))
+                {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &JumpToSubagent, _, cx| {
+                if !this
+                    .model
+                    .update(cx, |model, cx| model.open_next_subagent(cx))
+                {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
                 this.model.update(cx, |model, _| model.refresh());

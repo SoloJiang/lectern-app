@@ -28,6 +28,15 @@ actions!(
         ToggleNoise,
         /// Show or hide the turns before the latest seen mark.
         ToggleEarlierTurns,
+        /// Fold the turn of the selected item into one line, or open it (the
+        /// click on a turn's title).
+        ToggleTurn,
+        /// Go to the place of the next brief entry that has one (the click on
+        /// an entry of the brief).
+        JumpToBriefEntry,
+        /// Go to the session of a sub-agent line: the selected one, else the
+        /// next after the one opened last (the click on the line).
+        JumpToSubagent,
         /// Compare the working tree again.
         Refresh,
         /// ⇧⌘O: the selected row in the full file.

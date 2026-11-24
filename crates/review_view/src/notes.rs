@@ -36,8 +36,10 @@ pub(crate) const MAX_DRAFTS: usize = 20;
 const REVEAL_FRAMES: u8 = 4;
 
 /// The Conversation page of the inspector, selected after a send into the
-/// session.
-const CONVERSATION_TAB: &str = "conversation";
+/// session, and the page that Esc leaves to `workspace`. It is the name
+/// `lectern-workspace` exports as `CONVERSATION_TAB`; a plugin crate does
+/// not depend on that crate (AGENTS.md rule 7).
+pub(crate) const CONVERSATION_TAB: &str = "conversation";
 
 /// The open note editor: at most one per screen.
 pub(crate) struct NoteEditor {
@@ -308,6 +310,21 @@ impl ReviewModel {
             let text = editor.state.read(cx).text();
             self.keep_draft(anchor.clone(), text);
         }
+    }
+
+    /// The screen is going away (the entity's release hook): the text of an
+    /// open editor for a new note becomes the draft of its anchor, then all
+    /// the drafts go to `Shared`, by the review target. An editor on an
+    /// existing note is dropped with its changes. Never logged.
+    pub(crate) fn leave_drafts(&mut self, cx: &mut gpui::App) {
+        if let Some(editor) = self.editor.take()
+            && let EditorTarget::New { anchor, .. } = &editor.target
+        {
+            let text = editor.state.read(cx).text();
+            self.keep_draft(anchor.clone(), text);
+        }
+        let drafts = std::mem::take(&mut self.drafts);
+        self.shared.keep_drafts(&self.target, drafts);
     }
 
     pub(crate) fn keep_draft(&mut self, anchor: NoteAnchor, text: SharedString) {
