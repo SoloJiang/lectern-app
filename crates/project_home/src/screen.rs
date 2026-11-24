@@ -24,9 +24,9 @@ use lectern_services::session::SessionKey;
 use lectern_ui::motion::{self, LOADING_PROGRESS_AT, LOADING_SKELETON_AT, Transition};
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
-    AgentDot, Button, ButtonKind, ButtonSize, GroupedList, Icon, LoadingPhase, Progress,
-    ProgressShape, Row, Skeleton, SystemColor, Text, TextRole, TextRoleExt, colors, loading_phase,
-    strings,
+    AgentDot, Button, ButtonKind, ButtonSize, GroupedList, Icon, LoadingPhase, LoadingProgress,
+    Progress, ProgressShape, Row, Skeleton, SystemColor, Text, TextRole, TextRoleExt, colors,
+    loading_phase, strings,
 };
 
 use crate::actions::{
@@ -593,6 +593,24 @@ impl HomeScreen {
 
     /// The placeholder of Needs Review while the overview has no result.
     fn placeholder(&self, strings: &Strings, phase: LoadingPhase) -> GroupedList {
+        if phase == LoadingPhase::Progress {
+            // Over 1 s: the shared progress, without Cancel (the rest of the
+            // home stays usable; interaction spec「加载超过 1 s」). It
+            // declares `project-home.loading` with `phase=progress` itself.
+            return GroupedList::new(nodes::needs_review())
+                .header(Text::key(strings, keys::project_home::NEEDS_REVIEW))
+                .row(
+                    Row::new(nodes::area("loading").child("row")).child(
+                        div()
+                            .w_full()
+                            .py(LINE_GAP * 3.0)
+                            .child(LoadingProgress::new(
+                                nodes::area("loading"),
+                                Text::key(strings, keys::project_home::LOADING),
+                            )),
+                    ),
+                );
+        }
         let facts = Semantic::new(nodes::area("loading"), Role::Group).attr(
             "phase",
             match phase {

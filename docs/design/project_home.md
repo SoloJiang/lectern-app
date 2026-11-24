@@ -1,6 +1,6 @@
 # project_home 设计
 
-状态：已实现（第 3 步有三项基准等前置条件：`app/home_frames` 等 `workspace` 记录帧，`project_home/resident_bytes` 等视图状态的内存测量，`app/idle_monorepo`、`app/idle_100k` 暂时不暂停后台工作，见「与设计的差异」第 3 步）。前置条件 B（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、A（`Overview.packages`，[#239](https://github.com/SoloJiang/lectern-app/pull/239)）与「验收」第 1 步（[#241](https://github.com/SoloJiang/lectern-app/pull/241)）、第 2 步（[#248](https://github.com/SoloJiang/lectern-app/pull/248)）、`app` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)）、第 3 步（里程碑经探针报告 [#320](https://github.com/SoloJiang/lectern-app/pull/320)，基准夹具 [#321](https://github.com/SoloJiang/lectern-app/pull/321)，基准 [#322](https://github.com/SoloJiang/lectern-app/pull/322)，手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，见「实际验证」「与设计的差异」；搜索框、New session、`Waiting` / `Ended` 状态、Outside 卡片的文件名、侧栏的数量和 Recently Done 的结果还没有数据来源，没有画。「验收」第 4 步（会话行与卡片的等待标记，[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求)的 H，`Refs #23`、`Refs #24`）已实现，见「实际验证」「与设计的差异」。[#422](https://github.com/SoloJiang/lectern-app/issues/422) 的 UX 审计修了三处：侧栏「N more」行有了具名 Action `ToggleSessions`（点击与 Action 改同一个标志，标志移到 `Home`），点击没有动作的行（Packages 行、加载骨架行）不再有悬停底色（改在 `ui` 的 `Row` 与 `SidebarRow`），当前屏幕是 Worktrees 等屏幕时侧栏里打开它的条目显示为选中，见「实际验证」「与设计的差异」的「#422」。
+状态：已实现（第 3 步有三项基准等前置条件：`app/home_frames` 等 `workspace` 记录帧，`project_home/resident_bytes` 等视图状态的内存测量，`app/idle_monorepo`、`app/idle_100k` 暂时不暂停后台工作，见「与设计的差异」第 3 步）。前置条件 B（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、A（`Overview.packages`，[#239](https://github.com/SoloJiang/lectern-app/pull/239)）与「验收」第 1 步（[#241](https://github.com/SoloJiang/lectern-app/pull/241)）、第 2 步（[#248](https://github.com/SoloJiang/lectern-app/pull/248)）、`app` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)）、第 3 步（里程碑经探针报告 [#320](https://github.com/SoloJiang/lectern-app/pull/320)，基准夹具 [#321](https://github.com/SoloJiang/lectern-app/pull/321)，基准 [#322](https://github.com/SoloJiang/lectern-app/pull/322)，手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，见「实际验证」「与设计的差异」；搜索框、New session、`Waiting` / `Ended` 状态、Outside 卡片的文件名、侧栏的数量和 Recently Done 的结果还没有数据来源，没有画。「验收」第 4 步（会话行与卡片的等待标记，[conversation 设计「对其他 crate 的要求」](conversation.md#对其他-crate-的要求)的 H，`Refs #23`、`Refs #24`）已实现，见「实际验证」「与设计的差异」。[#422](https://github.com/SoloJiang/lectern-app/issues/422) 的 UX 审计修了三处：侧栏「N more」行有了具名 Action `ToggleSessions`（点击与 Action 改同一个标志，标志移到 `Home`），点击没有动作的行（Packages 行、加载骨架行）不再有悬停底色（改在 `ui` 的 `Row` 与 `SidebarRow`），当前屏幕是 Worktrees 等屏幕时侧栏里打开它的条目显示为选中，见「实际验证」「与设计的差异」的「#422」。概览第一轮超过 1 s 时 Needs Review 的占位换成 `ui::LoadingProgress`（`project-home-loading`，没有 Cancel；交互规范「加载超过 1 s」，#422；见「实际验证」的「加载超过 1 s（#422）」）。
 
 对应 issue [#30](https://github.com/SoloJiang/lectern-app/issues/30)。`project_home` 是打开项目后首先看到的屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 02 画板，[ADR 0012](../adr/0012.md)）：项目侧栏（Overview、最近的 Sessions、带今天改动数的 Packages、其他 crate 贡献的 Worktrees / Files / MR 入口、底部的 Usage 卡片）和主区（Needs Review 的会话卡片、Outside Any Session、Recently Done）。它只显示领域层算好的快照（`project`、`agents`、`review`、`usage`），自己不做归位、比较和统计；它由 [workspace 设计](workspace.md)的根视图承载，作为 `Screen(PROJECT_HOME)` 和 `SidebarPanel("project")` 贡献进去。
 
@@ -447,6 +447,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
   | `project-home-outside-capped` | { $count } changed paths (not attributed) | { $count } 个改动路径（未归属） |
   | `project-home-done` | Recently Done | 最近完成 |
   | `project-home-all-reviewed` | Every session is reviewed. | 所有会话都已审阅。 |
+  | `project-home-loading` | Counting files… | 正在统计文件… |
   | `project-home-empty` | No agent sessions in this project yet. | 这个项目还没有 agent 会话。 |
   | `project-home-progress` | { $seen }/{ $total } reviewed | 已看 { $seen }/{ $total } |
   | `project-home-progress-short` | { $seen }/{ $total } | { $seen }/{ $total } |
@@ -721,6 +722,11 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - 每个测试在去掉修复之后都失败：把 `ui` 的 `controls/` 还原到修复前，`a_row_without_a_click_does_not_answer_the_pointer` 与 `the_loading_placeholder_does_not_answer_the_pointer` 失败（指针经过不可点的行时多了一个悬停过渡）；去掉屏幕根视图上的 `ToggleSessions` 处理函数，两个 Action 测试失败；去掉 `Home::open` 里清标志的一行，`the_fold_starts_again_with_another_project` 失败；让侧栏只在主页选中 Overview 条目，`the_entry_of_the_current_screen_is_selected` 失败。
 - 悬停用 `motion::active_transitions` 观察：指针移到行上，有 `on_hover` 监听的行会开始一个 `Transition`，计数加一；没有监听的行计数不变。这检查的是「有没有开始淡入」，不是画出来的底色。
 - 没有验证：真实窗口里的观感（Packages 行与骨架行上指针经过时没有底色、Worktrees 条目选中的底色与 Overview 选中时相同）；探针对 `ToggleSessions` 的触发：读过 gpui-mcp 锁定版本的工具表（`click_element`、`keyboard`、`execute_app_command` 等），没有按名字分发 GPUI Action 的工具（`execute_app_command` 是应用自己登记的命令，不是 Action），所以探针靠 `click_element` 点 `project-home.sidebar.sessions.more` 触发（这个节点在所有屏幕上都在），`ToggleSessions` 本身只在 `#[gpui::test]` 里用 `VisualTestContext::dispatch_action` 触发过，没有键绑定，真实窗口里也没有试；Worktrees 屏幕上侧栏是否真的画出（`worktrees` 的 `ScreenLayout` 里 `sidebar: Shown`，只读了代码，`workspace` 的真实根视图没有在这里跑）。
+
+### 加载超过 1 s（#422）
+
+- Needs Review 的占位在 `LoadingPhase::Progress` 时画 `ui::LoadingProgress`（节点 `project-home.loading`、`phase=progress`、标签 `project-home-loading`，没有 Cancel），不再继续显示骨架。Outside 行的数字在等待时仍是骨架块（它是一行里的一个数字，不是一块加载区域）。
+- 测试：`skeleton_appears_after_100ms_only` 的 1 s 后一段改为期望 `label=[project-home-loading] phase=progress`。`cargo nextest run -p lectern-project-home` 通过。没有验证：窗口里的外观。
 
 ## 与设计的差异
 
