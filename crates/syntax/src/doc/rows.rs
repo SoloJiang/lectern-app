@@ -515,7 +515,16 @@ impl DocSnapshot {
             return out;
         };
         let key = line_start.max(spans.range().start);
-        for token in spans.line(key) {
+        let line = spans.line(key);
+        // A line's tokens are ascending and do not overlap (`WindowSpans`), so
+        // the row's first one is found by a binary search: a long line holds
+        // hundreds of thousands, and each frame asks for about 60 rows.
+        let relative = row.start.saturating_sub(key);
+        let first = line.partition_point(|token| u64::from(token.end()) <= relative);
+        for token in &line[first..] {
+            if key + u64::from(token.start()) >= row.end {
+                break;
+            }
             let start = key + u64::from(token.start());
             let end = key + u64::from(token.end());
             let (a, b) = (start.max(row.start), end.min(row.end));
