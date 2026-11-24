@@ -729,26 +729,28 @@ fn scrolled(
     scenario: &str,
 ) -> Result<FrameStats, BenchError> {
     // DIAGNOSTIC ONLY (not for main): samples the app's stacks while it scrolls.
-    let sampler = std::env::var("LECTERN_BENCH_SAMPLE_DIR").ok().and_then(|dir| {
-        std::fs::create_dir_all(&dir).ok()?;
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis();
-        let name: String = scenario
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let child = std::process::Command::new("/usr/bin/sample")
-            .args([&session.pid().to_string(), "6", "1", "-mayDie", "-file"])
-            .arg(format!("{dir}/{name}-{stamp}.txt"))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        std::thread::sleep(Duration::from_millis(700));
-        Some(child)
-    });
+    let sampler = std::env::var("LECTERN_BENCH_SAMPLE_DIR")
+        .ok()
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_millis();
+            let name: String = scenario
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let child = std::process::Command::new("/usr/bin/sample")
+                .args([&session.pid().to_string(), "6", "1", "-mayDie", "-file"])
+                .arg(format!("{dir}/{name}-{stamp}.txt"))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            std::thread::sleep(Duration::from_millis(700));
+            Some(child)
+        });
     let stats = session.frames(OpenTarget::Scroll { yielding }, SCROLL_LIMIT);
     if let Some(mut child) = sampler {
         let _ = child.wait();

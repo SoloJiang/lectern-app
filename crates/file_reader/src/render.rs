@@ -26,6 +26,7 @@ use crate::actions::{
     self, Back, Close, DiscardMine, Edit, Find, FindNext, FindPrevious, Forward, KeepEditing,
     Merge, Save, SaveAnyway,
 };
+use crate::fast_row::{FastRow, colour_only};
 use crate::nodes;
 use crate::text::{expand, runs};
 use crate::view::ReadingView;
@@ -37,8 +38,18 @@ mod rowdiag {
     use std::collections::HashSet;
     use std::hash::{DefaultHasher, Hash, Hasher};
     #[derive(Default)]
-    struct State { prev_t: HashSet<u64>, prev_r: HashSet<u64>, cur_t: HashSet<u64>, cur_r: HashSet<u64>,
-        frames: u64, rows: u64, new_text: u64, same_text_new_runs: u64 }
+    struct State {
+        prev_t: HashSet<u64>,
+        prev_r: HashSet<u64>,
+        cur_t: HashSet<u64>,
+        cur_r: HashSet<u64>,
+        frames: u64,
+        rows: u64,
+        new_text: u64,
+        same_text_new_runs: u64,
+        fast: u64,
+        fallback: u64,
+    }
     thread_local! { static S: RefCell<State> = RefCell::new(State::default()); }
     pub fn frame() {
         S.with(|s| {
@@ -46,29 +57,55 @@ mod rowdiag {
             let s = &mut *s;
             std::mem::swap(&mut s.prev_t, &mut s.cur_t);
             std::mem::swap(&mut s.prev_r, &mut s.cur_r);
-            s.cur_t.clear(); s.cur_r.clear();
+            s.cur_t.clear();
+            s.cur_r.clear();
             s.frames += 1;
-            if s.frames % 50 == 0 {
-                if let Ok(dir) = std::env::var("LECTERN_BENCH_SAMPLE_DIR") {
-                    let _ = std::fs::write(format!("{dir}/rows-{}.txt", std::process::id()),
-                        format!("frames {} rows {} new_text {} same_text_new_runs {}\n", s.frames, s.rows, s.new_text, s.same_text_new_runs));
-                }
+            if s.frames % 50 == 0
+                && let Ok(dir) = std::env::var("LECTERN_BENCH_SAMPLE_DIR")
+            {
+                let _ = std::fs::write(
+                    format!("{dir}/rows-{}.txt", std::process::id()),
+                    format!(
+                        "frames {} rows {} new_text {} same_text_new_runs {} fast {} fallback {}\n",
+                        s.frames, s.rows, s.new_text, s.same_text_new_runs, s.fast, s.fallback
+                    ),
+                );
+            }
+        });
+    }
+    pub fn path(fast: bool) {
+        S.with(|s| {
+            let mut s = s.borrow_mut();
+            if fast {
+                s.fast += 1;
+            } else {
+                s.fallback += 1;
             }
         });
     }
     pub fn row(text: &str, runs: &[(std::ops::Range<usize>, gpui::HighlightStyle)]) {
-        let mut h = DefaultHasher::new(); text.hash(&mut h); let t = h.finish();
-        for (r, st) in runs { r.start.hash(&mut h); r.end.hash(&mut h); format!("{:?}{:?}", st.font_weight, st.font_style).hash(&mut h); }
+        let mut h = DefaultHasher::new();
+        text.hash(&mut h);
+        let t = h.finish();
+        for (r, st) in runs {
+            r.start.hash(&mut h);
+            r.end.hash(&mut h);
+            format!("{:?}{:?}", st.font_weight, st.font_style).hash(&mut h);
+        }
         let r = h.finish();
         S.with(|s| {
             let mut s = s.borrow_mut();
             s.rows += 1;
-            if !s.prev_t.contains(&t) { s.new_text += 1; } else if !s.prev_r.contains(&r) { s.same_text_new_runs += 1; }
-            s.cur_t.insert(t); s.cur_r.insert(r);
+            if !s.prev_t.contains(&t) {
+                s.new_text += 1;
+            } else if !s.prev_r.contains(&r) {
+                s.same_text_new_runs += 1;
+            }
+            s.cur_t.insert(t);
+            s.cur_r.insert(r);
         });
     }
 }
-
 
 impl Render for ReadingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -519,7 +556,14 @@ fn code_row(
             };
             // A long line's later display rows have no number of their own.
             let number = (pos.sub_row == 0).then_some(number);
-            let element = if styled.is_empty() {
+            // DIAGNOSTIC: colour-only ASCII rows take the one-font-run path.
+            let fast = colour_only(&shown.text, &styled);
+            rowdiag::path(fast.is_some());
+            let element = if let Some(colours) = fast {
+                div()
+                    .child(FastRow::new(shown.text.clone(), colours))
+                    .into_any_element()
+            } else if styled.is_empty() {
                 div().child(shown.text.clone()).into_any_element()
             } else {
                 div()
