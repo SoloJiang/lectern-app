@@ -336,6 +336,19 @@ pub(crate) fn click(vcx: &mut VisualTestContext, id: &str) {
     vcx.run_until_parked();
 }
 
+/// Moves the pointer to the centre of the node `id` of a new frame and lets
+/// the views take what that started.
+pub(crate) fn hover(vcx: &mut VisualTestContext, id: &str) {
+    let records = record(vcx);
+    let found = records
+        .iter()
+        .find(|record| record.semantic.id.as_str() == id && record.visible)
+        .unwrap_or_else(|| panic!("node {id} is not on screen"));
+    let centre = found.bounds.center();
+    vcx.simulate_mouse_move(centre, None, Modifiers::none());
+    vcx.run_until_parked();
+}
+
 /// The screen and the sidebar views of a window.
 pub(crate) fn views(
     host: &Entity<Host>,

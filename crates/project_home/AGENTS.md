@@ -13,11 +13,11 @@
 | 文件 | 内容 |
 |---|---|
 | `snapshot.rs`、`snapshot/` | `HomeSnapshot` 与 `build`（纯函数，不依赖视图）；`NodeId` 随快照建一次 |
-| `home.rs` | `Home`：插件状态、合成任务、视图的唤醒通道（`attach_view`）、经 `Contributions` 的 `dispatch` / `sidebar_entries` / 里程碑 |
+| `home.rs` | `Home`：插件状态、合成任务、视图的唤醒通道（`attach_view`）、经 `Contributions` 的 `dispatch` / `sidebar_entries` / 里程碑、当前不是主页时的屏幕名、Sessions 是否展开 |
 | `plugin.rs`、`usage_slot.rs`、`waiting_slot.rs` | 三个插件与两个共用的格子：`UsageSlot`（`dyn Usage` 与对账）、`WaitingSlot`（`dyn Conversations`，读 `waiting()`，变化只唤醒视图） |
 | `contribute.rs` | `Screen`、`SidebarPanel`、`SidebarEntry("overview")`、`KeyBindings` 的载荷与登记 |
 | `screen.rs` | `HomeScreen`：大标题与说明、三个 `GroupedList`（Needs Review 的卡片、Outside 卡片、Recently Done 的行）、选中项、Needs Review 进度环的 `Transition`、等待概览的占位、滚动到可见 |
-| `sidebar.rs` | `HomeSidebar`：一个 `uniform_list` 装 `Project` 条目、快照的行（会话混排只列最近 3 个，其余折成「N more」，折叠是视图的状态）、`Views` 小标题和条目，行是 `ui::SidebarRow::compact()`；底部固定 `Bottom` 条目（Usage 卡片） |
+| `sidebar.rs` | `HomeSidebar`：一个 `uniform_list` 装 `Project` 条目、快照的行（会话混排只列最近 3 个，其余折成「N more」，折叠的标志在 `Home` 里，`ToggleSessions` 与这一行的点击共用）、`Views` 小标题和条目，行是 `ui::SidebarRow::compact()`；底部固定 `Bottom` 条目（Usage 卡片） |
 | `fixture.rs` | `test-support` feature：`project_home/build_1000` 基准的输入 `BuildFixture`（不依赖视图，只构造 `services` 的类型） |
 | `actions.rs`、`nodes.rs`、`present.rs` | Action 与键绑定（谓词 `Content > project-home`）；探针 ID；行里的文字（卡片第一行、信号、大标题下的说明、工具栏副标题、额度行） |
 

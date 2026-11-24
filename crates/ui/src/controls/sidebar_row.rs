@@ -3,7 +3,8 @@
 //! 8pt, children stacked 2pt apart); `compact` is the workspace sidebar's
 //! (28pt high, 8pt sides, children side by side 8pt apart, radius 6pt),
 //! whose `trailing` text (a count) sits at the right in the secondary
-//! colour. Hovered it shows `fill`; selected it is `fill_strong`, or with
+//! colour. Hovered it shows `fill`, but only with an `on_click`: a row that
+//! does nothing when clicked does not answer the pointer; selected it is `fill_strong`, or with
 //! `accent` the accent with `on_accent` text. A `Row` outside a
 //! `GroupedList` is the inspector's compact list row; this is the sidebar's.
 
@@ -145,9 +146,12 @@ impl RenderOnce for SidebarRow {
         } else if hover.strength > 0.0 {
             row = row.bg(palette.fill.alpha(palette.fill.a * hover.strength));
         }
-        row = row.on_hover(hover.listener());
+        // Only a row that does something when clicked answers the pointer: a
+        // row with no click handler stays as it is under it.
         if let Some(on_click) = self.on_click {
-            row = row.on_click(move |_, window, cx| on_click(window, cx));
+            row = row
+                .on_hover(hover.listener())
+                .on_click(move |_, window, cx| on_click(window, cx));
         }
         if let Some(menu) = &self.menu {
             row = row.on_mouse_down(MouseButton::Right, menu.on_right_down());

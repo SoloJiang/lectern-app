@@ -24,9 +24,10 @@ use gpui::{
     UniformListScrollHandle, Window, div, px, relative, svg, uniform_list,
 };
 use lectern_i18n::{Args, Strings, count_compact, keys};
+use lectern_kernel::Name;
 use lectern_logging::debug;
 use lectern_services::session::{SessionKey, Timestamp};
-use lectern_services::workspace::{SidebarEntry, SidebarSection};
+use lectern_services::workspace::{SidebarEntry, SidebarSection, WorkspaceCommand};
 use lectern_ui::contrib::SidebarItem;
 use lectern_ui::motion::{HOVER_IN, HOVER_OUT, Transition};
 use lectern_ui::semantic::{NodeId, Role, Semantic, semantic, semantic_interactive};
@@ -142,11 +143,14 @@ pub struct HomeSidebar {
     home: Arc<Home>,
     snapshot: Option<Arc<HomeSnapshot>>,
     entries: Entries,
-    /// The window shows the project home: the Overview entry is selected.
-    on_home: bool,
+    /// The screen the window shows when it is not the project home (`None`
+    /// on the home): the Overview entry is selected on the home, the entry
+    /// that opens this screen is selected otherwise.
+    screen: Option<Name>,
     scroll: UniformListScrollHandle,
     /// The Sessions list shows all the sessions of the last 14 days, not
-    /// only the newest `FOLDED`. The view's state, not the snapshot's.
+    /// only the newest `FOLDED`. `Home`'s flag (`Home::sessions_expanded`),
+    /// read on each wake-up.
     expanded: bool,
     rounds: HashMap<SessionKey, Round>,
     /// The sessions that wait for the user, as of the last wake-up
@@ -174,9 +178,9 @@ impl HomeSidebar {
         let mut sidebar = HomeSidebar {
             snapshot: None,
             entries: Entries::empty(),
-            on_home: home.on_home_screen(),
+            screen: home.other_screen(),
             scroll: UniformListScrollHandle::new(),
-            expanded: false,
+            expanded: home.sessions_expanded(),
             rounds: HashMap::new(),
             waiting: home.waiting(),
             built: Rc::new(Cell::new(0)),
@@ -208,9 +212,14 @@ impl HomeSidebar {
             self.entries = Entries::from(source);
             changed = true;
         }
-        let on_home = self.home.on_home_screen();
-        if on_home != self.on_home {
-            self.on_home = on_home;
+        let screen = self.home.other_screen();
+        if screen != self.screen {
+            self.screen = screen;
+            changed = true;
+        }
+        let expanded = self.home.sessions_expanded();
+        if expanded != self.expanded {
+            self.expanded = expanded;
             changed = true;
         }
         let waiting = self.home.waiting();
@@ -287,21 +296,35 @@ impl HomeSidebar {
             .map(|index| match plan.at(index) {
                 Line::Project(i) => {
                     let entry = self.entries.project[i].clone();
-                    let selected = entry.id == OVERVIEW_ENTRY && self.on_home;
+                    let selected = self.is_current(&entry);
                     self.entry_row("project", &entry, selected, &strings, window, cx)
                 }
                 Line::Snapshot(row) => self.snapshot_row(row, &strings, &palette, window, cx),
-                Line::More => self.more_row(&plan, &strings, cx),
+                Line::More => self.more_row(&plan, &strings),
                 Line::ViewsHeading => {
                     let text = Text::key(&strings, keys::project_home::VIEWS);
                     heading(nodes::sidebar_views(), text, None, &palette, window, cx)
                 }
                 Line::View(i) => {
                     let entry = self.entries.views[i].clone();
-                    self.entry_row("views", &entry, false, &strings, window, cx)
+                    let selected = self.is_current(&entry);
+                    self.entry_row("views", &entry, selected, &strings, window, cx)
                 }
             })
             .collect()
+    }
+
+    /// Whether the entry opens the screen the window shows: the Overview entry
+    /// on the home, and an entry whose command pushes the current screen
+    /// (Worktrees on the Worktrees screen) otherwise.
+    fn is_current(&self, entry: &Entry) -> bool {
+        match &self.screen {
+            None => entry.id == OVERVIEW_ENTRY,
+            Some(screen) => matches!(
+                &entry.item.on_select,
+                WorkspaceCommand::Push(route) if route.screen == *screen
+            ),
+        }
     }
 
     fn snapshot_row(
@@ -449,7 +472,7 @@ impl HomeSidebar {
     /// The row under the newest sessions that says how many are folded away
     /// (or offers to fold them again when all are shown): unfolds and folds
     /// the list.
-    fn more_row(&self, plan: &Plan, strings: &Strings, cx: &mut Context<Self>) -> AnyElement {
+    fn more_row(&self, plan: &Plan, strings: &Strings) -> AnyElement {
         let hidden = plan.sessions - FOLDED.min(plan.sessions);
         let text = if self.expanded {
             Text::key(strings, keys::project_home::SESSIONS_LESS)
@@ -465,17 +488,11 @@ impl HomeSidebar {
             .label(&text)
             .attr("hidden", hidden.to_string())
             .attr("expanded", flag(self.expanded));
-        let this = cx.entity().downgrade();
+        let home = self.home.clone();
         inset(
             Row::new(node)
                 .compact()
-                .on_click(move |_, cx| {
-                    this.update(cx, |this, cx| {
-                        this.expanded = !this.expanded;
-                        cx.notify();
-                    })
-                    .ok();
-                })
+                .on_click(move |_, _| home.toggle_sessions())
                 .child(semantic(
                     facts,
                     div()
