@@ -25,7 +25,7 @@ just bench agents/           # 只运行 ID 含 agents/ 的基准
 just bench worktrees/        # macOS：worktrees/build_1000、worktrees/resident_bytes（进程内，不开窗口）；app/switch_worktree 要窗口，用 just bench app/switch_worktree
 just bench terminal_view/     # macOS：terminal_view/snap_full（进程内，不开窗口；`just bench` 还会构建发布版 lectern 和 empty_window，只想跑这一项时用 cargo bench --locked -p lectern-bench --all-features --bench time -- terminal_view/）；app/terminal_output_frames 要窗口，随 terminal_view 第 3 步加入
 just bench conversation/     # macOS：conversation/stream_apply（进程内，GPUI 测试平台的窗口，不开真实窗口；只想跑这一项时用 cargo bench --locked -p lectern-bench --all-features --bench time -- conversation/，原因同 terminal_view/）
-just bench --shard rest agents/   # macOS：只运行一个分片（code-intel、process、process-open-file、process-app、git、rest）里的预算，不合并；CI 的合并任务合并各分片的报告
+just bench --shard rest agents/   # macOS：只运行一个分片（code-intel、process、process-open-file、process-frames、process-app、git、rest）里的预算，不合并；CI 的合并任务合并各分片的报告
 just bench-build DIR    # macOS：构建 process 目标的三个程序（CI 的构建任务）；just bench-prebuilt <分片> DIR 直接运行 process 分片，不构建
 just bench --measure git/    # Linux 上也按规则采样，只报告、不判定
 LECTERN_BENCH_JUDGE=1 just bench baseline/   # 只在判定机器上：首帧要真正显示的条目也判定（ADR 0052）

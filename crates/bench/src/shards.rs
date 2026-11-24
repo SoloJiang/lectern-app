@@ -17,10 +17,10 @@ pub struct Shard {
 }
 
 /// The shards in the order [`shard_of`] tries them. The `process` target is
-/// in three shards (ADR 0062), but every `plugin/` and `lsp/` budget is in
+/// in four shards (ADR 0062), but every `plugin/` and `lsp/` budget is in
 /// the shard called `process`: the plugin and language server lists the
 /// merge expands `plugin/*` and `lsp/*` over come from that shard's report.
-/// `process-app` has no prefix, so it is the last of the three: it takes
+/// `process-app` has no prefix, so it is the last of the four: it takes
 /// the budgets the other two do not name, such as `app/*` budgets added
 /// later.
 pub static SHARDS: &[Shard] = &[
@@ -49,6 +49,14 @@ pub static SHARDS: &[Shard] = &[
         name: "process-open-file",
         targets: &[Target::Process],
         prefixes: &["app/open_file"],
+    },
+    // The scroll frame benchmarks (about 465 s on the hosted runner), with
+    // `app/enter_edit` and `app/open_project` to even out the two shards
+    // (`process-app` alone took 20.5 minutes, ADR 0062).
+    Shard {
+        name: "process-frames",
+        targets: &[Target::Process],
+        prefixes: &["app/scroll_frames", "app/enter_edit", "app/open_project"],
     },
     // The rest of the `process` target: the open and navigation benchmarks.
     Shard {
@@ -176,7 +184,13 @@ mod tests {
             ("app/nav_back", "process-app"),
             ("app/files_open", "process-app"),
             ("app/files_expand", "process-app"),
-            ("app/open_project", "process-app"),
+            ("app/open_project", "process-frames"),
+            ("app/enter_edit", "process-frames"),
+            ("app/scroll_frames", "process-frames"),
+            ("app/scroll_frames_indexing", "process-frames"),
+            ("app/scroll_frames/main_thread/one_line", "process-frames"),
+            ("app/scroll_frames_indexing/main_thread", "process-frames"),
+            ("app/switch_worktree", "process-app"),
             ("app/cold_start", "process"),
             ("app/cold_start_purged", "process"),
             ("app/idle_100k", "process"),
@@ -189,11 +203,11 @@ mod tests {
     }
 
     /// A budget that no prefix names is not left out: the last shard of a
-    /// target with no prefix takes it (`app/enter_edit` and the budgets
+    /// target with no prefix takes it (`app/open_diff` and the budgets
     /// that later steps add need no table change).
     #[test]
     fn shards_an_unnamed_process_budget_goes_to_the_catch_all() {
-        for id in ["app/enter_edit", "app/goto_candidates", "app/new_thing"] {
+        for id in ["app/open_diff", "app/goto_candidates", "app/new_thing"] {
             let budget = Budget {
                 id,
                 checks: &[],

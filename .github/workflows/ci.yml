@@ -206,7 +206,7 @@ jobs:
       fail-fast: false
       matrix:
         # The process shards in crates/bench/src/shards.rs.
-        shard: [process, process-open-file, process-app]
+        shard: [process, process-open-file, process-frames, process-app]
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2

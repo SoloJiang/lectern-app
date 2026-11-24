@@ -1114,12 +1114,15 @@ fn report_merge_shards_subcommand_names_the_targets() {
     assert_eq!(target_names("code-intel").unwrap(), ["time", "memory"]);
     assert_eq!(target_names("process").unwrap(), ["process"]);
     assert_eq!(target_names("process-open-file").unwrap(), ["process"]);
+    assert_eq!(target_names("process-frames").unwrap(), ["process"]);
     assert_eq!(target_names("process-app").unwrap(), ["process"]);
     assert_eq!(target_names("git").unwrap(), ["time", "memory"]);
     assert_eq!(target_names("rest").unwrap(), ["time", "memory"]);
     let error = target_names("nope").unwrap_err();
     assert!(
-        error.contains("code-intel, process, process-open-file, process-app, git, rest"),
+        error.contains(
+            "code-intel, process, process-open-file, process-frames, process-app, git, rest"
+        ),
         "{error}"
     );
 }
