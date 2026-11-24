@@ -384,9 +384,7 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
       /// 这份行两侧的 OID（同 `Press::oids`）；快照换代后不等就清除选区。
       oids: (Option<BlobId>, Option<BlobId>),
       anchor: TextPoint,          // 按下的点
-      head: TextPoint,            // 指针现在的点
-      run: Range<u32>,            // 按下那一行所在的一段（`items::run_of`），选区不出这一段
-      dragging: bool,             // 按键还没松开
+      head: TextPoint,            // 松开时的点
   }
   pub(crate) struct TextPoint {
       at: (Option<u32>, Option<u32>), // 这一行的（旧行号，新行号），同 `LineRange::at`：展开折叠后下标会变
@@ -396,17 +394,18 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
   ```
 
   点存行号和源行的字节偏移，不存显示行下标和像素：展开折叠、横向滚动、换代之后仍指向同一处文字。
-- 开始：行的 `on_mouse_down`（左键）现在遇到修饰键直接返回；改为修饰键恰好是 ⌥（`Modifiers { alt: true, .. }` 且没有别的键）时调 `begin_text`，其余修饰键仍返回。只在代码格上开始（行号栏、符号栏、行尾的 + 和 Add Note 不算）。开始时清除行范围（`drop_range`），不改选中项，不打开编辑框，不画行尾的 +。
-- 拖动：复用行范围的跟踪（按下期间的 `canvas` 里的 `on_mouse_event`，拖到列表上下边时自动滚动，`tick_drag`）。指针下的项是这一段里的 `Item::Row` 时，`head` 取它；是别的项（意见、编辑框、`Hunk`）时 `head` 不变。所以选区不跨 `Fold`、不跨文件：折叠的行用户没有看到，要跨过去先展开。双栏里只在按下的一半：指针的水平位置只用来在那一半的代码里定字节偏移。
-- 命中：每帧为画出的代码格记下 `StyledText` 的 `TextLayout`（`text_layouts: HashMap<(RowsKey, u32, Half), TextLayout>`，每帧清空，约 60 项；没有着色的行也改用 `StyledText`，这样每一行都有布局）。指针位置经 `TextLayout::index_for_position` 得到显示文字的偏移：在文字左边取 0，在右边取行尾。显示偏移再换成源行的字节偏移（`lines.rs` 加 `DisplayLine::source_offset`，`display_offset` 的逆）：落在 tab 展开的空格里时取 tab 之前；`lossy` 的行取 0 或行尾。用布局而不用 `mono_metrics` 的格宽去除，中文注释和 emoji 的宽度不同，按格宽算会选错字。
+- 与按下共用一个状态：`Press` 加 `mode: PressMode`，`PressMode::Lines` 是现在的行范围，`PressMode::Text { anchor: TextPoint, head: TextPoint }` 是文字拖动。所以按下期间的 `canvas` 跟踪、自动滚动（`tick_drag`）、拖动期间不画悬停底色和行尾的 +、`check_range` 里换代时取消按下，都对两种按下照旧生效，不另写一条路径。`finish_press` 与 `cancel_press` 按 `mode` 分开：`Lines` 不变；`Text` 松开时 `anchor != head` 才写 `ReviewModel::text`（否则清除，等于一次 ⌥ 点击），从不生成 `LineRange`；取消时不留选区。
+- 开始：行的 `on_mouse_down`（左键）现在遇到修饰键直接返回；改为修饰键恰好是 ⌥（`Modifiers { alt: true, .. }` 且没有别的键）时调 `begin_text`，建 `mode: Text` 的 `Press`，其余修饰键仍返回。只在代码格上开始（行号栏、符号栏、行尾的 + 和 Add Note 不算）。开始时清除行范围（`drop_range`）和旧的文字选区，不改选中项，不打开编辑框。
+- 点击：GPUI 在同一个元素上按下又松开时触发 `on_click`，不管修饰键，所以在一行之内的 ⌥ 拖动（选一个词）松开时也会触发。行的 `on_click`（代码与行号栏，统一视图与双栏）在按下时带 ⌥（`ClickEvent::Mouse` 的 `down.modifiers.alt`）时不处理：不选中这一行，不打开编辑框，选区留着。测试 `option_drag_in_one_line_keeps_the_selected_item` 守住这一点。
+- 拖动：指针下的项是按下那一行所在的一段（`Press::run`，`items::run_of`）里的 `Item::Row` 时，`head` 取它；是别的项（意见、编辑框、`Hunk`）时 `head` 不变。所以选区不跨 `Fold`、不跨文件：折叠的行用户没有看到，要跨过去先展开。双栏里只在按下的一半：指针的水平位置只用来在那一半的代码里定字节偏移。
+- 命中：每帧为画出的代码格记下 `StyledText` 的 `TextLayout`（`text_layouts: HashMap<(RowsKey, u32, Half), TextLayout>`，约 60 项；没有着色的行也改用 `StyledText`，这样每一行都有布局）。`TextLayout::index_for_position` 在这个元素测量和 prepaint 之前调用会 panic（`expect("prepaint has not been performed")`），而列表也会为测量渲染不画出的项，所以表不在 `render` 里填：代码格里放一个零尺寸的 `canvas`，在它的 paint 回调里登记（paint 在整棵树 prepaint 之后，这时布局已完成）；屏幕的 `render` 开始时清空。鼠标处理只查这张表，查不到（这一格上一帧没有画出）时 `head` 不变。指针位置经 `TextLayout::index_for_position` 得到显示文字的偏移：在文字左边取 0，在右边取行尾。显示偏移再换成源行的字节偏移（`lines.rs` 加 `DisplayLine::source_offset`，现有的 `DisplayLine::map`（源偏移到显示偏移）的逆）：落在 tab 展开的空格里时取 tab 之前；`lossy` 的行取 0 或行尾。用布局而不用 `mono_metrics` 的格宽去除，中文注释和 emoji 的宽度不同，按格宽算会选错字。
 - 画法：选区里的每一行在代码格的着色区间（`code`）之后加一个区间，背景是 `palette.selected_text_background`（窗口不是主窗口时为 `unemphasized_selected_text_background`，「对其他 crate 的要求」O），覆盖增删底色和词级差异的底色，文字颜色不变。每行只与当前的一个选区比较，O(1)，只影响画出的行。中间的整行从 0 到行尾；首行和末行按偏移。空行不画（`StyledText` 没有字形可画底色，见「已知限制」）。指针在 ⌥ 拖动期间是 I 形（`CursorStyle::IBeam`），其他时候不变（#422 的箭头与行号栏的手形）。
-- 松开：`dragging = false`，选区留着。`anchor == head` 时没有选区（等于一次 ⌥ 点击，清除）。
 - 复制（⌘C 与 Edit 菜单的 Copy）：选区不为空时，屏幕的根元素登记 `gpui_component::input::Copy` 的处理（本 crate 加 `gpui-component` 依赖，与 `file_reader` 相同，`Cargo.lock` 不变）；没有选区时不登记，Edit 菜单的 Copy 因此置灰。按键：`review_view::key_bindings` 加 `("cmd-c", input::Copy, Some(IN_REVIEW))`；编辑框是更深的 `Input` 上下文，它自己的 ⌘C 先生效，编辑框里的复制不变。复制的文字：
   - 从选区的首行到末行，按显示顺序取这份行（`self.rows[rows]`）里每一行这一侧的源字节：统一视图里删除行取旧一侧，其余取新一侧；双栏取按下的一半，那一半没有行的显示行跳过。不带行号、`+` / `−` 和折叠行的文字。
   - 首行从 `anchor`（或 `head`，取靠前的）的偏移起，末行到另一个点的偏移止；中间的行是整行。行之间用 `\n`；源行自己的换行符（`\r\n`）不带。被截断（`kept` 小于源行长度）的行在选区覆盖到显示行尾时复制完整的源行，复制的是源文字，不是屏幕上截断后的文字。这一侧的文本不是 `SideText::Text`（`Absent`、`TooLarge` 等，屏幕上是占位文字）或行是 `lossy` 时，复制显示文字。
   - 这份行已不在 `self.rows` 里（滚得很远、被 `review` 放掉）时选区清除，不复制（下一条）。
   - 用 `cx.write_to_clipboard(ClipboardItem::new_string(text))`，在主线程上，只是内存复制；选区最多是一段（一个 `run`）的行，不另设上限。复制后选区留着。
-- 清除选区：不带修饰键在 diff 里按下（点行、开始拖行范围）；⌥ 点击；Esc（`review::Escape` 先清选区，再清行范围，再清选中项）；J、K、V 与任何 `select`；切换统一 / 双栏；快照换代后这份行不在了或 `oids` 变了（`check_range` 里一起检查）；这份行不在 `self.rows` 里了。选区与行范围互斥：开始一个就清除另一个。打开编辑框（C、点行号、+）不清除选区。
+- 清除选区：不带修饰键在 diff 里按下（点行、开始拖行范围）；⌥ 点击；Esc（`review::Escape` 的顺序：层或 Conversation 页开着时不处理；有按下时取消它，文字拖动中取消就不留选区；否则有文字选区时清除它；否则清行范围；否则清选中项）；J、K、V 与任何 `select`；切换统一 / 双栏；快照换代后这份行不在了或 `oids` 变了（`check_range` 里一起检查）；这份行不在 `self.rows` 里了。选区与行范围互斥：开始一个就清除另一个。打开编辑框（C、点行号、+）不清除选区。
 - 没有鼠标时：本 issue 不做（键盘的文字选择不在审阅的核心闭环里）。测试用 `#[gpui::test]` 模拟带 ⌥ 的按下、移动和松开：测试平台的文字系统给出真实的字形位置（每个字一个 em，emoji 两个），`index_for_position` 在测试里有意义。
 
 ## 数据流与线程
@@ -840,7 +839,8 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - `side_by_side_selects_one_half`：在左半按下、指针移到右半，选区仍在旧一侧，复制的只有旧一侧的行。
   - `selection_stops_at_a_fold`：指针拖过 `Fold` 和意见块时 `head` 停在这一段的边上。
   - `cmd_c_copies_and_the_editor_keeps_its_own`：⌘C 把选中的文字写进测试平台的剪贴板（`read_from_clipboard`）；没有选区时 `input::Copy` 不可用（`is_action_available` 为 false）；编辑框打开且有焦点时 ⌘C 复制的是编辑框里选中的文字。
-  - `escape_clears_the_text_first`：有文字选区和选中项时，第一次 Esc 只清除选区，第二次清空选中项。
+  - `escape_clears_the_text_first`：有文字选区和选中项时，第一次 Esc 只清除选区，第二次清空选中项；⌥ 拖动中按 Esc 取消拖动，没有选区。
+  - `option_drag_in_one_line_keeps_the_selected_item`：在一行之内 ⌥ 拖动（按下和松开在同一行）后有选区，选中项不变，编辑框没有打开；在行号栏上同样。
   - `selection_survives_a_fold_expand_and_drops_on_change`：展开折叠后选区仍指向同一段文字；快照换代后这一侧的 OID 变了，选区清除。
 - 日志：`logs_hold_no_contents`。
 - fixtures：没有外部格式；`testing::snapshot_fixture` 在代码里合成。
@@ -968,7 +968,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 
 **第 6 步：文字选择（`Closes #421`；前置 O）。**
 
-- `just test -p lectern-review-view text_select` 通过（「测试」里文字选择的 8 个测试）；行范围（第 5 步）、点击（#374）和审阅意见（第 4 步）的测试不改就通过。
+- `just test -p lectern-review-view text_select` 通过（「测试」里文字选择的 9 个测试）；行范围（第 5 步）、点击（#374）和审阅意见（第 4 步）的测试不改就通过。
 - `just test -p lectern-review-view logs_hold_no_note_contents` 与 `review_tree` 通过，`review_tree_text_selection` 是新快照。
 - `rg -n 'ClipboardItem|write_to_clipboard' crates/review_view/src` 只在 `src/text_select.rs`；`rg -n 'on_mouse_event' crates/review_view/src` 仍只在按下期间的 `canvas` 里（文字选择复用它）。
 - `review_view/items_5000` 与 `review_view/scroll_5000` 在预算内：选区只给画出的行加一个着色区间，`text_layouts` 每帧约 60 项。
