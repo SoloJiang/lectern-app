@@ -609,7 +609,11 @@ impl Navigator {
                 } else if self.nav.panel.is_some() {
                     self.done(name);
                     self.close_panel(out);
-                } else if self.nav.sidebar_panel.is_some() {
+                } else if self.nav.sidebar_panel.is_some()
+                    && self.layout(env).sidebar == Visibility::Shown
+                {
+                    // Only a panel the user sees: under a screen without the
+                    // sidebar (Review) it waits for the screen below.
                     self.done(name);
                     self.set_sidebar_panel(None, out);
                 } else if self.nav.project().is_some() && !self.nav.stack.is_empty() {

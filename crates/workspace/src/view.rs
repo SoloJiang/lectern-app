@@ -864,13 +864,13 @@ impl Workspace {
             .when(layout.back_button, |toolbar| {
                 let this = this.clone();
                 toolbar.child(
-                    Button::icon_only(toolbar_node.child("back"), Icon::Back, back_label).on_click(
-                        move |window, cx| {
+                    Button::icon_only(toolbar_node.child("back"), Icon::Back, back_label.clone())
+                        .tooltip(back_label)
+                        .on_click(move |window, cx| {
                             let _ = this.update(cx, |this, cx| {
                                 this.command(WorkspaceCommand::PopToBase, window, cx);
                             });
-                        },
-                    ),
+                        }),
                 )
             })
             .child(
@@ -906,8 +906,9 @@ impl Workspace {
                             Button::icon_only(
                                 toolbar_node.child("inspector"),
                                 Icon::Inspector,
-                                inspector_label,
+                                inspector_label.clone(),
                             )
+                            .tooltip(inspector_label)
                             .active(inspector_on)
                             .on_click(move |window, cx| {
                                 let _ = this.update(cx, |this, cx| {

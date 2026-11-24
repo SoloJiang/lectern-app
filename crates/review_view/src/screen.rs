@@ -80,6 +80,16 @@ pub(crate) fn build(
     screen.into()
 }
 
+/// Nothing is focused, or the focus is on the workspace's root view (its key
+/// context is the innermost one of the focus path).
+fn focus_is_on_the_root(window: &Window, cx: &App) -> bool {
+    window.focused(cx).is_none()
+        || window
+            .context_stack()
+            .last()
+            .is_some_and(|context| context.contains("Workspace"))
+}
+
 fn target_name(target: &Target) -> &'static str {
     match target {
         Target::None => "none",
@@ -141,6 +151,13 @@ impl Render for ReviewScreen {
             }
             model.sync_layout(cx);
         });
+        // A screen on top keeps the keyboard: when the one that had the focus
+        // is popped (the reader), `workspace` gives it to its root view, and
+        // this screen (kept below) takes it back. A focus in the inspector, a
+        // panel, an overlay or the sidebar stays where it is.
+        if !self.focus.contains_focused(window, cx) && focus_is_on_the_root(window, cx) {
+            window.focus(&self.focus, cx);
+        }
         let (state, shows_rows, ready, degraded_folder) = {
             let model = model.read(cx);
             (
@@ -488,13 +505,18 @@ impl ReviewScreen {
             shown,
         ));
         if !folder {
-            if let Some((batch, _)) = copy_again {
+            if let Some((batch, count)) = copy_again {
                 let weak = self.model.downgrade();
                 capsule = capsule.child(
                     Button::new(
                         bar.child("copy-again"),
                         Text::key(strings, keys::review::NOTES_COPY_AGAIN),
                     )
+                    .tooltip(Text::fmt(
+                        strings,
+                        keys::review::NOTES_COPY_AGAIN_TOOLTIP,
+                        &Args::new().num("count", count),
+                    ))
                     .kind(ButtonKind::Plain)
                     .size(ButtonSize::Regular)
                     .pill()
@@ -532,6 +554,7 @@ impl ReviewScreen {
                         bar.child("looks-good"),
                         Text::key(strings, keys::review::LOOKS_GOOD),
                     )
+                    .tooltip(Text::key(strings, keys::review::LOOKS_GOOD_TOOLTIP))
                     .kind(ButtonKind::Secondary)
                     .size(ButtonSize::Regular)
                     .pill()
@@ -558,6 +581,7 @@ impl ReviewScreen {
                         bar.child("copy"),
                         Text::key(strings, keys::review::COPY_PROMPT),
                     )
+                    .tooltip(Text::key(strings, keys::review::COPY_PROMPT_TOOLTIP))
                     .kind(ButtonKind::Plain)
                     .size(ButtonSize::Regular)
                     .pill()
@@ -587,6 +611,11 @@ impl ReviewScreen {
                     .on_click(|window, cx| {
                         window.dispatch_action(Box::new(SendNotes), cx);
                     });
+            if route == Some(RouteKind::Clipboard) {
+                // The label of this route is Copy as Prompt: it says what
+                // Send will do.
+                button = button.tooltip(Text::key(strings, keys::review::COPY_PROMPT_TOOLTIP));
+            }
             if let Some(route) = route {
                 button = button.attr(
                     "route",

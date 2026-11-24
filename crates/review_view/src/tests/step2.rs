@@ -1326,7 +1326,7 @@ fn analyze_commands_follow_the_state(cx: &mut TestAppContext) {
         assert_eq!(commands(&rig), [ReviewCommand::Analyze]);
     }
 
-    // Unavailable: no command.
+    // Unavailable: no command, and the button says why on hover.
     let rig = Rig::new(cx);
     let opened = rig.open(
         cx,
@@ -1336,6 +1336,11 @@ fn analyze_commands_follow_the_state(cx: &mut TestAppContext) {
         )))),
     );
     opened.draw(cx);
+    let records = opened.record(cx);
+    assert_eq!(
+        attr(must(&records, "review.brief.analyze"), "tooltip").as_deref(),
+        Some("Analyze isn't available: \u{2068}no tool\u{2069}")
+    );
     let mut visual = opened.visual(cx);
     visual.dispatch_action(crate::actions::Analyze);
     visual.run_until_parked();

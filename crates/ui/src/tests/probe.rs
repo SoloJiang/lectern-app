@@ -868,3 +868,56 @@ fn second_batch_sizes_follow_the_design(cx: &mut TestAppContext) {
     assert_eq!(bounds_of("snap.root.a").size.width, px(118.0));
     assert_eq!(bounds_of("snap.root.b").size.width, px(118.0));
 }
+
+/// `Button::tooltip` sets the probe attribute `tooltip` (a key-built text
+/// carries its text), keeps the label as the accessible name, and a button
+/// without one has no such attribute; a disabled one keeps both.
+#[gpui::test]
+fn button_tooltip_is_a_probe_attribute(cx: &mut TestAppContext) {
+    let records = record_scene(cx, |_, cx| {
+        let strings = strings(cx);
+        div()
+            .child(
+                Button::new(root().child("edit"), verbatim("Edit…"))
+                    .disabled(true)
+                    .tooltip(Text::key(&strings, keys::common::OK)),
+            )
+            .child(
+                Button::icon_only(root().child("back"), Icon::Back, verbatim("Back"))
+                    .tooltip(verbatim("Go back")),
+            )
+            .child(Button::new(root().child("plain"), verbatim("Plain")))
+            .into_any_element()
+    });
+    let node = |id: &str| {
+        records
+            .iter()
+            .find(|r| r.semantic.id.as_str() == id)
+            .unwrap_or_else(|| panic!("{id} recorded"))
+    };
+    let tooltip = |id: &str| {
+        node(id)
+            .semantic
+            .attrs
+            .iter()
+            .find(|(key, _)| *key == "tooltip")
+            .map(|(_, value)| value.to_string())
+    };
+    let label = |id: &str| {
+        node(id)
+            .semantic
+            .label
+            .as_ref()
+            .map(|label| label.text.to_string())
+    };
+    assert_eq!(tooltip("snap.root.edit").as_deref(), Some("OK"));
+    assert!(node("snap.root.edit").semantic.state.disabled);
+    assert_eq!(label("snap.root.edit").as_deref(), Some("Edit…"));
+    assert_eq!(tooltip("snap.root.back").as_deref(), Some("Go back"));
+    assert_eq!(
+        label("snap.root.back").as_deref(),
+        Some("Back"),
+        "an icon-only button's label stays its name"
+    );
+    assert_eq!(tooltip("snap.root.plain"), None);
+}

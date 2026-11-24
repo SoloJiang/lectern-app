@@ -1171,6 +1171,11 @@ fn the_bar_follows_the_notes_state(cx: &mut TestAppContext) {
     assert_eq!(attr(send, "route").as_deref(), Some("clipboard"));
     assert_eq!(send_label(&records), "Copy as Prompt ⌘↩");
     assert!(!send.semantic.state.disabled);
+    assert_eq!(
+        attr(send, "tooltip").as_deref(),
+        Some("Copy the review notes as a prompt, then paste it into the session"),
+        "Send by the clipboard says what it does"
+    );
 
     // Copy Again, Discard, Looks Good, Copy as Prompt and Send, in order.
     change(&rig, &opened, cx, |snapshot| {
@@ -1212,6 +1217,23 @@ fn the_bar_follows_the_notes_state(cx: &mut TestAppContext) {
         attr(must(&records, "review.bar.copy-again"), "batch").as_deref(),
         Some("0000000000000001")
     );
+    // The hover texts: one sent note, the singular; Discard has none; Send
+    // by the session has none.
+    let tooltip = |id: &str| attr(must(&records, id), "tooltip");
+    assert_eq!(
+        tooltip("review.bar.copy-again").as_deref(),
+        Some("Copy the 1 review note you sent last, with the same marker")
+    );
+    assert_eq!(
+        tooltip("review.bar.looks-good").as_deref(),
+        Some("Mark every file as reviewed")
+    );
+    assert_eq!(
+        tooltip("review.bar.copy").as_deref(),
+        Some("Copy the review notes as a prompt, then paste it into the session")
+    );
+    assert_eq!(tooltip("review.bar.discard"), None);
+    assert_eq!(tooltip("review.bar.send"), None);
     // Copy as Prompt sends the pending notes by the clipboard.
     let mut visual = opened.visual(cx);
     visual.simulate_click(
@@ -1614,6 +1636,12 @@ fn edit_and_delete_act_on_the_note(cx: &mut TestAppContext) {
     );
     assert!(!cx.has_pending_prompt());
     assert!(opened.read(cx, |model| model.note(NoteId(2)).is_none()));
+    // The click does not reach the note's block: the deleted note is not
+    // selected again.
+    assert_ne!(
+        opened.read(cx, |model| model.selection.clone()),
+        Some(ItemKey::Note(NoteId(2)))
+    );
     // One that is being sent cannot be deleted or changed.
     let before = note_commands(&rig).len();
     opened.update(cx, |model, cx| model.delete_note(NoteId(3), cx));
@@ -1905,7 +1933,73 @@ fn the_plus_shows_on_the_row_under_the_pointer(cx: &mut TestAppContext) {
     assert!(!plus(&records, "-:1"), "the pointer left that row");
 
     let button = must(&records, "review.diff.item[step:0].row.item[2:2].add-note");
+    assert_eq!(
+        attr(button, "tooltip").as_deref(),
+        Some("Add a review note (C)")
+    );
     visual.simulate_click(button.bounds.center(), gpui::Modifiers::default());
     visual.run_until_parked();
     assert_eq!(editor_target(&opened, cx), target_at(DiffSide::New, 2));
+}
+
+// ----- folder projects ---------------------------------------------------
+
+/// What `review` gives for a folder project (docs/design/review.md「未决问题」
+/// 2): turns whose edits are `Tool` calls, no files and no steps, so no diff
+/// rows and no blob OID.
+fn folder_snapshot() -> ReviewSnapshot {
+    let (mut snapshot, _) = snapshot_fixture(1, 1, 4);
+    snapshot.degraded = Some(lectern_services::review::Degraded::FolderProject);
+    snapshot.files = Arc::from(Vec::new());
+    let turns: Vec<_> = snapshot
+        .turns
+        .iter()
+        .flat_map(|turns| turns.iter())
+        .map(|turn| {
+            let mut turn = turn.clone();
+            let kept: Vec<_> = turn
+                .items
+                .iter()
+                .filter(|item| !matches!(item, lectern_services::review::NarrativeItem::Step(_)))
+                .cloned()
+                .collect();
+            turn.items = Arc::from(kept);
+            turn
+        })
+        .collect();
+    snapshot.turns = Some(Arc::from(turns));
+    snapshot
+}
+
+#[gpui::test]
+fn folder_project_cannot_anchor_a_note_on_a_tool_call(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    rig.review.set_auto_prepare(true);
+    let opened = rig.open(cx, session(), Some(folder_snapshot()));
+    opened.draw(cx);
+    rig.settle(cx);
+    opened.draw(cx);
+    let call = lectern_services::session::ToolCallId(Arc::from("tool-0"));
+    let keys = opened.read(cx, |model| {
+        model
+            .items
+            .iter()
+            .map(|item| item.key())
+            .collect::<Vec<_>>()
+    });
+    assert!(keys.contains(&ItemKey::Call(call)), "{keys:?}");
+    assert!(
+        keys.iter()
+            .all(|key| !matches!(key, ItemKey::Row { .. } | ItemKey::Hunk { .. })),
+        "a folder project has no diff rows: {keys:?}"
+    );
+    let mut visual = opened.visual(cx);
+    // Every item there is: C anchors nothing.
+    for key in keys {
+        select(&opened, cx, key.clone());
+        visual.simulate_keystrokes("c");
+        opened.draw(cx);
+        assert_eq!(editor_target(&opened, cx), None, "{key:?}");
+    }
+    assert!(note_commands(&rig).is_empty());
 }

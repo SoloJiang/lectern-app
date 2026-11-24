@@ -512,11 +512,13 @@ fn escape_closes_the_topmost_layer() {
     nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
     assert_eq!(nav.nav().panel, None);
     assert_eq!(nav.nav().sidebar_panel, Some(name("files")));
-    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
-    assert_eq!(nav.nav().sidebar_panel, None);
-    assert_eq!(nav.nav().depth(), 1);
+    // Review hides the sidebar: Esc does not close a panel nobody sees, it
+    // goes back, and the home shows the panel again.
     nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
     assert_eq!(nav.nav().depth(), 0, "no guards: popped at once");
+    assert_eq!(nav.nav().sidebar_panel, Some(name("files")));
+    nav.dispatch(WorkspaceCommand::Escape, &env, &mut out);
+    assert_eq!(nav.nav().sidebar_panel, None);
     assert_eq!(
         layers(&out),
         vec![

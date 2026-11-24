@@ -5,7 +5,7 @@ expression: render_tree(& records)
 review.narrative List items=34 visible=0..34 mode=unified
   review.header Group <review-title-untitled> "Untitled session" files=3 added=0 removed=0 turns=2
   review.brief Group items=2 omitted=0 pending=0 analysis=unavailable
-    review.brief.analyze Button <review-analyze-with> "Analyze with \u{2068}Claude Code\u{2069}" [disabled]
+    review.brief.analyze Button <review-analyze-with> "Analyze with \u{2068}Claude Code\u{2069}" [disabled] tooltip=Analyze isn't available: ⁨not yet⁩
     review.brief.item[sensitive-ci:src/file_000.rs] ListItem <review-brief-sensitive-ci> "\u{2068}src/file_000.rs\u{2069} runs in CI" critical=true
     review.brief.item[edit-failed:src/file_001.rs] ListItem <review-brief-edit-failed> "An edit to \u{2068}src/file_001.rs\u{2069} failed; the agent may think it applied" critical=false
   review.turn.item[0:1] Group <review-turn> "Turn 1" [expanded=true] after_last_seen=true running=false
@@ -51,5 +51,5 @@ review.narrative List items=34 visible=0..34 mode=unified
   review.call.item[tool-1] Text <review-tool> "\u{2068}Read\u{2069}" kind=tool status=completed
 review.bar Group
   review.bar.comments Text <review-comments> "No review notes" pending=0 sending=false
-  review.bar.looks-good Button <review-looks-good> "Looks Good"
+  review.bar.looks-good Button <review-looks-good> "Looks Good" tooltip=Mark every file as reviewed
   review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" [disabled] route=session

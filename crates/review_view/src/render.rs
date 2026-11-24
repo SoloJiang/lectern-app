@@ -618,14 +618,22 @@ impl ReviewModel {
                 })
         };
         match analysis {
-            AnalysisState::Unavailable(_) => (
-                Button::new(id, analyze_text)
+            AnalysisState::Unavailable(reason) => {
+                let mut button = Button::new(id, analyze_text)
                     .size(ButtonSize::Small)
                     .kind(ButtonKind::Secondary)
-                    .disabled(true)
-                    .into_any_element(),
-                Vec::new(),
-            ),
+                    .disabled(true);
+                // The reason as the domain layer gave it; with none there is
+                // nothing to say.
+                if !reason.is_empty() {
+                    button = button.tooltip(Text::fmt(
+                        strings,
+                        keys::review::ANALYZE_UNAVAILABLE,
+                        &Args::new().str("reason", reason),
+                    ));
+                }
+                (button.into_any_element(), Vec::new())
+            }
             AnalysisState::Idle => (
                 button(id, analyze_text, Analyze::Start, ButtonKind::Secondary).into_any_element(),
                 Vec::new(),

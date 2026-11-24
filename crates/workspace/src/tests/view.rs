@@ -206,6 +206,58 @@ fn review_hides_the_sidebar_and_shows_the_bar(cx: &mut TestAppContext) {
     assert!(tree.contains("workspace.bar [Group]"));
 }
 
+/// The toolbar's two icon-only buttons have no visible label, so each names
+/// its action in a hover tooltip: the probe attribute `tooltip` carries the
+/// same text as the accessible name (`workspace-back`,
+/// `workspace-inspector-toggle`), in both languages.
+#[gpui::test]
+fn toolbar_icon_buttons_name_their_action_in_a_tooltip(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let _plugins = rig.contribute(Contributor::staged(standard_screens()), cx);
+    rig.open(project_path(), &project(), cx);
+    rig.push(screens::REVIEW, cx);
+
+    let node_text = |records: &[lectern_ui::semantic::Record], id: &str| {
+        let record = records
+            .iter()
+            .find(|record| record.semantic.id.as_str() == id)
+            .unwrap_or_else(|| panic!("{id} recorded"));
+        let tooltip = record
+            .semantic
+            .attrs
+            .iter()
+            .find(|(key, _)| *key == "tooltip")
+            .map(|(_, value)| value.to_string());
+        let label = record
+            .semantic
+            .label
+            .as_ref()
+            .map(|label| label.text.to_string());
+        (tooltip, label)
+    };
+
+    let records = rig.record(cx);
+    for (id, text) in [
+        ("workspace.toolbar.back", "Back"),
+        ("workspace.toolbar.inspector", "Inspector"),
+    ] {
+        let (tooltip, label) = node_text(&records, id);
+        assert_eq!(tooltip.as_deref(), Some(text), "{id}");
+        assert_eq!(label.as_deref(), Some(text), "{id}: the name stays");
+    }
+
+    cx.update(|cx| lectern_ui::set_locale(lectern_i18n::Locale::ZhCn, cx));
+    let records = rig.record(cx);
+    for (id, text) in [
+        ("workspace.toolbar.back", "返回"),
+        ("workspace.toolbar.inspector", "检查器"),
+    ] {
+        let (tooltip, label) = node_text(&records, id);
+        assert_eq!(tooltip.as_deref(), Some(text), "{id}");
+        assert_eq!(label.as_deref(), Some(text), "{id}: the name stays");
+    }
+}
+
 #[gpui::test]
 fn set_reading_column_widens_the_content(cx: &mut TestAppContext) {
     let rig = UiRig::new(cx);
