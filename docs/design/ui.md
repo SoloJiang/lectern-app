@@ -525,7 +525,7 @@ pub fn loading_phase(elapsed: Duration) -> LoadingPhase;   // < 100 ms → Nothi
 
 /// 加载超过 1 s 时的进度（交互规范「状态与异常」的「加载超过 1 s」）：居中的不确定进度圆环（16pt，`secondary_label`，
 /// `motion::SPIN` 匀速转动；减弱动态效果时静止）、一行 `Secondary` 层级的说明文字和可选的朴素按钮 Cancel（`common-cancel`）。
-/// 圆环是一个只画它自己的小视图（`Entity<Spinner>`，`LoadingProgress` 建它并作为子视图放进去），在里面用 `with_animation`
+/// 圆环是一个只画它自己的小视图（`Entity<Spinner>`，`LoadingProgress` 以自己的 `id` 经 `window.use_keyed_state` 取得，持有视图每次 render 拿到同一个实体，转动不从头开始），在里面用 `with_animation`
 /// （`SPIN`，`repeat`）转动。GPUI 的动画每帧 `notify` 当前视图（`Window::request_animation_frame` 取 `current_view`），
 /// 所以只有放在独立的视图里，每帧重新 render 的才只是圆环，而不是持有它的审阅、阅读或主页视图。转动是「只改低开销属性」的一个例外：旋转只变换这个 16pt 的图形，不触发重排。
 /// 元素不画（加载结束、换屏、窗口不可见）时动画随之停下。`SPIN` 不经 `Transition`，不计入 `active_transitions`，
