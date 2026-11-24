@@ -43,6 +43,7 @@ project-home-outside-review = 审阅
 project-home-outside-capped = { $count } 个改动路径（未归属）
 project-home-done = 最近完成
 project-home-all-reviewed = 所有会话都已审阅。
+project-home-loading = 正在统计文件…
 project-home-empty = 这个项目还没有 agent 会话。
 # 进度环的无障碍名称；旁边显示的数字是 -short。
 project-home-progress = 已看 { $seen }/{ $total }
