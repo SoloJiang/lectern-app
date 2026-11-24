@@ -99,6 +99,9 @@ pub struct Palette {
     pub accent: Hsla,
     pub selected_content_background: Hsla,
     pub unemphasized_selected_content_background: Hsla,
+    // 选中的文字：selectedTextBackgroundColor、unemphasizedSelectedTextBackgroundColor（主窗口里 / 其他窗口里；审阅 diff 的文字选择，#421）
+    pub selected_text_background: Hsla,
+    pub unemphasized_selected_text_background: Hsla,
     // 系统色：systemRed … systemGray，按 `SystemColor` 的顺序
     pub system: [Hsla; SystemColor::COUNT],
     // 派生：系统绿 / 红按本外观的透明度叠出的 diff 底色（交互规范「视觉」的「淡底色」）
@@ -833,8 +836,8 @@ pub mod semantic {
 
 ## 数据结构
 
-- `Palette`：每个外观一份，`init` 时建两份，`platform` 通知时整份替换，每份 31 个 `Hsla`（496 字节），放在一个 GPUI 全局 `UiState` 里，连同 `Strings`、减弱动态效果标志、`accent_follows_system`、`MonoMetrics` 的缓存（≤ 4 项）和 `platform::appearance::Watch`。`UiState` 固定大小，不随运行增长。
-- 内置的系统色表：`src/palette/builtin.rs`，两个外观各 31 项（含派生的 diff 底色、`fill` / `fill_strong` 与 agent 色，内置表本身只存系统读数的分量），值是 `platform::appearance::system_colors` 在 macOS 27.0.1 上读到的 sRGB 分量（HIG「Color」页面只发布 13 个系统色、没有语义色，见「与设计的差异」），文件头写明来源与读取日期。用途：`platform` 返回 None 时（Linux 的 `cargo check`、headless、测试、系统接口失败），以及测试的参照。`init_fixed` 只用这张表。`diff_added_background` / `diff_removed_background`：`system(Green)` / `system(Red)` 在浅色下 12% 透明度、深色下 18% 透明度叠在 `control_background` 上，预先算好。`diff_added_inline_background` / `diff_removed_inline_background`：同样的两个来源在浅色下 28%、深色下 36% 透明度叠在 `control_background` 上，比行底色深一档；内置表与系统色两条路径都经同一个 `Palette::from_system` 给出，所以读到系统色之后它们随 `system(Green)` / `system(Red)` 一起更新。
+- `Palette`：每个外观一份，`init` 时建两份，`platform` 通知时整份替换，每份 33 个 `Hsla`（528 字节），放在一个 GPUI 全局 `UiState` 里，连同 `Strings`、减弱动态效果标志、`accent_follows_system`、`MonoMetrics` 的缓存（≤ 4 项）和 `platform::appearance::Watch`。`UiState` 固定大小，不随运行增长。
+- 内置的系统色表：`src/palette/builtin.rs`，两个外观各 33 项（含派生的 diff 底色、`fill` / `fill_strong` 与 agent 色，内置表本身只存系统读数的分量），值是 `platform::appearance::system_colors` 在 macOS 27.0.1 上读到的 sRGB 分量（HIG「Color」页面只发布 13 个系统色、没有语义色，见「与设计的差异」），文件头写明来源与读取日期。用途：`platform` 返回 None 时（Linux 的 `cargo check`、headless、测试、系统接口失败），以及测试的参照。`init_fixed` 只用这张表。`diff_added_background` / `diff_removed_background`：`system(Green)` / `system(Red)` 在浅色下 12% 透明度、深色下 18% 透明度叠在 `control_background` 上，预先算好。`diff_added_inline_background` / `diff_removed_inline_background`：同样的两个来源在浅色下 28%、深色下 36% 透明度叠在 `control_background` 上，比行底色深一档；内置表与系统色两条路径都经同一个 `Palette::from_system` 给出，所以读到系统色之后它们随 `system(Green)` / `system(Red)` 一起更新。
 - agent 标识色：浅 `#D9790A` / 深 `#C77A1A`（Claude Code），浅 `#5856D6` / 深 `#6260D8`（Codex），来自交互规范「视觉」；不从系统读。
 - `Transition`：`from`、`to`、`start`、`motion`、当前值、弹簧的速度、`reduced` 快照（开始时的值，过渡中途不换）、是否计入计数，共 56 字节，由视图持有，不可 `Clone`（drop 时要减计数）。
 - 贝塞尔求值：`Easing::eval` 对 `CubicBezier` 用牛顿迭代求 x(t)=进度 的 t，再取 y(t)；不建查表，每次调用常数时间（≤ 8 次迭代）。
@@ -1036,6 +1039,10 @@ pub mod semantic {
 **视图 crate 接入后的持续检查**（写进各视图设计的验收，这里列出口径）：`rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|\.font_family\(|gpui_component::Button' crates/{workspace,welcome,project_home,review_view,file_reader}/src` 没有结果。
 
 ## 实际验证
+
+### 选中文字的底色（#421）
+
+`Refs #421`，在 macOS 27.0.1（arm64）上运行：`cargo nextest run -p lectern-platform -p lectern-ui` 通过。`SystemColors` 与 `Palette` 加 `selected_text_background`（`selectedTextBackgroundColor`）和 `unemphasized_selected_text_background`（`unemphasizedSelectedTextBackgroundColor`），供审阅 diff 的文字选择用（[review_view 设计「文字选择（#421）」](review_view.md)「对其他 crate 的要求」O）。内置表的值是本机用 `NSAppearance.performAsCurrentDrawingAppearance` 读到的 sRGB 分量：浅色 (0.7020, 0.8431, 1.0) 与 (0.8627, 0.8627, 0.8627)，深色 (0.2471, 0.3882, 0.5451) 与 (0.2745, 0.2745, 0.2745)，不透明；`Palette` 由 31 个颜色变为 33 个。
 
 第 1 步（macOS，Apple 芯片，macOS 27.0.1）：
 

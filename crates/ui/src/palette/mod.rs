@@ -113,6 +113,11 @@ pub struct Palette {
     pub accent: Hsla,
     pub selected_content_background: Hsla,
     pub unemphasized_selected_content_background: Hsla,
+    /// selectedTextBackgroundColor and unemphasizedSelectedTextBackgroundColor:
+    /// selected text in the key window and elsewhere (the review diff's text
+    /// selection, docs/design/review_view.md「文字选择（#421）」).
+    pub selected_text_background: Hsla,
+    pub unemphasized_selected_text_background: Hsla,
     /// systemRed … systemGray, in the order of `SystemColor`.
     pub system: [Hsla; SystemColor::COUNT],
     /// Derived: `system(Green)` / `system(Red)` over `control_background` at
@@ -178,6 +183,10 @@ impl Palette {
             selected_content_background: builtin::convert(colors.selected_content_background),
             unemphasized_selected_content_background: builtin::convert(
                 colors.unemphasized_selected_content_background,
+            ),
+            selected_text_background: builtin::convert(colors.selected_text_background),
+            unemphasized_selected_text_background: builtin::convert(
+                colors.unemphasized_selected_text_background,
             ),
             system,
             diff_added_background: over(

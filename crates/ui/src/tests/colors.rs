@@ -134,6 +134,11 @@ fn all_colors(palette: &Palette) -> Vec<(&'static str, Hsla)> {
             "unemphasized_selected_content_background",
             palette.unemphasized_selected_content_background,
         ),
+        ("selected_text_background", palette.selected_text_background),
+        (
+            "unemphasized_selected_text_background",
+            palette.unemphasized_selected_text_background,
+        ),
         ("diff_added_background", palette.diff_added_background),
         ("diff_removed_background", palette.diff_removed_background),
         (
@@ -156,12 +161,12 @@ fn all_colors(palette: &Palette) -> Vec<(&'static str, Hsla)> {
 }
 
 #[test]
-fn palette_builtin_has_31_colors_with_alpha_in_range() {
+fn palette_builtin_has_33_colors_with_alpha_in_range() {
     for appearance in Appearance::ALL {
         let palette = Palette::builtin(appearance);
         assert_eq!(palette.appearance, appearance);
         let colors = all_colors(&palette);
-        assert_eq!(colors.len(), 31);
+        assert_eq!(colors.len(), 33);
         for (name, color) in colors {
             assert!(
                 (0.0..=1.0).contains(&color.a) && (0.0..=1.0).contains(&color.l),
@@ -297,6 +302,8 @@ fn palette_from_system_derives_the_diff_backgrounds() {
         accent: grey,
         selected_content_background: grey,
         unemphasized_selected_content_background: grey,
+        selected_text_background: grey,
+        unemphasized_selected_text_background: grey,
         system,
         accent_available: true,
     };
