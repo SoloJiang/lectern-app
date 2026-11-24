@@ -596,6 +596,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - `frames_leave_the_kernel_quiescent`（`view.rs`，`#[gpui::test]`）：激活并静止之后只画 3 帧（`UiRig::draw`：`Window::refresh` 后 `run_until_parked`），不做其他事，`Kernel::quiescent_epoch()` 不变；测试贡献方的工具栏闭包记录调用次数，断言它确实在这几帧里被调用（[ADR 0066](../adr/0066.md)）。
 - `current_route_follows_the_screen`（`view.rs`，`#[gpui::test]`）：激活之后、压入、弹出、打开与关闭项目、关闭窗口，`Contributions::current_route(WindowId(0))` 每一步都等于状态机的当前屏幕（即最近一次 `ScreenChanged::to`），窗口关闭后和不存在的窗口为 `None`。`services` 的 `workspace_contributions_is_a_shared_trait_object` 另外调用一次 `current_route`。
 - 2026-11-24 的决定（`Refs #422`）：`nav.rs` 的 `escape_switches_the_conversation_page_to_files_then_pops`（面板先于 Conversation 页关闭、页切回第一页而检查器与屏幕不变、第二次 Esc 才弹出屏幕）、`escape_leaves_the_conversation_page_alone_when_it_is_not_shown`（检查器隐藏、已在第一页、Conversation 是唯一的页时 Esc 直接返回）；`view.rs` 的 `back_pops_one_screen_at_a_time`（两层栈上 ⌘[ 与 `Back` 各退一层）、`escape_takes_the_inspector_from_conversation_to_files_first`、`inspector_tab_follows_the_page_on_show`（`Contributions::inspector_tab` 跟随选中的页、屏幕自己的页、隐藏、没有检查器的屏幕、Esc 切页、窗口关闭）、`close_project_action_returns_to_welcome`（Welcome 上 `is_action_available` 为假且无事发生；有项目时为真，守卫拒绝则不动，通过后 `Projects::close`，`Closed` 之后回到 Welcome 且又不可用）。
+- 返回后焦点回到打开者（`Refs #422`）：`view.rs` 的 `back_returns_the_focus_to_the_opener`（Files 面板的树建好时拿到焦点，压入审阅后焦点在审阅，`Back` 之后焦点回到树；去掉恢复的一行时这个测试失败）。
 - 工具栏图标按钮的悬停提示（`src/tests/view.rs`，`#[gpui::test]`）：`toolbar_icon_buttons_name_their_action_in_a_tooltip`：审阅屏幕上，用 `ui::semantic::Recorder` 记一帧（`UiRig::record`），返回与检查器两个节点的 `tooltip` 属性等于各自的辅助名（`Back` / `Inspector`），辅助名不变；切到 zh-CN 再记一帧，是 `返回` / `检查器`。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
@@ -803,6 +804,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - **`inspector_tab` 由根视图记下**：设计写「状态机改变检查器时记下」。显示的页还取决于登记的页和当前屏幕（选中的页在这个屏幕上不可见时显示第一个可见的页），状态机只知道 `nav.inspector_tab`，所以根视图在状态机处理完一批输入之后、发出这批事件之前（和 `current_route` 一样先写后发，监听 `LayerChanged`、`ScreenChanged` 的插件读到的是事件之后的页）、`bind_window` 时按它画的规则算出显示的页写入 `Hub`；窗口关闭之后（没有 route）写入 `None`。
 - **Esc 在 Conversation 是第一页时直接往下走**：只有一页、或第一页就是 Conversation 时没有可切的页，这一步不吞掉 Esc，继续到下面的层。设计没有写这种情况。
 - **`CONVERSATION_TAB` 移到 `nav`**：状态机要用它，`actions` 重新导出，名字不变。
+- **返回后焦点回到打开者（#422 审计）**：设计只写了「弹出的屏幕带走焦点时根视图拿回焦点」，于是从 Files 面板的树 ↵ 打开屏幕、再返回后，焦点停在根视图（项目主页只在焦点在根上时拿回焦点，面板的树只在建好时拿一次），↑↓↵ 不再到达树。现在 `Built` 记下压入时拥有焦点的 `WeakFocusHandle`，`sync_views` 在这一层被弹出时把焦点还给它（有覆盖层时不还；同一深度换屏继承原来的；句柄已经释放就照旧落到根视图）。弱引用，不让已丢掉的视图留在内存里。
 
 ### 帧记录（#393）
 
