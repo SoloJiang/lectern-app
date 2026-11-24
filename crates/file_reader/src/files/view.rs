@@ -336,12 +336,13 @@ impl FilesView {
     }
 
     /// Asks the reader to show the file of row `index`, at its start, as
-    /// every other open does (`Reader::open`). The panel goes first: the
-    /// reading view hides the sidebar, and `workspace`'s Esc closes a
-    /// sidebar panel before it pops a screen, so a panel left open would
-    /// take the first Esc of the reader without any visible change. The
-    /// tree comes back as it was (expansion, selection, the file just
-    /// opened) when it is shown again.
+    /// every other open does (`Reader::open`). The panel goes first, so the
+    /// reader opens over the project sidebar, not over the Files panel. The
+    /// reading view hides the sidebar, and `workspace`'s Esc closes a sidebar
+    /// panel only when the screen shows the sidebar
+    /// (`layout.sidebar == Visibility::Shown`), so a panel left set would not
+    /// take the reader's first Esc either way. The tree comes back as it was
+    /// (expansion, selection, the file just opened) when it is shown again.
     fn open(&mut self, index: usize, cx: &mut Context<Self>) {
         let (Some(project), Some(path)) = (
             self.project.clone(),
