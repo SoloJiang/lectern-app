@@ -11,6 +11,8 @@ worktrees-active = 活动
 worktrees-idle = 空闲
 worktrees-only-one = 这个仓库只有一个 worktree。在其他 worktree 里工作的 agent 会列在这里。
 worktrees-not-git = 这个文件夹不是 git 仓库。
+# 第一轮比较超过 1 s 时显示在列表下面。
+worktrees-loading = 正在比较 worktree…
 # 分支名后面的小标记。
 worktrees-current = 当前
 worktrees-locked = 已锁定

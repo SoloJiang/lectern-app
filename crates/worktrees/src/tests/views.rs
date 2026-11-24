@@ -735,7 +735,15 @@ fn skeleton_appears_after_100ms_only(cx: &mut TestAppContext) {
     vcx.executor()
         .advance_clock(LOADING_PROGRESS_AT - LOADING_SKELETON_AT);
     frame(vcx);
-    assert!(tree(vcx, main_part).contains("ready=false phase=progress"));
+    let progress = tree(vcx, main_part);
+    assert!(
+        progress.contains("ready=false phase=progress"),
+        "{progress}"
+    );
+    assert!(
+        progress.contains("worktrees.loading Group label=[worktrees-loading] phase=progress"),
+        "one spinner under the list over 1 s: {progress}"
+    );
 
     // The counts arrive: the wait is over.
     rig.review.set_overview(Some(overview_of(
@@ -750,7 +758,9 @@ fn skeleton_appears_after_100ms_only(cx: &mut TestAppContext) {
     rig.worktrees_changed(&world.key);
     rig.run();
     frame(vcx);
-    assert!(tree(vcx, main_part).contains("ready=true phase=nothing"));
+    let done = tree(vcx, main_part);
+    assert!(done.contains("ready=true phase=nothing"), "{done}");
+    assert!(!done.contains("worktrees.loading"), "{done}");
 }
 
 #[gpui::test]
