@@ -22,6 +22,7 @@ mod diag;
 mod diffs;
 mod handoff;
 mod highlight;
+mod hover;
 pub mod items;
 mod lines;
 mod model;

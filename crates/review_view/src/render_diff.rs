@@ -20,6 +20,7 @@ use lectern_ui::{
 };
 
 use crate::highlight::{Half, SideSpans};
+use crate::hover::{self, Hover};
 use crate::items::{self, DiffMode, DisplayRow, ItemKey, RowKind, RowNotes, Side};
 use crate::lines::{self, DisplayLine};
 use crate::model::ReviewModel;
@@ -236,6 +237,14 @@ impl ReviewModel {
                 )
             }
         };
+        // The fill of the line under the pointer; not while a button is held
+        // (the pointer is dragging a range, GPUI still hovers the lines it
+        // passes).
+        let fade = if self.press.is_some() {
+            0.0
+        } else {
+            self.row_fade.strength(&key)
+        };
         let mut line = div()
             .id(&node)
             .relative()
@@ -254,6 +263,18 @@ impl ReviewModel {
                     .alpha(if selected || in_range { 1.0 } else { 0.0 })),
             )
             .child(content);
+        if fade > 0.0 {
+            // Over the colours of added and removed lines, which it is
+            // translucent enough to let through; below the dot and the +.
+            line = line.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(hover::fill(palette, fade)),
+            );
+        }
         if notes.count > 0 {
             // A dot in the line-number column: the accent while a note is
             // not sent, the tertiary label once all are.
@@ -630,6 +651,7 @@ impl ReviewModel {
         let spec = Semantic::new(node.clone(), Role::Button).label(&text);
         let key = ReviewModel::fold_key(&rows_key, old);
         let selected = self.selection.as_ref() == Some(&key);
+        let hover = Hover::track(&node, window, cx);
         let mut row = div()
             .id(&node)
             .w_full()
@@ -641,9 +663,12 @@ impl ReviewModel {
             .cursor_pointer()
             .text_role(TextRole::Caption, window, cx)
             .text_color(palette.secondary_label)
-            .child(text.shared());
+            .child(text.shared())
+            .on_hover(hover.listener());
         if selected {
             row = row.bg(palette.unemphasized_selected_content_background);
+        } else if let Some(fill) = hover.fill(palette) {
+            row = row.bg(fill);
         }
         row = row.on_click(cx.listener(move |this, _, _, cx| {
             this.select(Some(key.clone()), cx);

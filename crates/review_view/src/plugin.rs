@@ -3,12 +3,12 @@
 //! services, registers the three contributions and subscribes; nothing is
 //! read, submitted or drawn before a screen is pushed (ADR 0017).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::channel::mpsc;
-use gpui::{App, AppContext, Window};
+use gpui::{App, AppContext, SharedString, Window};
 use lectern_executor::{Executor, Priority};
 use lectern_kernel::{
     Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, ServiceRef,
@@ -17,12 +17,12 @@ use lectern_kernel::{
 use lectern_logging::{debug, warn};
 use lectern_services::code_intel::CodeIntel;
 use lectern_services::reader::Reader;
-use lectern_services::review::{Review, ReviewEvent, ReviewId};
+use lectern_services::review::{NoteAnchor, Review, ReviewEvent, ReviewId, ReviewTarget};
 use lectern_services::session::{SessionKey, SessionSource, SessionSummary};
 use lectern_services::usage::{Usage, UsageEvent, UsageQuery};
 use lectern_services::workspace::{
     Contribution, ContributionKind, Contributions, Layer, Milestone, ScreenLayout, Target,
-    Visibility, WorkspaceEvent, screens,
+    Visibility, WindowId, WorkspaceEvent, screens,
 };
 use lectern_syntax::WindowSpans;
 use lectern_ui::contrib::{InspectorTab, KeyBindings, Screen};
@@ -31,6 +31,7 @@ use crate::actions;
 use crate::diag;
 use crate::highlight::SpanKey;
 use crate::items::DiffMode;
+use crate::notes::MAX_DRAFTS;
 use crate::progress_tab::ProgressTab;
 use crate::screen;
 
@@ -130,6 +131,12 @@ pub(crate) struct Shared {
     screens: Mutex<Vec<(ReviewId, u64, JobSender)>>,
     /// The next registration's token.
     next_token: AtomicU64,
+    /// The drafts of notes (the text of an editor for a new note, by its
+    /// anchor) that screens left behind, by the review target they belong
+    /// to, oldest first, at most `MAX_DRAFTS` in all. In memory only: a
+    /// screen of the same target takes its drafts back when it opens
+    /// (docs/design/review_view.md「审阅意见（#22）」「离开审阅」).
+    drafts: Mutex<VecDeque<(ReviewTarget, NoteAnchor, SharedString)>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -150,6 +157,7 @@ impl Shared {
             mode: Mutex::new(DiffMode::Unified),
             screens: Mutex::new(Vec::new()),
             next_token: AtomicU64::new(0),
+            drafts: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -246,6 +254,58 @@ impl Shared {
     /// The title of a session in the sessions list, None if no source knows it.
     pub(crate) fn session_title(&self, key: &SessionKey) -> Option<Arc<str>> {
         self.session_summary(key)?.title
+    }
+
+    /// The page the inspector shows, None when it is hidden or the
+    /// contributions are not there. The first version has one window,
+    /// `WindowId(0)` (`WindowId`'s documentation).
+    pub(crate) fn inspector_tab(&self) -> Option<Name> {
+        self.with_contributions(|contributions| contributions.inspector_tab(WindowId(0)))
+            .flatten()
+    }
+
+    /// Takes the drafts a screen of `target` left, oldest first.
+    pub(crate) fn take_drafts(
+        &self,
+        target: &ReviewTarget,
+    ) -> VecDeque<(NoteAnchor, SharedString)> {
+        let mut held = lock(&self.drafts);
+        let mut taken = VecDeque::new();
+        let mut kept = VecDeque::with_capacity(held.len());
+        for (at, anchor, text) in held.drain(..) {
+            if at == *target {
+                taken.push_back((anchor, text));
+            } else {
+                kept.push_back((at, anchor, text));
+            }
+        }
+        *held = kept;
+        taken
+    }
+
+    /// Keeps the drafts of a screen that is going away. A draft of the same
+    /// target and anchor that is already there (two screens of one target
+    /// can exist) is replaced; beyond `MAX_DRAFTS` in all, the earliest are
+    /// dropped. The texts are never logged.
+    pub(crate) fn keep_drafts(
+        &self,
+        target: &ReviewTarget,
+        drafts: VecDeque<(NoteAnchor, SharedString)>,
+    ) {
+        let mut held = lock(&self.drafts);
+        for (anchor, text) in drafts {
+            held.retain(|(at, kept, _)| !(at == target && *kept == anchor));
+            held.push_back((target.clone(), anchor, text));
+        }
+        while held.len() > MAX_DRAFTS {
+            held.pop_front();
+        }
+    }
+
+    /// How many drafts are kept, over all targets.
+    #[cfg(test)]
+    pub(crate) fn draft_count(&self) -> usize {
+        lock(&self.drafts).len()
     }
 
     pub(crate) fn report_milestone(&self, milestone: Milestone) {

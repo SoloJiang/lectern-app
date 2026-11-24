@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。编辑框打开后一定在浮条上方（[#380](https://github.com/SoloJiang/lectern-app/issues/380)）：见「审阅意见（#22）」的「编辑框的位置」，差异与验证见同名小节。产品负责人 2026-11-24 决定离开审阅时保留编辑框里的新意见为草稿（「审阅意见（#22）」的「离开审阅」，[#422](https://github.com/SoloJiang/lectern-app/issues/422)），已写进设计，尚未实现。
+状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。编辑框打开后一定在浮条上方（[#380](https://github.com/SoloJiang/lectern-app/issues/380)）：见「审阅意见（#22）」的「编辑框的位置」，差异与验证见同名小节。产品负责人 2026-11-24 决定离开审阅时保留编辑框里的新意见为草稿（「审阅意见（#22）」的「离开审阅」，[#422](https://github.com/SoloJiang/lectern-app/issues/422)），已实现（屏幕释放时经 `Shared` 交接，再开同一个审阅目标时取回）。同一个 issue 的审阅屏幕 UX 修复也已实现：只能用鼠标做的三个操作有了具名 Action（`ToggleTurn`、`JumpToBriefEntry`、`JumpToSubagent`），Conversation 页开着时 Esc 交给 `workspace`，可点的行有悬停底色（见「Action 与快捷键」「界面」的悬停一条，差异与验证见「与设计的差异」和「实际验证」的「审阅屏幕的 UX 修复（#422）」）。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -131,6 +131,9 @@ pub struct ReviewModel {
     collapsed_turns: HashSet<TurnRef>,          // 用户点标题折叠成一行的轮次（#283）
     noise_expanded: HashSet<FileKey>,
     selection: Option<ItemKey>,                 // J / K / 点击选中的项
+    brief_cursor: Option<usize>,                // #422：最近打开的简报条目（`JumpToBriefEntry` 从它的下一条开始）
+    subagent_cursor: Option<ToolCallId>,        // #422：最近打开的子 agent 行（`JumpToSubagent` 同理）
+    row_fade: RowFade,                          // #422：diff 行悬停底色的淡入与淡出（一对 `Transition`）
     anchor: Option<(ItemKey, Pixels)>,          // 刷新前记下的 `logical_scroll_top`
     needs: Arc<[Need]>,                         // 最近一次发出的 `Prepare`
     visible: Range<u32>,                        // `ListScrollEvent::visible_range`
@@ -402,6 +405,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 | 勾选 | `command(MarkSeen)` 返回前 review 已换出 `seen`（< 0.2 ms）；本 crate 只重画 Progress 行和步标题，勾选动画只改透明度与描边进度（`CHECK_FILL`、`CHECK_STROKE`） |
 | 审阅意见（#22） | C 到编辑框画出在下一帧（整表重建，见第 4 步的差异）；编辑框在浮条之下时，再下一帧滚到浮条上方（#380，一次 `bounds_for_item` 和一次 `scroll_by`）；`command(AddNote)` 返回前 review 已换出 `notes`（< 0.2 ms）；`items::build` 多 O(意见数) 的建表；滚动时每项的元素构造不变，意见块按项排版。prompt 不经过本 crate |
 | 拖选（#373） | 只在按下期间有开销。指针移动：先比较 `focus` 的一个 `bounds_for_item`，换行时查约 60 个可见项和一次 `range_of`（5000 行的一段约 10 µs），目标 < 0.1 ms。`focus` 变化时重画可见的行，与悬停相同，每帧 ≤ 8.3 ms。自动滚动就是滚动（`review_view/scroll_5000`）。松开不改 `items`，没有 `splice`。`items::build` 不变：意见仍按一个键（`anchor.last`）进 `by_line`，O(意见数)。每行多一次 O(1) 的范围比较。按下之前和冷启动没有新的工作，模型多两个 `Option`。预算不变，不加基准 |
+| 悬停底色（#422） | 非 diff 行：每个画出的行一次 keyed state 查找加一次 `tick`（`Hover::track`，一个常数时间的查找；状态在行第一次画出时建一次，行不再画出时由 GPUI 放掉），一屏约 10 个这样的行。diff 行：模型里两个 `Transition`，每行一次键比较，只有指针下和刚离开的两行多一个元素；没有每行的状态，滚动时进入视野的行不分配。动画期间 `request_animation_frame` 重画可见的行，与拖选的重画同量级，每帧 ≤ 8.3 ms；没有跑 `review_view/scroll_5000`（见「实际验证」） |
 | 刷新 | `Changed` 到新画面：`items::build` < 2 ms（5000 行时 < 4 ms），锚点找回 O(1)；不等 `Prepared` |
 | 空闲内存（采样状态，没有打开审阅） | 本 crate 没有屏幕时 < 16 KiB（`Shared` 与注册的工厂），另加留下的草稿：至多 20 条，每条是用户打的文字，通常不到 1 KiB。屏幕在 `Pop` 时 drop，不保留 |
 | 审阅打开时的内存 | 展示行由 review 保留（≤ 8 MiB，只为 `Prepare` 的范围）；本 crate 另有：`items`（5000 行约 5000 × 40 B = 200 KiB）、显示行的配对（双栏时同量级）、高亮区间 ≤ 2 MiB（LRU）、`texts` 的引用（内容由 review 持有）。合计 ≤ 3 MiB 之外不持有两侧文本的副本（`ArcSource` 只借 review 给的 `Arc<[u8]>`） |
@@ -425,6 +429,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - 原来在这里的统一 / 双栏分段控件和 Refresh 不再占工具栏：Action（`review::ToggleDiffMode`、`review::Refresh`）和键值保留，入口改到应用菜单栏的 View 菜单（`app` 设计的应用菜单现在只有四项，加 View 菜单是 `app` 的要求，见「对其他 crate 的要求」G）；在那之前只能经 Action 触发。画布没有给这两个操作留位置，这是需要产品确认的取舍（见「未决问题」5）。
 - `ui` 的控件与动效原语：颜色经 `colors(window, cx)`，文字经 `Text` 与 `TextRole`（层级见[交互规范「视觉」](interaction.md#视觉)的文字样式表，下文只写层级名），代码行 `TextRole::Code` 加 `mono_metrics` 的格宽与行高，`code_style` 着色；`CircleCheck`（文件卡片头与 Files 页的行）、`Progress`（Files 页的进度条，`ProgressShape::Bar`）、`Button`、`AgentDot`（子 agent 行）、`GroupedList` 与 `Row`（文件卡片、折叠的文件行）、`Skeleton`、`Expander`（展开 `Fold` 时下方内容下移）；浮条的胶囊容器、分段控件（检查器的页签）、开关来自 `ui`（见「对其他 crate 的要求」I）；动效：`CHECK_FILL`、`CHECK_STROKE`、`PROGRESS`、`SCROLL_NEXT`（V 之后的滚动，`ListState::scroll_to` 的目标由 `Transition` 逐帧给出）、`ARRIVE`（新一轮到达时 `Turn` 项从下方 8pt 淡入）、`SEGMENT`、`HOVER_IN` / `HOVER_OUT`、`EXPAND_HEIGHT` / `EXPAND_FADE`；减弱动态效果由 `Motion::effective` 处理。进入会话的 `ENTER_SESSION` 弹簧动画由 `project_home` 的行标题在 `Push` 前后完成（它拥有那段文字），本 crate 的内容按 `ARRIVE` 淡入。本 crate 不写任何颜色值、字体和时长（验收用 `rg` 检查）。
 - diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），符号栏里 `+` 用绿色、`−` 用红色；两个行号栏右对齐、用三级次要色，和符号栏、代码各占固定宽度；行高比字号高（画布是 12pt 的字配 20pt 的行高，由 `mono_metrics` 给出，不在这里写数值）；词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。选中的行保留增删的淡底色，左边加一条 2pt 的强调色竖条，行号换成强调色；行尾出现一个圆形的 + 按钮（`Button::icon_only(Icon::Plus)`，悬停说明 `review-note-add-here`；点击同 C，「审阅意见（#22）」）；指针下的行也画它，不必先选中。点两个行号栏（光标变成手形）一下直接打开编辑框；点代码只移动当前行。有意见的行，行号栏里画一个 6pt 圆点。
+- 悬停底色（[交互规范「动效」](interaction.md#动效)：进入 `HOVER_IN` 120 ms，离开 `HOVER_OUT` 200 ms，背景淡入淡出；颜色是 `palette.fill`，与侧栏的行相同）：可点的行都有（规则分组视图里的 hunk 标题行除外，见「与设计的差异」）：轮次标题（展开的与折叠成一行的）、简报的条目、「之前的 n 轮」、文件与步的标题（选中时是选中的底色，不叠悬停色）、折叠行（`Fold`）、子 agent 行、diff 行。不可点的行（命令、工具、文字、意见块）没有。前几种每行一个 GPUI 的 keyed state 里的 `Transition`（`hover.rs` 的 `Hover`，与 `ui` 的控件同一个做法；`ui` 的 `controls::hover` 是 `pub(crate)`，所以用公开的 `Transition`、`HOVER_IN`、`HOVER_OUT` 和 `palette.fill` 重做），一个行只在画出时才有，每帧一次查找；diff 行成千上万，不给每行一个状态：模型里一对 `Transition`（`RowFade`，指针下的一行淡入、刚离开的一行淡出；屏幕的 `render` 每帧推进一次，不论行画不画出，所以滚出视野的行不会让动画一直算作进行中），行按键读它的值，画的时候在内容之上盖一层半透明的 `fill`（所以增删行的底色透得出来），除了这两行没有额外的元素。拖选期间（`press`）不画 diff 行的底色。diff 行的悬停仍由 `hovered_row`（行尾的 +）和 `RowFade` 一起由行的 `on_hover` 更新，没有第二个监听。
 - 阅读栏（背景是页面底色，卡片带描边，[交互规范「视觉」](interaction.md#视觉)；宽度 760pt）从上到下，每一块是 `Item` 的一种：
   - 标题区（新的 `Item::Header`，会话审阅和规则分组视图都有）：标题（Title 1 层级，粗体；文字同工具栏标题），下面一行统计（Body 层级，次要色），用 ` · ` 连接：轮数（`review-stats-turns`，规则分组视图没有）、文件数（`review-stats-files`；有包数时用 `review-stats-files-packages`）、增删行数（`review-added` 绿色、`review-removed` 红色，取 `ChangeTotals::added` / `removed`）。包数（涉及几个子项目）要 `review` 的快照提供（「对其他 crate 的要求」H），没有时只写文件数。
   - 简报（没有卡片）：标题行 `review-brief-title`，旁边次要文字 `review-brief-source`，右边是 Analyze 的按钮（`review-analyze-with`，点名分析用的 agent）或进行中 / 重新分析的状态（下面「简报」一节写了状态）；条目前的标记是 8pt 圆点，不用画布 Review 画板里的 16pt 图标（[交互规范「视觉」](interaction.md#视觉)：状态用圆点）；条目末尾的 See impact 链接打开上下文面板，要 `context_drawer`（[#20](https://github.com/SoloJiang/lectern-app/issues/20)），没有它时不画；分支用量行前有分支图标。Analyze 进行中的说明和进度条、结果卡片的内容归 [#66](https://github.com/SoloJiang/lectern-app/issues/66)，这里只留出位置：说明在条目列表下面，结果卡片在同一位置。
@@ -631,6 +636,9 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   | `review::ExpandFold` | ↵（选中 `Fold` 时） | `review` | 加大这个文件的 `context`，重新 `Prepare` |
   | `review::ToggleNoise` | — | `review` | 展开 / 折叠噪声文件 |
   | `review::ToggleEarlierTurns` | — | `review` | 展开 / 折叠早先的轮次 |
+  | `review::ToggleTurn` | — | `review` | #422：折叠或展开选中项所在的轮次（没有选中项时取列表顶部第一项所在的轮次），与点轮次标题相同（同一个 `toggle_turn`）。折叠时选中项在这一轮里的，选中移到这一轮的标题，所以再来一次能找到同一轮。选中项不属于任何轮次（简报、早先轮次的行、末尾的噪声与不在审阅里的意见）或没有轮次（规则分组视图）时不处理，冒泡 |
+  | `review::JumpToBriefEntry` | — | `review` | #422：跳到简报里下一条有文件的条目的位置，与点这一条相同（同一个 `open_brief_entry`）。简报是一项，不是每条一项，所以选中项不决定哪一条：从最近打开的那一条（点击或本 Action）的下一条开始，没有文件的条目跳过，到末尾回到第一条；没有打开过的从第一条开始。没有一条有文件时不处理，冒泡 |
+  | `review::JumpToSubagent` | — | `review` | #422：跳到子 agent 行的会话，与点这一行相同（同一个 `open_subagent`，到它的第一轮）。选中的是子 agent 行时用它；否则取最近打开的那一行（点击或本 Action）之后的下一行，到末尾回到第一行，没有打开过的从第一行开始。跳转选中的是目标轮次的标题，不是子 agent 行，所以「选中项之后」找不到下一行，要靠最近打开的那一行。列表里没有子 agent 行时不处理，冒泡 |
   | `review::Refresh` | — | `review` | `ReviewCommand::Refresh` |
   | `review::Analyze` / `CancelAnalyze` | — | `review` | 对应命令 |
   | `review::Escape` | Esc | `review` | 面板或覆盖层开着、或检查器显示着 Conversation 页时不处理（面板和覆盖层：`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里；Conversation 页：处理 Esc 时调 `Contributions::inspector_tab(window)`，它是 `Some("conversation")` 时不处理。`LayerChanged` 不带分页，所以这里用查询），Esc 冒泡到 `workspace`，先关面板或切回 Files 页（2026-11-24 的决定）；没有开着的层而有拖选的范围时只清除范围并停止传播（#373）；没有范围而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
@@ -777,6 +785,13 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - `the_editor_follows_its_line_across_a_refresh`：快照换代后编辑框仍在锚点行之后；锚点行没了时跟在文件标题之后，保存照常发出。
   - `the_turn_title_shows_the_answered_notes`：`TurnEntry::answers` 的轮次标题有 `review-turn-answers`，折叠成一行时也有。
   - 编辑框的位置（#380，`src/tests/reveal.rs`，列表里是 300 行的 diff，滚到中间，在最低的一行上打开）：`a_line_number_at_the_bottom_opens_the_editor_above_the_bar`、`c_at_the_bottom_*`、`the_plus_at_the_bottom_*`、`add_note_for_a_range_at_the_bottom_*`、`edit_at_the_bottom_*`：编辑框、取消、保存、文本框的下缘都不低于浮条（`review.bar`）的上缘，上缘都不高于列表；`an_editor_higher_than_the_room_keeps_its_text_field_in_view`（窗口只有 140pt 高）文本框在列表之内、浮条之上；`an_editor_far_below_the_list_is_brought_into_view`、`an_editor_above_the_list_is_brought_into_view`（选中一行，滚走一屏以上再按 C）；`an_editor_in_view_does_not_move_the_list`；`a_closed_editor_leaves_nothing_to_reveal`（画出之前关掉，不再等待）。
+- 审阅屏幕的 UX 修复（#422，`src/tests/ux.rs`）：
+  - `toggle_turn_does_what_the_click_on_the_title_does`：点轮次标题与从选中的步派发 `ToggleTurn` 折叠同一轮；选中移到标题；再派发展开。`toggle_turn_without_a_turn_does_nothing`：选中简报（在第一轮之前）或末尾的噪声块时不处理。
+  - `jump_to_brief_entry_goes_where_the_click_goes`：第一次与点第一条相同；第二次到下一条有文件的（没有文件的跳过）；第三次回到第一条。
+  - `jump_to_subagent_goes_where_the_click_goes`：与点子 agent 行相同；再派发到下一行，再派发回到第一行；没有子 agent 行时不处理。
+  - `escape_with_the_conversation_page_open_goes_on`：假 `Contributions::inspector_tab` 回答 `conversation` 时 Esc 冒泡、选中项不变；回答 `files` 后 Esc 清空选中并停止传播。
+  - `a_draft_survives_leaving_the_review`：在真实的编辑框里打字、不关编辑框就让屏幕 drop；打开另一个审阅目标时没有草稿，`Shared` 里的还在；再打开同一个目标时取回（`Shared` 清空），同一行按 C 得到原文，另一行是空的。`only_new_text_is_left_behind`：空编辑框不留草稿；改已有的意见时离开，改动不留。`at_most_twenty_drafts_are_kept`：两个目标共 25 条只留 20 条，丢的是最早的；同一目标同一锚点替换，不新增。
+  - `a_turn_title_fills_under_the_pointer`：指针移到轮次标题上，悬停的 `Transition` 立即开始（`active_transitions` 加一），离开时同一个 `Transition` 转回，不再建新的。`a_diff_line_fills_under_the_pointer`：指针移到 diff 行上 `RowFade` 在跑，移到下一行时两个 `Transition` 在跑（进入的一行与离开的一行）；指针离开、列表滚到这一行不画出的地方、`HOVER_OUT` 的时间过去之后，`active_transitions` 回到开始时的数（用真实时间等 `HOVER_OUT.duration * 2`，因为 `Transition` 取 `Instant::now()`）。
 - 语义树：`review_tree_session`、`review_tree_groups`、`review_tree_progress`、`review_tree_failed` 的 insta 快照；#22 加 `review_tree_notes`（意见、编辑框、`NotesElsewhere`、浮条的再次复制、放弃与发送），#373 加 `review_tree_note_range`（`in_range`、`review.range.add-note`、`last`）（`ui_probe` 的 `tree::snapshot`，[#6](https://github.com/SoloJiang/lectern-app/issues/6) 合并后接入；之前用 `Recorder::finish` 的记录去掉 `bounds` 后快照）。
 - 日志：`logs_hold_no_contents`。
 - fixtures：没有外部格式；`testing::snapshot_fixture` 在代码里合成。
@@ -841,7 +856,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - `review-view-handoff` 两个依赖（`dyn Reader`、`dyn CodeIntel`）里任一个失败，交接一起不可用；用量由 `review-view-usage` 单独提供，不受影响。
 - 别的 worktree 里的子 agent 不在这个审阅里，它的派出在叙事里只是一行 `Tool`（review 设计「未决问题」1 的 (a)），不能从这里进入它的审阅；同一 worktree 里的子 agent 的 `Subagent` 行点开只滚到它的第一轮。
 - `Provided` 规则的文案只覆盖静态表里的（provider, rule）；新的提供者要改表。
-- 审阅意见的草稿（Esc 关掉的、或离开审阅时编辑框里的新意见的文字）只在内存里，本次运行有效：离开审阅后经 `Shared` 保留（2026-11-24 的决定，「审阅意见（#22）」），退出应用后丢失；不写盘。改已有的意见时离开，改动丢失。
+- 审阅意见的草稿（Esc 关掉的、或离开审阅时编辑框里的新意见的文字）只在内存里，本次运行有效：离开审阅后经 `Shared` 保留（2026-11-24 的决定，「审阅意见（#22）」），退出应用后丢失；不写盘；各审阅目标合计至多 20 条，超出时丢最早的。改已有的意见时离开，改动丢失。
 - 已发送的意见不能改，只能删掉再写（`review` 的规则）。复制之后没有粘贴成功时用 Copy Again 重新复制；浮条只给最近一批这个按钮，更早的批次不能再复制。
 - 会话外的改动和比较范围没有回应的那一轮（`answered_by` 总是 None），所以那里的 Copy Again 一直留到发出下一批或删掉这一批的意见为止。
 - 只有剪贴板途径时，用户要自己把 prompt 粘贴进会话；Lectern 只能按 prompt 第一行的标记找出回应的那一轮，粘贴到别处时找不到（review 设计「审阅意见」的「已知限制」）。
@@ -1022,7 +1037,39 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 
 `src/tests` 里已有的测试加了对探针节点属性 `tooltip` 的断言（测试用 en；`Args::str` 的参数带方向隔离符）：浮条的 Looks Good、Copy Again（`count` 为 1 的单数）、Copy as Prompt、Send（剪贴板途径有提示，会话途径没有）、Discard 没有提示（`the_bar_follows_the_notes_state`）；行尾的 +（`the_plus_shows_on_the_row_under_the_pointer`）；拖选后的 Add Note（`range_drag_sets_a_range_and_shows_add_note`，`2–4` 行，与编辑框的 Lines 2–4 是同一个范围）；Analyze 在 `Unavailable` 时有原因的提示、`Idle` 时没有（`analyze_commands_follow_the_state`、`the_analysis_row_shows_each_state`）。没有验证：窗口里的外观与延迟手感（`ui` 的 `Button::tooltip` 也还没有在窗口里检查）。
 
+### 审阅屏幕的 UX 修复（#422）
+
+在 macOS（arm64）上运行，没有打开真实窗口，没有运行 `just bench`、`just automation`、`app` 的窗口测试和探针。`just check` 退出码 0（直接取 `$?`，没有经管道）；`INSTA_UPDATE=no just test -p lectern-review-view`：208 个通过（原 198 个，新增 10 个，都在 `src/tests/ux.rs`），没有快照变化；新增的 `ux::` 测试合计约 0.5 s（其中等 `HOVER_OUT` 的约 0.4 s）。开头的五条 `rg` 检查与 `rg -i 'pasteboard|…'` 都没有结果，`python3 scripts/check_architecture.py` 通过。
+
+- 新增的 10 个测试（名字见「测试」）：`toggle_turn_does_what_the_click_on_the_title_does`、`toggle_turn_without_a_turn_does_nothing`、`jump_to_brief_entry_goes_where_the_click_goes`、`jump_to_subagent_goes_where_the_click_goes`、`escape_with_the_conversation_page_open_goes_on`、`a_draft_survives_leaving_the_review`、`only_new_text_is_left_behind`、`at_most_twenty_drafts_are_kept`、`a_turn_title_fills_under_the_pointer`、`a_diff_line_fills_under_the_pointer`。
+- 先失败的检查（每次只临时改掉一处，跑 `just test -p lectern-review-view ux::`，再改回来）：
+  - Esc 不看 `inspector_tab`（`conversation_open` 恒为 false）：`escape_with_the_conversation_page_open_goes_on` 失败。
+  - 屏幕释放时不调 `Shared::keep_drafts`：`a_draft_survives_leaving_the_review`、`only_new_text_is_left_behind` 失败；只不存编辑框的文字：前一个失败；打开时不取回（`take_drafts`）：前一个失败。
+  - `keep_drafts` 去掉 20 条的上限、或去掉同目标同锚点的替换：`at_most_twenty_drafts_are_kept` 失败。
+  - `toggle_turn` 不移选中、`toggle_current_turn` 恒返回 false：`toggle_turn_does_what_the_click_on_the_title_does` 失败；`open_next_brief_entry` 恒返回 false、不记 `brief_cursor`：`jump_to_brief_entry_goes_where_the_click_goes` 失败；不记 `subagent_cursor`：`jump_to_subagent_goes_where_the_click_goes` 失败。
+  - 展开的轮次标题去掉 `on_hover`：`a_turn_title_fills_under_the_pointer` 失败；`RowFade::enter` 什么也不做：`a_diff_line_fills_under_the_pointer` 失败。
+  - 屏幕的 `render` 不推进 `RowFade`（去掉 `model.row_fade.tick(window)`）：`a_diff_line_fills_under_the_pointer` 失败；`turn_at` 去掉 `Item::Noise` 的一臂：`toggle_turn_without_a_turn_does_nothing` 失败（选中简报的那一半在去掉所有停止的臂之后也通过，所以测试另选了末尾的噪声块）。
+  - 三个 Action 本身没有「先失败」可测：没有它们时测试编译不过。
+- 没有验证（要在真实窗口里看）：
+  - 悬停底色真的画出来、颜色与深浅、淡入 120 ms 与淡出 200 ms 的手感（测试只看到 `Transition` 开始，探针节点没有背景色）；叠在增删行底色之上是否清楚、叠在选中行的强调条上是否难看；简报条目的 6pt 内边距与圆角、折叠行与子 agent 行的底色范围。
+  - 扫过很多行时 diff 行的淡入淡出是否跟手（每次换行 `cx.notify()`，与原来的 +（`hovered_row`）同一个代价，没有量）；`review_view/scroll_5000` 没有跑，不知道每行多出的一次键比较在预算内的余量。
+  - `use_keyed_state` 在列表项的构造里调用（`list` 的回调，布局之后的预绘制阶段）：测试平台里没有问题；真实窗口里的行为（状态在行滚出视野后是否被放掉）没有看。
+  - 三个 Action 的快捷键：没有加（见「与设计的差异」），所以没有看过键盘在真实窗口里怎样走一遍。
+  - Conversation 页开着时 Esc：只测了本屏幕交出 Esc（假 `Contributions` 回答分页）；`workspace` 收到后切回 Files 页是 `workspace` 的测试（`tests/view.rs`）覆盖的，这里没有把两个 crate 接在一起跑。
+
 ## 与设计的差异
+
+### 审阅屏幕的 UX 修复（#422）
+
+- **三个 Action 没有加默认快捷键。** 交互规范只要求每个只能用鼠标做的操作有具名 Action，`J`、`K`、`V`、`C`、`↵`、`Space`、`Esc` 都已占用；折叠轮次、跳简报、跳子 agent 是低频操作，先不抢键；要加键时在 `actions.rs` 的 `key_bindings` 里加一行，并与上面的键对照。三个 Action 也不在 Review 菜单里（菜单的项是下一处、上一处、标记已看、加意见、发送）。
+- **简报与子 agent 行不是可选中的项，两个 Action 靠「最近打开的那一条」往下走。** 设计的原则是 Action 作用在选中项上，但简报是一个 `Item::Brief`，条目不是项；子 agent 行点击时不选中它，而是选中目标轮次的标题。照「选中项之后」找，第二次又会回到同一行（目标轮次在两行之后）。所以模型多两个游标（`brief_cursor`、`subagent_cursor`），点击和 Action 都更新它，Action 从游标的下一条开始，到末尾回到第一条。选中的恰好是子 agent 行时（只有探针能做到）用选中的那一行。游标不随快照换代重置：条目变少时下标越界按「回到第一条」处理，子 agent 行的游标找不到时从第一行开始。
+- **`toggle_turn` 在折叠时移动选中。** 点标题原来不碰选中（折叠后选中项被 `rebuild` 清空）；现在选中项在被折叠的轮次里时，选中移到这一轮的标题。点击和 Action 走同一个方法，所以点击折叠也会选中标题，这是点击行为的一个小变化。
+- **Esc 用 `WindowId(0)` 问分页。** `Contributions::inspector_tab` 要服务层的 `WindowId`；`LayerChanged` 带的是同一种，但分页不是事件，屏幕里也没有窗口 ID。第一版只有一个窗口（`WindowId` 的文档：总是 `WindowId(0)`），所以固定用它；有第二个窗口之后要改成屏幕所在窗口的 ID。分页名 `conversation` 用 `notes.rs` 里已有的常量（`CONVERSATION_TAB`），与 `lectern-workspace` 导出的同名同值，但插件 crate 不能依赖 `workspace`（架构规则 7）。
+- **草稿在模型的释放钩子（`cx.on_release`）里交给 `Shared`，不在 `Drop` 里。** 编辑框的文字要从 `TextAreaState` 实体里读，`Drop` 里没有 `App`。钩子在 `Drop` 之前运行，所以 `Drop` 里的 `close`、取消分析等不变。钩子无论这个审阅有没有打开成功都运行（打开失败的屏幕取走了草稿，也要还回去）。`Shared::take_drafts` 取走并删掉该目标的全部草稿，`keep_drafts` 逐条放回：同目标同锚点的替换（同一个目标可以同时有两个屏幕），总数超过 20 时从最早的丢（目标之间合计）。
+- **diff 行不用「每行一个状态」的做法。** 悬停底色在非 diff 行用 keyed state（每个画出的行一个，一屏约 10 个），diff 行改用模型里的一对 `Transition`（`RowFade`）：前者在滚动时每个进入视野的行要分配一次，diff 行有几千个。代价是两套做法；`ui` 若把 `Hover` 公开，非 diff 行可以换成它。
+- **没有加悬停底色的可点行：** 规则分组视图里的 hunk 标题行（点它选中；只在规则分组视图画出，较少用）、diff 行里的行号区（行号区点击打开编辑框，悬停底色属于整行）、浮条和 Files 页的行（Files 页用 `ui::Row` 的，已有悬停）。命令、工具、文字、意见块不可点，没有加。
+- **diff 行的悬停底色在拖选期间不画，**行本身不变色：拖选时 GPUI 仍给经过的行发悬停事件，会让范围的行与悬停的行混在一起。选中行、范围的行没有底色（只有左边的强调条与行号色），所以悬停底色叠上去没有冲突，不需要跳过它们。
+- **`ui` 的 `Hover` 是 `pub(crate)`，本 crate 照它重做了一份**（`hover.rs`，约 30 行）：公开的 `Transition`、`HOVER_IN`、`HOVER_OUT`、`palette.fill`，keyed state 的 ID 与 `ui` 的 `NodeId::part("hover")` 同一种形状。本 PR 只改本 crate，没有动 `ui`。
 
 ### 编辑框在浮条上方（#380）
 

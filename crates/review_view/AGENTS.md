@@ -19,7 +19,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `plugin.rs` | 插件 "review-view"、"review-view-handoff" 与 "review-view-usage"、`plugins(executor)`、`Shared`（服务引用、交接的两个服务、用量服务、执行器、各屏幕的事件通道、所选的模式）、三项贡献的登记 |
+| `plugin.rs` | 插件 "review-view"、"review-view-handoff" 与 "review-view-usage"、`plugins(executor)`、`Shared`（服务引用、交接的两个服务、用量服务、执行器、各屏幕的事件通道、所选的模式、离开审阅的屏幕留下的草稿（按 `ReviewTarget`，至多 20 条，只在内存里）、`inspector_tab`）、三项贡献的登记 |
 | `model.rs` | `ReviewModel`：快照、项、展示行与正文、选中、`Prepare`、V / J / K / Esc 的状态变化、屏幕 drop 时的收尾 |
 | `items.rs` | 叙事列表的项与 `build`：快照加已准备的行的纯函数，`review_view/items_5000` 基准直接调它；意见的 `NoteIndex`（按快照建一次，O(意见数)）与编辑框的位置 `EditorAt` |
 | `notes.rs`、`render_notes.rs` | #22：编辑框（`NoteEditor`、草稿、保存 / 取消）、对意见的命令、浮条的状态（`Status`）、发送后切到 Conversation 页；意见块、编辑框与「不在本次审阅里」块的元素 |
@@ -31,8 +31,9 @@
 | `diffs.rs` | 模型对已准备的 diff 做的事：提交高亮任务和收结果、`share_object` 登记、统一 / 双栏切换、折叠展开 |
 | `handoff.rs` | 交接：⇧⌘O / ⌘E 打开文件、`CodeIntel::set_focus`、Space；以及会话用量的 `watch`、读取与释放（`attach_usage`、`usage_changed`，来自 "review-view-usage"） |
 | `screen.rs`、`render.rs`、`render_diff.rs`、`progress_tab.rs` | `ReviewScreen`（加载 / 失败 / 内容、胶囊浮条、工具栏的 Mark Reviewed 与副标题）、各项的元素（标题区、简报、轮次、文件卡片按列表项切开画：`Slice`）、diff 行（统一与双栏）与折叠、检查器的 Files 页（已看数、进度条、紧凑行） |
+| `hover.rs` | 可点的行的悬停底色（#422）：`Hover`（keyed state 里的 `Transition`，非 diff 行）与 `RowFade`（模型里一对 `Transition`，diff 行）；`ui` 的 `controls::hover` 是 `pub(crate)`，所以用公开的原语重做 |
 | `actions.rs`、`nodes.rs`、`diag.rs` | Action 与 `KeyBindings`、探针的节点 ID、日志字段 |
-| `testing.rs` | `test-support`：`FakeReview`（意见的命令在返回前换出快照，`finish_send` 等替 `review` 交回发送结果）、`snapshot_fixture`、`add_notes`；GPUI 的测试台在 `src/tests/support.rs`，交接与用量三个服务的假实现在 `src/tests/fakes.rs`，意见的测试在 `src/tests/notes.rs`，范围的测试在 `src/tests/range.rs` |
+| `testing.rs` | `test-support`：`FakeReview`（意见的命令在返回前换出快照，`finish_send` 等替 `review` 交回发送结果）、`snapshot_fixture`、`add_notes`；GPUI 的测试台在 `src/tests/support.rs`，交接与用量三个服务的假实现在 `src/tests/fakes.rs`，意见的测试在 `src/tests/notes.rs`，范围的测试在 `src/tests/range.rs`，#422 的 Action、Esc、草稿交接与悬停的测试在 `src/tests/ux.rs` |
 
 ## 测试
 

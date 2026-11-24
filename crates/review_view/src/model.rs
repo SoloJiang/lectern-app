@@ -24,6 +24,7 @@ use lectern_services::review::{
     Progress, ReviewCommand, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, SeenState, TextKey,
     TurnRef,
 };
+use lectern_services::session::ToolCallId;
 use lectern_services::usage::{UsageInterest, UsageQuery, UsageSnapshot};
 use lectern_services::workspace::WorkspaceCommand;
 use lectern_ui::motion::{self, Transition};
@@ -31,9 +32,10 @@ use lectern_ui::motion::{self, Transition};
 use crate::anchor;
 use crate::diag;
 use crate::highlight::{Half, SideSpans, SpansCache};
+use crate::hover::RowFade;
 use crate::items::{self, BuildOptions, DiffMode, DisplayRow, Item, ItemKey, NoteIndex};
 use crate::needs;
-use crate::notes::NoteEditor;
+use crate::notes::{CONVERSATION_TAB, NoteEditor};
 use crate::plugin::{Job, JobReceiver, JobSender, Shared};
 use crate::range::{LineRange, Press};
 
@@ -169,6 +171,8 @@ pub struct ReviewModel {
     pub(crate) selection: Option<ItemKey>,
     /// The diff row under the pointer: it shows the + that writes a note.
     pub(crate) hovered_row: Option<ItemKey>,
+    /// The fade of the fill under `hovered_row` (`hover::RowFade`).
+    pub(crate) row_fade: RowFade,
     /// #373: a button held down on a row of a diff.
     pub(crate) press: Option<Press>,
     /// #373: the range the last drag left.
@@ -184,10 +188,16 @@ pub struct ReviewModel {
     pub(crate) marked: u32,
     pub(crate) looks_good: bool,
     pub(crate) layer_open: bool,
+    /// The brief entry opened last, by click or `JumpToBriefEntry`.
+    pub(crate) brief_cursor: Option<usize>,
+    /// The sub-agent line opened last, by click or `JumpToSubagent`.
+    pub(crate) subagent_cursor: Option<ToolCallId>,
     /// #22: the open note editor, at most one.
     pub(crate) editor: Option<NoteEditor>,
     /// #22: what Esc closed of new notes' texts, by anchor, at most
-    /// `MAX_DRAFTS`; dropped with the screen.
+    /// `MAX_DRAFTS`; when the screen is released they go to
+    /// `Shared::drafts` by target, and a screen of the same target takes
+    /// them back.
     pub(crate) drafts: VecDeque<(NoteAnchor, SharedString)>,
     /// #22: the last batch the screen went to the Conversation page for.
     pub(crate) switched_for: Option<BatchId>,
@@ -250,6 +260,9 @@ impl ReviewModel {
         }
         // The mode the user chose on an earlier screen of this run.
         let mode = shared.mode();
+        // What an earlier screen of this target left (docs/design/
+        // review_view.md「审阅意见（#22）」「离开审阅」).
+        let drafts = shared.take_drafts(&target);
         let mut model = ReviewModel {
             shared,
             tx,
@@ -285,6 +298,7 @@ impl ReviewModel {
             noise_expanded: false,
             selection: None,
             hovered_row: None,
+            row_fade: RowFade::default(),
             press: None,
             range: None,
             needs: Arc::from(Vec::new()),
@@ -298,8 +312,10 @@ impl ReviewModel {
             marked: 0,
             looks_good: false,
             layer_open: false,
+            brief_cursor: None,
+            subagent_cursor: None,
             editor: None,
-            drafts: VecDeque::new(),
+            drafts,
             switched_for: None,
             notes_full_hint: false,
             notes_added: 0,
@@ -313,6 +329,9 @@ impl ReviewModel {
             jobs: None,
             timers: None,
         };
+        // The text of an open editor is read from its entity, which `drop`
+        // cannot do: the release hook has the `App`.
+        cx.on_release(|model, cx| model.leave_drafts(cx)).detach();
         if let Some(receiver) = receiver {
             model.jobs = Some(Self::listen(receiver, cx));
         }
@@ -378,6 +397,7 @@ impl ReviewModel {
             noise_expanded: false,
             selection: None,
             hovered_row: None,
+            row_fade: RowFade::default(),
             press: None,
             range: None,
             needs: Arc::from(Vec::new()),
@@ -391,6 +411,8 @@ impl ReviewModel {
             marked: 0,
             looks_good: false,
             layer_open: false,
+            brief_cursor: None,
+            subagent_cursor: None,
             editor: None,
             drafts: VecDeque::new(),
             switched_for: None,
@@ -1026,13 +1048,17 @@ impl ReviewModel {
         cx: &mut Context<ReviewModel>,
     ) {
         if hovered {
+            self.row_fade.enter(key, cx);
             if self.hovered_row.as_ref() != Some(key) {
                 self.hovered_row = Some(key.clone());
                 cx.notify();
             }
-        } else if self.hovered_row.as_ref() == Some(key) {
-            self.hovered_row = None;
-            cx.notify();
+        } else {
+            self.row_fade.leave(key, cx);
+            if self.hovered_row.as_ref() == Some(key) {
+                self.hovered_row = None;
+                cx.notify();
+            }
         }
     }
 
@@ -1126,7 +1152,32 @@ impl ReviewModel {
         }
     }
 
-    /// A click on a brief entry: the row of the line in the file's final
+    /// A click on entry `ix` of the brief: `jump_to_brief` to what it names.
+    /// The entry is remembered, for the action to go on from it.
+    pub(crate) fn open_brief_entry(&mut self, ix: usize, cx: &mut Context<ReviewModel>) {
+        let Some(item) = self.snapshot.brief.items.get(ix) else {
+            return;
+        };
+        let (file, line) = (item.file.clone(), item.line);
+        self.brief_cursor = Some(ix);
+        self.jump_to_brief(file, line, cx);
+    }
+
+    /// `JumpToBriefEntry`: the next entry that names a file after the one
+    /// opened last (the first when none was opened or it was the last).
+    /// False when no entry names one.
+    pub(crate) fn open_next_brief_entry(&mut self, cx: &mut Context<ReviewModel>) -> bool {
+        let entries = &self.snapshot.brief.items;
+        let after = self.brief_cursor.map_or(0, |ix| ix + 1).min(entries.len());
+        let next = (after..entries.len())
+            .chain(0..after)
+            .find(|&ix| entries[ix].file.is_some());
+        let Some(ix) = next else { return false };
+        self.open_brief_entry(ix, cx);
+        true
+    }
+
+    /// The jump of a brief entry: the row of the line in the file's final
     /// diff when that is shown, otherwise the file's step (or title).
     pub(crate) fn jump_to_brief(
         &mut self,
@@ -1203,9 +1254,52 @@ impl ReviewModel {
         })
     }
 
-    /// A click on a sub-agent's line: its first turn (known limitation of
-    /// the design: only that turn is reached).
-    pub(crate) fn jump_to_session(&mut self, session: u16, cx: &mut Context<ReviewModel>) {
+    /// A click on a sub-agent's line, or `JumpToSubagent`: its first turn
+    /// (known limitation of the design: only that turn is reached). The
+    /// line is remembered, for the action to go on from it.
+    pub(crate) fn open_subagent(
+        &mut self,
+        call: ToolCallId,
+        session: u16,
+        cx: &mut Context<ReviewModel>,
+    ) {
+        self.subagent_cursor = Some(call);
+        self.jump_to_session(session, cx);
+    }
+
+    /// `JumpToSubagent`: the selected sub-agent line, else the next one after
+    /// the line opened last (the first when none was opened or it was the
+    /// last), in the order of the list. False when the list has none.
+    pub(crate) fn open_next_subagent(&mut self, cx: &mut Context<ReviewModel>) -> bool {
+        let lines: Vec<(usize, ToolCallId, u16)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, item)| match item {
+                Item::Subagent { session, call, .. } => Some((ix, call.clone(), *session)),
+                _ => None,
+            })
+            .collect();
+        let selected = self
+            .selection
+            .as_ref()
+            .and_then(|key| anchor::find(&self.items, key));
+        let after = self
+            .subagent_cursor
+            .as_ref()
+            .and_then(|cursor| lines.iter().position(|(_, call, _)| call == cursor))
+            .map_or(0, |at| at + 1);
+        let chosen = selected
+            .and_then(|ix| lines.iter().find(|(at, _, _)| *at == ix))
+            .or_else(|| lines.get(after).or_else(|| lines.first()));
+        let Some((_, call, session)) = chosen.cloned() else {
+            return false;
+        };
+        self.open_subagent(call, session, cx);
+        true
+    }
+
+    fn jump_to_session(&mut self, session: u16, cx: &mut Context<ReviewModel>) {
         let find = |items: &[Item]| {
             items
                 .iter()
@@ -1427,12 +1521,68 @@ impl ReviewModel {
         self.rebuild_in_place(cx);
     }
 
-    /// A click on a turn's title: the turn folds into one line, or opens.
+    /// A click on a turn's title, or `ToggleTurn`: the turn folds into one
+    /// line, or opens. A selection inside a turn that folds moves to the
+    /// turn's title, so that the keyboard stays where it was.
     pub(crate) fn toggle_turn(&mut self, at: TurnRef, cx: &mut Context<ReviewModel>) {
+        let folding = !self.collapsed_turns.contains(&at);
+        let selected_inside = folding
+            && self
+                .selection
+                .as_ref()
+                .and_then(|key| anchor::find(&self.items, key))
+                .is_some_and(|ix| self.turn_at(ix) == Some(at));
         if !self.collapsed_turns.remove(&at) {
             self.collapsed_turns.insert(at);
         }
         self.rebuild_in_place(cx);
+        if selected_inside {
+            self.selection = Some(ItemKey::Turn(at));
+            self.sync_current();
+            cx.notify();
+        }
+    }
+
+    /// `ToggleTurn`: folds or opens the turn of the selected item, or of the
+    /// first item in view when nothing is selected. False when there is no
+    /// such turn (before the first turn, after the last, in the rule-grouped
+    /// view).
+    pub(crate) fn toggle_current_turn(&mut self, cx: &mut Context<ReviewModel>) -> bool {
+        let Some(at) = self.current_index().and_then(|ix| self.turn_at(ix)) else {
+            return false;
+        };
+        self.toggle_turn(at, cx);
+        true
+    }
+
+    /// The item the keyboard works on: the selected one, else the first in
+    /// view.
+    fn current_index(&self) -> Option<usize> {
+        self.selection
+            .as_ref()
+            .and_then(|key| anchor::find(&self.items, key))
+            .or_else(|| (self.visible.start < self.items.len()).then_some(self.visible.start))
+    }
+
+    /// The turn the item at `ix` belongs to: the nearest title of a turn
+    /// above it. The items before the first turn and the blocks after the
+    /// last (folded noise, notes on files that are not in the review) belong
+    /// to none.
+    fn turn_at(&self, ix: usize) -> Option<TurnRef> {
+        for item in self.items.get(..=ix)?.iter().rev() {
+            match item {
+                Item::Turn { at, .. } => return Some(*at),
+                Item::Header
+                | Item::Brief
+                | Item::EarlierTurns { .. }
+                | Item::Noise { .. }
+                | Item::NotesElsewhere { .. }
+                | Item::Note { rows: None, .. }
+                | Item::NoteEditor { rows: None } => return None,
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Opens the folded turn that has a step on `file`, so that a jump can
@@ -1467,7 +1617,9 @@ impl ReviewModel {
     /// action is not handled here, so that it goes on to `workspace`:
     /// while a panel or overlay is open, and when nothing is selected.
     pub(crate) fn escape(&mut self, cx: &mut Context<ReviewModel>) -> bool {
-        if self.layer_open {
+        // A panel or overlay is open, or the inspector shows the Conversation
+        // page: `workspace` closes that first (2026-11-24).
+        if self.layer_open || self.conversation_open() {
             return false;
         }
         // The drag, then the range it left, then the current line (#373).
@@ -1486,6 +1638,13 @@ impl ReviewModel {
         self.selection = None;
         cx.notify();
         true
+    }
+
+    /// Whether the inspector shows the Conversation page.
+    fn conversation_open(&self) -> bool {
+        self.shared
+            .inspector_tab()
+            .is_some_and(|tab| *tab == *CONVERSATION_TAB)
     }
 
     // ----- helpers for the screen and the Progress page ---------------------

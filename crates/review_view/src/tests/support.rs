@@ -49,9 +49,16 @@ pub struct FakeContributions {
     milestones: Mutex<Vec<Milestone>>,
     released: Arc<AtomicUsize>,
     bindings: Mutex<Option<KeyBindings>>,
+    /// The page the inspector shows, as `inspector_tab` answers.
+    inspector: Mutex<Option<Name>>,
 }
 
 impl FakeContributions {
+    /// The inspector shows the page `tab` (None: it is hidden).
+    pub fn show_inspector_tab(&self, tab: Option<&'static str>) {
+        *self.inspector.lock().unwrap() = tab.map(Name::Borrowed);
+    }
+
     pub fn registered(&self) -> Vec<String> {
         self.registered.lock().unwrap().clone()
     }
@@ -190,7 +197,7 @@ impl Contributions for FakeContributions {
         None
     }
     fn inspector_tab(&self, _window: WindowId) -> Option<Name> {
-        None
+        self.inspector.lock().unwrap().clone()
     }
 
     fn report_milestone(&self, milestone: Milestone) {
