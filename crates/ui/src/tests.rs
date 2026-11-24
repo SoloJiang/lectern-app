@@ -9,3 +9,4 @@ mod probe;
 mod semantic;
 mod text;
 mod text_area;
+mod tooltip;

@@ -167,6 +167,9 @@ pub const LOADING_SKELETON_AT: Duration = ms(100);
 pub const LOADING_PROGRESS_AT: Duration = Duration::from_secs(1);
 /// How long a `Hint` stays before it fades out (`HOVER_OUT`).
 pub const HINT_DURATION: Duration = ms(2500);
+/// How long the pointer rests on a control before its tooltip shows
+/// (`Button::tooltip`; AppKit's tooltips wait about a second).
+pub const TOOLTIP_DELAY: Duration = ms(1000);
 
 /// Entering a session: spring, response 0.35 s, damping 0.86. With mass 1:
 /// stiffness = (2π / 0.35)² ≈ 322.27, damping = 2 × 0.86 × √stiffness

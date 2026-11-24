@@ -8,15 +8,17 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled,
-    Window, div, px,
+    App, ClickEvent, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
+    SharedString, Styled, Window, div, px,
 };
 use gpui_component::button::{ButtonCustomVariant, ButtonRounded, ButtonVariants};
 use gpui_component::{Disableable, Sizable, Size};
 
 use crate::controls::require_ready;
+use crate::controls::tooltip::TooltipView;
 use crate::font::{TextRole, TextRoleExt};
 use crate::icon::Icon;
+use crate::motion::TOOLTIP_DELAY;
 use crate::palette::{Palette, colors, on_accent, shade};
 use crate::semantic::{self, NodeId, Role, Semantic, State};
 use crate::text::Text;
@@ -38,6 +40,7 @@ pub struct Button {
     icon: Option<Icon>,
     icon_only: bool,
     hint: Option<Text>,
+    tooltip: Option<Text>,
     pill: bool,
     active: Option<bool>,
     disabled: bool,
@@ -120,6 +123,7 @@ impl Button {
             icon: None,
             icon_only: false,
             hint: None,
+            tooltip: None,
             pill: false,
             active: None,
             disabled: false,
@@ -147,6 +151,17 @@ impl Button {
     /// attribute `hint`.
     pub fn hint(mut self, hint: Text) -> Button {
         self.hint = Some(hint);
+        self
+    }
+
+    /// A tooltip by the pointer: `text` shows after `motion::TOOLTIP_DELAY`
+    /// of resting on the button, and hides when the pointer leaves, on mouse
+    /// down and on scroll. It shows on a disabled button too: this is where a
+    /// grey button says why. The text is also the probe node's attribute
+    /// `tooltip`; it is not part of the accessible name (that stays the
+    /// label).
+    pub fn tooltip(mut self, text: Text) -> Button {
+        self.tooltip = Some(text);
         self
     }
 
@@ -285,6 +300,9 @@ impl RenderOnce for Button {
         if let Some(hint) = &self.hint {
             spec = spec.attr("hint", hint.shared());
         }
+        if let Some(tooltip) = &self.tooltip {
+            spec = spec.attr("tooltip", tooltip.shared());
+        }
         let gpui_size = match self.size {
             ButtonSize::Small => Size::Small,
             ButtonSize::Regular | ButtonSize::Toolbar => Size::Medium,
@@ -339,6 +357,18 @@ impl RenderOnce for Button {
         }
         if let Some(on_click) = self.on_click {
             button = button.on_click(move |_: &ClickEvent, window, cx| on_click(window, cx));
+        }
+        if let Some(tooltip) = &self.tooltip {
+            // GPUI's own tooltip on the button's element, not gpui-component's
+            // `Button::tooltip` (that one draws through a `Root` overlay that
+            // Lectern does not mount). A disabled button keeps its hitbox and
+            // only swallows the mouse down, so the tooltip still shows; GPUI's
+            // listeners for hiding on mouse down and scroll are window-level
+            // and run in the capture phase too.
+            let text = tooltip.shared();
+            let interactivity = button.interactivity();
+            interactivity.tooltip(move |_, cx| TooltipView::build(text.clone(), cx));
+            interactivity.tooltip_show_delay(TOOLTIP_DELAY);
         }
         semantic::declare(spec, button)
     }

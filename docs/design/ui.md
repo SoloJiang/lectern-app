@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。终端配色（`terminal_colors`，[terminal_view 设计](terminal_view.md#验收)第 1 步的 `ui` 部分）已实现（本 PR）：窗口里的视觉检查随 terminal_view 第 3 步。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 已随 `workspace` 的 `app` 装配加上（见 [app 设计「workspace 的装配」](app.md#workspace-的装配)），第 1 步的 `ui/*` 基准仍在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。控件与设计画布对齐（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的控件 PR）已实现：`TextRole` 改为 HIG 文本样式的字号，`GroupedList` / `Row` 的卡片边线、行距、分隔线缩进与安静的选中样式，图标按钮 `Button::icon_only`，进度环 20pt / 2.5pt；窗口里的视觉检查还没有做（见「实际验证」）。第 5 步（「控件」的「第二批控件」，#283 的三个屏幕要用）除 `Switch`（随 [#21](https://github.com/SoloJiang/lectern-app/issues/21) 的调用方实现）之外已实现（本 PR）：`Palette::fill` / `fill_strong`、6 个图标、`ActionCard`、`MenuItem`、`PopUpButton`、`show_menu`、`SidebarRow`、`Row::context_menu`、`Segmented::fill`、`Button::pill`、`Capsule`、`Disclosure`、`AppIcon`；窗口里的视觉检查和系统菜单的弹出还没有做（见「实际验证」）。`ActionCard::disabled`（#283 的画布决定，Welcome 的 Clone 卡片）已实现，窗口里没有检查。 第 6 步（多行文本框 `TextArea`，[conversation 设计](conversation.md#对其他-crate-的要求) F，[#22](https://github.com/SoloJiang/lectern-app/issues/22) 的前置条件 J）已实现（本 PR）：`TextArea`、`TextAreaState`；窗口里的真实输入法与视觉检查还没有做（见「实际验证」）。终端配色（`terminal_colors`，[terminal_view 设计](terminal_view.md#验收)第 1 步的 `ui` 部分）已实现（本 PR）：窗口里的视觉检查随 terminal_view 第 3 步。 `Button::tooltip`（悬停提示，[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的 UX 审计）已实现（本 PR）：窗口里的外观与延迟手感还没有检查（见「实际验证」）。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -437,6 +437,11 @@ impl Button {
     pub fn attr(self, key: &'static str, value: impl Into<SharedString>) -> Button;
     /// 标签之后的键提示（Mark Reviewed 后面的 V）：`secondary_label`（主按钮上是文字色的 70 %），与标签之间 5pt；不属于辅助名，探针节点上是属性 `hint`。
     pub fn hint(self, hint: Text) -> Button;
+    /// 悬停提示：指针在按钮上停 `motion::TOOLTIP_DELAY`（1 s）后，在指针下方显示 `text`；指针离开、鼠标按下、滚动时收起。
+    /// 禁用的按钮也显示（灰色按钮用它说明原因，如大文件的 Edit…）。提示是 `ui` 自己的小视图：`Caption` 字号、`label` 色，
+    /// `control_background` 底、0.5pt `separator` 边线、5pt 圆角、小阴影，最宽 280pt，超出换行；没有自己的动画。
+    /// 文字同时是探针节点的属性 `tooltip`（视图不必再调 `attr("tooltip", …)`）；不属于辅助名，辅助名仍是 `label`。
+    pub fn tooltip(self, text: Text) -> Button;
 }
 
 /// 第一批屏幕用到的图标，来自 gpui-component 自带的 Lucide 集合（见「未决问题」1）。只列需要的，不暴露整个 `IconName`。
@@ -876,7 +881,7 @@ pub mod semantic {
 - 详细级别（debug）：外观变化（`appearance`）、强调色变化（`accent`）、减弱动态效果变化（`reduce_motion`）、语言切换（`locale` 为 `Locale::tag()`）。每次事件一条，事件本身由用户或系统触发，频率低。不在 `colors`、`code_style`、`Transition::tick`、`mono_metrics` 的热路径上加记录。
 - 关联 ID：本 crate 不设作用域（logging 设计「对其他 crate 的要求」第 11 项：主线程上的作用域由 `workspace` 和视图层设置），记录带调用线程上已有的作用域。
 - 不记录：`Text` 的内容（界面文案、路径、会话标题、prompt 都经它显示）、`NodeId` 的业务键（路径、会话 ID）、`Semantic::attrs` 的值、`Label` 的文字、颜色的数值、字体的实际 PostScript 名（只记上面三个 `'static` 家族常量的其中一个）、窗口标题。用事件名、外观、`'static` 的家族常量和计数代替。
-- 金丝雀测试：`tests::logs_hold_no_text`（`lectern_logging::testing::capture()`，trace 级别，`init_fixed`）：用含金丝雀的 `Text::verbatim` 渲染 `Button`、`Row`、`GroupedList`，用含金丝雀的业务键建 `NodeId`，用含金丝雀的 `attrs` 和 `Label` 调 `semantic(...)`，`Recorder::begin` 后渲染一帧，再切一次语言、触发一次模拟的外观变化；`assert_absent` 确认金丝雀不进日志，并检查记录只有 `ui initialised`、`ui ready`（`init_fixed` 也运行 `ready`）和两条 debug。
+- 金丝雀测试：`tests::logs_hold_no_text`（`lectern_logging::testing::capture()`，trace 级别，`init_fixed`）：用含金丝雀的 `Text::verbatim` 渲染 `Button`（含 `tooltip`）、`Row`、`GroupedList`，用含金丝雀的业务键建 `NodeId`，用含金丝雀的 `attrs` 和 `Label` 调 `semantic(...)`，`Recorder::begin` 后渲染一帧，再切一次语言、触发一次模拟的外观变化；`assert_absent` 确认金丝雀不进日志，并检查记录只有 `ui initialised`、`ui ready`（`init_fixed` 也运行 `ready`）和两条 debug。
 
 ## 测试
 
@@ -1087,6 +1092,22 @@ pub mod semantic {
 - `just test -p lectern-ui`：100 个测试通过，其中新增 5 个：`terminal_colors_follow_the_design_table`、`terminal_colors_contrast`、`terminal_colors_distinct` 和两份 insta 快照。设计表里的 ANSI 1–6 按派生规则（向 `label` 混合）调整之后通过对比度与 ΔE 两项检查，不需要换系统色，所以「与设计的差异」没有新增条目。
 - 没有新的外部 crate，`Cargo.lock` 不变。
 
+`Button::tooltip`（[#283](https://github.com/SoloJiang/lectern-app/issues/283) 的 UX 审计：控件没有悬停提示；macOS，Apple 芯片）：
+
+- `just check` 通过；`cargo nextest run -p lectern-ui`：109 个测试通过，新增 8 个，全用 GPUI 测试平台（`#[gpui::test]`、`VisualTestContext`，用 `simulate_mouse_move` 与测试时钟 `advance_clock`，不开真实窗口）：
+  - `tooltip_shows_after_the_delay_on_hover`：`TOOLTIP_DELAY` 为 1 s；差 1 ms 时没有提示，到点后出现，提示的框在指针下方、不在左边；另一个按钮的提示不出现。
+  - `tooltip_shows_on_a_disabled_button`：禁用的按钮悬停同样出现自己的提示。
+  - `tooltip_hides_after_the_pointer_leaves`：指针移走后收起；没到点就移走的，到点之后也不出现。
+  - `tooltip_hides_on_mouse_down_and_on_scroll`：鼠标按下收起（启用的按钮，和吞掉按下事件的禁用按钮）；滚动收起，滚动事件发在按钮上指针的位置，所以收起的原因是滚动，不是指针离开。
+  - `tooltip_stays_on_scroll_over_its_own_bounds`：已知限制（见「与设计的差异」），用测试固定下来：指针在提示出现后向右下移 3pt、仍在按钮上时，滚动不收起提示，鼠标按下收起。
+  - `a_button_without_a_tooltip_shows_none`：没调 `tooltip` 的按钮悬停 2 s 也没有提示。
+  - `a_long_tooltip_wraps_at_the_maximum_width`：长文字时框宽 ≤ 280pt，高度超过一行。
+  - `button_tooltip_is_a_probe_attribute`（`tests/probe.rs`）：探针节点有属性 `tooltip`，`label` 仍是辅助名；没调 `tooltip` 的没有该属性；禁用与图标按钮同样。
+  - `logs_hold_no_text` 的金丝雀按钮多调了 `tooltip`，日志里仍没有金丝雀。
+  - 把 `Button` 里挂提示的那一行临时去掉：当时的 6 个提示测试里，除 `a_button_without_a_tooltip_shows_none` 外的 5 个失败（确认它们测的是这段代码）；之后加的 `tooltip_stays_on_scroll_over_its_own_bounds` 没有重做这个检查。
+- 提示框用 `debug_bounds` 按文字找（`tooltip.rs` 给框设了 `debug_selector`，发布构建里它是空操作），所以测试看到的是真画出来的框，不是 GPUI 内部的状态。
+- **没有做**：真实窗口里的外观（字号、边线、阴影、与指针的间距、窗口边缘处的翻转）和真实鼠标下的延迟手感；测试平台没有 AppKit 的光标，指针位置由模拟事件给出。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1175,3 +1196,15 @@ pub mod semantic {
 - `TextAreaState::text()` 与 `focus_handle()` 读缓存（F 的签名没有 `cx`）。`set_text` 的文字会清空撤销历史并把光标放回开头，这是 gpui-component 的 `set_value` 的行为。
 - 文本框的底、边和焦点环由本 crate 画（`Textarea::appearance(false)`），不用 gpui-component 的：它的边是 1px 的 `ring`、圆角取主题的，与 F 要求的 0.5pt `separator` 和 `accent` 焦点环不同。文字大小与行高用 `TextRole::Body`；内边距用 gpui-component 的 `Size::Medium`（左右 10pt、上下 8pt），它没有提供设置内边距的接口。
 - 占位文字的颜色是 gpui-component 的 `muted_foreground`，即 `secondary_label`（`init.rs` 的投影），不是 HIG 的 `tertiary_label`；要不要换取决于窗口里的视觉检查。
+
+### `Button::tooltip`（[#283](https://github.com/SoloJiang/lectern-app/issues/283)）
+
+- 这之前设计里没有 `Button` 的悬停提示：控件的接口表里没有它，`file_reader` 的 Edit… 只能把原因写进探针的 `attr("tooltip")`（那是屏幕代码里的注释所说「`ui` 的 `Button` 没有 `tooltip`」）。现在 `Button::tooltip` 出现在接口表里，并设同名的探针属性；调用方改用它之后不再需要 `attr("tooltip", …)`，改动在各视图自己的 PR 里。
+- 不用 gpui-component 的 `Button::tooltip`：它经 `Root` 的提示层绘制，Lectern 不挂 `Root`；而且它的 `Tooltip` 是主题色。提示用 GPUI 自己的 `Interactivity::tooltip`（时长 `TOOLTIP_DELAY`、离开 / 按下 / 滚动时收起、在窗口边缘翻转都是 GPUI 的实现），内容是 `controls/tooltip.rs` 的 `TooltipView`。gpui-component 0.7.0 的 `Button` 只实现了 `InteractiveElement`，没有 `StatefulInteractiveElement`，所以在 `interactivity()` 上调 `tooltip` 与 `tooltip_show_delay`，不用包一层带 ID 的元素，布局不变。
+- 禁用的按钮：读过的源码里 GPUI 的 `div` 没有 `disabled` 的概念，gpui-component 的 `Button` 禁用时只加一个吞掉左键按下的监听，命中框和悬停照常，所以不用包装元素也能出现提示（测试 `tooltip_shows_on_a_disabled_button` 确认）。GPUI 为「按下」和「滚动」注册的是窗口级监听，不看事件阶段，在捕获阶段就先运行，禁用按钮的 `stop_propagation` 拦不住它（测试确认）。
+- `TOOLTIP_DELAY` = 1 s 放在 `motion.rs`（与 `HINT_DURATION` 同处）：GPUI 的默认是 0.5 s；AppKit 工具提示的实际默认延迟没有测过，1 s 是估计值，交互规范「动效」表没有这一项。改不改这个值、要不要把它写进交互规范，由真实窗口里的手感决定。
+- 提示的位置：GPUI 把提示放在指针右下 1pt，窗口边缘处翻到另一侧。视图在框的上下各留 12pt 空白（`POINTER_GAP`），所以框离指针一段距离，翻转后也一样。提示没有淡入淡出（GPUI 的提示层直接画出或不画，本 PR 不加动画），所以没有用到 `motion` 的曲线；减弱动态效果与它无关。
+- 提示的文字用 `TextRole::Caption`（11pt），颜色取 `label`，不是 `Caption` 默认的 `secondary_label`：提示的底是 `control_background`，次要色在深色外观下偏淡。
+- 已知限制：GPUI 的滚动监听在指针位于提示自己的范围内时不收起提示。范围从提示出现处右下 1pt 起，含框上方的 `POINTER_GAP` 空白；指针出现提示后向右下移几 pt、仍在按钮上，就在范围内，这时滚动滚轮提示还在，鼠标按下仍会收起（`tooltip_stays_on_scroll_over_its_own_bounds`）。不绕开 GPUI 的这条规则：提示在指针离开按钮后收起，工具栏按钮上滚动滚轮很少见。
+- 提示的内容不进日志（[ADR 0046](../adr/0046.md)）；`TooltipView` 不调用任何日志宏。
+- 键盘用户看不到提示：GPUI 的提示只由悬停和触摸长按触发，焦点到按钮上不触发。这是已知限制；提示文字在探针节点的 `tooltip` 属性里，不在辅助名里。
