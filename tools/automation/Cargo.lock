@@ -4546,12 +4546,15 @@ name = "lectern-app"
 version = "0.0.0"
 dependencies = [
  "futures",
+ "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
  "lectern-agents",
  "lectern-cache",
+ "lectern-code-intel",
  "lectern-conversation",
  "lectern-executor",
+ "lectern-file-reader",
  "lectern-fs-watch",
  "lectern-i18n",
  "lectern-kernel",
@@ -4592,6 +4595,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "lectern-code-intel"
+version = "0.0.0"
+dependencies = [
+ "lectern-cache",
+ "lectern-executor",
+ "lectern-fs-watch",
+ "lectern-git",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-platform",
+ "lectern-services",
+ "memchr",
+ "serde",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-tags",
+ "tree-sitter-typescript",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "lectern-conversation"
 version = "0.0.0"
 dependencies = [
@@ -4611,6 +4641,24 @@ version = "0.0.0"
 dependencies = [
  "lectern-kernel",
  "lectern-logging",
+]
+
+[[package]]
+name = "lectern-file-reader"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-component",
+ "gpui-pre",
+ "lectern-cache",
+ "lectern-executor",
+ "lectern-fs-watch",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-syntax",
+ "lectern-ui",
 ]
 
 [[package]]
@@ -4849,6 +4897,7 @@ dependencies = [
  "lectern-i18n",
  "lectern-kernel",
  "lectern-logging",
+ "lectern-platform",
  "lectern-services",
  "lectern-ui",
  "serde",
@@ -4934,9 +4983,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "b06e69070b7e12262b0cd90832f0a7396f142a2b330181255562decf9f0c6215"
 dependencies = [
  "cc",
  "pkg-config",
@@ -6978,9 +7027,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "f172c4812a19b26d1c23cdb0070e69db335503dfa378b910eb857386e5b8beba"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -8510,6 +8559,19 @@ checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
 dependencies = [
  "cc",
  "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-tags"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bfc06a03e1bfabf198e2f21a31ed4308fff0a1fb7917e141525a884dabad94e"
+dependencies = [
+ "memchr",
+ "regex",
+ "streaming-iterator",
+ "thiserror 2.0.21",
+ "tree-sitter",
 ]
 
 [[package]]
