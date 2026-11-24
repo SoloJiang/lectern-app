@@ -31,8 +31,8 @@ use lectern_ui::motion::{
 };
 use lectern_ui::semantic::{Role, Semantic, State, semantic};
 use lectern_ui::{
-    AgentDot, Button, ButtonKind, ButtonSize, Expander, Icon, LoadingPhase, Skeleton, Text,
-    TextAreaState, TextRole, TextRoleExt, colors, loading_phase, strings,
+    AgentDot, Button, ButtonKind, ButtonSize, Expander, Icon, LoadingPhase, LoadingProgress,
+    Skeleton, Text, TextAreaState, TextRole, TextRoleExt, colors, loading_phase, strings,
 };
 
 use crate::diag;
@@ -650,10 +650,10 @@ impl MessagesModel {
         cx: &mut Context<MessagesModel>,
     ) -> AnyElement {
         let Some(snapshot) = self.snapshot.clone() else {
-            return self.render_loading(window, cx);
+            return self.render_loading(cx);
         };
         match snapshot.load {
-            Load::Loading => self.render_loading(window, cx),
+            Load::Loading => self.render_loading(cx),
             Load::Failed(HistoryError::Unrecognized) => text_line(
                 nodes::area("empty"),
                 keys::conversation::UNRECOGNIZED,
@@ -695,12 +695,10 @@ impl MessagesModel {
         }
     }
 
-    /// 100 ms of nothing, then skeleton blocks, then the loading message.
-    fn render_loading(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<MessagesModel>,
-    ) -> AnyElement {
+    /// 100 ms of nothing, then skeleton blocks, then the spinner and the
+    /// loading message, centred in the body (no Cancel: the page is a tab,
+    /// closing it stops the read).
+    fn render_loading(&mut self, cx: &mut Context<MessagesModel>) -> AnyElement {
         match self.phase(cx) {
             LoadingPhase::Nothing => div().into_any_element(),
             LoadingPhase::Skeleton => div()
@@ -712,12 +710,11 @@ impl MessagesModel {
                 .child(Skeleton::new(px(260.0), px(14.0)))
                 .child(Skeleton::new(px(180.0), px(14.0)))
                 .into_any_element(),
-            LoadingPhase::Progress => text_line(
-                nodes::area("empty"),
-                keys::conversation::LOADING,
-                window,
-                cx,
-            ),
+            LoadingPhase::Progress => LoadingProgress::new(
+                nodes::area("loading"),
+                Text::key(&strings(cx), keys::conversation::LOADING),
+            )
+            .into_any_element(),
         }
     }
 
