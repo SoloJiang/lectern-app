@@ -15,11 +15,12 @@ use gpui::{
 };
 use gpui_component::input::{Enter, Escape};
 use lectern_i18n::{Args, Strings, keys};
+use lectern_services::workspace::WorkspaceCommand;
 use lectern_syntax::{DocSnapshot, DocState, LineNo, Row};
 use lectern_ui::semantic::{Role, Semantic, State, semantic};
 use lectern_ui::{
-    Expander, LoadingPhase, MonoMetrics, Palette, Skeleton, Text, TextArea, TextRole, TextRoleExt,
-    colors, loading_phase, mono_metrics,
+    Expander, LoadingPhase, LoadingProgress, MonoMetrics, Palette, Skeleton, Text, TextArea,
+    TextRole, TextRoleExt, colors, loading_phase, mono_metrics,
 };
 
 use crate::actions::{
@@ -175,7 +176,7 @@ impl ReadingView {
         }
         match &snapshot.state {
             DocState::Ready => self.render_code(&snapshot, palette, mono, window, cx),
-            DocState::Opening => self.render_loading(strings, window, cx),
+            DocState::Opening => self.render_loading(strings, window),
             DocState::Missing => {
                 message(Text::key(strings, keys::file_reader::MISSING), window, cx)
             }
@@ -206,12 +207,7 @@ impl ReadingView {
 
     /// Nothing for 100 ms, skeleton blocks until a second, then the word
     /// (Esc leaves; interaction.md「状态与异常」).
-    fn render_loading(
-        &mut self,
-        strings: &Strings,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_loading(&mut self, strings: &Strings, window: &mut Window) -> AnyElement {
         let phase = loading_phase(self.opened_at.elapsed());
         let name = match phase {
             LoadingPhase::Nothing => "nothing",
@@ -237,7 +233,17 @@ impl ReadingView {
                     .into_any_element()
             }
             LoadingPhase::Progress => {
-                message(Text::key(strings, keys::file_reader::LOADING), window, cx)
+                // The shared state for a load over 1 s (interaction spec
+                // 「加载超过 1 s」): it declares `file-reader.loading` itself.
+                // The reader fills a pushed screen, so Cancel leaves it: the
+                // same `Pop` as Back.
+                let shared = self.shared.clone();
+                return LoadingProgress::new(
+                    nodes::plain("loading"),
+                    Text::key(strings, keys::file_reader::LOADING),
+                )
+                .on_cancel(move |_, _| shared.dispatch(WorkspaceCommand::Pop))
+                .into_any_element();
             }
         };
         semantic(

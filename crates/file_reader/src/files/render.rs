@@ -14,8 +14,8 @@ use lectern_i18n::{Strings, keys};
 use lectern_services::workspace::Milestone;
 use lectern_ui::semantic::{Role, Semantic, State, semantic};
 use lectern_ui::{
-    Button, Disclosure, Icon, LoadingPhase, Palette, SidebarRow, Skeleton, Text, TextRole,
-    TextRoleExt, colors, loading_phase, strings,
+    Button, Disclosure, Icon, LoadingPhase, LoadingProgress, Palette, SidebarRow, Skeleton, Text,
+    TextRole, TextRoleExt, colors, loading_phase, strings,
 };
 
 use super::tree::{Node, Tree};
@@ -126,7 +126,7 @@ impl FilesView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match &self.content {
-            Content::Loading { since } => loading(*since, strings, window, cx),
+            Content::Loading { since } => loading(*since, strings, window),
             Content::Unavailable => message(
                 "unavailable",
                 Text::key(strings, keys::file_reader::FILES_UNAVAILABLE),
@@ -293,12 +293,7 @@ fn message(
 
 /// Nothing for 100 ms, skeleton blocks until a second, then the word
 /// (interaction.md「状态与异常」).
-fn loading(
-    since: Instant,
-    strings: &Strings,
-    window: &mut Window,
-    cx: &mut Context<FilesView>,
-) -> AnyElement {
+fn loading(since: Instant, strings: &Strings, window: &mut Window) -> AnyElement {
     let phase = loading_phase(since.elapsed());
     let name = match phase {
         LoadingPhase::Nothing => "nothing",
@@ -324,12 +319,16 @@ fn loading(
                 .child(Skeleton::new(px(96.0), BLOCK_HEIGHT))
                 .into_any_element()
         }
-        LoadingPhase::Progress => message(
-            "progress-text",
-            Text::key(strings, keys::file_reader::LOADING),
-            window,
-            cx,
-        ),
+        LoadingPhase::Progress => {
+            // The shared state for a load over 1 s, without Cancel: the rest
+            // of the project sidebar stays usable, and closing the panel is
+            // the cancel (interaction spec「加载超过 1 s」).
+            return LoadingProgress::new(
+                nodes::files_tree().child("loading"),
+                Text::key(strings, keys::file_reader::LOADING),
+            )
+            .into_any_element();
+        }
     };
     semantic(
         Semantic::new(nodes::files_tree().child("loading"), Role::Group).attr("phase", name),

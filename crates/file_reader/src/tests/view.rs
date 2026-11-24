@@ -891,3 +891,33 @@ fn view_ending_the_view_closes_the_document_and_brings_the_push_back(cx: &mut Te
     );
     let _ = (res, kernel);
 }
+
+/// A first screen that takes over 1 s shows the shared progress
+/// (interaction spec「加载超过 1 s」): `file-reader.loading` with
+/// `phase=progress`, and Cancel leaves the reader with `Pop`.
+#[gpui::test]
+fn view_a_load_over_one_second_shows_progress_and_cancel_pops(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    rig.write("a.rs", &numbered(20));
+    rig.open(cx, "a.rs", Anchor::Start);
+    rig.view.update(cx, |view, cx| {
+        let mut opening = (**view.snapshot.as_ref().expect("a snapshot")).clone();
+        opening.state = DocState::Opening;
+        view.snapshot = Some(Arc::new(opening));
+        view.opened_at = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        cx.notify();
+    });
+    let records = rig.record(cx);
+    let loading = find_node(&records, "file-reader.loading").expect("the loading node");
+    assert_eq!(attr(loading, "phase"), Some("progress"));
+    let cancel = find_node(&records, "file-reader.loading.cancel").expect("Cancel");
+    let before = rig.contributions.dispatched().len();
+    let mut visual = rig.visual(cx);
+    visual.simulate_click(cancel.bounds.center(), gpui::Modifiers::default());
+    let dispatched = rig.contributions.dispatched();
+    assert_eq!(dispatched.len(), before + 1);
+    assert_eq!(
+        dispatched.last(),
+        Some(&lectern_services::workspace::WorkspaceCommand::Pop)
+    );
+}
