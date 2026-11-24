@@ -92,6 +92,10 @@ fn screen_opens_the_review_and_shows_loading_phases(cx: &mut TestAppContext) {
     );
     let cancel = must(&records, "review.loading.cancel");
     assert_eq!(label_key(cancel), Some("common-cancel"));
+    // Cancel is leaving: the same `Pop` as Back.
+    let mut visual = opened.visual(cx);
+    visual.simulate_click(cancel.bounds.center(), gpui::Modifiers::default());
+    assert_eq!(rig.contributions.dispatched(), [WorkspaceCommand::Pop]);
 
     // Ready: the content takes the place.
     let (snapshot, rows) = snapshot_fixture(3, 2, 8);
