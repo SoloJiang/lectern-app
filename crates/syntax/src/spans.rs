@@ -126,8 +126,9 @@ pub struct WindowSpans {
     end: u64,
     /// The starts of the lines with tokens, relative to `start`, ascending.
     line_starts: Box<[u32]>,
-    /// `tokens[offsets[i]..offsets[i + 1]]` are the tokens of line `i`;
-    /// one more entry than `line_starts`.
+    /// `tokens[offsets[i]..offsets[i + 1]]` are the tokens of line `i`,
+    /// ascending and not overlapping (the display rows find a row's first
+    /// token by a binary search); one more entry than `line_starts`.
     offsets: Box<[u32]>,
     tokens: Box<[Token]>,
     exact: bool,
