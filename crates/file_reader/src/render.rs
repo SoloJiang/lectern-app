@@ -30,6 +30,46 @@ use crate::nodes;
 use crate::text::{expand, runs};
 use crate::view::ReadingView;
 
+// DIAGNOSTIC ONLY (not for main): counts how many drawn rows change between
+// frames, by text and by text plus highlight runs.
+mod rowdiag {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    #[derive(Default)]
+    struct State { prev_t: HashSet<u64>, prev_r: HashSet<u64>, cur_t: HashSet<u64>, cur_r: HashSet<u64>,
+        frames: u64, rows: u64, new_text: u64, same_text_new_runs: u64 }
+    thread_local! { static S: RefCell<State> = RefCell::new(State::default()); }
+    pub fn frame() {
+        S.with(|s| {
+            let mut s = s.borrow_mut();
+            let s = &mut *s;
+            std::mem::swap(&mut s.prev_t, &mut s.cur_t);
+            std::mem::swap(&mut s.prev_r, &mut s.cur_r);
+            s.cur_t.clear(); s.cur_r.clear();
+            s.frames += 1;
+            if s.frames % 50 == 0 {
+                if let Ok(dir) = std::env::var("LECTERN_BENCH_SAMPLE_DIR") {
+                    let _ = std::fs::write(format!("{dir}/rows-{}.txt", std::process::id()),
+                        format!("frames {} rows {} new_text {} same_text_new_runs {}\n", s.frames, s.rows, s.new_text, s.same_text_new_runs));
+                }
+            }
+        });
+    }
+    pub fn row(text: &str, runs: &[(std::ops::Range<usize>, gpui::HighlightStyle)]) {
+        let mut h = DefaultHasher::new(); text.hash(&mut h); let t = h.finish();
+        for (r, st) in runs { r.start.hash(&mut h); r.end.hash(&mut h); format!("{:?}{:?}", st.font_weight, st.font_style).hash(&mut h); }
+        let r = h.finish();
+        S.with(|s| {
+            let mut s = s.borrow_mut();
+            s.rows += 1;
+            if !s.prev_t.contains(&t) { s.new_text += 1; } else if !s.prev_r.contains(&r) { s.same_text_new_runs += 1; }
+            s.cur_t.insert(t); s.cur_r.insert(r);
+        });
+    }
+}
+
+
 impl Render for ReadingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = *colors(window, cx);
@@ -259,6 +299,7 @@ impl ReadingView {
         // One row more than the viewport holds: the pixel offset shows a
         // part of the one below.
         let count = self.rows_visible() + 1;
+        rowdiag::frame();
         let rows = snapshot.rows(self.top, count, cols);
         self.drawn = rows
             .iter()
@@ -471,6 +512,7 @@ fn code_row(
                 .and_then(|current| matches.iter().position(|m| m == current))
                 .and_then(|at| found.get(at));
             let styled = runs(&shown, tokens, found, here, palette);
+            rowdiag::row(&shown.text, &styled);
             let (number, estimated) = match line {
                 LineNo::Exact(n) => (n + 1, false),
                 LineNo::Estimated(n) => (n + 1, true),
