@@ -20,6 +20,7 @@ use lectern_services::workspace::{
     WorkspaceCommand, screens,
 };
 use lectern_ui::contrib::{InspectorTab, Screen, SidebarItem, SidebarPanel, ToolbarItems};
+use lectern_ui::semantic::Recorder;
 use lectern_ui::{Appearance, Text};
 
 use crate::WorkspacePlugin;
@@ -152,6 +153,17 @@ impl UiRig {
             .update(cx, |_, window, _| window.refresh())
             .expect("the window is open");
         cx.run_until_parked();
+    }
+
+    /// Draws one frame with the probe's recorder armed and returns the nodes
+    /// the controls declared (the real `ui::semantic` records, not
+    /// `Workspace::inspect`).
+    pub fn record(&self, cx: &mut TestAppContext) -> Vec<lectern_ui::semantic::Record> {
+        Recorder::begin(self.window.window_id());
+        self.window
+            .update(cx, |_, window, cx| window.draw(cx).clear(cx))
+            .expect("the window is open");
+        Recorder::finish()
     }
 
     /// Lets the kernel thread and the main-thread queue finish.

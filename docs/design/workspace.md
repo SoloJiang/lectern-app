@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。`Contributions::current_route`（conversation 设计的前置条件 A，`Refs #23`）已实现，见「实际验证」。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。工具栏闭包改在 `enter_frame()` 的准入内调用，画帧不再让 kernel 变忙（[ADR 0066](../adr/0066.md)，[#403](https://github.com/SoloJiang/lectern-app/issues/403)）。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。`Contributions::current_route`（conversation 设计的前置条件 A，`Refs #23`）已实现，见「实际验证」。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。工具栏闭包改在 `enter_frame()` 的准入内调用，画帧不再让 kernel 变忙（[ADR 0066](../adr/0066.md)，[#403](https://github.com/SoloJiang/lectern-app/issues/403)）。工具栏的返回与检查器图标按钮已加悬停提示（`Button::tooltip`，文字复用辅助名的键；窗口里的外观没有检查，见「实际验证」）。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -502,9 +502,9 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
   | 键 | en | zh-CN | 用途 |
   |---|---|---|---|
-  | `workspace-back` | Back | 返回 | 工具栏返回图标按钮的辅助名与提示（不画文字） |
+  | `workspace-back` | Back | 返回 | 工具栏返回图标按钮的辅助名与悬停提示（不画文字）；同一个键两用，提示只写动作名，不写快捷键（[ui 设计](ui.md)的 `Button::tooltip` 与交互规范都没有给提示里写快捷键的约定） |
   | `workspace-sidebar-toggle` | Sidebar | 侧栏 | 工具栏侧栏开关的辅助名与提示 |
-  | `workspace-inspector-toggle` | Inspector | 检查器 | 工具栏检查器开关的辅助名与提示 |
+  | `workspace-inspector-toggle` | Inspector | 检查器 | 工具栏检查器开关的辅助名与悬停提示（同上） |
   | `workspace-command-failed` | This command isn't available right now. | 这个命令现在不可用。 | 代理 Action 激活失败或没有处理函数时的一次性提示 |
   | `workspace-screen-missing` | Nothing to show here yet. | 这里还没有内容。 | 基底屏幕没有注册时内容区的一行次要文字 |
 
@@ -517,9 +517,9 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   | `workspace.sidebar` | `Sidebar` | `panel`（当前面板 ID）；隐藏时不出现 |
   | `workspace.sidebar.panel[<id>]` | `Group` | — |
   | `workspace.toolbar` | `Toolbar` | `screen`（当前屏幕 ID）、`depth`（栈深度） |
-  | `workspace.toolbar.back` | `Button` | — |
-  | `workspace.toolbar.sidebar` | `Toggle` | `State::checked` = 侧栏是否显示；没有侧栏的屏幕上不出现，命令设计之前不出现 |
-  | `workspace.toolbar.inspector` | `Toggle` | `State::checked` = 检查器是否显示 |
+  | `workspace.toolbar.back` | `Button` | `tooltip`（= 辅助名 `workspace-back` 的文字；由 `Button::tooltip` 写入，`Workspace::inspect` 的数据形式不含它） |
+  | `workspace.toolbar.sidebar` | `Toggle` | `State::checked` = 侧栏是否显示；没有侧栏的屏幕上不出现，命令设计之前不出现；画出时同样带 `tooltip`（`workspace-sidebar-toggle`） |
+  | `workspace.toolbar.inspector` | `Toggle` | `State::checked` = 检查器是否显示；`tooltip`（= 辅助名 `workspace-inspector-toggle` 的文字，同上） |
   | `workspace.content` | `Group` | `base`（`welcome` / `project`）、`column`（`reading` / `full`） |
   | `workspace.content.screen[<id>]` | `Group` | `index`（栈里的位置，基底为 0） |
   | `workspace.inspector` | `Panel` | `tab`（当前页 ID）；隐藏时不出现 |
@@ -589,6 +589,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`inspector_tab_scoped_to_its_screen`（`screen: Some(s)` 的页只在 `s` 上显示；`s` 有自己的页时不显示 `None` 的页；选中的页不可见时显示第一个可见的页，`nav.inspector_tab` 不变，弹回后恢复）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`；测试平台的窗口没有 `CAMetalLayer`，`platform::frame::record` 返回错误，交回的 `result` 是这个错误）。
 - `frames_leave_the_kernel_quiescent`（`view.rs`，`#[gpui::test]`）：激活并静止之后只画 3 帧（`UiRig::draw`：`Window::refresh` 后 `run_until_parked`），不做其他事，`Kernel::quiescent_epoch()` 不变；测试贡献方的工具栏闭包记录调用次数，断言它确实在这几帧里被调用（[ADR 0066](../adr/0066.md)）。
 - `current_route_follows_the_screen`（`view.rs`，`#[gpui::test]`）：激活之后、压入、弹出、打开与关闭项目、关闭窗口，`Contributions::current_route(WindowId(0))` 每一步都等于状态机的当前屏幕（即最近一次 `ScreenChanged::to`），窗口关闭后和不存在的窗口为 `None`。`services` 的 `workspace_contributions_is_a_shared_trait_object` 另外调用一次 `current_route`。
+- 工具栏图标按钮的悬停提示（`src/tests/view.rs`，`#[gpui::test]`）：`toolbar_icon_buttons_name_their_action_in_a_tooltip`：审阅屏幕上，用 `ui::semantic::Recorder` 记一帧（`UiRig::record`），返回与检查器两个节点的 `tooltip` 属性等于各自的辅助名（`Back` / `Inspector`），辅助名不变；切到 zh-CN 再记一帧，是 `返回` / `检查器`。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
 - 不用真实的 git、会话扫描和文件 IO；`Projects` 用 `services` 的 trait 对象的假实现，只发事件、返回构造好的快照。
@@ -763,6 +764,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 没有验证：真实窗口里的样子（工具栏横跨检查器、窗口控件与返回按钮的间距、检查器与侧栏的底色在两种外观下的对比）；窗口控件在 52pt 工具栏里的竖直位置（前置条件 G，[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。
 
 - 每帧读取不计入静止（[#403](https://github.com/SoloJiang/lectern-app/issues/403)，[ADR 0066](../adr/0066.md)）：`frames_leave_the_kernel_quiescent` 打开项目、画一帧并静止后，再画 3 帧（`UiRig::draw`：`Window::refresh` 后 `run_until_parked`），工具栏闭包至少调用 3 次，两个 `TestKernel` 的 `quiescent_epoch()` 都不变。改动前同一测试失败：贡献方 kernel 的代数从 12 变为 18（每帧 +2）。`just test -p lectern-workspace`：85 个测试全部通过。
+
+### 工具栏图标按钮的悬停提示
+
+返回与检查器开关是不带文字的图标按钮，各自用 `Button::tooltip`（[ui 设计](ui.md)）写出动作名，文字复用辅助名的键（`workspace-back`、`workspace-inspector-toggle`），没有加新键；提示里不写快捷键（没有约定）。侧栏开关没有画，所以没有提示。在 macOS（arm64，Rust 1.97.0）上运行，没有开真实窗口：
+
+- `just test -p lectern-workspace`（`cargo nextest run -p lectern-workspace`）：86 个测试通过（新增 `toolbar_icon_buttons_name_their_action_in_a_tooltip`）。把返回按钮的 `.tooltip(...)` 临时去掉，这个测试失败（`tooltip` 为 `None`），恢复后通过。
+- 没有验证：真实窗口里的提示外观与 1 s 延迟的手感（`ui` 设计「实际验证」同样没有做）。
 
 ## 与设计的差异
 
