@@ -1001,6 +1001,32 @@ fn files_states_without_rows(cx: &mut TestAppContext) {
             .contains(&("phase", "nothing".into()))
     );
 
+    // Over 1 s: the shared progress, without Cancel (closing the panel is
+    // the cancel; interaction spec「加载超过 1 s」).
+    rig.view().update(cx, |view, cx| {
+        view.content = Content::Loading {
+            since: std::time::Instant::now() - std::time::Duration::from_secs(2),
+        };
+        cx.notify();
+    });
+    let records = rig.record(cx);
+    let loading = records
+        .iter()
+        .find(|r| r.semantic.id.as_str() == "files.tree.loading")
+        .expect("the loading node");
+    assert!(
+        loading
+            .semantic
+            .attrs
+            .contains(&("phase", "progress".into()))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|r| r.semantic.id.as_str() == "files.tree.loading.cancel"),
+        "no Cancel in the panel"
+    );
+
     // The table arrives; `src` is opened.
     rig.publish(
         cx,
