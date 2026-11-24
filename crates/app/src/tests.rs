@@ -9,6 +9,7 @@ mod bench_keys;
 mod hooks;
 mod leave;
 mod logs;
+mod menu;
 #[cfg(feature = "ui-probe")]
 mod probe;
 mod profile;

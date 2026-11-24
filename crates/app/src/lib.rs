@@ -10,6 +10,7 @@ mod bench;
 #[cfg(debug_assertions)]
 mod debug_quit;
 mod hooks;
+mod menu;
 #[cfg(feature = "ui-probe")]
 mod probe;
 mod profile;

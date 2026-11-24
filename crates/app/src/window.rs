@@ -1,13 +1,14 @@
 //! The skeleton window and the app menu (docs/design/app.md「界面」).
 
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render,
-    Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
-    actions, div, point, prelude::*, px, size,
+    AnyWindowHandle, App, Bounds, Context, IntoElement, KeyBinding, Render, Subscription,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div,
+    point, prelude::*, px, size,
 };
-use lectern_i18n::{Strings, keys};
+use lectern_i18n::Strings;
 use lectern_review_view::actions as review;
 
+use crate::menu;
 use crate::profile::Profile;
 use crate::quit::Quit;
 use crate::startup::{self, Started, Startup};
@@ -130,11 +131,14 @@ pub fn reopen(cx: &mut App) {
     }
 }
 
-/// The app menu and its key bindings, in the language chosen at startup.
+/// The menu bar and the key bindings it shows, in the language chosen at
+/// startup. Memory only: the structure is built by `menu::menus`, nothing
+/// else happens before the first frame (docs/design/app.md「界面」).
 pub fn set_menus(cx: &mut App, strings: Strings) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    menu::on_window_actions(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
@@ -143,22 +147,8 @@ pub fn set_menus(cx: &mut App, strings: Strings) {
         // nothing elsewhere (docs/design/review_view.md「对其他 crate 的要求」G).
         KeyBinding::new("cmd-r", review::Refresh, None),
     ]);
-    cx.set_menus([
-        Menu::new("Lectern").items([
-            MenuItem::action(strings.get(keys::app::MENU_HIDE), Hide),
-            MenuItem::action(strings.get(keys::app::MENU_HIDE_OTHERS), HideOthers),
-            MenuItem::action(strings.get(keys::app::MENU_SHOW_ALL), ShowAll),
-            MenuItem::separator(),
-            MenuItem::action(strings.get(keys::app::MENU_QUIT), Quit),
-        ]),
-        // The review screen's two commands that have no control on screen; macOS
-        // greys an item out while no view on the focus path handles its action.
-        Menu::new(strings.get(keys::app::MENU_VIEW)).items([
-            MenuItem::action(
-                strings.get(keys::app::MENU_TOGGLE_DIFF_MODE),
-                review::ToggleDiffMode,
-            ),
-            MenuItem::action(strings.get(keys::app::MENU_REFRESH), review::Refresh),
-        ]),
-    ]);
+    // Before `set_menus`: the menu reads the keymap once (`menu` module doc).
+    let shown = menu::load_bindings(menu::key_bindings(), cx);
+    cx.bind_keys(shown);
+    cx.set_menus(menu::menus(strings));
 }

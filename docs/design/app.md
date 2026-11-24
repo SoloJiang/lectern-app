@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`code_intel`、`file_reader` 与 `review-view-handoff` 随 file_reader 第 7 步的阅读视图一起装配（`Refs #10`，见「code_intel 与 file_reader 的装配」）；会话用量拆成的 `review-view-usage` 也已装配（`Refs #31`），简报的用量行和轮次标题的 token 因此生效。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。`worktrees` 的两个插件已装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，见「worktrees 的装配」），`Driver::open(Worktree)` 与 `app/switch_worktree` 随之生效。`terminal` 插件已装配（[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「terminal 的装配」）。`conversation` 的三个插件与 `agents` 的 `conversations` 已装配（[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#24](https://github.com/SoloJiang/lectern-app/issues/24)，见「conversation 的装配」），`project_home` 的 `project-home-waiting`（会话行的等待标记，conversation 设计的 H）也已装配，共 20 个插件（见「project_home 的等待标记」），`review-view-usage` 再加一个，共 21 个；`code-intel`、`file-reader`、`review-view-handoff` 再加三个，共 24 个。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查在 `review-view-handoff` 装配之后做，还没有做（「与设计的差异」）。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`code_intel`、`file_reader` 与 `review-view-handoff` 随 file_reader 第 7 步的阅读视图一起装配（`Refs #10`，见「code_intel 与 file_reader 的装配」）；会话用量拆成的 `review-view-usage` 也已装配（`Refs #31`），简报的用量行和轮次标题的 token 因此生效。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步的 5a，[#7](https://github.com/SoloJiang/lectern-app/issues/7)，见「测量构建的装配」）已实现。实现与原设计的差别见「与设计的差异」。`worktrees` 的两个插件已装配（[#16](https://github.com/SoloJiang/lectern-app/issues/16)，见「worktrees 的装配」），`Driver::open(Worktree)` 与 `app/switch_worktree` 随之生效。`terminal` 插件已装配（[#12](https://github.com/SoloJiang/lectern-app/issues/12)，见「terminal 的装配」）。`conversation` 的三个插件与 `agents` 的 `conversations` 已装配（[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#24](https://github.com/SoloJiang/lectern-app/issues/24)，见「conversation 的装配」），`project_home` 的 `project-home-waiting`（会话行的等待标记，conversation 设计的 H）也已装配，共 20 个插件（见「project_home 的等待标记」），`review-view-usage` 再加一个，共 21 个；`code-intel`、`file-reader`、`review-view-handoff` 再加三个，共 24 个。自动化构建的装配（[#310](https://github.com/SoloJiang/lectern-app/issues/310)，见「自动化构建的装配」）已实现；上下文面板的手动检查在 `review-view-handoff` 装配之后做，还没有做（「与设计的差异」）。产品负责人 2026-11-24 的菜单栏决定（File、Edit、Review、Window 菜单，[#422](https://github.com/SoloJiang/lectern-app/issues/422)）已实现（`src/menu.rs`，见「界面」「实际验证」「与设计的差异」）；真实菜单栏里的显示、置灰和快捷键没有在真实应用里看过。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -744,16 +744,39 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
   | View 菜单（标题） | `app-menu-view` | View | 显示 | — | — |
   | 统一 / 双栏 | `app-menu-toggle-diff-mode` | Unified / Side by Side | 统一 / 双栏 | — | `review::ToggleDiffMode` |
   | 刷新 | `app-menu-refresh` | Refresh | 刷新 | ⌘R | `review::Refresh` |
+  | File 菜单（标题） | `app-menu-file` | File | 文件 | — | — |
+  | 打开文件夹 | `app-menu-open-folder` | Open Folder… | 打开文件夹… | ⌘O | `workspace::OpenFolder` |
+  | 关闭项目 | `app-menu-close-project` | Close Project | 关闭项目 | — | `workspace::CloseProject` |
+  | 关闭窗口 | `app-menu-close-window` | Close Window | 关闭窗口 | ⌘W | `workspace::CloseWindow` |
+  | Edit 菜单（标题） | `app-menu-edit` | Edit | 编辑 | — | — |
+  | 撤销 | `app-menu-undo` | Undo | 撤销 | ⌘Z | `input::Undo`（`OsAction::Undo`） |
+  | 重做 | `app-menu-redo` | Redo | 重做 | ⇧⌘Z | `input::Redo`（`OsAction::Redo`） |
+  | 剪切 | `app-menu-cut` | Cut | 剪切 | ⌘X | `input::Cut`（`OsAction::Cut`） |
+  | 拷贝 | `app-menu-copy` | Copy | 拷贝 | ⌘C | `input::Copy`（`OsAction::Copy`） |
+  | 粘贴 | `app-menu-paste` | Paste | 粘贴 | ⌘V | `input::Paste`（`OsAction::Paste`） |
+  | 全选 | `app-menu-select-all` | Select All | 全选 | ⌘A | `input::SelectAll`（`OsAction::SelectAll`） |
+  | Review 菜单（标题） | `app-menu-review` | Review | 审阅 | — | — |
+  | 下一处 | `app-menu-next-change` | Next Change | 下一处 | 不显示（J） | `review::NextHunk` |
+  | 上一处 | `app-menu-previous-change` | Previous Change | 上一处 | 不显示（K） | `review::PreviousHunk` |
+  | 标记已看 | `app-menu-mark-reviewed` | Mark Reviewed | 标记已看 | 不显示（V） | `review::MarkSeenAndNext` |
+  | 加审阅意见 | `app-menu-add-note` | Add Note | 加审阅意见 | 不显示（C） | `review::AddNote` |
+  | 发送审阅意见 | `app-menu-send-notes` | Send Notes | 发送审阅意见 | ⌘↩ | `review::SendNotes` |
+  | Window 菜单（标题） | `app-menu-window` | Window | 窗口 | — | — |
+  | 最小化 | `app-menu-minimize` | Minimize | 最小化 | ⌘M | `lectern::Minimize`（`Window::minimize_window`） |
+  | 缩放 | `app-menu-zoom` | Zoom | 缩放 | — | `lectern::Zoom`（`Window::zoom_window`） |
+  | 全部移到前面 | `app-menu-bring-all-to-front` | Bring All to Front | 全部移到前面 | — | `lectern::BringAllToFront`（`cx.activate(true)`） |
 
   View 菜单放审阅屏幕在画布里没有控件的两个命令（[review_view 设计「对其他 crate 的要求」](review_view.md#对其他-crate-的要求) G，[#283](https://github.com/SoloJiang/lectern-app/issues/283)）。只有审阅屏幕处理这两个 `Action`，所以焦点不在审阅屏幕上时 macOS 把它们置灰、⌘R 也不起作用；菜单在启动时设置一次，统一 / 双栏不显示勾选状态。
 
-  产品负责人 2026-11-24 决定补齐菜单栏（[交互规范「菜单栏」](interaction.md#菜单栏)，[#422](https://github.com/SoloJiang/lectern-app/issues/422)，尚未实现）：File（Open Folder… ⌘O → `workspace::OpenFolder`，Close Project → `workspace::CloseProject`（[workspace 设计](workspace.md)的 Action 表；Welcome 上置灰），Close Window ⌘W → `workspace::CloseWindow`）、Edit（系统标准的撤销、重做、剪切、拷贝、粘贴、全选，接到文本框实际处理的 Action）、Review（J、K、V、C、⌘↩ 对应 `review_view` 的 Action）、Window（最小化 ⌘M、缩放、全部移到前面）。关键约束：
-  - 菜单仍在上面这一次 `set_menus` 里建好，首帧之前不多做菜单结构以外的事；新的 Fluent 键 en 与 zh-CN 同时加。
-  - 菜单项只派发已有的具名 Action，不在 `app` 里实现动作；Review 菜单的项在焦点不在审阅屏幕时置灰（没有处理它的 Action）。
-  - 不带修饰键的快捷键（J、K、V、C）在菜单里只作显示，不能抢走文本框里的输入；实现 PR 读锁定版本的 GPUI 确认菜单的键等价怎样处理，做不到时这几项不显示快捷键。
+  产品负责人 2026-11-24 决定补齐菜单栏（[交互规范「菜单栏」](interaction.md#菜单栏)，[#422](https://github.com/SoloJiang/lectern-app/issues/422)），已实现：菜单顺序是应用菜单、File、Edit、View、Review、Window。上表里 `workspace::`、`input::`（gpui-component 的文本框处理的）、`review::` 开头的 Action 都是别的 crate 的，`app` 只定义 `Minimize`、`Zoom`、`BringAllToFront` 三个并在 `set_menus` 里挂全局处理函数（GPUI 0.3.7 没有这三个 Action）。菜单结构由 `src/menu.rs` 的 `menus(strings)` 建出，是纯函数；`window::set_menus` 在同一次调用里先绑菜单要显示的键，再 `cx.set_menus`。关键约束与实现结果：
+  - 菜单仍在上面这一次 `set_menus` 里建好，首帧之前不多做菜单结构以外的事（多的只是几次 `bind_keys`，内存操作，与原有的 ⌘H、⌘Q、⌘R 同类）；新的 Fluent 键 en 与 zh-CN 同时加（`build.rs` 检查两种语言的键一致）。
+  - 菜单项只派发已有的具名 Action。置灰由 GPUI 决定：macOS 的 `validateMenuItem:` 调 `App::is_action_available`，它只看焦点路径上有没有这个 Action 的监听器，或有没有全局监听器（`gpui-pre-0.3.7/src/app.rs` 的 `is_action_available`、`key_dispatch.rs` 的 `is_action_available`；`gpui-pre-macos-0.3.7/src/platform.rs` 的 `validate_menu_item`）。所以 Review 的项只在审阅屏幕在焦点路径上时可用（五个 Action 的监听器都挂在审阅屏幕根元素 `review` 上，`review_view/src/screen.rs`；`MarkSeenAndNext` 在 Progress 页也有一个），workspace 的根视图在窗口绑定和屏幕弹出后取得焦点（`workspace/src/view.rs` 的 `bind_window`），所以 Open Folder… 与 Close Window 在没有别的焦点时仍在路径上（读代码得出，没有在运行中看过），Edit 的项只在文本框有焦点时可用，Close Project 在 Welcome 上置灰（workspace 只在有项目时挂处理函数）；应用菜单和 Window 的项是全局监听器，总是可用。
+  - **不带修饰键的快捷键不抢输入。** 读锁定版本的源码得到：(1) `set_menus` 把调用那一刻的 keymap 交给平台，之后 `bind_keys` 不会重建菜单（`gpui-pre-0.3.7/src/app.rs`，`set_menus`）；(2) macOS 平台用 Action 的第一个绑定做菜单项的键等价，`find_or_first` 在没有一个绑定的上下文匹配时也取第一个绑定，所以上下文条件（审阅的 `!Input`）不能把绑定从菜单里藏起来，`MenuItem` 也没有隐藏键的选项（`gpui-pre-macos-0.3.7/src/platform.rs` 的 `create_menu_item`，`gpui-pre-0.3.7/src/platform/app_menu.rs`）；(3) 没有修饰键的绑定得到空的修饰掩码，即一个裸的 `j`；(4) 视图对 GPUI 没处理的键等价返回 NO（`gpui-pre-macos-0.3.7/src/window.rs` 的 `handle_key_event`，`key_equivalent && modifiers != function` 一支），AppKit 于是问菜单，菜单项经 `validateMenuItem:` 校验，而备注编辑框在审阅屏幕里面，监听器就在焦点路径上，菜单项可用，于是在编辑框里打 J 会执行「下一处」而不是输入字母。结论：J、K、V、C 的菜单项不显示快捷键，并且 `app` 在 `set_menus` 之前不能绑定它们；审阅屏幕在首帧之后自己绑（带 `!Input`），那时菜单已经建好。⌘↩ 有修饰键，可以显示；`app` 在 `set_menus` 之前从 `review_view::actions::key_bindings()` 里取出 `SendNotes` 的那一条（同样的键与上下文）绑一次。它绕过 `!Input` 的方式与 J 相同（GPUI 没处理时菜单照样问），但审阅屏幕里唯一的文本框是备注编辑框，它在捕获阶段自己处理 ⌘↩（`SaveNote`，`ui/src/controls/text_area.rs`），GPUI 先处理，菜单轮不到；审阅屏幕以外的文本框（Conversation 的回复框）不在审阅根元素之下，那里 `SendNotes` 没有监听器，菜单项置灰。
+  - **要显示的键必须在 `set_menus` 之前绑好。** 因为菜单只读一次 keymap，而 `workspace::install`（⌘O、⌘W）、`gpui_component::init`（Edit 的键）和审阅屏幕（⌘↩）都在首帧之后才绑，`menu::key_bindings` 在 `set_menus` 之前再绑一遍：⌘O、⌘W、⌘M（上下文为空，与 `workspace` 的绑定相同），Edit 的六个键（⌘Z、⇧⌘Z、⌘X、⌘C、⌘V、⌘A，上下文 `Input`，与 gpui-component 的绑定相同），⌘↩（`review_view` 给的上下文）。后来的同键同上下文绑定是重复，不改变分发；这些绑定都有修饰键。Edit 的项用 `MenuItem::os_action`：剪切、拷贝、粘贴、全选的 selector 是系统的 `cut:`、`copy:`、`paste:`、`selectAll:`，撤销与重做与普通项用同一个 selector（`gpui-pre-macos-0.3.7/src/platform.rs` 的 `create_menu_item`）；六项都经 `handle_menu_item` 派发 Action。
   - Close Project 经 `workspace` 的离开守卫（`LeaveScope::Project`），之后窗口状态记成 Welcome，下次启动显示 Welcome。
+  - 菜单名是 `Window` 时 GPUI 的 macOS 平台把它登记为系统的窗口菜单（`gpui-pre-macos-0.3.7/src/platform.rs` 的 `create_menu_bar`，按字面名字比较），系统会往里加窗口列表；zh-CN 的标题「窗口」不等于 `Window`，那里它是普通菜单。
 
-  菜单的文字在启动时按第 4 步选出的语言生成。设置里切换语言后重建菜单，随语言设置的实现（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)）一起做。
+  菜单的文字在启动时按第 4 步选出的语言生成。设置里切换语言后重建菜单，随语言设置的实现（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)）一起做；重建时 keymap 里已经有审阅屏幕绑的 J、K、V、C，直接再调一次 `set_menus` 会让这四项得到裸的键等价（上面「不带修饰键的快捷键不抢输入」），所以语言切换的实现要先解决这一点（例如重建时用没有这四个绑定的 keymap，或平台提供隐藏键的选项），`src/tests/menu.rs` 的 `the_keymap_set_menus_reads_has_no_bare_key` 只覆盖启动时的那一次。
 - UI 探针的语义节点：本 issue 的根视图没有可交互元素，不登记节点。
 - 动效：没有。
 
@@ -804,6 +827,7 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
   - `logs`：`canary_stays_out_of_app_logs`。
   - `#[gpui::test]`：`test_profile_releases_once`（窗口建好后 `Started` 已设为全局对象；再次调用 `release` 不再启动 kernel）、`quit_before_release_starts_nothing`（屏障放开之前退出：不设 `Started`，之后的 `release` 也不启动任何东西）。test profile 在开窗口之前先 `lectern_ui::init_fixed`（骨架窗口的 `attach` 要 `ui` 的全局；`release` 里的 `ready` 随后是空操作）。
   - `#[gpui::test]`，`ui` 的接入（`src/tests/ui.rs`，[ui 设计「验收」](ui.md#验收)第 1 步的 `app` 项；外观变化经 `lectern_ui::testing::simulate_appearance_change`，GPUI 的测试平台不能改窗口外观）：`appearance_change_refreshes_the_skeleton_window`（test profile：`init_fixed`、`window::open`（含 `attach` 与 `release`）之后模拟外观变深，骨架窗口重画一次，`colors` 给出深色的 `Palette`）、`appearance_change_before_ready_does_not_touch_the_theme`（直接 `lectern_ui::init`、`window::open`，不设 `Startup` 全局，所以不 `release`；`ready` 之前模拟一次外观变化：不 panic、窗口重画一次、`is_ready` 仍为 false、gpui-component 的 `Theme` 全局不存在，即没有被读写）。
+  - `#[gpui::test]` 与单元测试，菜单栏（`src/tests/menu.rs`，GPUI 的测试平台保存 `set_menus` 交来的菜单，所以测试运行真实的 `window::set_menus` 再读回；不建原生菜单，AppKit 的键等价与置灰不在覆盖内）：`menu_bar_order_and_items_in_english`（顺序是应用菜单、File、Edit、View、Review、Window；每个菜单的项、标题、Action 名和 `OsAction`）、`menu_bar_in_chinese_has_the_same_actions`（zh-CN 的菜单名与 Review 菜单的标题；同样的 Action；每个标题与英文不同）、`the_keymap_set_menus_reads_has_no_bare_key`（模拟平台读到的第一个绑定：没有一个菜单项得到没有修饰键的键；J、K、V、C 四项没有绑定；⌘O、⌘W、⌘Z、⇧⌘Z、⌘X、⌘C、⌘V、⌘A、⌘↩、⌘R、⌘M 各对应的项有键，Close Project 没有）、`early_bindings_are_valid_and_modified`（`menu::key_bindings` 的键和上下文都能解析，都有修饰键，没有那四个 Action，⌘↩ 的上下文与 `review_view` 的相同，Edit 的键只绑在 `Input` 上）。
 - 启动测试（`tests/startup.rs`，启动真实的 `lectern` 进程，需要 macOS 的图形会话；macOS CI 任务满足）：每个测试用新的临时目录作 `HOME`，日志落在 `$HOME/Library/Logs/Lectern/`，带调试构建才有的 `--quit-after-start`，等进程退出（30 s 后结束进程并判为失败，只防卡住，不判定耗时）。`--quit-after-start` 等屏障放开、本次运行的日志文件出现之后才退出。
   - `startup_writes_a_header_and_an_end_record`：只有一个 `lectern-*.log`；第一行是文件头（`msg` 为 `file`）；`ui initialised`、`first frame drawn`、`ui ready`、`plugins assembled`、`startup barrier released` 依次出现；`ui initialised` 的 `accent` 为 `builtin`，`ui ready` 的为 `system`（真实的 macOS 图形会话）；最后一行是 `run end`。
   - `log_file_is_created_after_the_first_frame`：日志文件的创建时间（`Metadata::created`）不早于 `first frame drawn` 的 `t`（毫秒精度）。
@@ -970,6 +994,15 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
 - `just check` 通过；`just test -p lectern-app -E 'test(window_state)'` 10 个测试通过，含新增的 `applying_a_name_reads_the_bounds_again`（`welcome`、`project` 各一次，窗口的 bounds 观察者各运行一次）。去掉 `apply_name` 里的 `bounds_changed` 后这个测试失败。
 - 手动（`just automation`，临时 `HOME` 的 `recent.json` 里放一个合成的 git 仓库；user defaults 域 `lectern-automation` 里 `NSWindow Frame welcome`、`NSWindow Frame project` 都是 1180 × 760）：Welcome 的 `welcome` 和 `workspace` 都是 1180 × 760（修复前启动时是 820 × 521）。`click_element` 点仓库的行之后，`get_element_bounds` 的 `workspace` 是 1180 × 760，`workspace-sidebar` 248 × 760，`workspace-toolbar` 932 × 52；`screenshot` 是 1180 × 760，整个窗口都画了，没有空白。日志里 gpui 的 `RefCell already borrowed` 仍在（GPUI 自己的 `on_resize` 仍然失败，只是之后由 `bounds_changed` 补上）。
 
+### 菜单栏（#422）
+
+在 macOS（arm64）上运行，没有打开真实窗口，也没有启动应用（`Refs #422`）：
+
+- `just check` 通过（退出码 0）。
+- `cargo nextest run -p lectern-app --lib`：43 个通过，其中新增 4 个（`src/tests/menu.rs`，见「测试」）；`just test -p lectern-app`：79 个通过（默认 profile 跳过 `tests/startup.rs`、`probe.rs`、`bench_probe.rs`）；`just test -p lectern-i18n`：57 个通过（`build.rs` 在编译期检查 en 与 zh-CN 的键一致，新增的 21 个键两边都有）。
+- 变异检查：把 `review::key_bindings()` 全部提前绑定（去掉只取 `SendNotes` 的过滤）后，`early_bindings_are_valid_and_modified` 与 `the_keymap_set_menus_reads_has_no_bare_key` 失败（后者报 `review::NextHunk would get the bare key "j"`）；把拷贝项的 Action 换成 `input::Cut`、去掉 ⌘W 的提前绑定后，`menu_bar_order_and_items_in_english` 与 `the_keymap_set_menus_reads_has_no_bare_key` 失败。
+- 没有验证的：真实菜单栏（要启动应用，本次不做）里：菜单的显示和顺序、各项显示的键（尤其 ⌘↩ 与 Edit 的键）、J、K、V、C 四项没有键、Review 与 Close Project 的置灰和在审阅屏幕与项目里变为可用、Edit 的项在备注编辑框有焦点时可用且各自起作用、在编辑框里打 J、K、V、C 仍是输入、Minimize、Zoom 与 Bring All to Front 的效果（Bring All to Front 的 `cx.activate(true)` 可能什么也不做）、zh-CN 下的菜单；`app/cold_start` 没有测（首帧之前多了约 10 个 `bind_keys`、一次 `review::key_bindings()` 调用和三个全局监听器，都是内存操作）；AppKit 对键等价的实际处理只由源码推断（见「界面」的约束），没有在运行中看过。
+
 ### project_home 的等待标记
 
 （插件数为 20 的验证；`review-view-usage` 之后为 21，见下一节。）在 macOS（arm64）上运行，没有打开真实窗口：`just check`、`just test -p lectern-app`（56 个通过；默认 profile 跳过 `tests/startup.rs`、`probe.rs`、`bench_probe.rs`；`every_profile_graph_validates` 的 desktop 与 probe 插件数为 20，图校验通过，临时目录之后仍是空的）、`just deny`、`cargo metadata --format-version 1 --locked --all-features` 通过，`Cargo.lock` 与 `tools/automation/Cargo.lock` 都没有变化。没有验证：`tests/startup.rs`（`plugins` 为 20）、`tests/bench_probe.rs`（20 个应答）、`tests/probe.rs` 都要图形会话，已改好，没有在本机运行，结果以 macOS CI 为准；冷启动与 `app/idle_empty` 没有测。
@@ -990,6 +1023,15 @@ pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, reader: ReaderSlot, cx: &
 - 没有验证的：真实窗口里的记录（`record` 成功时 `frame_started` 与 GPUI 的帧是否一一对应、`problems` 是否干净）、滚轮事件到达编辑器、`activate_window` 之后窗口是否按 60 或 120 fps 请求帧、`bench scroll ended` 的 `background_items`；都由 `app/scroll_frames`、`app/scroll_frames_indexing` 在 macOS CI 里检验。
 
 ## 与设计的差异
+
+菜单栏（#422）：
+
+- **J、K、V、C 的菜单项不显示快捷键。** 交互规范写「菜单项显示它的快捷键」，同时要求不抢走文本框里的输入；GPUI 0.3.7 的 macOS 菜单只能从 keymap 取键，取到的一定是 NSMenu 的键等价，没有隐藏键的选项，所以按「界面」的约束，这四项不显示键（原设计预留的做法）。[交互规范「菜单栏」](interaction.md#菜单栏)的那一句因此只对有修饰键的项成立。
+- **有键的项由 `app` 在 `set_menus` 之前再绑一遍。** 设计没有写这一点；菜单只读一次 keymap，而这些键的拥有者（`workspace`、gpui-component、审阅屏幕）在首帧之后才绑，不提前绑就没有键显示。绑定与拥有者的键、上下文相同，后来的重复不改变分发。
+- **「全部移到前面」是 `cx.activate(true)`。** GPUI 0.3.7 没有 `arrangeInFront:` 的接口，原生调用只能放进 `platform`（架构规则 6）；激活应用会把它的窗口一起带到前面，作为这一项的实现；应用已经是活动应用时（菜单栏只在应用活动时可用）这个调用可能没有任何效果，这一项的行为没有验证。需要精确的 `arrangeInFront:` 时再给 `platform` 加一个函数。
+- **Minimize、Zoom、BringAllToFront 是 `app` 的 Action。** GPUI 0.3.7 没有内置的对应 Action；处理函数是全局监听器，所以这三项总是可用，不随焦点置灰。Minimize 与 Zoom 作用于当前活动窗口（`Window::minimize_window`、`Window::zoom_window`）。
+- **zh-CN 的 Window 菜单不是系统的窗口菜单。** GPUI 按字面名字 `Window` 登记系统的窗口菜单；「窗口」不匹配，窗口列表只在英文下出现。
+- **`gpui-component` 从 dev 依赖改为普通依赖**，只为引用 Edit 菜单用的 `input::{Undo, Redo, Cut, Copy, Paste, SelectAll}`；`Cargo.lock` 不变（它原来就在 `lectern-app` 的依赖列表里）。
 
 - **帧记录与滚动场景（#393）。** 设计只写了 `app` 把 `FrameRecord` 转成 `FrameStats`、`Driver` 的滚动场景调 `host.record_frames`。实现里：(1) 滚动是每帧一个滚轮事件，不是按时间间隔（运行器每帧都有事件，帧数就是事件数，不受计时器抖动影响；设计没有规定序列，常量在 `lectern-bench::wire`）；(2) `OpenTarget::Scroll` 带 `yielding`（bench 设计「与设计的差异」），`Targets` 多 `host` 与 `kernel`；(3) 滚动前让窗口成为前台窗口（platform 设计的要求，只在这个请求里）；(4) `wire::FrameTimes::presented` 带来源；(5) 滚动结束记 info `bench scroll ended`（字段 `background_items`，只在有探针的测量构建里记）。`FrameStats` 的每帧工作时间与间隔在 `lectern-bench::frames` 算，不在 `app`。
 - **「项目」窗口第一次使用时 1180 × 760 pt 居中**（[#215](https://github.com/SoloJiang/lectern-app/issues/215)）：原来是「已知限制」里的一条（GPUI 不能移动窗口，`app` 做不到）。现在 `window_state::apply_name` 设 `"project"` 时调 `platform::window::set_frame_autosave_name_or_center(window, "project", (1180.0, 760.0))`，设 `"welcome"` 时仍调 `set_frame_autosave_name`；`window_state` 的改名和 `window::open_named`（Dock 重开）都经它。没有保存过 frame 时窗口先设尺寸、居中，再设名字，保存下来的就是居中后的 frame（[platform 设计「窗口 frame 的 autosave」](platform.md#窗口-frame-的-autosave)）。
