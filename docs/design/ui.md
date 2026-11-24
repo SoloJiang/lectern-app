@@ -525,13 +525,18 @@ pub fn loading_phase(elapsed: Duration) -> LoadingPhase;   // < 100 ms → Nothi
 
 /// 加载超过 1 s 时的进度（交互规范「状态与异常」的「加载超过 1 s」）：居中的不确定进度圆环（16pt，`secondary_label`，
 /// `motion::SPIN` 匀速转动；减弱动态效果时静止）、一行 `Secondary` 层级的说明文字和可选的朴素按钮 Cancel（`common-cancel`）。
-/// 圆环的转动只在这个元素画出时请求动画帧（`window.request_animation_frame`），不画就没有开销。
+/// 圆环在它自己的元素里用 `with_animation`（`SPIN`，`repeat`）转动，只重画这个元素，不让持有它的视图每帧重新 render；
+/// 不调用 `request_animation_frame`。转动是「只改低开销属性」的一个例外：旋转只变换这个 16pt 的图形，不触发重排。
+/// 元素不画（加载结束、换屏、窗口不可见）时动画随之停下。`SPIN` 不经 `Transition`，不计入 `active_transitions`，
+/// 所以慢加载期间 `RecordStop::AnimationsSettled` 照常结算。
 /// 语义节点：`Role::Group`，`attr("phase", "progress")`；Cancel 是它的子节点 `….cancel`（`Role::Button`）。
 pub struct LoadingProgress { /* id, label, cancel: Option<Box<dyn Fn(&mut Window, &mut App)>> */ }
 impl LoadingProgress {
     pub fn new(id: NodeId, label: Text) -> LoadingProgress;
     /// 有取消时给出取消做的事（调用方派发 `Pop`；只有占满压入屏幕的加载才给，见交互规范）。
     pub fn on_cancel(self, f: impl Fn(&mut Window, &mut App) + 'static) -> LoadingProgress;
+    /// 加载方报告了比例（0–1）时，圆环换成 `Progress` 的 `Bar`。
+    pub fn fraction(self, f: f32) -> LoadingProgress;
 }
 
 /// 骨架块：`tertiary_label` 的淡版，圆角，无闪烁动画（减弱动态效果时也一样）。自己画，不包装 gpui-component 的
