@@ -519,6 +519,48 @@ fn doc_tier_b_long_line_highlights_where_it_scrolls() {
 }
 
 #[test]
+fn doc_long_line_rows_get_the_tokens_a_full_scan_of_the_line_gives() {
+    let rig = Rig::new();
+    let bytes = testing::minified_js(4 << 20, 0);
+    rig.write("app.min.js", &bytes);
+    let (doc, _) = rig.open_settled(rig.target("app.min.js", Anchor::Start));
+    let deep = doc.snapshot().pos_of_byte(2 << 20, VIEW.cols);
+    doc.scrolled(deep);
+    rig.settle();
+    let s = doc.snapshot();
+    let mut checked = 0;
+    for row in s.rows(deep, 60, VIEW.cols) {
+        let Row::Text {
+            bytes: row, tokens, ..
+        } = row
+        else {
+            panic!("in memory");
+        };
+        let spans = s
+            .spans
+            .iter()
+            .find(|spans| spans.range().contains(&row.start))
+            .expect("highlighted where it scrolled");
+        let key = spans.range().start;
+        let scan: Vec<crate::Token> = spans
+            .line(key)
+            .iter()
+            .filter_map(|t| {
+                let (a, b) = (
+                    (key + u64::from(t.start())).max(row.start),
+                    (key + u64::from(t.end())).min(row.end),
+                );
+                let a32 = u32::try_from(a.checked_sub(row.start)?).ok()?;
+                (a < b).then(|| crate::Token::new(a32, (b - a) as u32, t.kind()))?
+            })
+            .collect();
+        assert_eq!(tokens.as_ref(), scan.as_slice(), "row {row:?}");
+        checked += scan.len();
+    }
+    assert!(checked > 60, "{checked} tokens");
+}
+
+#[test]
 fn doc_tier_c_long_line_reads_the_pages_it_scrolls_to() {
     let rig = Rig::new();
     let bytes = testing::minified_js(TIER_B_MAX as usize + (1 << 20), 0);
