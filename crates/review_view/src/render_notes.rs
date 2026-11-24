@@ -133,6 +133,8 @@ impl ReviewModel {
                 .kind(ButtonKind::Plain)
                 .size(ButtonSize::Small)
                 .on_click(move |_, cx| {
+                    // The block under the button would select the note again.
+                    cx.stop_propagation();
                     let _ = delete.update(cx, |model, cx| model.delete_note(id, cx));
                 }),
             );

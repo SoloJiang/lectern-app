@@ -80,6 +80,16 @@ pub(crate) fn build(
     screen.into()
 }
 
+/// Nothing is focused, or the focus is on the workspace's root view (its key
+/// context is the innermost one of the focus path).
+fn focus_is_on_the_root(window: &Window, cx: &App) -> bool {
+    window.focused(cx).is_none()
+        || window
+            .context_stack()
+            .last()
+            .is_some_and(|context| context.contains("Workspace"))
+}
+
 fn target_name(target: &Target) -> &'static str {
     match target {
         Target::None => "none",
@@ -141,6 +151,13 @@ impl Render for ReviewScreen {
             }
             model.sync_layout(cx);
         });
+        // A screen on top keeps the keyboard: when the one that had the focus
+        // is popped (the reader), `workspace` gives it to its root view, and
+        // this screen (kept below) takes it back. A focus in the inspector, a
+        // panel, an overlay or the sidebar stays where it is.
+        if !self.focus.contains_focused(window, cx) && focus_is_on_the_root(window, cx) {
+            window.focus(&self.focus, cx);
+        }
         let (state, shows_rows, ready, degraded_folder) = {
             let model = model.read(cx);
             (

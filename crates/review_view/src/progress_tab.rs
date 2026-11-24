@@ -185,11 +185,18 @@ impl ProgressTab {
         cx.notify();
     }
 
-    /// ↵ or a click: the narrative goes to the file.
-    fn jump(&mut self, file: FileKey, cx: &mut Context<ProgressTab>) {
+    /// ↵ or a click: the narrative goes to the file, and the keyboard with
+    /// it, so J, K and C work on it at once.
+    fn jump(&mut self, file: FileKey, window: &mut Window, cx: &mut Context<ProgressTab>) {
         self.selected = Some(file.clone());
         if let Some(model) = self.upgrade() {
-            model.update(cx, |model, cx| model.jump_to_brief(Some(file), None, cx));
+            let focus = model.update(cx, |model, cx| {
+                model.jump_to_brief(Some(file), None, cx);
+                model.screen_focus.clone()
+            });
+            if let Some(focus) = focus {
+                window.focus(&focus, cx);
+            }
         }
         cx.notify();
     }
@@ -218,9 +225,9 @@ impl Render for ProgressTab {
             .p(px(12.0))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.step(-1, cx)))
-            .on_action(cx.listener(|this, _: &JumpToSelected, _, cx| {
+            .on_action(cx.listener(|this, _: &JumpToSelected, window, cx| {
                 if let Some(file) = this.selected.clone() {
-                    this.jump(file, cx);
+                    this.jump(file, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &MarkSeenAndNext, _, cx| {
@@ -419,9 +426,9 @@ fn line(
             .attr("noise", file.noise.is_some().to_string());
             let row = Row::new(node)
                 .selected(is_selected)
-                .on_click(move |_, cx| {
+                .on_click(move |window, cx| {
                     let key = key.clone();
-                    let _ = tab.update(cx, |tab, cx| tab.jump(key, cx));
+                    let _ = tab.update(cx, |tab, cx| tab.jump(key, window, cx));
                 })
                 .child(check)
                 .child(text);

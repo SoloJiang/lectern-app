@@ -1614,6 +1614,12 @@ fn edit_and_delete_act_on_the_note(cx: &mut TestAppContext) {
     );
     assert!(!cx.has_pending_prompt());
     assert!(opened.read(cx, |model| model.note(NoteId(2)).is_none()));
+    // The click does not reach the note's block: the deleted note is not
+    // selected again.
+    assert_ne!(
+        opened.read(cx, |model| model.selection.clone()),
+        Some(ItemKey::Note(NoteId(2)))
+    );
     // One that is being sent cannot be deleted or changed.
     let before = note_commands(&rig).len();
     opened.update(cx, |model, cx| model.delete_note(NoteId(3), cx));
