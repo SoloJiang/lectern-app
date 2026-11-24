@@ -23,8 +23,8 @@ use lectern_services::project::WorktreeKey;
 use lectern_ui::contrib::ToolbarItems;
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
-    AgentDot, Button, ButtonKind, ButtonSize, GroupedList, LoadingPhase, Row, Skeleton, Text,
-    TextRole, TextRoleExt, strings,
+    AgentDot, Button, ButtonKind, ButtonSize, GroupedList, LoadingPhase, LoadingProgress, Row,
+    Skeleton, Text, TextRole, TextRoleExt, strings,
 };
 
 use crate::actions::{
@@ -58,6 +58,9 @@ const SEPARATOR_INSET: Pixels = px(40.0);
 const BLOCK_WIDE: Pixels = px(72.0);
 const BLOCK_NARROW: Pixels = px(48.0);
 const BLOCK_HEIGHT: Pixels = px(10.0);
+/// The band under the list that holds the spinner of a first comparison
+/// over 1 s.
+const PROGRESS_HEIGHT: Pixels = px(64.0);
 
 /// What every row of a frame is drawn against.
 struct Frame<'a> {
@@ -478,6 +481,17 @@ impl Render for WorktreesScreen {
                 .children(active)
                 .children(idle);
             column = column.child(semantic(list, groups));
+            // Over 1 s the rows keep their blocks, and one spinner under the
+            // list says the comparison is still running (no Cancel: leaving
+            // the screen cancels it).
+            if phase == LoadingPhase::Progress {
+                let text = Text::key(&strings, keys::worktrees::LOADING);
+                column = column.child(
+                    div()
+                        .h(PROGRESS_HEIGHT)
+                        .child(LoadingProgress::new(nodes::area("loading"), text)),
+                );
+            }
             if total == 1 {
                 let text = Text::key(&strings, keys::worktrees::ONLY_ONE);
                 column = column.child(semantic(

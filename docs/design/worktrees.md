@@ -1,6 +1,6 @@
 # worktrees 设计
 
-状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（#339），第 2 步（视图）已实现（#340），第 3 步的代码（`app` 的装配、测量构建的 `Driver::open(Worktree)`、`bench` 的 `worktrees/build_1000`、`worktrees/resident_bytes` 与 `app/switch_worktree`）已实现，见「实际验证」「与设计的差异」；第 3 步在真实窗口里的检查（发布构建的手动运行、`app/switch_worktree`、`app/idle_empty`）还没有做，所以 issue 仍是 `Refs #16`。
+状态：实现中。前置条件 C（`worktrees.ftl`，#333）、A 的 `services` 部分（#334）与 `review` 部分（#337）、B（#336）已实现；「验收」的第 1 步（快照与插件）已实现（#339），第 2 步（视图）已实现（#340），第 3 步的代码（`app` 的装配、测量构建的 `Driver::open(Worktree)`、`bench` 的 `worktrees/build_1000`、`worktrees/resident_bytes` 与 `app/switch_worktree`）已实现，见「实际验证」「与设计的差异」；第 3 步在真实窗口里的检查（发布构建的手动运行、`app/switch_worktree`、`app/idle_empty`）还没有做，所以 issue 仍是 `Refs #16`。第一轮比较超过 1 s 时的 `ui::LoadingProgress` 已换上（#422）。
 
 对应 issue [#16](https://github.com/SoloJiang/lectern-app/issues/16)。`worktrees` 是并行 agent 总览屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 04 Worktrees，[技术调研](tech-research.md)「需求拆解与 Zed 对照」里的「并行 agent 总览」）：按 Active / Idle 分组列出项目的每个 worktree，每行显示分支、会话、改动量和分支的累计 token；检查器显示所选 worktree 的分支用量、相对主干的改动，以及与其他 worktree 的文件重叠。本 crate 只合成和显示领域层算好的快照（`project`、`agents`、`review`、`usage`），不读会话文件，不调用 git；屏幕和检查器页经 `workspace` 的贡献接口显示（[workspace 设计](workspace.md)）。
 
@@ -377,6 +377,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
   | `worktrees-idle` | Idle | 空闲 |
   | `worktrees-only-one` | This repository has one worktree. Agents working in other worktrees appear here. | 这个仓库只有一个 worktree。在其他 worktree 里工作的 agent 会列在这里。 |
   | `worktrees-not-git` | This folder is not a git repository. | 这个文件夹不是 git 仓库。 |
+  | `worktrees-loading` | Comparing worktrees… | 正在比较 worktree… |
   | `worktrees-current` | Current | 当前 |
   | `worktrees-locked` | Locked | 已锁定 |
   | `worktrees-missing` | Missing | 已缺失 |
@@ -463,7 +464,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 | 情况 | 表现（[交互规范「状态与异常」](interaction.md#状态与异常)） |
 |---|---|
 | 刚进入屏幕，计数还没有到达 | 行按项目快照和会话列表立即画出；改动数、重叠和 token 按 `loading_phase` 显示骨架，100 ms 内不显示 |
-| 第一轮比较超过 1 s（10 万文件） | 骨架换成 `ui::LoadingProgress`（不确定进度，`worktrees-loading`）；计数逐个 worktree 到达。不提供取消：离开屏幕即取消 |
+| 第一轮比较超过 1 s（10 万文件） | 行里的骨架保留（行已经可读，计数逐个 worktree 到达），列表下面加一个 `ui::LoadingProgress`（不确定进度，`worktrees-loading`，节点 `worktrees.loading`），计数全部到达后去掉。不提供取消：离开屏幕即取消 |
 | 文件夹项目 | 不登记侧栏条目；屏幕被压入时（如经探针）显示 `worktrees-not-git` |
 | 只有主 worktree | 一行，下面加 `worktrees-only-one` |
 | prunable 的 worktree | 在 Idle 的最后，带 `worktrees-missing`；点击只选中，不能审阅、不能切换；检查器的对比一节为 `worktrees-missing-detail` |
@@ -639,7 +640,6 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - 「相对主干」的合计是已提交与未提交路径的并集：已提交的改动在工作区里又改回原样时，这个文件仍计入，而「相对主干」的审阅里没有它。
 - 改动路径超过 4000 个的 worktree 没有重叠信息。
 - 相对时间只随合成刷新；Active 到期由一次性定时触发一次合成。
-- `LoadingPhase::Progress` 的不确定进度：设计阶段 `ui` 没有这个控件，超过 1 秒仍显示骨架；已由 `ui::LoadingProgress` 取代（[交互规范「加载超过 1 s」](interaction.md#加载超过-1-s)，#422），实现 PR 换上它之前仍是骨架。
 - 第一轮概览失败时当前 worktree 的计数曾停在 `Pending`、骨架一直显示（第 2 步可见）：原因在 `review`，`publish_overview(None)` 发布了空概览，却没有标记 worktrees 这一侧的那一轮，所以没有人去比较当前 worktree。[#341](https://github.com/SoloJiang/lectern-app/pull/341) 已修复（见「与设计的差异 / 前置条件 A 的遗留」），本 crate 没有改；这一条不再是限制，留作记录。
 - 列表不虚拟化：worktree 多于 100 个时每帧的排版随行数增长。
 - 本屏幕依赖 `dyn Review`：`review` 失败时整个屏幕不可用。
@@ -695,6 +695,10 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 ### 前置条件 A 的 `review` 部分
 
 #337，在 macOS（arm64）上运行：`just check`（含整个工作区的 clippy，这台机器已装 Metal 工具链）、`just test -p lectern-review -p lectern-services`（399 个测试）通过。依赖没有改，没有运行 `just deny`。基准只跑不开窗口的两个目标：`review/worktrees_cloudprint` 中位数 686 ms（11 个 worktree、728 个文件、冷缓存，只记录），`review/resident_cloudprint_bytes` 84.8 KB、`review/resident_100k_bytes` 8.86 KB（含关注再放下之后保留的 worktree 数据，预算 < 1 MB，第 3 步复查）。测试覆盖第 7 条列的各项：未提交与已提交的计数、当前 worktree 复用概览的改动集（含概览为 `Capped`、第一轮未发布）、两个 worktree 的重叠和每个方向共用一个 `Arc`、`Capped` 没有重叠且不在别人的列表里、节流、没有关注者时不比较、放下关注后保留到项目关闭、没有主干，另有主干移动、HEAD 变化、rescan、会话事件、新增 worktree、路径哈希的释放和日志的金丝雀。没有验证：真实 fs_watch 批次到标记的整条路径（`Driven` 没有 watcher，批次直接交给引擎）；第 5 条估算的 17 个 worktree、每个 4000 个改动路径的内存（约 650 KB）没有基准；真实仓库上的耗时（见「与设计的差异」）；屏幕上的实际显示（第 2、3 步）。
+
+### 加载超过 1 s（#422）
+
+`Refs #422`，在 macOS（arm64）上运行：`cargo nextest run -p lectern-worktrees`（72 个测试）通过。`skeleton_appears_after_100ms_only` 确认超过 1 s 时列表下面出现 `worktrees.loading Group label=[worktrees-loading] phase=progress`，计数到达后消失。行里的骨架按「状态与异常」保留，没有逐行换成转圈：行在 100 ms 内就已经可读，十几个转圈并排没有多给信息。没有验证：真实窗口里的显示。
 
 ## 与设计的差异
 
