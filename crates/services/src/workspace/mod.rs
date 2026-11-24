@@ -67,6 +67,13 @@ pub trait Contributions: Send + Sync {
     /// `ScreenChanged::to` 一致。
     fn current_route(&self, window: WindowId) -> Option<Route>;
 
+    /// 检查器显示着时它的当前分页名（如 `files`、`conversation`）；检查器隐藏、当前屏幕
+    /// 没有检查器或窗口不存在时为 `None`。取锁复制，不阻塞，任何线程；值与
+    /// `current_route` 同样在状态机或贡献变化之后由 `workspace` 记下。`review_view` 的 Esc
+    /// 用它把 Conversation 页让给 `workspace` 的 `Escape`（2026-11-24 的决定，交互规范
+    /// 「返回与 Esc」）。
+    fn inspector_tab(&self, window: WindowId) -> Option<Name>;
+
     /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：
     /// `workspace` 记下时刻并转给 `app`，只等一帧：`Milestone::reported_after_frame`
     /// 为 `true` 的，调用者已经在画出结果之后的第一个帧回调里，`workspace` 按调用

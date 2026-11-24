@@ -332,6 +332,9 @@ impl Contributions for FakeContributions {
     fn current_route(&self, _: WindowId) -> Option<Route> {
         None
     }
+    fn inspector_tab(&self, _: WindowId) -> Option<Name> {
+        None
+    }
 
     fn report_milestone(&self, milestone: Milestone) {
         lock(&self.milestones).push(milestone);

@@ -103,6 +103,8 @@ pub struct FakeEnv {
     pub sidebar_panels: HashSet<String>,
     pub panels: HashSet<String>,
     pub overlays: HashSet<String>,
+    /// The inspector tabs of every screen, by order.
+    pub inspector_tabs: Vec<String>,
     pub guards: Vec<GuardId>,
     pub projects_available: bool,
     pub calls: Mutex<Vec<ProjectCall>>,
@@ -147,6 +149,13 @@ impl Env for FakeEnv {
 
     fn has_overlay(&self, id: &str) -> bool {
         self.overlays.contains(id)
+    }
+
+    fn inspector_tabs(&self, _screen: &str) -> Vec<Name> {
+        self.inspector_tabs
+            .iter()
+            .map(|tab| Name::Owned(tab.clone()))
+            .collect()
     }
 
     fn guards(&self) -> Vec<GuardId> {
@@ -216,6 +225,10 @@ impl Payloads for FakePayloads {
         let item = payload.0.downcast::<ItemPayload>().ok()?;
         let shared: Arc<dyn Any + Send + Sync> = Arc::new(*item);
         Some(SharedPayload(shared))
+    }
+
+    fn inspector_tab_screen(&self, _payload: &Payload) -> Option<Name> {
+        None
     }
 }
 

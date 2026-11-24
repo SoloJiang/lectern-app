@@ -31,7 +31,8 @@ use lectern_ui::semantic::NodeId as UiNode;
 use lectern_ui::{Button, Icon, Segmented, Text, TextRole, TextRoleExt, colors, strings};
 
 use crate::actions::{
-    self, Back, CloseWindow, Command, Escape, OpenFolder, ShowConversation, ToggleInspector,
+    self, Back, CloseProject, CloseWindow, Command, Escape, OpenFolder, ShowConversation,
+    ToggleInspector,
 };
 use crate::diag::{id_text, milestone_name};
 use crate::driver::Driver;
@@ -175,6 +176,7 @@ impl Workspace {
             self.driver.nav().window(),
             self.driver.nav().nav().current(),
         );
+        self.note_inspector_tab();
         self.screens.clear();
         self.sidebar = None;
         self.inspector = None;
@@ -259,6 +261,9 @@ impl Workspace {
         mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        // Before the events go out, as `current_route` is: a listener of
+        // `LayerChanged` or `ScreenChanged` reads the page the state shows.
+        self.note_inspector_tab();
         for effect in effects {
             match effect {
                 Effect::Ask { .. } => {}
@@ -634,29 +639,29 @@ impl Workspace {
     /// has tabs of its own (`InspectorTab::screen` is its ID) only those, else
     /// the tabs without a screen.
     fn inspector_tabs(&self) -> Vec<Name> {
-        let registry = self.driver.registry();
         let screen = self.driver.nav().nav().current().screen;
-        let (own, shared): (Vec<_>, Vec<_>) = registry
-            .applied_of(Kind::InspectorTab)
-            .into_iter()
-            .filter_map(|id| {
-                let tab = payload::<InspectorTab>(registry, Kind::InspectorTab, &id)?;
-                Some((id, tab.screen))
-            })
-            .filter(|(_, tab_screen)| tab_screen.as_deref().is_none_or(|s| s == &*screen))
-            .partition(|(_, tab_screen)| tab_screen.is_some());
-        let tabs = if own.is_empty() { shared } else { own };
-        tabs.into_iter().map(|(id, _)| id).collect()
+        self.driver.registry().inspector_tabs(&screen)
     }
 
     /// The selected tab: the navigation's choice when registered, else the
     /// first tab.
     fn selected_tab(&self) -> Option<Name> {
         let tabs = self.inspector_tabs();
-        match &self.driver.nav().nav().inspector_tab {
-            Some(tab) if tabs.contains(tab) => Some(tab.clone()),
-            _ => tabs.first().cloned(),
-        }
+        self.driver.nav().nav().shown_inspector_tab(&tabs)
+    }
+
+    /// Tells the hub which inspector page is on show, for
+    /// `Contributions::inspector_tab`. Called before `apply` emits its events,
+    /// after everything that can change it: a command, a registration, a
+    /// project event, a new window.
+    fn note_inspector_tab(&self) {
+        let window = self.driver.nav().window();
+        // A closed window has no route (`WindowClosed` removed it, `bind_window`
+        // brings it back) and shows nothing.
+        let tab = (self.hub.current_route(window).is_some() && self.inspector_shown())
+            .then(|| self.selected_tab())
+            .flatten();
+        self.hub.note_inspector_tab(window, tab);
     }
 
     // ----- the semantic tree -------------------------------------------------
@@ -868,7 +873,7 @@ impl Workspace {
                         .tooltip(back_label)
                         .on_click(move |window, cx| {
                             let _ = this.update(cx, |this, cx| {
-                                this.command(WorkspaceCommand::PopToBase, window, cx);
+                                this.command(WorkspaceCommand::Pop, window, cx);
                             });
                         }),
                 )
@@ -1200,8 +1205,15 @@ impl Render for Workspace {
                 this.command(WorkspaceCommand::CloseWindow, window, cx);
             }))
             .on_action(cx.listener(|this, _: &Back, window, cx| {
-                this.command(WorkspaceCommand::PopToBase, window, cx);
+                this.command(WorkspaceCommand::Pop, window, cx);
             }))
+            // Only with a project: on Welcome nothing handles it, so a menu
+            // item for it is disabled (「Action 与快捷键」).
+            .when(project, |root| {
+                root.on_action(cx.listener(|this, _: &CloseProject, window, cx| {
+                    this.command(WorkspaceCommand::CloseProject, window, cx);
+                }))
+            })
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 this.command(WorkspaceCommand::Escape, window, cx);
             }))
@@ -1312,6 +1324,9 @@ impl crate::nav::Env for RegistryEnv<'_> {
     }
     fn has_overlay(&self, id: &str) -> bool {
         self.0.has(Kind::Overlay, id)
+    }
+    fn inspector_tabs(&self, screen: &str) -> Vec<Name> {
+        self.0.inspector_tabs(screen)
     }
     fn guards(&self) -> Vec<crate::nav::GuardId> {
         Vec::new()

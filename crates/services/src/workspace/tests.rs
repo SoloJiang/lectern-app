@@ -63,6 +63,9 @@ impl Contributions for Empty {
     fn current_route(&self, _window: WindowId) -> Option<Route> {
         None
     }
+    fn inspector_tab(&self, _window: WindowId) -> Option<Name> {
+        None
+    }
     fn report_milestone(&self, _milestone: Milestone) {}
 }
 
@@ -238,6 +241,7 @@ fn workspace_contributions_is_a_shared_trait_object() {
     contributions.dispatch(WorkspaceCommand::Escape);
     assert!(contributions.sidebar_entries().is_empty());
     assert_eq!(contributions.current_route(WindowId(0)), None);
+    assert_eq!(contributions.inspector_tab(WindowId(0)), None);
     contributions.report_milestone(Milestone::ProjectHome);
 
     // The service and the guards are shared across threads; registrations

@@ -6,6 +6,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use lectern_kernel::Name;
 use lectern_services::workspace::{ContributionKind, Payload, SharedPayload};
 use lectern_ui::contrib::{
     InspectorTab, KeyBindings, Overlay, Panel, Screen, SidebarItem, SidebarPanel,
@@ -33,6 +34,11 @@ impl Payloads for UiPayloads {
         let item = payload.0.downcast::<SidebarItem>().ok()?;
         let shared: Arc<dyn Any + Send + Sync> = Arc::new(*item);
         Some(SharedPayload(shared))
+    }
+
+    fn inspector_tab_screen(&self, payload: &Payload) -> Option<Name> {
+        let any: &(dyn Any + Send) = &*payload.0;
+        any.downcast_ref::<InspectorTab>()?.screen.clone()
     }
 }
 

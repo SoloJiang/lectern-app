@@ -112,6 +112,11 @@ pub trait Payloads: Send + Sync {
     /// A `SidebarEntry` payload as the shared `Arc` that `sidebar_entries`
     /// hands out. None when it is not the sidebar item type.
     fn share(&self, payload: Payload) -> Option<SharedPayload>;
+
+    /// The screen an `InspectorTab` payload is limited to
+    /// (`InspectorTab::screen`); None when it shows on every screen with an
+    /// inspector, or when it is not the inspector tab type.
+    fn inspector_tab_screen(&self, payload: &Payload) -> Option<Name>;
 }
 
 /// The shared handler of a `handle_command` registration.
@@ -718,6 +723,26 @@ impl Registry {
             .collect();
         entries.sort();
         entries.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// The inspector tabs shown on `screen`, by `(order, id)`: when the
+    /// screen has tabs of its own (`InspectorTab::screen` is its ID) only
+    /// those, else the tabs without a screen (「检查器页的范围」). The state
+    /// machine's Esc and the root view read the same list.
+    pub fn inspector_tabs(&self, screen: &str) -> Vec<Name> {
+        let (own, shared): (Vec<_>, Vec<_>) = self
+            .applied_of(Kind::InspectorTab)
+            .into_iter()
+            .filter_map(|id| {
+                let tab_screen = self.with_payload(Kind::InspectorTab, &id, |payload| {
+                    self.payloads.inspector_tab_screen(payload)
+                })?;
+                Some((id, tab_screen))
+            })
+            .filter(|(_, tab_screen)| tab_screen.as_deref().is_none_or(|s| s == screen))
+            .partition(|(_, tab_screen)| tab_screen.is_some());
+        let tabs = if own.is_empty() { shared } else { own };
+        tabs.into_iter().map(|(id, _)| id).collect()
     }
 
     /// The applied entries, for the probe and the tests: `(kind, id)` in
