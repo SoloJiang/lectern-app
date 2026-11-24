@@ -519,7 +519,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 |---|---|
 | 项目里还没有会话（14 天内 `in_project` 为空且概览的 `sessions` 为空） | 主区大标题换成 `project-home-empty`，不显示三个分组；侧栏 Sessions 区显示 `project-home-sessions-empty`。「最近提交」和 New session 在本 issue 之外 |
 | 刚打开项目：`files`、`packages` 为 `Pending` | 侧栏按会话列表立即画出会话行（里程碑不等它们）；Packages 显示骨架；概览未就绪时 Outside 行和进度环显示骨架；按 `loading_phase`，100 ms 内不显示骨架 |
-| 概览第一轮超过 1 s（10 万文件的计数比较） | 骨架换成 `LoadingPhase::Progress` 的不确定进度；不提供取消（概览在后台，不挡任何操作） |
+| 概览第一轮超过 1 s（10 万文件的计数比较） | 骨架换成 `ui::LoadingProgress`（不确定进度，`project-home-loading`）；不提供取消（概览在后台，不挡任何操作） |
 | 文件列表 `Unavailable`（index 读不出） | `files_settled` 为 true，里程碑照常；Packages 不显示；概览由 `review` 按它自己的规则给出（`Outside` 可能一直 `Pending`） |
 | 文件夹项目 | 工具栏没有副标题（没有分支和 worktree）；卡片没有分支；Outside 行不显示（没有基准）；卡片没有进度环与 Drifted（`review` 的 `Degraded::FolderProject`） |
 | `OutsideCount::Capped(n)` | Outside 行显示 `project-home-outside-capped`，Packages 的今天改动数不显示 |
@@ -753,7 +753,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
   - `project-home.sidebar.list` 的 `visible` 是上一帧建出的行数：行是布局之后在 `uniform_list` 里建的，这一帧声明节点时还不知道。
 - **侧栏的行不是 `ui::Row`**：`Row` 是带分隔线的卡片行，侧栏要等高、没有分隔线的行。第 2 步时 `ui` 还没有侧栏行，所以侧栏行是自己的 24pt `div` + `semantic_interactive`，悬停的淡入淡出自己做；#283 的第二批控件之后改用 `ui::SidebarRow::compact()`（28pt，见「为 #283 实现「界面」」），只有 Usage 卡片还留着这段悬停的代码（`clickable`）。侧栏的会话行不会处于选中态（审阅屏幕隐藏侧栏，侧栏也没有键盘焦点）。图标用 `gpui::svg()` 画 `Icon::path()`（`ui` 没有图标元素）。
 - **`ui` 的一处改动**：`lectern_ui::on_accent` 公开（原来是 `pub(crate)`）。主区卡片放在 `Row` 里，选中时 `Row` 把文字设成 `on_accent`，但卡片里次要文字用 `TextRole::Secondary`（灰色）会盖掉它，在强调色上看不清；选中的卡片次要行因此改用 `on_accent` 的 75%。改动是 `ui` 的两处可见性加一行 `pub use`。（控件对齐画布之后选中默认是安静的灰底，这一支已去掉；本 crate 不再用 `on_accent`。）
-- **等待概览**：`LoadingPhase::Progress` 要显示「不确定进度」，`ui` 没有这个控件（`Progress` 只有 `Bar` / `Ring` 两种确定的）。第 2 步在 `Progress` 阶段继续显示骨架，节点的 `phase=progress` 记下阶段，不确定进度等 `ui` 有了控件再换（待办，写在 PR 里）。起点用 `background_executor().now()`（测试里可以 `advance_clock`），两个阈值各一个一次性定时器，概览到达时丢掉；没有周期性的定时器。
+- **等待概览**：`LoadingPhase::Progress` 要显示「不确定进度」，`ui` 没有这个控件（`Progress` 只有 `Bar` / `Ring` 两种确定的）。第 2 步在 `Progress` 阶段继续显示骨架，节点的 `phase=progress` 记下阶段，不确定进度等 `ui` 有了控件再换（待办，写在 PR 里）。起点用 `background_executor().now()`（测试里可以 `advance_clock`），两个阈值各一个一次性定时器，概览到达时丢掉；没有周期性的定时器。（已由 `ui::LoadingProgress` 取代，见[交互规范「加载超过 1 s」](interaction.md#加载超过-1-s)，#422。）
 - **里程碑**：在 `HomeScreen::render` 里经 `Home::frame_drawn` 报告（`workspace` 自己在下一帧回调里记下时刻）；`request` 是 `Opened` 的 `OpenRequest` 序号，`started` 时项目已经打开的情形没有序号，记 0。
 - **键**：↓ 没有选中项时选第一项、↑ 没有选中项时选最后一项（macOS 列表的习惯，设计没有写）；`Open` 没有选中项时选第一项（设计）。谓词 `Content > project-home` 靠的是屏幕根视图是焦点路径上最深的上下文（`workspace` 设计第 2 步的差异里写过 `>` 的这个要求）。屏幕在工厂里建完就取得焦点；审阅屏幕弹出之后，被它压在下面的主页没有焦点（`workspace` 把焦点收回自己的根视图），所以主页在 `render` 里「焦点在根视图上（或没有焦点）而不在自己里面」时取回焦点，焦点在检查器、面板、覆盖层或侧栏上时不动（用 `Window::context_stack` 的最内层上下文判断）。这是 `workspace` 测试里 `Blank` 视图的做法的收窄版；更好的做法是 `workspace` 在弹出屏幕之后把焦点交给新的栈顶屏幕，等 `app` 装配后手动试过再定（PR 里写明）。
 - **`Home` 的 `Parts`**：`contributions: ServiceRef<dyn Contributions>`；`activate` 里 `contributions.get()` 取不到时返回 `DependencyUnavailable`，与 `welcome` 相同。

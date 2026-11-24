@@ -672,7 +672,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 
 | 情况 | 表现 |
 |---|---|
-| `LoadState::Loading` | 按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `review-loading` 与取消；`Ready` 到达时骨架换成内容（`ARRIVE`） |
+| `LoadState::Loading` | 按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `ui::LoadingProgress`（`review-loading`，Cancel 派发 `Pop`）；`Ready` 到达时骨架换成内容（`ARRIVE`） |
 | `Failed(Missing)`、`Failed(NotInOpenProject)`、`Failed(Changes(e))` | 内容区一行说明（对应的 `review-failed-*`，`Changes` 带错误种类）和 `review-back`；浮条隐藏；记 warn |
 | `Degraded::UnrecognizedSession` | 规则分组视图；`review-notice-unrecognized`；没有轮次、说明和归因标签 |
 | `Degraded::FolderProject` | 只有轮次与按日志原文的改动（`Tool` 行）；`review-notice-folder`；Progress 页显示 `review-progress-empty`；浮条只有意见数（没有 Copy Again、Discard、Looks Good、Copy as Prompt 和发送）：`Tool` 行不是 diff 行，没有 blob OID，C 与 Add Note 锚定不到任何东西（`selection_anchor` 要 `RowsSide::oid`），所以不会有意见可发，也没有进度可标 |

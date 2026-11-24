@@ -463,7 +463,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 | 情况 | 表现（[交互规范「状态与异常」](interaction.md#状态与异常)） |
 |---|---|
 | 刚进入屏幕，计数还没有到达 | 行按项目快照和会话列表立即画出；改动数、重叠和 token 按 `loading_phase` 显示骨架，100 ms 内不显示 |
-| 第一轮比较超过 1 s（10 万文件） | 骨架换成 `LoadingPhase::Progress` 的不确定进度；计数逐个 worktree 到达。不提供取消：离开屏幕即取消 |
+| 第一轮比较超过 1 s（10 万文件） | 骨架换成 `ui::LoadingProgress`（不确定进度，`worktrees-loading`）；计数逐个 worktree 到达。不提供取消：离开屏幕即取消 |
 | 文件夹项目 | 不登记侧栏条目；屏幕被压入时（如经探针）显示 `worktrees-not-git` |
 | 只有主 worktree | 一行，下面加 `worktrees-only-one` |
 | prunable 的 worktree | 在 Idle 的最后，带 `worktrees-missing`；点击只选中，不能审阅、不能切换；检查器的对比一节为 `worktrees-missing-detail` |
@@ -639,7 +639,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 - 「相对主干」的合计是已提交与未提交路径的并集：已提交的改动在工作区里又改回原样时，这个文件仍计入，而「相对主干」的审阅里没有它。
 - 改动路径超过 4000 个的 worktree 没有重叠信息。
 - 相对时间只随合成刷新；Active 到期由一次性定时触发一次合成。
-- `LoadingPhase::Progress` 的不确定进度：`ui` 没有这个控件（`Progress` 只有 `Bar` / `Ring` 两种确定的），超过 1 秒仍显示骨架，节点的 `phase=progress` 记下阶段；等 `ui` 有了控件再换（与项目主页相同）。
+- `LoadingPhase::Progress` 的不确定进度：设计阶段 `ui` 没有这个控件，超过 1 秒仍显示骨架；已由 `ui::LoadingProgress` 取代（[交互规范「加载超过 1 s」](interaction.md#加载超过-1-s)，#422），实现 PR 换上它之前仍是骨架。
 - 第一轮概览失败时当前 worktree 的计数曾停在 `Pending`、骨架一直显示（第 2 步可见）：原因在 `review`，`publish_overview(None)` 发布了空概览，却没有标记 worktrees 这一侧的那一轮，所以没有人去比较当前 worktree。[#341](https://github.com/SoloJiang/lectern-app/pull/341) 已修复（见「与设计的差异 / 前置条件 A 的遗留」），本 crate 没有改；这一条不再是限制，留作记录。
 - 列表不虚拟化：worktree 多于 100 个时每帧的排版随行数增长。
 - 本屏幕依赖 `dyn Review`：`review` 失败时整个屏幕不可用。
