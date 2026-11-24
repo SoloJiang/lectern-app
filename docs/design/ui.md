@@ -352,6 +352,7 @@ pub mod motion {
     pub const ARRIVE_OFFSET: Pixels;  // 8pt
     pub const HOVER_IN: Motion;       // 120 ms · Linear
     pub const HOVER_OUT: Motion;      // 200 ms · Linear
+    pub const SPIN: Motion;           // 1000 ms · Linear · 循环（`LoadingProgress` 的圆环；`reduced` 时不转）
 
     /// 进入会话：spring · response 0.35 · damping 0.86。换算（质量 1）：
     /// stiffness = (2π / 0.35)² ≈ 322.3，damping = 2 × 0.86 × √stiffness ≈ 30.9。
@@ -521,6 +522,17 @@ impl Row {
 /// 加载态的阶段（交互规范「状态与异常」的「加载」行）。纯函数，视图按它决定画什么。
 pub enum LoadingPhase { Nothing, Skeleton, Progress }
 pub fn loading_phase(elapsed: Duration) -> LoadingPhase;   // < 100 ms → Nothing，< 1 s → Skeleton，否则 Progress
+
+/// 加载超过 1 s 时的进度（交互规范「状态与异常」的「加载超过 1 s」）：居中的不确定进度圆环（16pt，`secondary_label`，
+/// `motion::SPIN` 匀速转动；减弱动态效果时静止）、一行 `Secondary` 层级的说明文字和可选的朴素按钮 Cancel（`common-cancel`）。
+/// 圆环的转动只在这个元素画出时请求动画帧（`window.request_animation_frame`），不画就没有开销。
+/// 语义节点：`Role::Group`，`attr("phase", "progress")`；Cancel 是它的子节点 `….cancel`（`Role::Button`）。
+pub struct LoadingProgress { /* id, label, cancel: Option<Box<dyn Fn(&mut Window, &mut App)>> */ }
+impl LoadingProgress {
+    pub fn new(id: NodeId, label: Text) -> LoadingProgress;
+    /// 有取消时给出取消做的事（调用方派发 `Pop`；只有占满压入屏幕的加载才给，见交互规范）。
+    pub fn on_cancel(self, f: impl Fn(&mut Window, &mut App) + 'static) -> LoadingProgress;
+}
 
 /// 骨架块：`tertiary_label` 的淡版，圆角，无闪烁动画（减弱动态效果时也一样）。自己画，不包装 gpui-component 的
 /// `Skeleton`（它的脉动关不掉，见「与设计的差异」第 3 步）。装饰元素，不声明节点。

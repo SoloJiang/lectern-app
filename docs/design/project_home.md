@@ -519,7 +519,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 |---|---|
 | 项目里还没有会话（14 天内 `in_project` 为空且概览的 `sessions` 为空） | 主区大标题换成 `project-home-empty`，不显示三个分组；侧栏 Sessions 区显示 `project-home-sessions-empty`。「最近提交」和 New session 在本 issue 之外 |
 | 刚打开项目：`files`、`packages` 为 `Pending` | 侧栏按会话列表立即画出会话行（里程碑不等它们）；Packages 显示骨架；概览未就绪时 Outside 行和进度环显示骨架；按 `loading_phase`，100 ms 内不显示骨架 |
-| 概览第一轮超过 1 s（10 万文件的计数比较） | 骨架换成 `LoadingPhase::Progress` 的不确定进度；不提供取消（概览在后台，不挡任何操作） |
+| 概览第一轮超过 1 s（10 万文件的计数比较） | 骨架换成 `ui::LoadingProgress`（不确定进度，`project-home-loading`）；不提供取消（概览在后台，不挡任何操作） |
 | 文件列表 `Unavailable`（index 读不出） | `files_settled` 为 true，里程碑照常；Packages 不显示；概览由 `review` 按它自己的规则给出（`Outside` 可能一直 `Pending`） |
 | 文件夹项目 | 工具栏没有副标题（没有分支和 worktree）；卡片没有分支；Outside 行不显示（没有基准）；卡片没有进度环与 Drifted（`review` 的 `Degraded::FolderProject`） |
 | `OutsideCount::Capped(n)` | Outside 行显示 `project-home-outside-capped`，Packages 的今天改动数不显示 |

@@ -463,7 +463,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop 侧栏条目的登�
 | 情况 | 表现（[交互规范「状态与异常」](interaction.md#状态与异常)） |
 |---|---|
 | 刚进入屏幕，计数还没有到达 | 行按项目快照和会话列表立即画出；改动数、重叠和 token 按 `loading_phase` 显示骨架，100 ms 内不显示 |
-| 第一轮比较超过 1 s（10 万文件） | 骨架换成 `LoadingPhase::Progress` 的不确定进度；计数逐个 worktree 到达。不提供取消：离开屏幕即取消 |
+| 第一轮比较超过 1 s（10 万文件） | 骨架换成 `ui::LoadingProgress`（不确定进度，`worktrees-loading`）；计数逐个 worktree 到达。不提供取消：离开屏幕即取消 |
 | 文件夹项目 | 不登记侧栏条目；屏幕被压入时（如经探针）显示 `worktrees-not-git` |
 | 只有主 worktree | 一行，下面加 `worktrees-only-one` |
 | prunable 的 worktree | 在 Idle 的最后，带 `worktrees-missing`；点击只选中，不能审阅、不能切换；检查器的对比一节为 `worktrees-missing-detail` |

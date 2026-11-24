@@ -676,7 +676,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 | 审阅对象不是会话（`NotSession`） | 两页都只显示 `conversation-empty-no-session` |
 | 没有 `dyn Conversations`（`conversation-live` 没有激活、失败或已停用） | Messages 页显示 `conversation-unavailable-service`，回复框不可用；Terminal 页照常 |
 | 没有 `dyn Terminals` | Terminal 页显示 `conversation-terminal-unavailable`，恢复不可用；Messages 页照常 |
-| `Load::Loading` | 按 `loading_phase`：100 ms 内空白，之后三块 `Skeleton`，1 s 后 `conversation-loading`；`Ready` 到达时换成内容 |
+| `Load::Loading` | 按 `loading_phase`：100 ms 内空白，之后三块 `Skeleton`，1 s 后 `ui::LoadingProgress`（`conversation-loading`，没有取消）；`Ready` 到达时换成内容 |
 | `Load::Failed(NotFound)` / `Failed(Io)` | `conversation-empty-missing` / `conversation-error-history`；回复框按 `can_prompt` |
 | `Load::Failed(Unrecognized)` | 只显示 `conversation-unrecognized`（不弹错误，与「会话格式无法识别」一致）；回复框按 `can_prompt` |
 | 历史为空、也没有实时的项 | `conversation-empty-turns` |
