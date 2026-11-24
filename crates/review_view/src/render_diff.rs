@@ -660,7 +660,6 @@ impl ReviewModel {
             .pr(px(14.0))
             .flex()
             .items_center()
-            .cursor_pointer()
             .text_role(TextRole::Caption, window, cx)
             .text_color(palette.secondary_label)
             .child(text.shared())
