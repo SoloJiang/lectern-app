@@ -317,7 +317,7 @@ pub struct TightestLimit { pub agent: Agent, pub used_percent: u8, pub window_mi
 
 | 用户动作 | 命令 |
 |---|---|
-| 侧栏 Overview 条目、⌘[ | `PopToBase`（`workspace` 处理） |
+| 侧栏 Overview 条目 | `PopToBase`（`workspace` 处理；⌘[ 是 `workspace` 的 `Pop`，主页是基底，栈空时不做事） |
 | 侧栏会话行或主区卡片的点击、↵ | `Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) })` |
 | Outside Any Session 的点击、↵ | `Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Outside { project, worktree: active }) })` |
 | `Views` 区的贡献条目 | 条目自己的 `on_select`（如 `ShowSidebarPanel(Some("files"))`、`Push(WORKTREES)`） |

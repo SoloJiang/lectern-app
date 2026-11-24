@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。里程碑与帧记录转交给 bench 的探针（前置条件 F）：里程碑随 bench 第 5 步，帧记录（`record_frames` 经 `platform::frame::record`、`FrameRecord` 带 `Result`、`app` 转交 `Probe::frames`，`Refs #393`）已实现，见「实际验证」「与设计的差异」的「帧记录（#393）」，macOS CI 的帧基准在真实窗口里记录成功（CI 运行 45355728393，见 bench 设计「实际验证」）。`Contributions::current_route`（conversation 设计的前置条件 A，`Refs #23`）已实现，见「实际验证」。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。工具栏闭包改在 `enter_frame()` 的准入内调用，画帧不再让 kernel 变忙（[ADR 0066](../adr/0066.md)，[#403](https://github.com/SoloJiang/lectern-app/issues/403)）。工具栏的返回与检查器图标按钮已加悬停提示（`Button::tooltip`，文字复用辅助名的键；窗口里的外观没有检查，见「实际验证」）。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。里程碑与帧记录转交给 bench 的探针（前置条件 F）：里程碑随 bench 第 5 步，帧记录（`record_frames` 经 `platform::frame::record`、`FrameRecord` 带 `Result`、`app` 转交 `Probe::frames`，`Refs #393`）已实现，见「实际验证」「与设计的差异」的「帧记录（#393）」，macOS CI 的帧基准在真实窗口里记录成功（CI 运行 45355728393，见 bench 设计「实际验证」）。`Contributions::current_route`（conversation 设计的前置条件 A，`Refs #23`）已实现，见「实际验证」。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 修订的「界面」已实现：工具栏与检查器的控件随 [#285](https://github.com/SoloJiang/lectern-app/pull/285)，区域的摆放（工具栏横跨内容区和检查器、窗口控件的位置、检查器的材质）随本节「实际验证」的「为 #283 实现「界面」」；侧栏开关没有画（它的命令还没有设计），窗口控件的竖直位置是 `app` 的前置条件 G（[#296](https://github.com/SoloJiang/lectern-app/pull/296)）。上下文面板的位置与尺寸已由产品负责人在 2026-10-29 改为按设计画布（「未决问题」3），已按它实现（`PANEL_WIDTH`、`PANEL_INSET`、`panel_width`，`Refs #283`）；窗口里的视觉检查还没有做。工具栏闭包改在 `enter_frame()` 的准入内调用，画帧不再让 kernel 变忙（[ADR 0066](../adr/0066.md)，[#403](https://github.com/SoloJiang/lectern-app/issues/403)）。工具栏的返回与检查器图标按钮已加悬停提示（`Button::tooltip`，文字复用辅助名的键；窗口里的外观没有检查，见「实际验证」）。产品负责人 2026-11-24 的决定（⌘[ 与返回按钮只退一层、Esc 先把检查器从 Conversation 切回 Files，见「区域与三层」的状态表，[#422](https://github.com/SoloJiang/lectern-app/issues/422)）已写进设计，尚未实现。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -79,6 +79,11 @@ pub trait Contributions: Send + Sync {
     /// 值与最近一次 `ScreenChanged::to` 一致：`Hub::emit` 在发出 `ScreenChanged` 之前记下 `to`，`WindowClosed` 时去掉该窗口；
     /// 根视图绑定窗口时（`install`、Dock 重开的 `attach`）记下当前屏幕，所以第一次 `ScreenChanged`（`from: None`，要等 `WorkspacePlugin::started`）之前也有值。
     fn current_route(&self, window: WindowId) -> Option<Route>;
+
+    /// 检查器显示着时它的当前分页名（如 `files`、`conversation`），隐藏或当前屏幕没有检查器时为 `None`。
+    /// 取锁复制，不阻塞，任何线程；值与 `current_route` 同样在状态机改变检查器时记下。`review_view` 的 Esc 用它把 Conversation 页
+    /// 让给本 crate 的 `Escape`（2026-11-24 的决定，[交互规范「返回与 Esc」](interaction.md#返回与-esc)）。
+    fn inspector_tab(&self, window: WindowId) -> Option<Name>;
 
     /// 报告一个里程碑状态已经画出（bench 设计「需要其他 crate 提供的接口」）：本 crate 记下时刻并转给 `app`，
     /// 从画出结果的那一帧到记时刻只等一帧。`Milestone::reported_after_frame()` 为 `true` 的（`DiffShown`、
@@ -438,7 +443,7 @@ struct Nav {
 | 任意 | `CloseWindow` | `Window` | 通过后 `remove_window`，`WindowClosed` |
 | `Welcome` | `Pop`、`PopToBase`、`Push` | — | 忽略，记 debug |
 
-`Escape` 的顺序：覆盖层 → 面板 → 替换侧栏的面板（回到项目侧栏；只在当前屏幕显示侧栏时，审阅这类隐藏侧栏的屏幕上它留给下面的屏幕，不让一次 Esc 落在看不见的面板上）→ 栈顶屏幕（`Pop`，经 `View` 守卫）→ 都没有时不做任何事。当前屏幕的视图先收到 Esc（它可能关闭自己的查找栏），没有处理时才冒泡到本 crate。⌘[ 同样先给当前屏幕，没有处理时是 `PopToBase`（「Esc · ⌘[：关闭面板 · 返回 Overview」）。阅读视图是例外：它自己处理 ⌘[（后退），退到历史起点之后 `dispatch(Pop)` 回到打开它的那个屏幕（审阅或项目主页，[file_reader 设计「Action 与快捷键」](file_reader.md#action-与快捷键)），不是 `PopToBase`。
+`Escape` 的顺序：覆盖层 → 面板 → 检查器的 Conversation 页（检查器显示着、当前页是 `conversation` 时切回第一页 Files，检查器不关；产品负责人 2026-11-24 的决定，[交互规范「返回与 Esc」](interaction.md#返回与-esc)）→ 替换侧栏的面板（回到项目侧栏；只在当前屏幕显示侧栏时，审阅这类隐藏侧栏的屏幕上它留给下面的屏幕，不让一次 Esc 落在看不见的面板上）→ 栈顶屏幕（`Pop`，经 `View` 守卫）→ 都没有时不做任何事。当前屏幕的视图先收到 Esc（它可能关闭自己的查找栏），没有处理时才冒泡到本 crate。⌘[ 和工具栏的返回按钮同样先给当前屏幕，没有处理时是 `Pop`，只退一层（2026-11-24 的决定：原来是 `PopToBase`，从 Worktrees 进入的审阅按 ⌘[ 会直接回到 Overview，与 Esc 不一致）。阅读视图是例外：它自己处理 ⌘[（后退），退到历史起点之后 `dispatch(Pop)` 回到打开它的那个屏幕（审阅或项目主页，[file_reader 设计「Action 与快捷键」](file_reader.md#action-与快捷键)），不是 `PopToBase`。
 
 守卫的询问：对一次命令，按登记顺序逐个 `ask(scope, done)`，前一个 `done(true)` 之后才问下一个；任一个 `done(false)` 就作废这次命令。询问期间到达的同范围命令排队，不并发询问。守卫的 `ask` 在它的激活准入内调用；`enter()` 失败的守卫跳过。
 
@@ -537,7 +542,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   |---|---|---|---|
   | `workspace::OpenFolder` | ⌘O | 全局 | `PromptOpenProject` |
   | `workspace::CloseWindow` | ⌘W | 全局 | `CloseWindow` |
-  | `workspace::Back` | ⌘[ | `Workspace`（屏幕没处理时冒泡到这里） | `PopToBase` |
+  | `workspace::CloseProject` | 无（File 菜单的 Close Project，2026-11-24 的决定） | `Workspace > project`（Welcome 上没有处理者，菜单项置灰） | `CloseProject`：问 `Project` 守卫，通过后 `Projects::close(k)` → `ProjectEvent::Closed` → `base = Welcome` → `on_state_changed` 写出 `project` 为空的窗口状态，下次启动显示 Welcome |
+  | `workspace::Back` | ⌘[ | `Workspace`（屏幕没处理时冒泡到这里） | `Pop`（2026-11-24 之前是 `PopToBase`） |
   | `workspace::Escape` | Esc | `Workspace` | `Escape` |
   | `workspace::ToggleInspector` | ⌥⌘I | 全局（原定 `Workspace > project`，见「与设计的差异」第 2 步） | `SetInspector(!inspector)`；没有检查器的屏幕上状态机忽略 |
   | `workspace::ShowConversation` | ⌘\ | 全局（同上） | `SelectInspectorTab("conversation")`；同上 |

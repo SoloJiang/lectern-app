@@ -513,7 +513,7 @@ Action 与快捷键（探针可按名字触发）：
 
 | Action | 键 | 上下文 | 处理 |
 |---|---|---|---|
-| `usage::Back` | Esc、⌘[ | `Content > usage` | `Drilled` 时回到「所有项目」；否则 `cx.propagate()`，交给 `workspace`（Esc → `Pop`，⌘[ → `PopToBase`，[workspace 设计「界面」](workspace.md#界面)） |
+| `usage::Back` | Esc、⌘[ | `Content > usage` | `Drilled` 时回到「所有项目」；否则 `cx.propagate()`，交给 `workspace`（Esc 和 ⌘[ 都是 `Pop`，[workspace 设计「界面」](workspace.md#界面)） |
 
 菜单打开时 Esc 先关闭菜单（系统菜单自己处理）。
 

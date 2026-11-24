@@ -286,7 +286,7 @@ pub struct MrItem {
 | 检查器里的会话行 | `Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) })` |
 | 检查器的「切换到这个 worktree」 | `SetActiveWorktree(worktree)`，停在本屏幕（「未决问题」3）。当前 worktree 和 prunable 的行没有这个按钮 |
 | 工具栏的 Refresh、⌘R | `Review::refresh_worktrees(project)`（立即返回），不经 `workspace` |
-| Esc、⌘[ | `workspace` 处理：`Pop` 回到打开本屏幕的屏幕，`PopToBase` 回到项目主页 |
+| Esc、⌘[ | `workspace` 处理：都是 `Pop`，回到打开本屏幕的屏幕（2026-11-24 之前 ⌘[ 是 `PopToBase`） |
 
 ## 数据结构
 
