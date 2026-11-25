@@ -507,7 +507,20 @@ impl ReviewModel {
     /// The selection as rows of the diff it is in now (whichever context
     /// holds it), for this frame's rows to draw.
     pub(crate) fn work_out_span(&self) -> Option<TextSpan> {
-        let selection = self.text.as_ref()?;
+        // A ⌥ drag in progress is drawn from the press, so the highlight
+        // follows the pointer (as in any macOS text view); otherwise the
+        // finished selection.
+        let live = self.press.as_ref().and_then(|press| match press.mode {
+            PressMode::Text { anchor, head } if anchor != head => Some(TextSelection {
+                rows: press.rows.clone(),
+                half: press.half,
+                oids: press.oids,
+                anchor,
+                head,
+            }),
+            _ => None,
+        });
+        let selection = live.as_ref().or(self.text.as_ref())?;
         let (key, display) = self
             .displays
             .iter()

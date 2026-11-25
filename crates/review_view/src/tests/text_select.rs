@@ -302,7 +302,18 @@ fn option_drag_selects_text_and_plain_drag_selects_lines(cx: &mut TestAppContext
     // ⌥: "ne 1" of 1:1 over the removed and the added line 2 to "line" of -:3.
     let from = char_at(&opened, cx, (Some(1), Some(1)), Half::New, 2);
     let to = char_at(&opened, cx, (None, Some(3)), Half::New, 4);
-    drag_with(&mut visual, &opened, cx, from, to, Modifiers::alt());
+    down(&mut visual, &opened, cx, from, Modifiers::alt());
+    moved(&mut visual, &opened, cx, to, Modifiers::alt());
+    // While the button is still down the highlight already follows the
+    // pointer.
+    assert!(opened.read(cx, |model| model.press.is_some()));
+    let live = opened
+        .record(cx)
+        .iter()
+        .filter(|record| crate::tests::screen::attr(record, "text_selected").is_some())
+        .count();
+    assert_eq!(live, 4);
+    up(&mut visual, &opened, cx, to, Modifiers::alt());
     assert!(opened.read(cx, |model| model.press.is_none()));
     assert_eq!(opened.read(cx, |model| model.range.clone()), None);
     assert_eq!(opened.read(cx, |model| model.selection.clone()), None);
