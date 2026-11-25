@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。编辑框打开后一定在浮条上方（[#380](https://github.com/SoloJiang/lectern-app/issues/380)）：见「审阅意见（#22）」的「编辑框的位置」，差异与验证见同名小节。产品负责人 2026-11-24 决定离开审阅时保留编辑框里的新意见为草稿（「审阅意见（#22）」的「离开审阅」，[#422](https://github.com/SoloJiang/lectern-app/issues/422)），已实现（屏幕释放时经 `Shared` 交接，再开同一个审阅目标时取回）。同一个 issue 的审阅屏幕 UX 修复也已实现：只能用鼠标做的三个操作有了具名 Action（`ToggleTurn`、`JumpToBriefEntry`、`JumpToSubagent`），Conversation 页开着时 Esc 交给 `workspace`，可点的行有悬停底色（见「Action 与快捷键」「界面」的悬停一条，差异与验证见「与设计的差异」和「实际验证」的「审阅屏幕的 UX 修复（#422）」）。指针在可点的行、标题和简报条目上保持箭头，只有行号栏用手形（ADR 0015 的 macOS 原生做法；行号栏点一下就打开编辑框，与点代码不同，手形提示这一点；见「实际验证」的「光标（#422）」）。加载超过 1 s 时换成 `ui::LoadingProgress`（交互规范「加载超过 1 s」，#422；见「实际验证」的「加载超过 1 s（#422）」）。
+状态：「验收」第 1 到第 5 步已实现（会话用量拆成了第三个插件 `review-view-usage`，只要 `dyn Usage`，已装配（`Refs #31`），简报的用量行和轮次标题的 token 不再等交接，见「与设计的差异」「用量插件」；第 3 步有两项等前置条件：`review-view-handoff` 的装配等 `dyn Reader`、`dyn CodeIntel` 有提供者，`review_view/scroll_5000` 等 `workspace` 记录帧，见「与设计的差异」第 3 步）。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）、第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）和第 3 步（`app` 装配 `review-view`、`app/open_diff` 基准、手动检查）已实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，屏幕已按它重画；统一 / 双栏与 Refresh 的 View 菜单在 [#294](https://github.com/SoloJiang/lectern-app/pull/294) 实现；`Switch`、包数、Drifted 的编辑时间不在内，实现与设计的差异见「与设计的差异」的「为 #283 实现「界面」」。审阅意见（#22）已实现（「验收」第 4 步，[#332](https://github.com/SoloJiang/lectern-app/pull/332)）：编辑框、行内的意见、浮条的发送 / 放弃 / 再次复制、C 与 ⌘↩、发送后切到 Conversation 页；与设计的差异见「与设计的差异」的「第 4 步」。审阅意见的范围（[#373](https://github.com/SoloJiang/lectern-app/issues/373)）已实现（「验收」第 5 步）：拖过几行出现 Add Note，点行号仍是一行，C 与 + 照旧，`ExtendRangeUp` / `ExtendRangeDown`，范围的意见与编辑框画在最后一行之下；`services` 与 `review` 一侧是 review 设计的「验收」第 8 步（已实现）；与设计的差异见「与设计的差异」的「第 5 步」，实际验证见「实际验证」的「第 5 步」。编辑框打开后一定在浮条上方（[#380](https://github.com/SoloJiang/lectern-app/issues/380)）：见「审阅意见（#22）」的「编辑框的位置」，差异与验证见同名小节。产品负责人 2026-11-24 决定离开审阅时保留编辑框里的新意见为草稿（「审阅意见（#22）」的「离开审阅」，[#422](https://github.com/SoloJiang/lectern-app/issues/422)），已实现（屏幕释放时经 `Shared` 交接，再开同一个审阅目标时取回）。同一个 issue 的审阅屏幕 UX 修复也已实现：只能用鼠标做的三个操作有了具名 Action（`ToggleTurn`、`JumpToBriefEntry`、`JumpToSubagent`），Conversation 页开着时 Esc 交给 `workspace`，可点的行有悬停底色（见「Action 与快捷键」「界面」的悬停一条，差异与验证见「与设计的差异」和「实际验证」的「审阅屏幕的 UX 修复（#422）」）。指针在可点的行、标题和简报条目上保持箭头，只有行号栏用手形（ADR 0015 的 macOS 原生做法；行号栏点一下就打开编辑框，与点代码不同，手形提示这一点；见「实际验证」的「光标（#422）」）。加载超过 1 s 时换成 `ui::LoadingProgress`（交互规范「加载超过 1 s」，#422；见「实际验证」的「加载超过 1 s（#422）」）。⌥ 加拖动选中代码文字、⌘C 复制（[#421](https://github.com/SoloJiang/lectern-app/issues/421)）已设计，尚未实现：见「数据结构」的「文字选择（#421）」和「验收」第 6 步。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）和审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 的视图部分。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、行内的审阅意见、检查器里的 Progress 列表、底部浮条，以及 J / K / V / C 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -370,6 +370,44 @@ pub(crate) struct SpansCache { /* HashMap<SpanKey, Arc<WindowSpans>>，LRU，合
 - 发送之后：`last` 是 `Sent` 且 `via` 是 `TerminalPaste` 或 `Acp` 时，`dispatch(SelectInspectorTab("conversation"))`，每一批只切换一次（`switched_for`）：用户接着在 Conversation 页或终端里看 agent 的回应。剪贴板途径不切换。
 - 轮次标题：`TurnEntry::answers` 为 Some 时，标题行的次要文字后面加 `review-turn-answers`（`$count` 取 `batches` 里这一批的 `count`）；折叠成一行的轮次同样。这就是交互规范「核心闭环」第 5 步的「agent 的修改作为新一轮出现」。
 
+### 文字选择（#421）
+
+产品负责人 2026-11-24 决定：diff 里按住 ⌥ 拖动选中代码文字，⌘C 复制；不带修饰键的拖动仍是行范围（[交互规范「体验审阅的产品决定（2026-11-24）」](interaction.md#体验审阅的产品决定2026-11-24)第 6 条）。选区只在内存里，属于屏幕，不进快照，不写盘。
+
+- 数据结构（`ReviewModel::text`，新文件 `src/text_select.rs`）：
+
+  ```rust
+  pub(crate) struct TextSelection {
+      rows: RowsKey,
+      /// 双栏：按下的一半；统一视图：None（选区跟着显示行走，删除行和增加行都算）。
+      half: Option<DiffSide>,
+      /// 这份行两侧的 OID（同 `Press::oids`）；快照换代后不等就清除选区。
+      oids: (Option<BlobId>, Option<BlobId>),
+      anchor: TextPoint,          // 按下的点
+      head: TextPoint,            // 松开时的点
+  }
+  pub(crate) struct TextPoint {
+      at: (Option<u32>, Option<u32>), // 这一行的（旧行号，新行号），同 `LineRange::at`：展开折叠后下标会变
+      side: DiffSide,                 // 这一点落在哪一侧的文字上
+      byte: u32,                      // 这一侧源行里的字节偏移（不是显示文字的偏移）
+  }
+  ```
+
+  点存行号和源行的字节偏移，不存显示行下标和像素：展开折叠、横向滚动、换代之后仍指向同一处文字。
+- 与按下共用一个状态：`Press` 加 `mode: PressMode`，`PressMode::Lines` 是现在的行范围，`PressMode::Text { anchor: TextPoint, head: TextPoint }` 是文字拖动。所以按下期间的 `canvas` 跟踪、自动滚动（`tick_drag`）、拖动期间不画悬停底色和行尾的 +、`check_range` 里换代时取消按下，都对两种按下照旧生效，不另写一条路径。`finish_press` 与 `cancel_press` 按 `mode` 分开：`Lines` 不变；`Text` 松开时 `anchor != head` 才写 `ReviewModel::text`（否则清除，等于一次 ⌥ 点击），从不生成 `LineRange`；取消时不留选区。
+- 开始：行的 `on_mouse_down`（左键）现在遇到修饰键直接返回；改为修饰键恰好是 ⌥（`Modifiers { alt: true, .. }` 且没有别的键）时调 `begin_text`，建 `mode: Text` 的 `Press`，其余修饰键仍返回。只在代码格上开始（行号栏、符号栏、行尾的 + 和 Add Note 不算）。开始时清除行范围（`drop_range`）和旧的文字选区，不改选中项，不打开编辑框。
+- 点击：GPUI 在同一个元素上按下又松开时触发 `on_click`，不管修饰键，所以在一行之内的 ⌥ 拖动（选一个词）松开时也会触发。行的 `on_click`（代码与行号栏，统一视图与双栏）在按下时带 ⌥（只看 `ClickEvent::Mouse` 的 `down.modifiers.alt`；`Keyboard`、`Touch` 照旧处理）时不处理：不选中这一行，不打开编辑框，选区留着。测试 `option_drag_in_one_line_keeps_the_selected_item` 守住这一点。
+- 拖动：指针下的项是按下那一行所在的一段（`Press::run`，`items::run_of`）里的 `Item::Row` 时，`head` 取它；是别的项（意见、编辑框、`Hunk`）时 `head` 不变。所以选区不跨 `Fold`、不跨文件：折叠的行用户没有看到，要跨过去先展开。双栏里只在按下的一半：指针的水平位置只用来在那一半的代码里定字节偏移。
+- 命中：每帧为画出的代码格记下 `StyledText` 的 `TextLayout`（`text_layouts: HashMap<(RowsKey, u32, Half), TextLayout>`，约 60 项；没有着色的行也改用 `StyledText`，这样每一行都有布局）。`TextLayout::index_for_position` 在这个元素测量和 prepaint 之前调用会 panic（`expect("prepaint has not been performed")`），而列表也会为测量渲染不画出的项，所以表不在 `render` 里填：代码格里放一个零尺寸的 `canvas`，在它的 paint 回调里登记（paint 在整棵树 prepaint 之后，这时布局已完成）；屏幕的 `render` 开始时清空。鼠标处理只查这张表，查不到（这一格上一帧没有画出）时 `head` 不变。指针位置经 `TextLayout::index_for_position` 得到显示文字的偏移：在文字左边取 0，在右边取行尾。显示偏移再换成源行的字节偏移（`lines.rs` 加 `DisplayLine::source_offset`，现有的 `DisplayLine::map`（源偏移到显示偏移）的逆）：落在 tab 展开的空格里时取 tab 之前；`lossy` 的行取 0 或行尾。用布局而不用 `mono_metrics` 的格宽去除，中文注释和 emoji 的宽度不同，按格宽算会选错字。
+- 画法：选区里的每一行在代码格的着色区间（`code`）之后加一个区间，背景是 `palette.selected_text_background`（窗口不是主窗口时为 `unemphasized_selected_text_background`，「对其他 crate 的要求」O），覆盖增删底色和词级差异的底色，文字颜色不变。每行只与当前的一个选区比较，O(1)，只影响画出的行。中间的整行从 0 到行尾；首行和末行按偏移。空行不画（`StyledText` 没有字形可画底色，见「已知限制」）。指针在 ⌥ 拖动期间是 I 形（`CursorStyle::IBeam`），其他时候不变（#422 的箭头与行号栏的手形）。
+- 复制（⌘C 与 Edit 菜单的 Copy）：选区不为空时，屏幕的根元素登记 `gpui_component::input::Copy` 的处理（本 crate 加 `gpui-component` 依赖，与 `file_reader` 相同，`Cargo.lock` 不变）；没有选区时不登记，Edit 菜单的 Copy 因此置灰。按键：`review_view::key_bindings` 加 `("cmd-c", input::Copy, Some(IN_REVIEW))`；编辑框是更深的 `Input` 上下文，它自己的 ⌘C 先生效，编辑框里的复制不变。复制的文字：
+  - 从选区的首行到末行，按显示顺序取这份行（`self.rows[rows]`）里每一行这一侧的源字节：统一视图里删除行取旧一侧，其余取新一侧；双栏取按下的一半，那一半没有行的显示行跳过。不带行号、`+` / `−` 和折叠行的文字。
+  - 首行从 `anchor`（或 `head`，取靠前的）的偏移起，末行到另一个点的偏移止；中间的行是整行。行之间用 `\n`；源行自己的换行符（`\r\n`）不带。被截断（`kept` 小于源行长度）的行在选区覆盖到显示行尾时复制完整的源行，复制的是源文字，不是屏幕上截断后的文字。这一侧的文本不是 `SideText::Text`（`Absent`、`TooLarge` 等，屏幕上是占位文字）或行是 `lossy` 时，复制显示文字。
+  - 这份行已不在 `self.rows` 里（滚得很远、被 `review` 放掉）时选区清除，不复制（下一条）。
+  - 用 `cx.write_to_clipboard(ClipboardItem::new_string(text))`，在主线程上，只是内存复制；选区最多是一段（一个 `run`）的行，不另设上限。复制后选区留着。
+- 清除选区：不带修饰键在 diff 里按下（点行、开始拖行范围）；⌥ 点击；Esc（`review::Escape` 的顺序：层或 Conversation 页开着时不处理；有按下时取消它，文字拖动中取消就不留选区；否则有文字选区时清除它；否则清行范围；否则清选中项）；J、K、V 与任何 `select`；切换统一 / 双栏；快照换代后这份行不在了或 `oids` 变了（`check_range` 里一起检查）；这份行不在 `self.rows` 里了。选区与行范围互斥：开始一个就清除另一个。打开编辑框（C、点行号、+）不清除选区。
+- 没有鼠标时：本 issue 不做（键盘的文字选择不在审阅的核心闭环里）。测试用 `#[gpui::test]` 模拟带 ⌥ 的按下、移动和松开：测试平台的文字系统给出真实的字形位置（每个字一个 em，emoji 两个），`index_for_position` 在测试里有意义。
+
 ## 数据流与线程
 
 ```
@@ -641,7 +679,8 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   | `review::JumpToSubagent` | — | `review` | #422：跳到子 agent 行的会话，与点这一行相同（同一个 `open_subagent`，到它的第一轮）。选中的是子 agent 行时用它；否则取最近打开的那一行（点击或本 Action）之后的下一行，到末尾回到第一行，没有打开过的从第一行开始。跳转选中的是目标轮次的标题，不是子 agent 行，所以「选中项之后」找不到下一行，要靠最近打开的那一行。列表里没有子 agent 行时不处理，冒泡 |
   | `review::Refresh` | — | `review` | `ReviewCommand::Refresh` |
   | `review::Analyze` / `CancelAnalyze` | — | `review` | 对应命令 |
-  | `review::Escape` | Esc | `review` | 面板或覆盖层开着、或检查器显示着 Conversation 页时不处理（面板和覆盖层：`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里；Conversation 页：处理 Esc 时调 `Contributions::inspector_tab(window)`，它是 `Some("conversation")` 时不处理。`LayerChanged` 不带分页，所以这里用查询），Esc 冒泡到 `workspace`，先关面板或切回 Files 页（2026-11-24 的决定）；没有开着的层而有拖选的范围时只清除范围并停止传播（#373）；没有范围而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
+  | `review::Escape` | Esc | `review` | 面板或覆盖层开着、或检查器显示着 Conversation 页时不处理（面板和覆盖层：`WorkspaceEvent::LayerChanged` 记在模型的 `layer_open` 里；Conversation 页：处理 Esc 时调 `Contributions::inspector_tab(window)`，它是 `Some("conversation")` 时不处理。`LayerChanged` 不带分页，所以这里用查询），Esc 冒泡到 `workspace`，先关面板或切回 Files 页（2026-11-24 的决定）；没有开着的层而有选中的文字时只清除文字选区并停止传播（#421）；没有文字选区而有拖选的范围时只清除范围并停止传播（#373）；没有范围而有选中项时清空选中并停止传播；否则不处理，冒泡到 `workspace`（返回） |
+  | `input::Copy`（gpui-component） | ⌘C | `review` | 有文字选区时复制选中的源文字（#421，「文字选择（#421）」）；没有选区时不登记处理，Edit 菜单的 Copy 置灰；编辑框里由它自己的 `Input` 上下文处理 |
   | `review::SelectNext` / `SelectPrevious` / `JumpToSelected` | ↓ / ↑ / ↵ | `review-progress` | Progress 列表的选择与跳转（跳到那个文件的步标题）；跳转（↵ 或点击）之后焦点移到屏幕，J、K、C 随即可用 |
   | `review::Back` | — | `review` | 失败态的返回按钮：`dispatch(Pop)` |
   | `review::AddNote` | C | `review` | #22：在拖选的范围（#373）、选中的行或 hunk 上打开编辑框（「审阅意见（#22）」）；行尾的 + 和 Add Note 触发同一个 Action；点行号不经 Action，直接选中那一行并打开 |
@@ -719,10 +758,10 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   | `Handoff` 或 `Usage` 不在而用户触发交接、或屏幕要读用量 | info | `handoff unavailable` | `id`、`what`（`open_file` / `focus` / `share` / `usage`） |
 
   `review screen closed` 另带 `notes_added`（本次打开发出的 `AddNote` 数，#22）。发送和再次复制的结果由 `review` 记（`review notes sent`、`review notes not sent`、`review notes copied again`、`review notes not copied again`，[review 设计「日志与诊断」](review.md#日志与诊断)），本 crate 不重复。
-- 详细级别（debug）：`snapshot applied`（`id`、`generation`、`state`、`items`、`files`、`turns`、`anchor_found`（bool）、`took_us`）；`prepare sent`（`id`、`rows`、`texts`、`visible`（范围长度））；`prepared applied`（`id`、`rows`、`texts`、`spliced`（换掉的项数））；`highlight`（`id`、`bytes`、`outcome`（`done` / `timed_out` / `cancelled`）、`took_us`）；`focus set`（`id`、`kind`、`paths`）；`usage applied`（`id`、`rows`、`turns`）；`command`（`id`、`kind`：`ReviewCommand` 的判别名）；#373 的 `note range`（`id`、`how`（`set` / `cleared` / `cancelled`）、`lines`（范围的行数）、`mode`（`unified` / `side_by_side`）；只在松开和清除时记，拖动期间不记）；#22 的 `note editor`（`id`、`target`（`new` / `existing`）、`how`（`opened` / `saved` / `cancelled` / `drafted` / `closed_by_change`））和 `notes discard`（`id`、`confirmed`（bool）、`notes`）。trace 不另记；渲染路径（每帧的 `render`、滚动事件）上不加记录。
+- 详细级别（debug）：`snapshot applied`（`id`、`generation`、`state`、`items`、`files`、`turns`、`anchor_found`（bool）、`took_us`）；`prepare sent`（`id`、`rows`、`texts`、`visible`（范围长度））；`prepared applied`（`id`、`rows`、`texts`、`spliced`（换掉的项数））；`highlight`（`id`、`bytes`、`outcome`（`done` / `timed_out` / `cancelled`）、`took_us`）；`focus set`（`id`、`kind`、`paths`）；`usage applied`（`id`、`rows`、`turns`）；`command`（`id`、`kind`：`ReviewCommand` 的判别名）；#373 的 `note range`（`id`、`how`（`set` / `cleared` / `cancelled`）、`lines`（范围的行数）、`mode`（`unified` / `side_by_side`）；只在松开和清除时记，拖动期间不记）；#421 的 `text selection`（`id`、`how`（`set` / `cleared` / `copied`）、`lines`（行数）、`bytes`（复制的字节数，只在 `copied` 时）、`mode`；只在松开、清除和复制时记，拖动期间不记）；#22 的 `note editor`（`id`、`target`（`new` / `existing`）、`how`（`opened` / `saved` / `cancelled` / `drafted` / `closed_by_change`））和 `notes discard`（`id`、`confirmed`（bool）、`notes`）。trace 不另记；渲染路径（每帧的 `render`、滚动事件）上不加记录。
 - 关联 ID：`plugin`、`act` 由 `workspace` 在调用工厂和 Action 处理时恢复，`task` 由 executor 填。本 crate 不设 `review`、`session` 作用域（`review` 的哈希由 `review` crate 定义和计算，会话标识由它的记录带，本 crate 不重复），用 `id` 字段对应。
-- 不记录：文件路径与 `FileKey`、会话标题、prompt 与 agent 说明、注入内容、命令文本、工具名、分支名、diff 的行与两侧文本、简报条目的文字与 `Provided` 的 `args`、`Analyze` 的原因文字、`Reader` 的目标路径、`NodeId` 的业务键；审阅意见的文字、草稿、摘录和锚点的行号（#22），范围的 `line`、`last`（#373，只记行数）。用计数、下标、`ReviewId`、`generation`、判别名和耗时代替。
-- 金丝雀测试：`logs_hold_no_contents`（`src/tests/logs.rs`，`lectern_logging::testing::capture()` 在 trace 级别）：用含金丝雀的路径、会话标题、prompt、说明、命令、工具名、分支名、两侧文本、`Provided` 的 `args`、`Unavailable` 的原因构造快照与行，经 `FakeReview` 打开屏幕、应用快照、`Prepare`、`Prepared`、V、失败态（第 1 步的流程），第 2 步再加上高亮、⇧⌘O（假 `Reader`）、Space 和用量行，`assert_absent(金丝雀)`，并检查 `review screen opened`、`diff shown`、`review screen closed` 的字段。#22 加 `logs_hold_no_note_contents`：金丝雀放在意见的文字、草稿、摘录和 `Elsewhere` 意见的路径里，走完 C、输入、Esc 存草稿、再 C、⌘↩、编辑、删除、放弃（确认框选放弃）、发送，#373 加拖选、Add Note、范围的摘录，并检查 `note range` 的字段里没有行号；没有记录含金丝雀，`review screen closed` 的 `notes_added` 正确。
+- 不记录：文件路径与 `FileKey`、会话标题、prompt 与 agent 说明、注入内容、命令文本、工具名、分支名、diff 的行与两侧文本、简报条目的文字与 `Provided` 的 `args`、`Analyze` 的原因文字、`Reader` 的目标路径、`NodeId` 的业务键；审阅意见的文字、草稿、摘录和锚点的行号（#22），范围的 `line`、`last`（#373，只记行数）；选中和复制的文字、选区的行号与偏移（#421，只记行数和字节数）。用计数、下标、`ReviewId`、`generation`、判别名和耗时代替。
+- 金丝雀测试：`logs_hold_no_contents`（`src/tests/logs.rs`，`lectern_logging::testing::capture()` 在 trace 级别）：用含金丝雀的路径、会话标题、prompt、说明、命令、工具名、分支名、两侧文本、`Provided` 的 `args`、`Unavailable` 的原因构造快照与行，经 `FakeReview` 打开屏幕、应用快照、`Prepare`、`Prepared`、V、失败态（第 1 步的流程），第 2 步再加上高亮、⇧⌘O（假 `Reader`）、Space 和用量行，`assert_absent(金丝雀)`，并检查 `review screen opened`、`diff shown`、`review screen closed` 的字段。#22 加 `logs_hold_no_note_contents`：金丝雀放在意见的文字、草稿、摘录和 `Elsewhere` 意见的路径里，走完 C、输入、Esc 存草稿、再 C、⌘↩、编辑、删除、放弃（确认框选放弃）、发送，#373 加拖选、Add Note、范围的摘录，并检查 `note range` 的字段里没有行号；#421 加 ⌥ 拖选含金丝雀的代码行和 ⌘C，并检查 `text selection` 的字段里没有行号和文字；没有记录含金丝雀，`review screen closed` 的 `notes_added` 正确。
 
 ## 测试
 
@@ -792,7 +831,17 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
   - `escape_with_the_conversation_page_open_goes_on`：假 `Contributions::inspector_tab` 回答 `conversation` 时 Esc 冒泡、选中项不变；回答 `files` 后 Esc 清空选中并停止传播。
   - `a_draft_survives_leaving_the_review`：在真实的编辑框里打字、不关编辑框就让屏幕 drop；打开另一个审阅目标时没有草稿，`Shared` 里的还在；再打开同一个目标时取回（`Shared` 清空），同一行按 C 得到原文，另一行是空的。`only_new_text_is_left_behind`：空编辑框不留草稿；改已有的意见时离开，改动不留。`at_most_twenty_drafts_are_kept`：两个目标共 25 条只留 20 条，丢的是最早的；同一目标同一锚点替换，不新增。
   - `a_turn_title_fills_under_the_pointer`：指针移到轮次标题上，悬停的 `Transition` 立即开始（`active_transitions` 加一），离开时同一个 `Transition` 转回，不再建新的。`a_diff_line_fills_under_the_pointer`：指针移到 diff 行上 `RowFade` 在跑，移到下一行时两个 `Transition` 在跑（进入的一行与离开的一行）；指针离开、列表滚到这一行不画出的地方、`HOVER_OUT` 的时间过去之后，`active_transitions` 回到开始时的数（用真实时间等 `HOVER_OUT.duration * 2`，因为 `Transition` 取 `Instant::now()`）。
-- 语义树：`review_tree_session`、`review_tree_groups`、`review_tree_progress`、`review_tree_failed` 的 insta 快照；#22 加 `review_tree_notes`（意见、编辑框、`NotesElsewhere`、浮条的再次复制、放弃与发送），#373 加 `review_tree_note_range`（`in_range`、`review.range.add-note`、`last`）（`ui_probe` 的 `tree::snapshot`，[#6](https://github.com/SoloJiang/lectern-app/issues/6) 合并后接入；之前用 `Recorder::finish` 的记录去掉 `bounds` 后快照）。
+- 语义树：`review_tree_session`、`review_tree_groups`、`review_tree_progress`、`review_tree_failed` 的 insta 快照；#22 加 `review_tree_notes`（意见、编辑框、`NotesElsewhere`、浮条的再次复制、放弃与发送），#373 加 `review_tree_note_range`（`in_range`、`review.range.add-note`、`last`），#421 加 `review_tree_text_selection`（行的 `text_selected`）（`ui_probe` 的 `tree::snapshot`，[#6](https://github.com/SoloJiang/lectern-app/issues/6) 合并后接入；之前用 `Recorder::finish` 的记录去掉 `bounds` 后快照）。
+- 文字选择（#421，`src/tests/text_select.rs`，都是纯函数或 `#[gpui::test]`，不打开真实窗口）：
+  - `source_offset_inverts_display_offset`：tab 展开、截断、多字节字符、`lossy` 的行，显示偏移与源偏移往返一致；落在 tab 的空格里取 tab 之前。
+  - `copied_text_is_the_source`：统一视图里跨删除行和增加行的选区复制两种行的源文字，不带行号和符号；首末行按偏移截取；tab 是原来的 `\t`；截断的行在选区到行尾时复制完整的源行；`TooLarge` 的一侧复制显示文字。
+  - `option_drag_selects_text_and_plain_drag_selects_lines`：带 ⌥ 的按下、移动、松开得到文字选区，`range` 为 None，选中项不变；不带修饰键的同样操作得到行范围，文字选区为 None；⌘⌥ 等其他组合什么也不做。
+  - `side_by_side_selects_one_half`：在左半按下、指针移到右半，选区仍在旧一侧，复制的只有旧一侧的行。
+  - `selection_stops_at_a_fold`：指针拖过 `Fold` 和意见块时 `head` 停在这一段的边上。
+  - `cmd_c_copies_and_the_editor_keeps_its_own`：⌘C 把选中的文字写进测试平台的剪贴板（`read_from_clipboard`）；没有选区时 `input::Copy` 不可用（`is_action_available` 为 false）；编辑框打开且有焦点时 ⌘C 复制的是编辑框里选中的文字。
+  - `escape_clears_the_text_first`：有文字选区和选中项时，第一次 Esc 只清除选区，第二次清空选中项；⌥ 拖动中按 Esc 取消拖动，没有选区。
+  - `option_drag_in_one_line_keeps_the_selected_item`：在一行之内 ⌥ 拖动（按下和松开在同一行）后有选区，选中项不变，编辑框没有打开；在行号栏上同样。
+  - `selection_survives_a_fold_expand_and_drops_on_change`：展开折叠后选区仍指向同一段文字；快照换代后这一侧的 OID 变了，选区清除。
 - 日志：`logs_hold_no_contents`。
 - fixtures：没有外部格式；`testing::snapshot_fixture` 在代码里合成。
 
@@ -831,6 +880,10 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - **M. `services`、`review`**：[review 设计「验收」](review.md#验收)第 8 步（`NoteAnchor::last`、`Excerpt::gap`、日志字段、摘录、prompt）。
 - **N. `i18n`**：`locales/{en,zh-CN}/review.ftl` 加上「界面」表里标了 #373 的键（可以与本 crate 的 PR 一起）。
 
+以下是文字选择（#421）的前置条件，写 `Refs #421`：
+
+- **O. `platform`、`ui`**：调色板加 `selected_text_background`（`selectedTextBackgroundColor`）和 `unemphasized_selected_text_background`（`unemphasizedSelectedTextBackgroundColor`），读法与 `selected_content_background` 相同，外观变化时一起更新；`ui` 的 `Palette` 与 gallery 加这两项。窗口不是主窗口时用后一个（与 macOS 的文本视图相同）。本 issue 不加界面字符串，`i18n` 不变。
+
 ## 未决问题
 
 1. **默认用统一视图还是双栏。** 阅读栏 760pt 放不下双栏（每侧约 45 格），双栏要离开阅读栏（「对其他 crate 的要求」A）。选项：(a) 默认统一，双栏是 View 菜单里的切换，切换时内容区变宽；(b) 默认双栏。默认 (a)：审阅按轮次从上往下读，统一视图与叙事同宽；切换后本次运行记住（不跨次保存）。
@@ -848,7 +901,8 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 
 - 范围只在一侧：统一视图里同时有增加和删除的一段，范围在新一侧，中间删除的行不进锚点和摘录，也不画范围的样子。要评论删除的行，在双栏的左边拖，或只拖删除的行。
 - 范围不跨 `Fold`、不跨文件；要跨折叠段，先展开。
-- 拖选不选文字，复制所选文字仍不支持：diff 行里没有文字选区（行是 `div` 加 `StyledText`）。
+- 不带修饰键的拖选只选行范围；选文字要按住 ⌥（#421）。文字选区不跨 `Fold`、不跨文件，双栏里只在一半；没有键盘的文字选择和全选（⌘A）。
+- 空行在文字选区里不画选中的底色（`StyledText` 没有字形），复制时照样带上。
 - `at` 那一行滚出屏幕后 Add Note 随行消失，范围还在，C 仍然可用。没有选中时，范围的意见只在 `last` 那一行有圆点，靠第一行的 `review-note-lines` 说明范围；选中才画出整段。
 - 高亮窗口 8 ms 内解析不完时这一侧保持纯文本，本次打开不重试。
 - `Changed` 与 `Prepared` 之间（< 3 ms）旧行与新快照并存，hunk 标签可能与新的 `FileAttribution` 短暂不一致。
@@ -863,7 +917,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 
 ## 验收
 
-分三步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-review-view`、`just deny` 通过，并且：
+分六步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-review-view`、`just deny` 通过，并且：
 
 - `rg 'std::fs|std::process|std::thread::spawn|gix|git2' crates/review_view/src` 没有结果（本 crate 不做 IO）。
 - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|Duration::from_secs|\.font_family\(|gpui_component::Button' crates/review_view/src` 没有结果（颜色、字体、时长、控件只来自 `ui`，与 `ui` 设计的持续检查同一口径）。
@@ -898,7 +952,7 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 **第 4 步：审阅意见（`Closes #22`；前置 J、K、L）。**
 
 - 「测试」里审阅意见的测试（`items_notes_*`、`c_opens_*`、`cmd_return_*`、`escape_in_the_editor_*`、`notes_are_drawn_*`、`the_bar_follows_*`、`discard_asks_first`、`a_full_batch_blocks_c`、`copy_again_*`、`a_session_route_switches_*`、`edit_and_delete_*`、`the_editor_follows_*`、`the_turn_title_shows_*`）、`logs_hold_no_note_contents` 和 `review_tree_notes` 快照通过；之前的测试和语义树快照照常通过（浮条的节点按本步更新）。
-- 开头的五条 `rg` 检查仍没有结果；`rg -i 'pasteboard|platform::clipboard|write_text|ClipboardItem|write_to_clipboard' crates/review_view/src` 没有结果：本 crate 不碰剪贴板（Copy as Prompt 与 Copy Again 都只发命令），复制由 `review` 的剪贴板途径完成。
+- 开头的五条 `rg` 检查仍没有结果；`rg -i 'pasteboard|platform::clipboard|write_text|ClipboardItem|write_to_clipboard' crates/review_view/src` 没有结果：本 crate 不碰剪贴板（Copy as Prompt 与 Copy Again 都只发命令），复制由 `review` 的剪贴板途径完成。第 6 步之后，`ClipboardItem` 与 `write_to_clipboard` 只出现在 `src/text_select.rs`（复制选中的代码文字，GPUI 自己的剪贴板接口），其余仍没有结果。
 - `rg 'lectern_terminal|lectern_conversation|lectern-terminal|lectern-conversation' crates/review_view` 没有结果。
 - `review_view/items_5000` 在预算内（夹具加 40 条意见）。
 - 手动在 macOS 上运行发布构建：在一行上按 C、输入、⌘↩，再在另一个 hunk 上加一条；Esc 关掉一个写了字的编辑框，再按 C 带回文字；按 Copy as Prompt 后在文本编辑器里粘贴，文字与 [review 设计「审阅意见」](review.md#审阅意见)的模板一致（这一步同时检查 `platform::clipboard` 排到主线程的写入）；在文本编辑器里复制别的文字，再按浮条的 Copy Again，粘贴出的文字与第一次相同（同一个 `[lectern-notes …]` 标记），意见仍显示为已复制；把它粘贴进这个会话、agent 回应之后，那一轮的标题上有 `review-turn-answers`；放弃会先弹出确认框。
@@ -911,6 +965,14 @@ C / Add Note ─▶ [主线程] 编辑框（Item::NoteEditor）─▶ ⌘↩ ─
 - `rg -n 'on_mouse_event' crates/review_view/src` 只在按下期间的 `canvas` 里；`rg -n 'on_drag' crates/review_view/src` 没有结果。
 - `review_view/items_5000`（夹具的 40 条意见里 4 条是范围）在预算内。
 - 手动在 macOS 上运行发布构建：统一和双栏里各拖一段，按 Add Note，写一条，按 Copy as Prompt，粘贴出的文字与 [review 设计「prompt 的模板」](review.md#prompt-的模板)的范围写法一致；拖到列表边上时自动滚动；点行号、点代码、悬停的 +、C 与 #374 相同；重启后范围还在。这一步的结果写进「实际验证」。
+
+**第 6 步：文字选择（`Closes #421`；前置 O）。**
+
+- `just test -p lectern-review-view text_select` 通过（「测试」里文字选择的 9 个测试）；行范围（第 5 步）、点击（#374）和审阅意见（第 4 步）的测试不改就通过。
+- `just test -p lectern-review-view logs_hold_no_note_contents` 与 `review_tree` 通过，`review_tree_text_selection` 是新快照。
+- `rg -n 'ClipboardItem|write_to_clipboard' crates/review_view/src` 只在 `src/text_select.rs`；`rg -n 'on_mouse_event' crates/review_view/src` 仍只在按下期间的 `canvas` 里（文字选择复用它）。
+- `review_view/items_5000` 与 `review_view/scroll_5000` 在预算内：选区只给画出的行加一个着色区间，`text_layouts` 每帧约 60 项。
+- 手动在 macOS 上运行发布构建：统一和双栏里各 ⌥ 拖一段（含中文注释和 tab 的行），⌘C 后在文本编辑器里粘贴，文字与源文件一致、没有行号和符号；Edit 菜单的 Copy 有选区时可用、没有时置灰；不带修饰键的拖动仍是行范围；编辑框里的 ⌘C 照常。这一步的结果写进「实际验证」。
 
 ## 实际验证
 
