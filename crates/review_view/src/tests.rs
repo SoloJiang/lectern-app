@@ -19,5 +19,6 @@ mod screen;
 mod scroll;
 mod step2;
 mod support;
+mod text_select;
 mod tree;
 mod ux;

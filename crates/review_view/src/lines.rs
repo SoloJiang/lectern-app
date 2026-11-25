@@ -37,16 +37,53 @@ pub(crate) struct DisplayLine {
 
 impl DisplayLine {
     /// The offset in `text` of an offset in the source line.
-    fn map(&self, offset: u32) -> usize {
+    pub(crate) fn map(&self, offset: u32) -> usize {
+        if self.lossy {
+            return if offset == 0 { 0 } else { self.text.len() };
+        }
         let before = self.tabs.partition_point(|tab| *tab < offset);
         offset as usize + before * (TAB_CELLS - 1)
+    }
+
+    /// The offset in the source line of an offset in `text` (the inverse of
+    /// `map`, #421): inside the spaces of a tab it is the tab's own offset;
+    /// past the end it is the end of what the text holds. A repaired line
+    /// (`lossy`) maps nothing but its two ends.
+    pub(crate) fn source_offset(&self, display: usize) -> u32 {
+        if self.lossy {
+            return if display == 0 { 0 } else { self.kept };
+        }
+        let mut extra = 0usize;
+        for tab in &self.tabs {
+            let start = *tab as usize + extra;
+            if display <= start {
+                break;
+            }
+            if display < start + TAB_CELLS {
+                return *tab;
+            }
+            extra += TAB_CELLS - 1;
+        }
+        u32::try_from(display.saturating_sub(extra))
+            .unwrap_or(u32::MAX)
+            .min(self.kept)
+    }
+
+    /// How many bytes of the source line the text holds.
+    pub(crate) fn kept(&self) -> u32 {
+        self.kept
+    }
+
+    /// Whether the text was repaired (not valid UTF-8).
+    pub(crate) fn lossy(&self) -> bool {
+        self.lossy
     }
 }
 
 /// The text of the line of a diff side: from `byte` when it is known,
 /// otherwise by counting `line` lines (from 0); without text, empty.
 pub(crate) fn display_line(side: &RowsSide, byte: Option<u64>, line: u32) -> DisplayLine {
-    let SideText::Text(bytes) = &side.text else {
+    let Some(source) = source_line(side, byte, line) else {
         return DisplayLine {
             text: SharedString::default(),
             tabs: Vec::new(),
@@ -54,16 +91,6 @@ pub(crate) fn display_line(side: &RowsSide, byte: Option<u64>, line: u32) -> Dis
             lossy: false,
         };
     };
-    let start = match byte {
-        Some(byte) if (byte as usize) <= bytes.len() => byte as usize,
-        _ => nth_line_start(bytes, line),
-    };
-    let rest = &bytes[start.min(bytes.len())..];
-    let end = rest.iter().position(|b| *b == b'\n').unwrap_or(rest.len());
-    let mut source = &rest[..end];
-    if source.last() == Some(&b'\r') {
-        source = &source[..source.len() - 1];
-    }
     let cut = source.len().min(MAX_LINE_BYTES);
     let source = &source[..cut];
     let (decoded, lossy) = match std::str::from_utf8(source) {
@@ -91,6 +118,26 @@ pub(crate) fn display_line(side: &RowsSide, byte: Option<u64>, line: u32) -> Dis
         kept: cut as u32,
         lossy,
     }
+}
+
+/// The whole source line of a diff side, as the file has it: from `byte`
+/// when it is known, otherwise by counting `line` lines; without its line
+/// break and not cut. None when the side has no text (#421: what Copy takes).
+pub(crate) fn source_line(side: &RowsSide, byte: Option<u64>, line: u32) -> Option<&[u8]> {
+    let SideText::Text(bytes) = &side.text else {
+        return None;
+    };
+    let start = match byte {
+        Some(byte) if (byte as usize) <= bytes.len() => byte as usize,
+        _ => nth_line_start(bytes, line),
+    };
+    let rest = &bytes[start.min(bytes.len())..];
+    let end = rest.iter().position(|b| *b == b'\n').unwrap_or(rest.len());
+    let mut source = &rest[..end];
+    if source.last() == Some(&b'\r') {
+        source = &source[..source.len() - 1];
+    }
+    Some(source)
 }
 
 /// The offset of line `n` (counted from 0) of `bytes`.

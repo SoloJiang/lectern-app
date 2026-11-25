@@ -308,3 +308,20 @@ fn review_tree_note_range(cx: &mut TestAppContext) {
     let text = render_tree(&opened.record(cx));
     insta::assert_snapshot!("review_tree_note_range", text);
 }
+
+/// A text selection (#421): a ⌥ drag from the first row into the added one
+/// marks the rows it covers with `text_selected`; no range, no current line.
+#[gpui::test]
+fn review_tree_text_selection(cx: &mut TestAppContext) {
+    use crate::highlight::Half;
+    use crate::tests::notes::sample;
+    use crate::tests::text_select::{char_at, drag_with};
+
+    let (_rig, opened) = sample(cx);
+    let mut visual = opened.visual(cx);
+    let from = char_at(&opened, cx, (Some(0), Some(0)), Half::New, 2);
+    let to = char_at(&opened, cx, (None, Some(1)), Half::New, 3);
+    drag_with(&mut visual, &opened, cx, from, to, gpui::Modifiers::alt());
+    let text = render_tree(&opened.record(cx));
+    insta::assert_snapshot!("review_tree_text_selection", text);
+}

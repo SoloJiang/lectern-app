@@ -1,0 +1,28 @@
+---
+source: crates/review_view/src/tests/tree.rs
+expression: text
+---
+review.narrative List items=13 visible=0..13 mode=unified
+  review.header Group <review-title-untitled> "Untitled session" files=1 added=0 removed=0 turns=1
+  review.brief Group items=1 omitted=0 pending=0 analysis=unavailable
+    review.brief.analyze Button <review-analyze-with> "Analyze with \u{2068}Claude Code\u{2069}" [disabled] tooltip=Analyze isn't available: ⁨not yet⁩
+    review.brief.item[sensitive-ci:src/file_000.rs] ListItem <review-brief-sensitive-ci> "\u{2068}src/file_000.rs\u{2069} runs in CI" critical=true
+  review.turn.item[0:1] Group <review-turn> "Turn 1" [expanded=true] after_last_seen=true running=false
+  review.turn.item[0:1].prompt Text "Make the change."
+  review.turn.item[0:1].text.item[0] Text "Done."
+  review.step.item[0] Group "src/file_000.rs" added=2 removed=1 alignment=aligned survival=all seen=unseen
+    review.step.item[0].check Toggle [checked=false]
+    review.step.item[0].open Button <review-open-file> "Open File" [disabled]
+  review.diff.item[step:0] Diff rows=5 context=3 prepared=true highlighted=old=plain,new=plain
+  review.diff.item[step:0].hunk.item[0:0] DiffHunk turns=0 others=0 drifted=0
+  review.diff.item[step:0].row.item[0:0] DiffLine kind=context drifted=false text_selected=true
+  review.diff.item[step:0].row.item[1:-] DiffLine kind=removed drifted=false text_selected=true
+  review.diff.item[step:0].row.item[-:1] DiffLine kind=added drifted=false text_selected=true
+    review.diff.item[step:0].row.item[-:1].add-note Button <review-note-add-here> "Add Note" tooltip=Add a review note (C)
+  review.diff.item[step:0].row.item[2:2] DiffLine kind=context drifted=false
+  review.diff.item[step:0].row.item[3:3] DiffLine kind=context drifted=false
+  review.call.item[tool-0] Text <review-tool> "\u{2068}Read\u{2069}" kind=tool status=completed
+review.bar Group
+  review.bar.comments Text <review-comments> "No review notes" pending=0 sending=false
+  review.bar.looks-good Button <review-looks-good> "Looks Good" tooltip=Mark every file as reviewed
+  review.bar.send Button "Send to \u{2068}Claude Code\u{2069} ⌘↩" [disabled] route=session

@@ -35,6 +35,9 @@ lectern-services = { path = "../services" }
 lectern-syntax = { path = "../syntax" }
 # Colours, text, controls, motion and the probe's semantic nodes (ADR 0015).
 lectern-ui = { path = "../ui" }
+# `input::Copy`: ⌘C and the Edit menu's Copy copy the selected text of a diff
+# (#421), the action the menu dispatches (as in `file_reader`).
+gpui-component.workspace = true
 
 [features]
 # `testing`: the fake review service, the snapshot fixture and the harness
